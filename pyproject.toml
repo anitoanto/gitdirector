@@ -1,0 +1,93 @@
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[project]
+name = "gitdirector"
+version = "0.1.0"
+description = "A Python CLI tool for managing and synchronizing multiple git repositories with ease"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Anito Anto", email = "49053859+anitoanto@users.noreply.github.com" }
+]
+maintainers = [
+    { name = "Anito Anto", email = "49053859+anitoanto@users.noreply.github.com" }
+]
+requires-python = ">=3.9"
+keywords = ["git", "repository", "manager", "cli", "synchronization", "batch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "click>=8.1.0",
+    "textual>=0.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "build>=1.0",
+    "twine>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/anitoanto/gitdirector"
+Repository = "https://github.com/anitoanto/gitdirector.git"
+Issues = "https://github.com/anitoanto/gitdirector/issues"
+Documentation = "https://github.com/anitoanto/gitdirector/blob/main/README.md"
+
+[project.scripts]
+gitdirector = "gitdirector.cli:main"
+
+[tool.uv]
+managed = true
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=src/gitdirector --cov-report=term-local"

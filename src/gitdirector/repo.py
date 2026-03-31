@@ -1,0 +1,95 @@
+import subprocess
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+
+class RepoStatus(Enum):
+    UP_TO_DATE = "up-to-date"
+    AHEAD = "ahead"
+    BEHIND = "behind"
+    DIVERGED = "diverged"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class RepositoryInfo:
+    path: Path
+    name: str
+    status: RepoStatus
+    branch: Optional[str] = None
+    message: str = ""
+
+    def __repr__(self) -> str:
+        return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
+
+
+class Repository:
+    def __init__(self, path: Path):
+        if not self._is_git_repo(path):
+            raise ValueError(f"Not a git repository: {path}")
+        self.path = path
+        self.name = path.name
+
+    @staticmethod
+    def _is_git_repo(path: Path) -> bool:
+        return (path / ".git").is_dir()
+
+    def _run_git(self, *args: str) -> tuple[int, str, str]:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.path)] + list(args),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode, result.stdout.strip(), result.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return 1, "", "git command timed out"
+        except FileNotFoundError:
+            return 1, "", "git not found"
+
+    def get_current_branch(self) -> Optional[str]:
+        code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
+        return out if code == 0 else None
+
+    def get_status(self) -> RepositoryInfo:
+        branch = self.get_current_branch()
+
+        code, out, err = self._run_git("fetch", "--dry-run")
+        if code != 0:
+            return RepositoryInfo(self.path, self.name, RepoStatus.UNKNOWN, branch, err)
+
+        code, ahead_behind, _ = self._run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
+
+        if code != 0:
+            return RepositoryInfo(
+                self.path, self.name, RepoStatus.UNKNOWN, branch, "No tracking branch"
+            )
+
+        try:
+            behind, ahead = map(int, ahead_behind.split())
+            if ahead > 0 and behind > 0:
+                status = RepoStatus.DIVERGED
+                msg = f"ahead {ahead}, behind {behind}"
+            elif ahead > 0:
+                status = RepoStatus.AHEAD
+                msg = f"ahead {ahead}"
+            elif behind > 0:
+                status = RepoStatus.BEHIND
+                msg = f"behind {behind}"
+            else:
+                status = RepoStatus.UP_TO_DATE
+                msg = ""
+        except ValueError:
+            status = RepoStatus.UNKNOWN
+            msg = "Could not parse git status"
+
+        return RepositoryInfo(self.path, self.name, status, branch, msg)
+
+    def pull(self) -> tuple[bool, str]:
+        code, out, err = self._run_git("pull")
+        if code == 0:
+            return True, out
+        return False, err
