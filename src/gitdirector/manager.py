@@ -59,7 +59,7 @@ class RepositoryManager:
             try:
                 self.config.add_repository(repo_path)
                 repos.append(repo_path)
-            except Exception as e:
+            except Exception as _:
                 skipped.append(repo_path)
 
         if not repos:

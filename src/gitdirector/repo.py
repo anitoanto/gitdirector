@@ -20,6 +20,10 @@ class RepositoryInfo:
     status: RepoStatus
     branch: Optional[str] = None
     message: str = ""
+    staged: bool = False
+    unstaged: bool = False
+    staged_files: Optional[list[str]] = None
+    unstaged_files: Optional[list[str]] = None
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -36,7 +40,7 @@ class Repository:
     def _is_git_repo(path: Path) -> bool:
         return (path / ".git").is_dir()
 
-    def _run_git(self, *args: str) -> tuple[int, str, str]:
+    def _run_git(self, *args: str, _strip: bool = True) -> tuple[int, str, str]:
         try:
             result = subprocess.run(
                 ["git", "-C", str(self.path)] + list(args),
@@ -44,7 +48,8 @@ class Repository:
                 text=True,
                 timeout=10,
             )
-            return result.returncode, result.stdout.strip(), result.stderr.strip()
+            stdout = result.stdout.strip() if _strip else result.stdout
+            return result.returncode, stdout, result.stderr.strip()
         except subprocess.TimeoutExpired:
             return 1, "", "git command timed out"
         except FileNotFoundError:
@@ -86,7 +91,34 @@ class Repository:
             status = RepoStatus.UNKNOWN
             msg = "Could not parse git status"
 
-        return RepositoryInfo(self.path, self.name, status, branch, msg)
+        code, porcelain, _ = self._run_git("status", "--porcelain", _strip=False)
+        staged = False
+        unstaged = False
+        staged_files: list[str] = []
+        unstaged_files: list[str] = []
+        if code == 0 and porcelain:
+            for line in porcelain.splitlines():
+                if len(line) >= 2:
+                    x, y = line[0], line[1]
+                    filename = line[3:].strip()
+                    if x not in (" ", "?"):
+                        staged = True
+                        staged_files.append(filename)
+                    if y not in (" ", "?"):
+                        unstaged = True
+                        unstaged_files.append(filename)
+
+        return RepositoryInfo(
+            self.path,
+            self.name,
+            status,
+            branch,
+            msg,
+            staged,
+            unstaged,
+            staged_files or None,
+            unstaged_files or None,
+        )
 
     def pull(self) -> tuple[bool, str]:
         code, out, err = self._run_git("pull")

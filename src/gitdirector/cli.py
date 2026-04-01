@@ -36,6 +36,16 @@ def _status_text(status: RepoStatus) -> Text:
     return Text(label, style=color)
 
 
+def _changes_text(staged: bool, unstaged: bool) -> Text:
+    if staged and unstaged:
+        return Text("staged+unstaged", style="yellow")
+    elif staged:
+        return Text("staged", style="cyan")
+    elif unstaged:
+        return Text("unstaged", style="yellow")
+    return Text("—", style="bright_black")
+
+
 def _repo_table() -> Table:
     table = Table(
         box=box.SIMPLE_HEAD,
@@ -46,9 +56,10 @@ def _repo_table() -> Table:
         padding=(0, 1),
     )
     table.add_column("REPOSITORY", ratio=4)
-    table.add_column("STATUS", no_wrap=True, ratio=2)
+    table.add_column("SYNC", no_wrap=True, ratio=2)
     table.add_column("BRANCH", style="dim", no_wrap=True, ratio=2)
-    table.add_column("DETAILS", style="dim", ratio=3)
+    table.add_column("CHANGES", no_wrap=True, ratio=2)
+    table.add_column("PATH", style="dim", ratio=3)
     return table
 
 
@@ -154,13 +165,21 @@ def list():
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
+    _PATH_MAX_LEN = 50
     table = _repo_table()
     for repo in repos:
+        full_path = str(repo.path)
+        display_path = (
+            ("…" + full_path[-(_PATH_MAX_LEN - 1) :])
+            if len(full_path) > _PATH_MAX_LEN
+            else full_path
+        )
         table.add_row(
             repo.name,
             _status_text(repo.status),
             repo.branch or "—",
-            repo.message or "",
+            _changes_text(repo.staged, repo.unstaged),
+            display_path,
         )
 
     console.print(table)
@@ -178,39 +197,38 @@ def status():
         return
 
     total = len(repos)
-    up_to_date = sum(1 for r in repos if r.status == RepoStatus.UP_TO_DATE)
-    behind = sum(1 for r in repos if r.status == RepoStatus.BEHIND)
-    ahead = sum(1 for r in repos if r.status == RepoStatus.AHEAD)
-    diverged = sum(1 for r in repos if r.status == RepoStatus.DIVERGED)
-    unknown = sum(1 for r in repos if r.status == RepoStatus.UNKNOWN)
+    dirty = sum(1 for r in repos if r.staged or r.unstaged)
+    clean = total - dirty
 
     summary = Text(" ")
     summary.append(str(total), style="bold white")
     summary.append(" repositories", style="dim")
     summary.append("    ")
-    summary.append(f"{up_to_date} up to date", style="green")
-    if behind:
-        summary.append(f"    {behind} behind", style="yellow")
-    if ahead:
-        summary.append(f"    {ahead} ahead", style="cyan")
-    if diverged:
-        summary.append(f"    {diverged} diverged", style="red")
-    if unknown:
-        summary.append(f"    {unknown} unknown", style="bright_black")
+    summary.append(f"{clean} clean", style="green")
+    if dirty:
+        summary.append(f"    {dirty} changed", style="yellow")
 
     console.print(summary)
     console.print()
 
-    table = _repo_table()
-    for repo in repos:
-        table.add_row(
-            repo.name,
-            _status_text(repo.status),
-            repo.branch or "—",
-            repo.message or "",
-        )
+    # Show per-repo file-level changes
+    dirty_repos = [r for r in repos if r.staged or r.unstaged]
+    if dirty_repos:
+        for repo in dirty_repos:
+            console.print(
+                f"  [bold white]{repo.name}[/bold white]  [dim]{repo.branch or '—'}[/dim]"
+            )
+            if repo.staged_files:
+                for f in repo.staged_files:
+                    console.print(f"    [cyan]staged:[/cyan]   {f}")
+            if repo.unstaged_files:
+                for f in repo.unstaged_files:
+                    console.print(f"    [yellow]unstaged:[/yellow] {f}")
+            console.print()
+    else:
+        console.print("  [dim]All repositories are clean[/dim]")
+        console.print()
 
-    console.print(table)
     console.print()
 
 

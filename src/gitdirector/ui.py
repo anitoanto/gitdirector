@@ -51,17 +51,33 @@ class RepositoryTable(DataTable):
         super().__init__(*args, **kwargs)
         self.repos = repos
 
+    _PATH_MAX_LEN = 50
+
     def on_mount(self) -> None:
-        self.add_columns("REPOSITORY", "STATUS", "BRANCH", "DETAILS")
+        self.add_columns("REPOSITORY", "SYNC", "BRANCH", "CHANGES", "PATH")
 
         for repo in self.repos:
             color = _STATUS_COLOR.get(repo.status, "white")
             label = _STATUS_LABEL.get(repo.status, repo.status.value)
+            full_path = str(repo.path)
+            if len(full_path) > self._PATH_MAX_LEN:
+                display_path = "…" + full_path[-(self._PATH_MAX_LEN - 1) :]
+            else:
+                display_path = full_path
+            if repo.staged and repo.unstaged:
+                changes = Text("staged+unstaged", style="yellow")
+            elif repo.staged:
+                changes = Text("staged", style="cyan")
+            elif repo.unstaged:
+                changes = Text("unstaged", style="yellow")
+            else:
+                changes = Text("—", style="bright_black")
             self.add_row(
                 repo.name,
                 Text(label, style=color),
                 repo.branch or "—",
-                repo.message or "",
+                changes,
+                Text(display_path, style="dim"),
             )
 
 
