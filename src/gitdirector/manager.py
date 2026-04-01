@@ -113,27 +113,23 @@ class RepositoryManager:
         except Exception as e:
             return False, f"Error removing repositories: {str(e)}", []
 
-    def list_repositories(self) -> List[RepositoryInfo]:
-        infos = []
-        for path in self.config.repositories:
-            if path.exists() and (path / ".git").is_dir():
-                try:
-                    repo = Repository(path)
-                    infos.append(repo.get_status())
-                except Exception as e:
-                    infos.append(RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(e)))
-            else:
-                infos.append(
-                    RepositoryInfo(
-                        path,
-                        path.name,
-                        RepoStatus.UNKNOWN,
-                        None,
-                        "Repository path not found or invalid",
-                    )
-                )
+    def get_repository_status(self, path: Path) -> RepositoryInfo:
+        if path.exists() and (path / ".git").is_dir():
+            try:
+                repo = Repository(path)
+                return repo.get_status()
+            except Exception as e:
+                return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(e))
+        return RepositoryInfo(
+            path,
+            path.name,
+            RepoStatus.UNKNOWN,
+            None,
+            "Repository path not found or invalid",
+        )
 
-        return infos
+    def list_repositories(self) -> List[RepositoryInfo]:
+        return [self.get_repository_status(path) for path in self.config.repositories]
 
     def pull_all(self) -> Tuple[List[str], List[str]]:
         success = []

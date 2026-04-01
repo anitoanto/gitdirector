@@ -2,7 +2,9 @@ from pathlib import Path
 
 import click
 from rich import box
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -47,7 +49,9 @@ def _changes_text(staged: bool, unstaged: bool) -> Text:
 
 
 def _path_text(path: str) -> Text:
-    col_width = max(10, console.width * 4 // 11 - 4)
+    # PATH column is ratio=4 out of total ratio=13 (3+1+1+2+2+4)
+    # subtract 2 for the column's own padding (1 char each side)
+    col_width = max(10, console.width * 4 // 13 - 5)
     if len(path) > col_width:
         path = "\u2026" + path[-(col_width - 1) :]
     return Text(path, justify="right")
@@ -166,26 +170,31 @@ def remove(path: str, discover: bool):
 @cli.command()
 def list():
     manager = RepositoryManager()
-    repos = manager.list_repositories()
+    paths = manager.config.repositories
 
     console.print()
-    if not repos:
+    if not paths:
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
     table = _repo_table()
-    for repo in repos:
-        full_path = str(repo.path)
-        table.add_row(
-            repo.name,
-            _status_text(repo.status),
-            repo.branch or "—",
-            _changes_text(repo.staged, repo.unstaged),
-            repo.last_updated or "—",
-            _path_text(full_path),
-        )
+    with Live(console=console, refresh_per_second=12, transient=False) as live:
+        for path in paths:
+            name = path.name
+            live.update(Group(table, Spinner("dots", text=f"  [dim]checking {name}...[/dim]")))
+            info = manager.get_repository_status(path)
+            full_path = str(info.path)
+            table.add_row(
+                info.name,
+                _status_text(info.status),
+                info.branch or "—",
+                _changes_text(info.staged, info.unstaged),
+                info.last_updated or "—",
+                _path_text(full_path),
+                # full_path,
+            )
+            live.update(table)
 
-    console.print(table)
     console.print()
 
 
