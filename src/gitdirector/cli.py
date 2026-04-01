@@ -66,6 +66,7 @@ def _repo_table() -> Table:
     table.add_column("SYNC", no_wrap=True, ratio=1)
     table.add_column("BRANCH", style="dim", no_wrap=True, ratio=1)
     table.add_column("CHANGES", no_wrap=True, ratio=2)
+    table.add_column("LAST COMMIT", style="dim", no_wrap=True, ratio=2)
     table.add_column("PATH", style="dim", ratio=4, no_wrap=True, justify="right")
     return table
 
@@ -180,6 +181,7 @@ def list():
             _status_text(repo.status),
             repo.branch or "—",
             _changes_text(repo.staged, repo.unstaged),
+            repo.last_updated or "—",
             _path_text(full_path),
         )
 

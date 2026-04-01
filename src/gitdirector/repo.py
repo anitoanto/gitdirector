@@ -24,6 +24,7 @@ class RepositoryInfo:
     unstaged: bool = False
     staged_files: Optional[list[str]] = None
     unstaged_files: Optional[list[str]] = None
+    last_updated: Optional[str] = None
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -58,6 +59,10 @@ class Repository:
     def get_current_branch(self) -> Optional[str]:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         return out if code == 0 else None
+
+    def get_last_commit_date(self) -> Optional[str]:
+        code, out, _ = self._run_git("log", "-1", "--format=%cd", "--date=relative")
+        return out if code == 0 and out else None
 
     def get_status(self) -> RepositoryInfo:
         branch = self.get_current_branch()
@@ -108,6 +113,8 @@ class Repository:
                         unstaged = True
                         unstaged_files.append(filename)
 
+        last_updated = self.get_last_commit_date()
+
         return RepositoryInfo(
             self.path,
             self.name,
@@ -118,6 +125,7 @@ class Repository:
             unstaged,
             staged_files or None,
             unstaged_files or None,
+            last_updated,
         )
 
     def pull(self) -> tuple[bool, str]:
