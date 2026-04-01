@@ -304,11 +304,11 @@ def pull():
     console.print()
     if failed_count:
         noun = "repository" if failed_count == 1 else "repositories"
-        console.print(f"  [red]{failed_count} {noun} failed[/red]\n")
+        console.print(f" [red]{failed_count} {noun} failed[/red]\n")
         raise SystemExit(1)
     else:
         noun = "repository" if success_count == 1 else "repositories"
-        console.print(f"  [green]{success_count} {noun} updated[/green]\n")
+        console.print(f" [green]{success_count} {noun}[/green]\n")
 
 
 @cli.command()
