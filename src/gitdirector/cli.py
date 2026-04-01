@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .manager import RepositoryManager
-from .repo import RepoStatus
+from .repo import Repository, RepoStatus
 
 __version__ = "0.1.1"
 
@@ -201,12 +201,19 @@ def list():
 @cli.command()
 def status():
     manager = RepositoryManager()
-    repos = manager.list_repositories()
+    paths = manager.config.repositories
 
     console.print()
-    if not repos:
+    if not paths:
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
+
+    repos = []
+    with Live(console=console, refresh_per_second=12, transient=True) as live:
+        for path in paths:
+            live.update(Spinner("dots", text=f"  [dim]checking {path.name}...[/dim]"))
+            info = manager.get_repository_status(path)
+            repos.append(info)
 
     total = len(repos)
     dirty = sum(1 for r in repos if r.staged or r.unstaged)
@@ -244,33 +251,64 @@ def status():
     console.print()
 
 
+def _pull_table() -> Table:
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        expand=True,
+        show_header=True,
+        header_style="bold",
+        show_edge=False,
+        padding=(0, 1),
+    )
+    table.add_column("REPOSITORY", ratio=3)
+    table.add_column("RESULT", ratio=6)
+    return table
+
+
 @cli.command()
 def pull():
     manager = RepositoryManager()
-
-    if manager.get_repository_count() == 0:
-        console.print("\n  [dim]No repositories tracked[/dim]\n")
-        return
-
-    console.print("\n  [dim]Pulling repositories...[/dim]")
-    success_results, failed_results = manager.pull_all()
+    paths = manager.config.repositories
 
     console.print()
-    if success_results:
-        for msg in success_results:
-            console.print(f"  [green]+[/green] {msg}")
+    if not paths:
+        console.print("  [dim]No repositories tracked[/dim]\n")
+        return
 
-    if failed_results:
-        console.print()
-        for msg in failed_results:
-            console.print(f"  [red]-[/red] {msg}")
-        console.print()
+    table = _pull_table()
+    failed_count = 0
+    success_count = 0
+
+    with Live(console=console, refresh_per_second=12, transient=False) as live:
+        for path in paths:
+            name = path.name
+            live.update(Group(table, Spinner("dots", text=f"  [dim]pulling {name}...[/dim]")))
+            if not path.exists() or not (path / ".git").is_dir():
+                table.add_row(name, Text("path not found", style="red"))
+                failed_count += 1
+            else:
+                try:
+                    repo = Repository(path)
+                    ok, msg = repo.pull()
+                    if ok:
+                        table.add_row(name, Text(msg, style="green"))
+                        success_count += 1
+                    else:
+                        table.add_row(name, Text(msg, style="red"))
+                        failed_count += 1
+                except Exception as e:
+                    table.add_row(name, Text(str(e), style="red"))
+                    failed_count += 1
+            live.update(table)
+
+    console.print()
+    if failed_count:
+        noun = "repository" if failed_count == 1 else "repositories"
+        console.print(f"  [red]{failed_count} {noun} failed[/red]\n")
         raise SystemExit(1)
     else:
-        count = len(success_results)
-        noun = "repository" if count == 1 else "repositories"
-        console.print()
-        console.print(f"  [green]{count} {noun} updated[/green]\n")
+        noun = "repository" if success_count == 1 else "repositories"
+        console.print(f"  [green]{success_count} {noun} updated[/green]\n")
 
 
 @cli.command()
