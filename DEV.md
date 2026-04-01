@@ -124,8 +124,8 @@ uv build
 ```
 
 This creates:
-- `dist/gitdirector-0.1.0-py3-none-any.whl` (wheel)
-- `dist/gitdirector-0.1.0.tar.gz` (source distribution)
+ - `dist/gitdirector-0.1.1-py3-none-any.whl` (wheel)
+ - `dist/gitdirector-0.1.1.tar.gz` (source distribution)
 
 ### Build Only Wheel
 
@@ -257,7 +257,7 @@ uv pip install -e .
 
 Verify what will be included in the wheel:
 ```bash
-unzip -l dist/gitdirector-0.1.0-py3-none-any.whl
+unzip -l dist/gitdirector-0.1.1-py3-none-any.whl
 ```
 
 ### 5. **Dry Run Upload**
@@ -307,7 +307,7 @@ MAJOR.MINOR.PATCH
 
 Before publishing, ensure no sensitive files are included:
 ```bash
-tar -tzf dist/gitdirector-0.1.0.tar.gz | grep -E "(\.env|credentials|secret)"
+tar -tzf dist/gitdirector-0.1.1.tar.gz | grep -E "(\.env|credentials|secret)"
 ```
 
 ## Dependency Management
@@ -410,9 +410,9 @@ uv add --dev black ruff pytest
 - [ ] Build distribution: `uv build`
 - [ ] Test on TestPyPI: `uv run twine upload --repository testpypi dist/*`
 - [ ] Verify TestPyPI installation works
-- [ ] Create git tag: `git tag v0.1.0`
+ - [ ] Create git tag: `git tag v0.1.1`
 - [ ] Publish to PyPI: `uv run twine upload dist/*`
-- [ ] Push tag: `git push origin v0.1.0`
+ - [ ] Push tag: `git push origin v0.1.1`
 - [ ] Create GitHub release
 
 ---

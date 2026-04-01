@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "gitdirector"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Python CLI tool for managing and synchronizing multiple git repositories with ease"
 readme = "README.md"
 license = { text = "MIT" }

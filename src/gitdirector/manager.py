@@ -9,70 +9,70 @@ class RepositoryManager:
     def __init__(self):
         self.config = Config()
 
-    def add_repository(self, path: Path, discover: bool = False) -> Tuple[bool, str, List[Path]]:
+    def add_repository(
+        self, path: Path, discover: bool = False
+    ) -> Tuple[bool, str, List[Path], List[Path]]:
         if discover:
             return self._discover_and_add(path)
         else:
             return self._add_single(path)
 
-    def _add_single(self, path: Path) -> Tuple[bool, str, List[Path]]:
+    def _add_single(self, path: Path) -> Tuple[bool, str, List[Path], List[Path]]:
         path = path.resolve()
 
         if not path.exists():
-            return False, f"Path does not exist: {path}", []
+            return False, f"Path does not exist: {path}", [], []
 
         if not path.is_dir():
-            return False, f"Path is not a directory: {path}", []
+            return False, f"Path is not a directory: {path}", [], []
 
         if not (path / ".git").is_dir():
-            return False, f"Not a git repository: {path}", []
+            return False, f"Not a git repository: {path}", [], []
 
         if self.config.has_repository(path):
-            return False, f"Repository already tracked: {path}", []
+            return False, f"Repository already tracked: {path}", [], []
 
         try:
             self.config.add_repository(path)
-            return True, f"Added repository: {path}", [path]
+            return True, f"Added repository: {path}", [path], []
         except Exception as e:
-            return False, f"Error adding repository: {str(e)}", []
+            return False, f"Error adding repository: {str(e)}", [], []
 
-    def _discover_and_add(self, root: Path) -> Tuple[bool, str, List[Path]]:
+    def _discover_and_add(self, root: Path) -> Tuple[bool, str, List[Path], List[Path]]:
         root = root.resolve()
 
         if not root.exists():
-            return False, f"Path does not exist: {root}", []
+            return False, f"Path does not exist: {root}", [], []
 
         if not root.is_dir():
-            return False, f"Path is not a directory: {root}", []
+            return False, f"Path is not a directory: {root}", [], []
 
         repos = []
-        errors = []
+        skipped = []
 
         for item in root.rglob(".git"):
             repo_path = item.parent
             if self.config.has_repository(repo_path):
-                errors.append(f"Already tracked: {repo_path}")
+                skipped.append(repo_path)
                 continue
 
             try:
                 self.config.add_repository(repo_path)
                 repos.append(repo_path)
             except Exception as e:
-                errors.append(f"Error adding {repo_path}: {str(e)}")
+                skipped.append(repo_path)
 
         if not repos:
-            msg = "No new repositories found" if errors else "No git repositories found"
-            return False, msg, []
+            msg = "No new repositories found" if skipped else "No git repositories found"
+            return False, msg, [], skipped
 
         msg = (
             f"Added {len(repos)} repository"
             if len(repos) == 1
             else f"Added {len(repos)} repositories"
         )
-        if errors:
-            msg += f"\n{len(errors)} already tracked or skipped"
 
-        return True, msg, repos
+        return True, msg, repos, skipped
 
     def remove_repository(self, path: Path, discover: bool = False) -> Tuple[bool, str, List[Path]]:
         if discover:
