@@ -46,6 +46,13 @@ def _changes_text(staged: bool, unstaged: bool) -> Text:
     return Text("—", style="bright_black")
 
 
+def _path_text(path: str) -> Text:
+    col_width = max(10, console.width * 4 // 11 - 4)
+    if len(path) > col_width:
+        path = "\u2026" + path[-(col_width - 1) :]
+    return Text(path, justify="right")
+
+
 def _repo_table() -> Table:
     table = Table(
         box=box.SIMPLE_HEAD,
@@ -55,11 +62,11 @@ def _repo_table() -> Table:
         show_edge=False,
         padding=(0, 1),
     )
-    table.add_column("REPOSITORY", ratio=4)
-    table.add_column("SYNC", no_wrap=True, ratio=2)
-    table.add_column("BRANCH", style="dim", no_wrap=True, ratio=2)
+    table.add_column("REPOSITORY", ratio=3)
+    table.add_column("SYNC", no_wrap=True, ratio=1)
+    table.add_column("BRANCH", style="dim", no_wrap=True, ratio=1)
     table.add_column("CHANGES", no_wrap=True, ratio=2)
-    table.add_column("PATH", style="dim", ratio=3)
+    table.add_column("PATH", style="dim", ratio=4, no_wrap=True, justify="right")
     return table
 
 
@@ -165,21 +172,15 @@ def list():
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
-    _PATH_MAX_LEN = 50
     table = _repo_table()
     for repo in repos:
         full_path = str(repo.path)
-        display_path = (
-            ("…" + full_path[-(_PATH_MAX_LEN - 1) :])
-            if len(full_path) > _PATH_MAX_LEN
-            else full_path
-        )
         table.add_row(
             repo.name,
             _status_text(repo.status),
             repo.branch or "—",
             _changes_text(repo.staged, repo.unstaged),
-            display_path,
+            _path_text(full_path),
         )
 
     console.print(table)
