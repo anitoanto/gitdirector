@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .config import Config
-from .repo import Repository, RepositoryInfo
+from .repo import Repository, RepositoryInfo, RepoStatus
 
 
 class RepositoryManager:
@@ -121,12 +121,8 @@ class RepositoryManager:
                     repo = Repository(path)
                     infos.append(repo.get_status())
                 except Exception as e:
-                    from .repo import RepositoryInfo, RepoStatus
-
                     infos.append(RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(e)))
             else:
-                from .repo import RepositoryInfo, RepoStatus
-
                 infos.append(
                     RepositoryInfo(
                         path,
