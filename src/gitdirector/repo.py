@@ -147,7 +147,7 @@ class Repository:
         )
 
     def pull(self) -> tuple[bool, str]:
-        code, out, err = self._run_git("pull")
+        code, out, err = self._run_git("pull", "--ff-only")
         if code == 0:
             return True, out
         return False, err

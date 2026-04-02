@@ -2,7 +2,7 @@ class Gitdirector < Formula
   desc "A Python CLI tool for managing and synchronizing multiple git repositories"
   homepage "https://github.com/anitoanto/gitdirector"
   url "https://github.com/anitoanto/gitdirector.git", branch: "main"
-  version "0.1.1"
+  version "0.1.4"
   license "MIT"
 
   depends_on "python@3.12"

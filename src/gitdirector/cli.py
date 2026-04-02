@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +14,7 @@ from rich.text import Text
 from .manager import RepositoryManager
 from .repo import Repository, RepositoryInfo, RepoStatus
 
-__version__ = "0.1.1"
+__version__ = version("gitdirector")
 
 console = Console(highlight=False)
 
@@ -148,15 +149,14 @@ def show_help():
     console.print(cmd_table)
 
     console.print()
-    console.print(" [dim]Examples[/dim]\n")
-    console.print("  [dim white]gitdirector add /path/to/repo[/dim white]")
-    console.print("  [dim white]gitdirector add /path/to/folder --discover[/dim white]")
-    console.print("  [dim white]gitdirector status[/dim white]")
-    console.print("  [dim white]gitdirector pull[/dim white]")
-    console.print()
 
 
-@click.group(invoke_without_command=True)
+class _HelpGroup(click.Group):
+    def format_help(self, ctx, formatter):
+        show_help()
+
+
+@click.group(cls=_HelpGroup, invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
     if ctx.invoked_subcommand is None:
