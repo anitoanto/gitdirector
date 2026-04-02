@@ -25,6 +25,7 @@ class RepositoryInfo:
     staged_files: Optional[list[str]] = None
     unstaged_files: Optional[list[str]] = None
     last_updated: Optional[str] = None
+    size: Optional[int] = None
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -63,6 +64,21 @@ class Repository:
     def get_last_commit_date(self) -> Optional[str]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd", "--date=relative")
         return out if code == 0 and out else None
+
+    def get_tracked_size(self) -> Optional[int]:
+        """Return total byte size of all tracked files (respects .gitignore)."""
+        code, out, _ = self._run_git("ls-files", "-z", _strip=False)
+        if code != 0 or not out:
+            return None
+        total = 0
+        for filename in out.split("\0"):
+            if not filename:
+                continue
+            try:
+                total += (self.path / filename).stat().st_size
+            except OSError:
+                pass
+        return total
 
     def get_status(self) -> RepositoryInfo:
         branch = self.get_current_branch()
@@ -114,6 +130,7 @@ class Repository:
                         unstaged_files.append(filename)
 
         last_updated = self.get_last_commit_date()
+        size = self.get_tracked_size()
 
         return RepositoryInfo(
             self.path,
@@ -126,6 +143,7 @@ class Repository:
             staged_files or None,
             unstaged_files or None,
             last_updated,
+            size,
         )
 
     def pull(self) -> tuple[bool, str]:

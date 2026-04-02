@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 
 import click
 from rich import box
@@ -10,7 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .manager import RepositoryManager
-from .repo import Repository, RepoStatus
+from .repo import Repository, RepositoryInfo, RepoStatus
 
 __version__ = "0.1.1"
 
@@ -39,6 +40,15 @@ def _status_text(status: RepoStatus) -> Text:
     return Text(label, style=color)
 
 
+def _format_size(size: Optional[int]) -> Text:
+    if size is None:
+        return Text("—", style="bright_black")
+    for unit, threshold in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if size >= threshold:
+            return Text(f"{size / threshold:.1f} {unit}", style="dim")
+    return Text(f"{size} B", style="dim")
+
+
 def _changes_text(staged: bool, unstaged: bool) -> Text:
     if staged and unstaged:
         return Text("staged+unstaged", style="yellow")
@@ -52,7 +62,7 @@ def _changes_text(staged: bool, unstaged: bool) -> Text:
 def _path_text(path: str) -> Text:
     # PATH column is ratio=2 out of total ratio=8 (2+1+1+1+1+2)
     # subtract 2 for the column's own padding (1 char each side)
-    col_width = max(10, console.width * 2 // 8 - 5)
+    col_width = max(10, console.width * 2 // 9 - 6)
     if len(path) > col_width:
         path = "\u2026" + path[-(col_width - 1) :]
     return Text(path, justify="right")
@@ -67,6 +77,7 @@ def _build_repo_table(results: list) -> Table:
             info.branch or "—",
             _changes_text(info.staged, info.unstaged),
             info.last_updated or "—",
+            _format_size(info.size),
             _path_text(str(info.path)),
         )
     return table
@@ -100,6 +111,7 @@ def _repo_table() -> Table:
     table.add_column("BRANCH", style="dim", no_wrap=True, ratio=1)
     table.add_column("CHANGES", no_wrap=True, ratio=1)
     table.add_column("LAST COMMIT", style="dim", no_wrap=True, ratio=1)
+    table.add_column("SIZE", style="dim", no_wrap=True, ratio=1, justify="right")
     table.add_column("PATH", style="dim", ratio=2, no_wrap=True, justify="right")
     return table
 
@@ -107,7 +119,8 @@ def _repo_table() -> Table:
 def show_help():
     console.print()
     console.print(
-        f" [bold white]GITDIRECTOR[/bold white]  [dim]v{__version__} - Manage multiple git repositories[/dim]\n"
+        f" [bold white]GITDIRECTOR[/bold white]  "
+        f"[dim]v{__version__} - Manage multiple git repositories[/dim]\n"
     )
 
     console.print(" [dim]Commands[/dim]\n")
@@ -165,7 +178,8 @@ def add(path: str, discover: bool):
                 console.print(f"  [green]+[/green] {repo_path}")
             for repo_path in skipped:
                 console.print(
-                    f"  [dim yellow]\\[skipped][/dim yellow] [bright_black]{repo_path}[/bright_black]"
+                    f"  [dim yellow]\\[skipped][/dim yellow] "
+                    f"[bright_black]{repo_path}[/bright_black]"
                 )
         else:
             console.print(f"  [green]+[/green] {message}")
@@ -196,8 +210,8 @@ def remove(path: str, discover: bool):
     console.print()
 
 
-@cli.command()
-def list():
+@cli.command(name="list")
+def list_repos():
     manager = RepositoryManager()
     paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
@@ -229,6 +243,31 @@ def list():
                     live.update(table)
 
     console.print()
+    total = len(paths)
+    noun = "repository" if total == 1 else "repositories"
+    console.print(f" [green]{total} {noun}[/green]\n")
+
+
+def _build_dirty_display(results: list[RepositoryInfo]) -> Text:
+    dirty_repos = sorted(
+        [r for r in results if r.staged or r.unstaged], key=lambda r: r.name.lower()
+    )
+    output = Text()
+    for repo in dirty_repos:
+        output.append(f"  {repo.name}", style="bold white")
+        output.append(f"  {repo.branch or '—'}\n", style="dim")
+        if repo.staged_files:
+            for f in repo.staged_files:
+                output.append("    ")
+                output.append("staged:", style="cyan")
+                output.append(f"   {f}\n")
+        if repo.unstaged_files:
+            for f in repo.unstaged_files:
+                output.append("    ")
+                output.append("unstaged:", style="yellow")
+                output.append(f" {f}\n")
+        output.append("\n")
+    return output
 
 
 @cli.command()
@@ -241,21 +280,32 @@ def status():
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
-    repos = []
-    with Live(console=console, refresh_per_second=12, transient=True) as live:
+    results = []
+    with Live(console=console, refresh_per_second=12, transient=False) as live:
         with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
             futures = {executor.submit(manager.get_repository_status, path): path for path in paths}
             remaining = len(futures)
             live.update(Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]"))
             for future in as_completed(futures):
                 remaining -= 1
-                repos.append(future.result())
+                results.append(future.result())
+                display = _build_dirty_display(results)
                 if remaining > 0:
-                    live.update(Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
+                    live.update(
+                        Group(
+                            display, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]")
+                        )
+                    )
+                else:
+                    live.update(display)
 
-    total = len(repos)
-    dirty = sum(1 for r in repos if r.staged or r.unstaged)
+    total = len(results)
+    dirty = sum(1 for r in results if r.staged or r.unstaged)
     clean = total - dirty
+
+    if not dirty:
+        console.print("  [dim]All repositories are clean[/dim]")
+        console.print()
 
     summary = Text(" ")
     summary.append(str(total), style="bold white")
@@ -266,26 +316,6 @@ def status():
         summary.append(f"    {dirty} changed", style="yellow")
 
     console.print(summary)
-    console.print()
-
-    # Show per-repo file-level changes
-    dirty_repos = [r for r in repos if r.staged or r.unstaged]
-    if dirty_repos:
-        for repo in dirty_repos:
-            console.print(
-                f"  [bold white]{repo.name}[/bold white]  [dim]{repo.branch or '—'}[/dim]"
-            )
-            if repo.staged_files:
-                for f in repo.staged_files:
-                    console.print(f"    [cyan]staged:[/cyan]   {f}")
-            if repo.unstaged_files:
-                for f in repo.unstaged_files:
-                    console.print(f"    [yellow]unstaged:[/yellow] {f}")
-            console.print()
-    else:
-        console.print("  [dim]All repositories are clean[/dim]")
-        console.print()
-
     console.print()
 
 
