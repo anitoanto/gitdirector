@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import click
@@ -179,21 +180,32 @@ def list():
 
     table = _repo_table()
     with Live(console=console, refresh_per_second=12, transient=False) as live:
-        for path in paths:
-            name = path.name
-            live.update(Group(table, Spinner("dots", text=f"  [dim]checking {name}...[/dim]")))
-            info = manager.get_repository_status(path)
-            full_path = str(info.path)
-            table.add_row(
-                info.name,
-                _status_text(info.status),
-                info.branch or "—",
-                _changes_text(info.staged, info.unstaged),
-                info.last_updated or "—",
-                _path_text(full_path),
-                # full_path,
+        with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
+            futures = {executor.submit(manager.get_repository_status, path): path for path in paths}
+            remaining = len(futures)
+            live.update(
+                Group(
+                    table,
+                    Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]"),
+                )
             )
-            live.update(table)
+            for future in as_completed(futures):
+                remaining -= 1
+                info = future.result()
+                table.add_row(
+                    info.name,
+                    _status_text(info.status),
+                    info.branch or "—",
+                    _changes_text(info.staged, info.unstaged),
+                    info.last_updated or "—",
+                    _path_text(str(info.path)),
+                )
+                if remaining > 0:
+                    live.update(
+                        Group(table, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
+                    )
+                else:
+                    live.update(table)
 
     console.print()
 
@@ -210,10 +222,15 @@ def status():
 
     repos = []
     with Live(console=console, refresh_per_second=12, transient=True) as live:
-        for path in paths:
-            live.update(Spinner("dots", text=f"  [dim]checking {path.name}...[/dim]"))
-            info = manager.get_repository_status(path)
-            repos.append(info)
+        with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
+            futures = {executor.submit(manager.get_repository_status, path): path for path in paths}
+            remaining = len(futures)
+            live.update(Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]"))
+            for future in as_completed(futures):
+                remaining -= 1
+                repos.append(future.result())
+                if remaining > 0:
+                    live.update(Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
 
     total = len(repos)
     dirty = sum(1 for r in repos if r.staged or r.unstaged)
@@ -265,6 +282,18 @@ def _pull_table() -> Table:
     return table
 
 
+def _pull_one(path: Path) -> tuple[str, bool, str]:
+    name = path.name
+    if not path.exists() or not (path / ".git").is_dir():
+        return name, False, "path not found"
+    try:
+        repo = Repository(path)
+        ok, msg = repo.pull()
+        return name, ok, msg
+    except Exception as e:
+        return name, False, str(e)
+
+
 @cli.command()
 def pull():
     manager = RepositoryManager()
@@ -280,26 +309,29 @@ def pull():
     success_count = 0
 
     with Live(console=console, refresh_per_second=12, transient=False) as live:
-        for path in paths:
-            name = path.name
-            live.update(Group(table, Spinner("dots", text=f"  [dim]pulling {name}...[/dim]")))
-            if not path.exists() or not (path / ".git").is_dir():
-                table.add_row(name, Text("path not found", style="red"))
-                failed_count += 1
-            else:
-                try:
-                    repo = Repository(path)
-                    ok, msg = repo.pull()
-                    if ok:
-                        table.add_row(name, Text(msg, style="green"))
-                        success_count += 1
-                    else:
-                        table.add_row(name, Text(msg, style="red"))
-                        failed_count += 1
-                except Exception as e:
-                    table.add_row(name, Text(str(e), style="red"))
+        with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
+            futures = {executor.submit(_pull_one, path): path for path in paths}
+            remaining = len(futures)
+            live.update(
+                Group(
+                    table, Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]")
+                )
+            )
+            for future in as_completed(futures):
+                remaining -= 1
+                name, ok, msg = future.result()
+                if ok:
+                    table.add_row(name, Text(msg, style="green"))
+                    success_count += 1
+                else:
+                    table.add_row(name, Text(msg, style="red"))
                     failed_count += 1
-            live.update(table)
+                if remaining > 0:
+                    live.update(
+                        Group(table, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
+                    )
+                else:
+                    live.update(table)
 
     console.print()
     if failed_count:

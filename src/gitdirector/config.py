@@ -13,16 +13,22 @@ class Config:
     def _ensure_config_dir(self) -> None:
         self.config_dir.mkdir(exist_ok=True)
 
+    DEFAULT_MAX_WORKERS = 10
+
     def _load(self) -> None:
         if self.config_file.exists():
             with open(self.config_file, "r") as f:
                 data = yaml.safe_load(f) or {}
                 self.repositories = [Path(p) for p in data.get("repositories", [])]
+                self.max_workers = int(data.get("max_workers", self.DEFAULT_MAX_WORKERS))
         else:
             self.repositories = []
+            self.max_workers = self.DEFAULT_MAX_WORKERS
 
     def save(self) -> None:
-        data = {"repositories": [str(p) for p in self.repositories]}
+        data: dict = {"repositories": [str(p) for p in self.repositories]}
+        if self.max_workers != self.DEFAULT_MAX_WORKERS:
+            data["max_workers"] = self.max_workers
         with open(self.config_file, "w") as f:
             yaml.dump(data, f, default_flow_style=False)
 
