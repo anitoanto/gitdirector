@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from gitdirector.config import Config
+
 
 class TestConfigInit:
     def test_creates_config_dir(self, config_dir, config):
@@ -36,9 +38,6 @@ class TestConfigInit:
         cfg = Config()
         assert cfg.repositories == []
         assert cfg.max_workers == Config.DEFAULT_MAX_WORKERS
-
-
-from gitdirector.config import Config
 
 
 class TestConfigAddRepository:

@@ -1,8 +1,6 @@
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
 
 from gitdirector.cli import (
     _changes_text,
@@ -13,7 +11,6 @@ from gitdirector.cli import (
     main,
 )
 from gitdirector.repo import RepositoryInfo, RepoStatus
-
 
 # ---------------------------------------------------------------------------
 # Pure helper functions

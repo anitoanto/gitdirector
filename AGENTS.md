@@ -34,3 +34,8 @@ Always setup the `.venv` correctly before running any commands or tests.
 - `uv` ensures consistent dependency management across all environments
 - It automatically uses the `.venv` in the project root
 - All team members get the same dependencies and versions
+
+## Documentation
+
+- **[DEV.md](DEV.md)** — Developer commands: setup, run, test, format, lint
+- **[README.md](README.md)** — Project overview, installation, usage, and configuration
