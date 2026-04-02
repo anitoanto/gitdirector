@@ -4,7 +4,7 @@ class GitDirector < Formula
   desc "Python CLI tool for managing and synchronizing multiple git repositories"
   homepage "https://github.com/anitoanto/gitdirector"
   url "https://github.com/anitoanto/gitdirector.git",
-      tag:      "v0.1.4",
+      tag:      "v0.1.5",
       revision: "PLACEHOLDER_COMMIT_SHA"
   license "MIT"
 

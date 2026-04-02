@@ -29,3 +29,14 @@ uv run black src/ tests/
 ```bash
 uv run ruff check src/ tests/
 ```
+
+## Release
+
+1. Bump `version` in `pyproject.toml`
+2. Commit and push the version bump
+3. Tag and push — GitHub Actions will build and publish to PyPI automatically:
+
+```bash
+git tag v<version>
+git push origin v<version>
+```
