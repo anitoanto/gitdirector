@@ -61,8 +61,6 @@ def _changes_text(staged: bool, unstaged: bool) -> Text:
 
 
 def _path_text(path: str) -> Text:
-    # PATH column is ratio=2 out of total ratio=8 (2+1+1+1+1+2)
-    # subtract 2 for the column's own padding (1 char each side)
     col_width = max(10, console.width * 2 // 9 - 6)
     if len(path) > col_width:
         path = "\u2026" + path[-(col_width - 1) :]
