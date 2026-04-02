@@ -199,16 +199,16 @@ def remove(target: str, discover: bool):
     # Treat the following as paths (not names): contains a separator, is '.' or '..', is
     # absolute, starts with '~', or refers to an existing filesystem entry.
     if not success and not discover:
-        _p = Path(target)
-        _is_path_like = (
+        path_obj = Path(target)
+        is_path_like = (
             "/" in target
             or "\\" in target
             or target in (".", "..")
-            or _p.is_absolute()
+            or path_obj.is_absolute()
             or target.startswith("~")
-            or _p.exists()
+            or path_obj.exists()
         )
-        if not _is_path_like:
+        if not is_path_like:
             success, message, repos = manager.remove_by_name(target)
 
     console.print()
