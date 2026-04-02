@@ -92,6 +92,27 @@ class RepositoryManager:
         except Exception as e:
             return False, f"Error removing repository: {str(e)}", []
 
+    def remove_by_name(self, name: str) -> Tuple[bool, str, List[Path]]:
+        matches = [r for r in self.config.repositories if r.name == name]
+
+        if not matches:
+            return False, f"No tracked repository named: {name}", []
+
+        if len(matches) > 1:
+            paths_list = "\n".join(f"  {p}" for p in matches)
+            return (
+                False,
+                f"Multiple repositories named '{name}' — use the full path:\n{paths_list}",
+                [],
+            )
+
+        path = matches[0]
+        try:
+            self.config.remove_repository(path)
+            return True, f"Removed repository: {path}", [path]
+        except Exception as e:
+            return False, f"Error removing repository: {str(e)}", []
+
     def _discover_and_remove(self, root: Path) -> Tuple[bool, str, List[Path]]:
         root = root.resolve()
 
