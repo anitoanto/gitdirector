@@ -39,3 +39,7 @@ Always setup the `.venv` correctly before running any commands or tests.
 
 - **[DEV.md](DEV.md)** — Developer commands: setup, run, test, format, lint
 - **[README.md](README.md)** — Project overview, installation, usage, and configuration
+
+## Code Style
+
+- Use very minimal comments in the codebase — let the code speak for itself
