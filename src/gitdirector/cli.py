@@ -50,12 +50,40 @@ def _changes_text(staged: bool, unstaged: bool) -> Text:
 
 
 def _path_text(path: str) -> Text:
-    # PATH column is ratio=4 out of total ratio=13 (3+1+1+2+2+4)
+    # PATH column is ratio=2 out of total ratio=8 (2+1+1+1+1+2)
     # subtract 2 for the column's own padding (1 char each side)
-    col_width = max(10, console.width * 4 // 13 - 5)
+    col_width = max(10, console.width * 2 // 8 - 5)
     if len(path) > col_width:
         path = "\u2026" + path[-(col_width - 1) :]
     return Text(path, justify="right")
+
+
+def _build_repo_table(results: list) -> Table:
+    table = _repo_table()
+    for info in sorted(results, key=lambda r: r.name.lower()):
+        table.add_row(
+            info.name,
+            _status_text(info.status),
+            info.branch or "—",
+            _changes_text(info.staged, info.unstaged),
+            info.last_updated or "—",
+            _path_text(str(info.path)),
+        )
+    return table
+
+
+def _build_pull_table(results: list) -> tuple[Table, int, int]:
+    table = _pull_table()
+    success_count = 0
+    failed_count = 0
+    for name, ok, msg in sorted(results, key=lambda r: r[0].lower()):
+        if ok:
+            table.add_row(name, Text(msg, style="green"))
+            success_count += 1
+        else:
+            table.add_row(name, Text(msg, style="red"))
+            failed_count += 1
+    return table, success_count, failed_count
 
 
 def _repo_table() -> Table:
@@ -67,12 +95,12 @@ def _repo_table() -> Table:
         show_edge=False,
         padding=(0, 1),
     )
-    table.add_column("REPOSITORY", ratio=3)
+    table.add_column("REPOSITORY", ratio=2)
     table.add_column("SYNC", no_wrap=True, ratio=1)
     table.add_column("BRANCH", style="dim", no_wrap=True, ratio=1)
-    table.add_column("CHANGES", no_wrap=True, ratio=2)
-    table.add_column("LAST COMMIT", style="dim", no_wrap=True, ratio=2)
-    table.add_column("PATH", style="dim", ratio=4, no_wrap=True, justify="right")
+    table.add_column("CHANGES", no_wrap=True, ratio=1)
+    table.add_column("LAST COMMIT", style="dim", no_wrap=True, ratio=1)
+    table.add_column("PATH", style="dim", ratio=2, no_wrap=True, justify="right")
     return table
 
 
@@ -171,35 +199,28 @@ def remove(path: str, discover: bool):
 @cli.command()
 def list():
     manager = RepositoryManager()
-    paths = manager.config.repositories
+    paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
     console.print()
     if not paths:
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
-    table = _repo_table()
     with Live(console=console, refresh_per_second=12, transient=False) as live:
         with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
             futures = {executor.submit(manager.get_repository_status, path): path for path in paths}
             remaining = len(futures)
             live.update(
                 Group(
-                    table,
+                    _repo_table(),
                     Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]"),
                 )
             )
+            results = []
             for future in as_completed(futures):
                 remaining -= 1
-                info = future.result()
-                table.add_row(
-                    info.name,
-                    _status_text(info.status),
-                    info.branch or "—",
-                    _changes_text(info.staged, info.unstaged),
-                    info.last_updated or "—",
-                    _path_text(str(info.path)),
-                )
+                results.append(future.result())
+                table = _build_repo_table(results)
                 if remaining > 0:
                     live.update(
                         Group(table, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
@@ -213,7 +234,7 @@ def list():
 @cli.command()
 def status():
     manager = RepositoryManager()
-    paths = manager.config.repositories
+    paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
     console.print()
     if not paths:
@@ -297,14 +318,13 @@ def _pull_one(path: Path) -> tuple[str, bool, str]:
 @cli.command()
 def pull():
     manager = RepositoryManager()
-    paths = manager.config.repositories
+    paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
     console.print()
     if not paths:
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
-    table = _pull_table()
     failed_count = 0
     success_count = 0
 
@@ -314,18 +334,15 @@ def pull():
             remaining = len(futures)
             live.update(
                 Group(
-                    table, Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]")
+                    _pull_table(),
+                    Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]"),
                 )
             )
+            results = []
             for future in as_completed(futures):
                 remaining -= 1
-                name, ok, msg = future.result()
-                if ok:
-                    table.add_row(name, Text(msg, style="green"))
-                    success_count += 1
-                else:
-                    table.add_row(name, Text(msg, style="red"))
-                    failed_count += 1
+                results.append(future.result())
+                table, success_count, failed_count = _build_pull_table(results)
                 if remaining > 0:
                     live.update(
                         Group(table, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
