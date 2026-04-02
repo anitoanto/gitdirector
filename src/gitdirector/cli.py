@@ -189,11 +189,15 @@ def add(path: str, discover: bool):
 
 
 @cli.command()
-@click.argument("path", type=click.Path(exists=False))
+@click.argument("target", type=click.Path(exists=False))
 @click.option("--discover", is_flag=True, help="Recursively discover repositories to remove")
-def remove(path: str, discover: bool):
+def remove(target: str, discover: bool):
     manager = RepositoryManager()
-    success, message, repos = manager.remove_repository(Path(path), discover=discover)
+    success, message, repos = manager.remove_repository(Path(target), discover=discover)
+
+    # If path-based lookup failed and the target looks like a plain name, try by name
+    if not success and not discover and "/" not in target and "\\" not in target:
+        success, message, repos = manager.remove_by_name(target)
 
     console.print()
     if success:
