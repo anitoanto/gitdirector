@@ -175,6 +175,18 @@ class TestRemoveCommand:
         assert result.exit_code == 1
         mgr.remove_by_name.assert_not_called()
 
+    @pytest.mark.parametrize("dot_target", [".", ".."])
+    def test_remove_dot_does_not_call_remove_by_name(self, runner, dot_target):
+        """. and .. should be treated as paths, not names, and must not fall back."""
+        mgr = _mock_manager(
+            remove_repository=(False, f"Repository not tracked: {dot_target}", []),
+        )
+        mgr.remove_by_name = MagicMock()
+        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["remove", dot_target])
+        assert result.exit_code == 1
+        mgr.remove_by_name.assert_not_called()
+
 
 class TestListCommand:
     def test_empty(self, runner):

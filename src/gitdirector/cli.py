@@ -195,9 +195,21 @@ def remove(target: str, discover: bool):
     manager = RepositoryManager()
     success, message, repos = manager.remove_repository(Path(target), discover=discover)
 
-    # If path-based lookup failed and the target looks like a plain name, try by name
-    if not success and not discover and "/" not in target and "\\" not in target:
-        success, message, repos = manager.remove_by_name(target)
+    # If path-based lookup failed and the target looks like a plain name, try by name.
+    # Treat the following as paths (not names): contains a separator, is '.' or '..', is
+    # absolute, starts with '~', or refers to an existing filesystem entry.
+    if not success and not discover:
+        _p = Path(target)
+        _is_path_like = (
+            "/" in target
+            or "\\" in target
+            or target in (".", "..")
+            or _p.is_absolute()
+            or target.startswith("~")
+            or _p.exists()
+        )
+        if not _is_path_like:
+            success, message, repos = manager.remove_by_name(target)
 
     console.print()
     if success:
