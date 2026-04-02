@@ -1,8 +1,27 @@
+import os
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+_AUTH_ERROR_PATTERNS = (
+    "could not read username",
+    "authentication failed",
+    "permission denied",
+    "terminal prompts disabled",
+    "could not read from remote repository",
+    "unable to access",
+    "returned error: 401",
+    "returned error: 403",
+    "invalid credentials",
+    "logon failed",
+)
+
+
+def _is_auth_error(stderr: str) -> bool:
+    lower = stderr.lower()
+    return any(p in lower for p in _AUTH_ERROR_PATTERNS)
 
 
 class RepoStatus(Enum):
@@ -43,15 +62,28 @@ class Repository:
         return (path / ".git").is_dir()
 
     def _run_git(self, *args: str, _strip: bool = True) -> tuple[int, str, str]:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = ""
+        env["SSH_ASKPASS"] = ""
         try:
             result = subprocess.run(
                 ["git", "-C", str(self.path)] + list(args),
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
+                env=env,
+                stdin=subprocess.DEVNULL,
             )
             stdout = result.stdout.strip() if _strip else result.stdout
-            return result.returncode, stdout, result.stderr.strip()
+            stderr = result.stderr.strip()
+            if result.returncode != 0 and _is_auth_error(stderr):
+                return (
+                    result.returncode,
+                    stdout,
+                    "authentication failed \u2014 configure git credentials for this remote",
+                )
+            return result.returncode, stdout, stderr
         except subprocess.TimeoutExpired:
             return 1, "", "git command timed out"
         except FileNotFoundError:
