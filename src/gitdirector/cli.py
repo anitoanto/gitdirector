@@ -234,27 +234,29 @@ def list_repos():
         console.print("  [dim]No repositories tracked[/dim]\n")
         return
 
-    with Live(console=console, refresh_per_second=12, transient=False) as live:
+    results = []
+    with Live(
+        console=console, refresh_per_second=12, transient=True, vertical_overflow="visible"
+    ) as live:
         with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
             futures = {executor.submit(manager.get_repository_status, path): path for path in paths}
             remaining = len(futures)
-            live.update(
-                Group(
-                    _repo_table(),
-                    Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]"),
-                )
-            )
-            results = []
+            live.update(Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]"))
             for future in as_completed(futures):
                 remaining -= 1
                 results.append(future.result())
-                table = _build_repo_table(results)
+                done = len(results)
                 if remaining > 0:
                     live.update(
-                        Group(table, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
+                        Spinner(
+                            "dots",
+                            text=f"  [dim]{done} done, {remaining} remaining...[/dim]",
+                        )
                     )
                 else:
-                    live.update(table)
+                    live.update(Spinner("dots", text="  [dim]done[/dim]"))
+
+    console.print(_build_repo_table(results))
 
     console.print()
     total = len(paths)
@@ -372,27 +374,30 @@ def pull():
     failed_count = 0
     success_count = 0
 
-    with Live(console=console, refresh_per_second=12, transient=False) as live:
+    results = []
+    with Live(
+        console=console, refresh_per_second=12, transient=True, vertical_overflow="visible"
+    ) as live:
         with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
             futures = {executor.submit(_pull_one, path): path for path in paths}
             remaining = len(futures)
-            live.update(
-                Group(
-                    _pull_table(),
-                    Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]"),
-                )
-            )
-            results = []
+            live.update(Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]"))
             for future in as_completed(futures):
                 remaining -= 1
                 results.append(future.result())
-                table, success_count, failed_count = _build_pull_table(results)
+                done = len(results)
                 if remaining > 0:
                     live.update(
-                        Group(table, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
+                        Spinner(
+                            "dots",
+                            text=f"  [dim]{done} done, {remaining} remaining...[/dim]",
+                        )
                     )
                 else:
-                    live.update(table)
+                    live.update(Spinner("dots", text="  [dim]done[/dim]"))
+
+    table, success_count, failed_count = _build_pull_table(results)
+    console.print(table)
 
     console.print()
     if failed_count:
