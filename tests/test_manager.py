@@ -118,6 +118,38 @@ class TestRemoveSingle:
 
 
 # ---------------------------------------------------------------------------
+# remove – by name
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveByName:
+    def test_remove_by_name_success(self, manager, fake_git_repo):
+        manager.add_repository(fake_git_repo)
+        ok, msg, removed = manager.remove_by_name(fake_git_repo.name)
+        assert ok is True
+        assert len(removed) == 1
+        assert fake_git_repo.resolve() not in manager.config.repositories
+
+    def test_remove_by_name_not_found(self, manager):
+        ok, msg, removed = manager.remove_by_name("nonexistent-repo")
+        assert ok is False
+        assert "no tracked repository named" in msg.lower()
+        assert removed == []
+
+    def test_remove_by_name_ambiguous(self, manager, tmp_path):
+        for folder in ("dir1", "dir2"):
+            r = tmp_path / folder / "my-repo"
+            r.mkdir(parents=True)
+            (r / ".git").mkdir()
+            manager.add_repository(r)
+
+        ok, msg, removed = manager.remove_by_name("my-repo")
+        assert ok is False
+        assert "multiple" in msg.lower()
+        assert removed == []
+
+
+# ---------------------------------------------------------------------------
 # remove – discover
 # ---------------------------------------------------------------------------
 
