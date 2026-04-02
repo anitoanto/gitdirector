@@ -11,12 +11,12 @@ pip install gitdirector
 ## Usage
 
 ```
-gitdirector add PATH [--discover]     Add a repository or discover all under a path
-gitdirector remove PATH [--discover]  Remove a repository or all under a path
-gitdirector list                      List all tracked repositories with live status
-gitdirector status                    Show dirty repositories with staged/unstaged files
-gitdirector pull                      Pull latest changes for all tracked repositories
-gitdirector help                      Show help
+gitdirector add PATH [--discover]          Add a repository or discover all under a path
+gitdirector remove PATH|NAME [--discover]  Remove a repository by path, name, or all under a path
+gitdirector list                           List all tracked repositories with live status
+gitdirector status                         Show dirty repositories with staged/unstaged files
+gitdirector pull                           Pull latest changes for all tracked repositories
+gitdirector help                           Show help
 ```
 
 ### add
@@ -29,9 +29,12 @@ gitdirector add /path/to/folder --discover   # recursively find and add all repo
 ### remove
 
 ```bash
-gitdirector remove /path/to/repo
-gitdirector remove /path/to/folder --discover
+gitdirector remove /path/to/repo         # remove by full path
+gitdirector remove my-repo               # remove by repository name
+gitdirector remove /path/to/folder --discover  # remove all repos under a path
 ```
+
+If multiple tracked repositories share the same name, `gitdirector` will refuse and list the conflicting paths so you can use the full path instead.
 
 ### list
 

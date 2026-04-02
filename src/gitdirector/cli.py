@@ -189,11 +189,27 @@ def add(path: str, discover: bool):
 
 
 @cli.command()
-@click.argument("path", type=click.Path(exists=False))
+@click.argument("target", type=click.Path(exists=False))
 @click.option("--discover", is_flag=True, help="Recursively discover repositories to remove")
-def remove(path: str, discover: bool):
+def remove(target: str, discover: bool):
     manager = RepositoryManager()
-    success, message, repos = manager.remove_repository(Path(path), discover=discover)
+    success, message, repos = manager.remove_repository(Path(target), discover=discover)
+
+    # If path-based lookup failed and the target looks like a plain name, try by name.
+    # Treat the following as paths (not names): contains a separator, is '.' or '..', is
+    # absolute, starts with '~', or refers to an existing filesystem entry.
+    if not success and not discover:
+        path_obj = Path(target)
+        is_path_like = (
+            "/" in target
+            or "\\" in target
+            or target in (".", "..")
+            or path_obj.is_absolute()
+            or target.startswith("~")
+            or path_obj.exists()
+        )
+        if not is_path_like:
+            success, message, repos = manager.remove_by_name(target)
 
     console.print()
     if success:
