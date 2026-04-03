@@ -1,8 +1,27 @@
+import os
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+_AUTH_ERROR_PATTERNS = (
+    "could not read username",
+    "authentication failed",
+    "permission denied",
+    "terminal prompts disabled",
+    "could not read from remote repository",
+    "unable to access",
+    "returned error: 401",
+    "returned error: 403",
+    "invalid credentials",
+    "logon failed",
+)
+
+
+def _is_auth_error(stderr: str) -> bool:
+    lower = stderr.lower()
+    return any(p in lower for p in _AUTH_ERROR_PATTERNS)
 
 
 class RepoStatus(Enum):
@@ -25,6 +44,7 @@ class RepositoryInfo:
     staged_files: Optional[list[str]] = None
     unstaged_files: Optional[list[str]] = None
     last_updated: Optional[str] = None
+    last_commit_timestamp: Optional[int] = None
     size: Optional[int] = None
 
     def __repr__(self) -> str:
@@ -43,15 +63,28 @@ class Repository:
         return (path / ".git").is_dir()
 
     def _run_git(self, *args: str, _strip: bool = True) -> tuple[int, str, str]:
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = ""
+        env["SSH_ASKPASS"] = ""
         try:
             result = subprocess.run(
                 ["git", "-C", str(self.path)] + list(args),
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
+                env=env,
+                stdin=subprocess.DEVNULL,
             )
             stdout = result.stdout.strip() if _strip else result.stdout
-            return result.returncode, stdout, result.stderr.strip()
+            stderr = result.stderr.strip()
+            if result.returncode != 0 and _is_auth_error(stderr):
+                return (
+                    result.returncode,
+                    stdout,
+                    "authentication failed \u2014 configure git credentials for this remote",
+                )
+            return result.returncode, stdout, stderr
         except subprocess.TimeoutExpired:
             return 1, "", "git command timed out"
         except FileNotFoundError:
@@ -64,6 +97,15 @@ class Repository:
     def get_last_commit_date(self) -> Optional[str]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd", "--date=relative")
         return out if code == 0 and out else None
+
+    def get_last_commit_timestamp(self) -> Optional[int]:
+        code, out, _ = self._run_git("log", "-1", "--format=%ct")
+        if code == 0 and out:
+            try:
+                return int(out)
+            except ValueError:
+                return None
+        return None
 
     def get_tracked_size(self) -> Optional[int]:
         """Return total byte size of all tracked files (respects .gitignore)."""
@@ -130,6 +172,7 @@ class Repository:
                         unstaged_files.append(filename)
 
         last_updated = self.get_last_commit_date()
+        last_commit_ts = self.get_last_commit_timestamp()
         size = self.get_tracked_size()
 
         return RepositoryInfo(
@@ -143,6 +186,7 @@ class Repository:
             staged_files or None,
             unstaged_files or None,
             last_updated,
+            last_commit_ts,
             size,
         )
 
