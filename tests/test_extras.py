@@ -1,0 +1,323 @@
+"""Tests for coverage gaps - error paths and edge cases."""
+
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from gitdirector.cli import main
+from gitdirector.manager import RepositoryManager
+from gitdirector.repo import Repository, RepositoryInfo, RepoStatus
+
+
+# ---------------------------------------------------------------------------
+# Fixtures (copied from test_manager.py to avoid circular imports)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def manager(config, monkeypatch):
+    """RepositoryManager backed by a temp config."""
+    monkeypatch.setattr("gitdirector.manager.Config", lambda: config)
+    return RepositoryManager()
+
+
+# ---------------------------------------------------------------------------
+# Manager – Error handling in add_repository
+# ---------------------------------------------------------------------------
+
+
+class TestManagerAddErrors:
+    """Test error paths in RepositoryManager.add_repository."""
+
+    def test_add_config_exception_on_add_single(self, manager, fake_git_repo, mocker):
+        """When config.add_repository raises, error is caught and returned."""
+        mocker.patch.object(
+            manager.config, "add_repository", side_effect=Exception("Config write failed")
+        )
+        ok, msg, added, skipped = manager.add_repository(fake_git_repo)
+        assert ok is False
+        assert "Error adding repository" in msg
+
+    def test_discover_config_exception_on_find(self, manager, tmp_path, mocker):
+        """When config.add_repository fails during discover, repo is skipped."""
+        # Create actual raw repos
+        repos = []
+        for i in range(2):
+            r = tmp_path / f"repo-{i}"
+            r.mkdir()
+            (r / ".git").mkdir()
+            repos.append(r)
+
+        # Fail on the first repo
+        original_add = manager.config.add_repository
+        call_count = [0]
+
+        def failing_add(path):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("Write failed")
+            return original_add(path)
+
+        mocker.patch.object(manager.config, "add_repository", side_effect=failing_add)
+
+        ok, msg, added, skipped = manager.add_repository(tmp_path, discover=True)
+        assert ok is True
+        assert len(added) == 1  # Second one succeeded
+        assert len(skipped) == 1  # First one was skipped
+
+    def test_add_discover_not_a_directory(self, manager, tmp_path):
+        """When discover path is not a directory, error is returned."""
+        f = tmp_path / "file.txt"
+        f.write_text("hi")
+        ok, msg, added, skipped = manager.add_repository(f, discover=True)
+        assert ok is False
+        assert "not a directory" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# Manager – Error handling in remove_repository
+# ---------------------------------------------------------------------------
+
+
+class TestManagerRemoveErrors:
+    """Test error paths in RepositoryManager.remove_repository."""
+
+    def test_remove_config_exception(self, manager, fake_git_repo, mocker):
+        """When config.remove_repository raises, error is caught and returned."""
+        manager.add_repository(fake_git_repo)
+        mocker.patch.object(
+            manager.config, "remove_repository", side_effect=Exception("Config write failed")
+        )
+        ok, msg, removed = manager.remove_repository(fake_git_repo)
+        assert ok is False
+        assert "Error removing repository" in msg
+
+    def test_discover_and_remove_config_exception(self, manager, tmp_path, mocker):
+        """When config exception occurs during discover remove, error is returned."""
+        # Create a repo and add it
+        r = tmp_path / "repo"
+        r.mkdir()
+        (r / ".git").mkdir()
+        manager.add_repository(r)
+
+        # Patch config.remove_repository to fail
+        mocker.patch.object(
+            manager.config, "remove_repository", side_effect=Exception("Write failed")
+        )
+        ok, msg, removed = manager.remove_repository(tmp_path, discover=True)
+        assert ok is False
+        assert "Error removing repositories" in msg
+
+
+# ---------------------------------------------------------------------------
+# Repo – Error handling in get_last_commit_timestamp
+# ---------------------------------------------------------------------------
+
+
+class TestRepoTimestampErrors:
+    """Test error paths in Repository.get_last_commit_timestamp."""
+
+    def test_last_commit_timestamp_non_integer(self, fake_git_repo, mocker):
+        """When git returns non-integer timestamp, None is returned."""
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="not-an-int\n", stderr=""),
+        )
+        repo = Repository(fake_git_repo)
+        result = repo.get_last_commit_timestamp()
+        assert result is None
+
+    def test_last_commit_timestamp_empty_output(self, fake_git_repo, mocker):
+        """When git returns empty output, None is returned."""
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        repo = Repository(fake_git_repo)
+        result = repo.get_last_commit_timestamp()
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Repo – Error handling in get_tracked_size
+# ---------------------------------------------------------------------------
+
+
+class TestRepoTrackedSizeErrors:
+    """Test error paths in Repository.get_tracked_size."""
+
+    def test_tracked_size_git_failure(self, fake_git_repo, mocker):
+        """When git ls-files fails, None is returned."""
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=1, stdout="", stderr="error"),
+        )
+        repo = Repository(fake_git_repo)
+        size = repo.get_tracked_size()
+        assert size is None
+
+    def test_tracked_size_empty_output(self, fake_git_repo, mocker):
+        """When git ls-files returns no files, None is returned."""
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        repo = Repository(fake_git_repo)
+        size = repo.get_tracked_size()
+        assert size is None
+
+
+# ---------------------------------------------------------------------------
+# Repo – Error handling in get_status (pull command)
+# ---------------------------------------------------------------------------
+
+
+class TestRepoPullErrors:
+    """Test error paths in Repository.pull method."""
+
+    def test_pull_with_auth_error(self, fake_git_repo, mocker):
+        """Pull returns auth error message when git pull fails with auth error."""
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(
+                returncode=128,
+                stdout="",
+                stderr="fatal: Authentication failed\n",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+        ok, msg = repo.pull()
+        assert ok is False
+        assert "authentication" in msg.lower()
+
+    def test_pull_with_generic_error(self, fake_git_repo, mocker):
+        """Pull returns generic error when git pull fails."""
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="fatal: some error\n",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+        ok, msg = repo.pull()
+        assert ok is False
+        assert "fatal" in msg
+
+
+# ---------------------------------------------------------------------------
+# CLI – main() exception handling
+# ---------------------------------------------------------------------------
+
+
+class TestMainExceptionHandling:
+    """Test error handling in cli.main()."""
+
+    @patch("gitdirector.cli.cli")
+    def test_main_catches_exception(self, mock_cli, capsys):
+        """main() catches exceptions from cli and exits with code 1."""
+        mock_cli.side_effect = Exception("Test error")
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        assert "Test error" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Manager – Pull all errors
+# ---------------------------------------------------------------------------
+
+
+class TestManagerPullAllErrors:
+    """Test error paths in RepositoryManager.pull_all()."""
+
+    def test_pull_all_with_missing_repo(self, manager, tmp_path):
+        """When repo path doesn't exist, it's added to failed list."""
+        # Add a repo to config but don't create it
+        fake_path = tmp_path / "nonexistent"
+        manager.config.add_repository(fake_path)
+
+        success, failed = manager.pull_all()
+        assert len(success) == 0
+        assert len(failed) == 1
+        assert "not found" in failed[0].lower()
+
+    def test_pull_all_with_repo_exception(self, manager, fake_git_repo, mocker):
+        """When repo.pull() raises exception, error is caught."""
+        manager.add_repository(fake_git_repo)
+        mocker.patch.object(Repository, "pull", side_effect=Exception("Pull failed"))
+        success, failed = manager.pull_all()
+        assert len(success) == 0
+        assert len(failed) == 1
+
+
+# ---------------------------------------------------------------------------
+# Manager – Get repository status error paths
+# ---------------------------------------------------------------------------
+
+
+class TestManagerRepositoryStatusErrors:
+    """Test error paths in RepositoryManager.get_repository_status()."""
+
+    def test_get_status_repo_exception(self, manager, fake_git_repo, mocker):
+        """When Repository init or get_status fails, returns UNKNOWN status."""
+        mocker.patch("gitdirector.manager.Repository", side_effect=Exception("Init failed"))
+        result = manager.get_repository_status(fake_git_repo)
+        assert result.status == RepoStatus.UNKNOWN
+        assert result.message == "Init failed"
+
+    def test_get_status_nonexistent_path(self, manager, tmp_path):
+        """When path doesn't exist, returns UNKNOWN status."""
+        fake_path = tmp_path / "nonexistent"
+        result = manager.get_repository_status(fake_path)
+        assert result.status == RepoStatus.UNKNOWN
+        assert "not found" in result.message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Repo – get_status with parsing errors
+# ---------------------------------------------------------------------------
+
+
+class TestRepoGetStatusParsingErrors:
+    """Test error paths when parsing git status output."""
+
+    def test_get_status_invalid_ahead_behind_format(self, fake_git_repo, mocker):
+        """When rev-list output can't be parsed as two ints, returns UNKNOWN."""
+
+        # Mock all subprocess.run calls
+        def mock_run(*args, **kwargs):
+            # Check which git command this is
+            git_cmd = args[0]
+            if "fetch" in git_cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            elif "rev-list" in git_cmd:
+                return MagicMock(returncode=0, stdout="invalid format\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mocker.patch("subprocess.run", side_effect=mock_run)
+        repo = Repository(fake_git_repo)
+        status = repo.get_status()
+        assert status.status == RepoStatus.UNKNOWN
+
+    def test_get_status_no_tracking_branch(self, fake_git_repo, mocker):
+        """When no tracking branch exists, returns UNKNOWN."""
+
+        def mock_run(*args, **kwargs):
+            git_cmd = args[0]
+            if "fetch" in git_cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            elif "rev-list" in git_cmd:
+                return MagicMock(returncode=128, stdout="", stderr="fatal: no upstream branch\n")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mocker.patch("subprocess.run", side_effect=mock_run)
+        repo = Repository(fake_git_repo)
+        status = repo.get_status()
+        assert status.status == RepoStatus.UNKNOWN
+        assert "upstream" in status.message.lower() or "tracking" in status.message.lower()

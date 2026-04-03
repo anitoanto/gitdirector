@@ -5,22 +5,20 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from textual.widgets import DataTable, Input, OptionList, Static
 
 from gitdirector.commands.tui import (
+    _SORT_COLUMN_NAMES,
+    _STATUS_LABEL,
+    _STATUS_ORDER,
     ActionMenuScreen,
     ConfirmScreen,
     GitDirectorConsole,
     RemoveSessionScreen,
     SortMenuScreen,
     _changes_label,
-    _SORT_COLUMN_NAMES,
-    _STATUS_LABEL,
-    _STATUS_ORDER,
 )
 from gitdirector.repo import RepositoryInfo, RepoStatus
-
 
 # ---------------------------------------------------------------------------
 # Helper factories
@@ -113,7 +111,7 @@ class TestGitDirectorConsole:
         """App renders Header, DataTable, Footer and status bar."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(120, 30)) as _:
             assert app.query_one("#repo-table", DataTable)
             assert app.query_one("#status-bar", Static)
             assert len(app.query("Footer")) == 1
@@ -232,7 +230,7 @@ class TestGitDirectorConsole:
         """DataTable should have the expected 7 columns."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(120, 30)) as _:
             table = app.query_one("#repo-table", DataTable)
             assert len(table.columns) == 7
 
@@ -279,7 +277,7 @@ class TestGitDirectorConsole:
         """Dismissing the menu (None) should not crash."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(120, 30)) as _:
             app._handle_menu_action(None)
             # No exception means success
 
@@ -599,7 +597,7 @@ class TestRemoveFlow:
         """_do_remove calls kill_tmux_session when confirmed."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(80, 24)) as _:
             app._do_remove(True, "gd-myrepo-happy-panda")
             mock_kill.assert_called_once_with("gd-myrepo-happy-panda")
 
@@ -608,7 +606,7 @@ class TestRemoveFlow:
         """_do_remove does NOT call kill when not confirmed."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(80, 24)) as _:
             app._do_remove(False, "gd-myrepo-happy-panda")
             mock_kill.assert_not_called()
 
