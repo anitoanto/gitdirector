@@ -16,6 +16,7 @@ gitdirector remove PATH|NAME [--discover]  Remove a repository by path, name, or
 gitdirector list                           List all tracked repositories with live status
 gitdirector status                         Show dirty repositories with staged/unstaged files
 gitdirector pull                           Pull latest changes for all tracked repositories
+gitdirector cd NAME                        Open or switch to a tmux session for a repository
 gitdirector help                           Show help
 ```
 
@@ -57,6 +58,23 @@ Shows repositories with uncommitted changes (staged and/or unstaged files). Prin
 
 Pulls all tracked repositories concurrently using fast-forward only (`git pull --ff-only`). Reports success or failure per repository.
 
+### cd
+
+```bash
+gitdirector cd my-repo
+```
+
+Opens a [tmux](https://github.com/tmux/tmux) session rooted at the repository directory, or switches to it if a session for that repo already exists.
+
+- **Inside tmux** — switches the current client to the target session.
+- **Outside tmux** — replaces the current process with `tmux attach-session`, handing the terminal over to tmux.
+
+> **Requires tmux to be installed on your system.**
+>
+> macOS: `brew install tmux`  
+> Debian/Ubuntu: `sudo apt install tmux`  
+> Arch: `sudo pacman -S tmux`
+
 ## Configuration
 
 Config is stored at `~/.gitdirector/config.yaml`.
@@ -72,6 +90,7 @@ max_workers: 10   # optional, default 10
 
 - Python 3.9+
 - Git
+- [tmux](https://github.com/tmux/tmux) ≥ 3.2a (for `gitdirector cd`)
 
 ## License
 

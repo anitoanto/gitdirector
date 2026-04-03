@@ -304,6 +304,54 @@ class TestHelpCommand:
         assert "GITDIRECTOR" in result.output
 
 
+class TestCdCommand:
+    def test_cd_not_found(self, runner):
+        mgr = _mock_manager()
+        mgr.config.repositories = []
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["cd", "missing-repo"])
+        assert result.exit_code == 1
+        assert "missing-repo" in result.output
+
+    def test_cd_multiple_matches(self, runner, tmp_path):
+        path_a = tmp_path / "projects" / "my-repo"
+        path_b = tmp_path / "work" / "my-repo"
+        mgr = _mock_manager()
+        mgr.config.repositories = [path_a, path_b]
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["cd", "my-repo"])
+        assert result.exit_code == 1
+        assert "my-repo" in result.output
+
+    def test_cd_success(self, runner, tmp_path):
+        import sys
+
+        repo = tmp_path / "my-repo"
+        mgr = _mock_manager()
+        mgr.config.repositories = [repo]
+        mock_tmux = MagicMock()
+        fake_tmux_module = MagicMock()
+        fake_tmux_module.open_in_tmux = mock_tmux
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
+            with patch.dict(sys.modules, {"gitdirector.integrations.tmux": fake_tmux_module}):
+                result = runner.invoke(cli, ["cd", "my-repo"])
+        mock_tmux.assert_called_once_with("my-repo", repo)
+        assert result.exit_code == 0
+
+    def test_cd_libtmux_not_installed(self, runner, tmp_path):
+        import sys
+
+        repo = tmp_path / "my-repo"
+        mgr = _mock_manager()
+        mgr.config.repositories = [repo]
+        # Setting the module entry to None causes ImportError on 'from ... import'
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
+            with patch.dict(sys.modules, {"gitdirector.integrations.tmux": None}):
+                result = runner.invoke(cli, ["cd", "my-repo"])
+        assert result.exit_code == 1
+        assert "libtmux" in result.output
+
+
 class TestMain:
     def test_main_catches_exception(self):
         with patch("gitdirector.cli.cli", side_effect=RuntimeError("boom")):
