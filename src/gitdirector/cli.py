@@ -6,6 +6,7 @@ from .commands import (
     _path_text,
     _status_text,
     add,
+    cd,
     console,
     help,
     listt,
@@ -42,6 +43,7 @@ remove.register(cli)
 listt.register(cli)
 status.register(cli)
 pull.register(cli)
+cd.register(cli)
 help.register(cli)
 
 
