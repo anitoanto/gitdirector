@@ -224,7 +224,7 @@ class TestGitDirectorConsole:
             await app.workers.wait_for_complete()
             await pilot.pause()
             status_text = app.query_one("#status-bar", Static).content
-            assert "No repositories tracked" in status_text
+            assert "No repositories linked" in status_text
 
     async def test_table_columns_created(self):
         """DataTable should have the expected 7 columns."""

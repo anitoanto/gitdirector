@@ -41,7 +41,7 @@ def register(cli: click.Group):
 
         console.print()
         if not paths:
-            console.print("  [dim]No repositories tracked[/dim]\n")
+            console.print("  [dim]No repositories linked[/dim]\n")
             return
 
         results = []
