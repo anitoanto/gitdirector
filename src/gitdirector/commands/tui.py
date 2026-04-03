@@ -11,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
+from textual.widgets import DataTable, Footer, Header, Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..manager import RepositoryManager
@@ -315,6 +315,70 @@ class SortMenuScreen(ModalScreen[tuple | None]):
         self.query_one("#action-menu", OptionList).action_cursor_up()
 
 
+class _AgentLoadingScreen(ModalScreen[None]):
+    """Full-screen loading overlay shown while an agent initialises."""
+
+    DEFAULT_CSS = """
+    _AgentLoadingScreen {
+        align: center middle;
+        background: $panel 90%;
+    }
+    #loading-container {
+        width: 50;
+        height: auto;
+        background: $panel;
+        padding: 2 4;
+        border: panel $primary;
+    }
+    #loading-container LoadingIndicator {
+        height: 3;
+        color: $primary;
+    }
+    #loading-text {
+        text-align: center;
+        color: white;
+        padding: 1 0 0 0;
+    }
+    """
+
+    def __init__(self, agent_cmd: str, session_name: str) -> None:
+        super().__init__()
+        self._agent_cmd = agent_cmd
+        self._session_name = session_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="loading-container"):
+            yield LoadingIndicator()
+            yield Static(
+                f"Waiting for [bold]{self._agent_cmd}[/bold] to initialize",
+                id="loading-text",
+            )
+
+    def on_mount(self) -> None:
+        self.set_timer(4, self._do_dismiss)
+
+    def _do_dismiss(self) -> None:
+        import subprocess
+        import sys
+
+        from ..integrations.tmux import attach_tmux_session
+
+        session_name = self._session_name
+
+        # Suspend the app directly — never dismiss, so the table never repaints
+        with self.app.suspend():
+            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+            sys.stdout.flush()
+            subprocess.run(["tmux", "send-keys", "-t", session_name, "C-l", ""], check=False)
+            subprocess.run(["tmux", "clear-history", "-t", session_name], check=False)
+            attach_tmux_session(session_name)
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+
+        # Pop the loading screen after returning from tmux
+        self.dismiss(None)
+
+
 class GitDirectorConsole(App):
     CSS = """
     Screen {
@@ -324,8 +388,8 @@ class GitDirectorConsole(App):
     #status-bar {
         dock: bottom;
         height: 1;
-        background: $accent;
-        color: $text;
+        background: $panel;
+        color: white;
         padding: 0 2;
     }
     #search-container {
@@ -618,35 +682,37 @@ class GitDirectorConsole(App):
         if path is None:
             return
 
-        from ..integrations.tmux import attach_tmux_session, create_tmux_session
+        import subprocess
+
+        from ..integrations.tmux import create_tmux_session
 
         session_name = create_tmux_session(path.name, path)
 
         if agent_cmd:
-            import subprocess
-
             subprocess.run(
-                ["tmux", "send-keys", "-t", session_name, agent_cmd, "Enter"],
+                ["tmux", "send-keys", "-t", session_name, f"clear && {agent_cmd}", "Enter"],
                 check=False,
             )
+            self.push_screen(_AgentLoadingScreen(agent_cmd, session_name))
+        else:
+            self._suspend_and_attach(session_name)
 
-        import sys
-
-        with self.suspend():
-            sys.stdout.write("\033[?1049h\033[H\033[2J")
-            sys.stdout.flush()
-            attach_tmux_session(session_name)
-
-    def _attach_to_session(self, session_name: str) -> None:
-        """Attach to an existing tmux session."""
+    def _suspend_and_attach(self, session_name: str) -> None:
+        """Suspend the TUI and attach to the tmux session."""
         import sys
 
         from ..integrations.tmux import attach_tmux_session
 
         with self.suspend():
-            sys.stdout.write("\033[?1049h\033[H\033[2J")
+            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
             sys.stdout.flush()
             attach_tmux_session(session_name)
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+
+    def _attach_to_session(self, session_name: str) -> None:
+        """Attach to an existing tmux session."""
+        self._suspend_and_attach(session_name)
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()
