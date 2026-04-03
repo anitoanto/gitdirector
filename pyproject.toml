@@ -34,6 +34,7 @@ dependencies = [
     "rich>=12.0",
     "libtmux>=0.46.2",
     "textual>=8.2.1",
+    "coolname>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +63,7 @@ managed = true
 [dependency-groups]
 dev = [
     "pytest>=7.0",
+    "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "pytest-mock>=3.0",
     "black>=23.0",
@@ -92,3 +94,4 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=src/gitdirector --cov-report=term-missing"
+asyncio_mode = "auto"
