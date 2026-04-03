@@ -418,6 +418,12 @@ class GitDirectorConsole(App):
         overflow-y: auto;
         padding: 0 1;
     }
+    #no-repos-message {
+        height: 1fr;
+        display: none;
+        align: center middle;
+        color: $text-muted;
+    }
     """
 
     BINDINGS = [
@@ -445,6 +451,10 @@ class GitDirectorConsole(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield DataTable(id="repo-table", cursor_type="row")
+        yield Static(
+            "No repositories linked.  Run [bold]gitdirector link <path>[/bold] to get started.",
+            id="no-repos-message",
+        )
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
             yield Input(placeholder="type to filter…", id="search-bar")
@@ -463,7 +473,7 @@ class GitDirectorConsole(App):
         self._repo_paths = sorted(self.manager.config.repositories, key=lambda p: p.name.lower())
 
         if not self._repo_paths:
-            self.call_from_thread(self._update_status, "No repositories tracked")
+            self.call_from_thread(self._show_no_repos)
             return
 
         # First pass: add rows with repo names only
@@ -531,6 +541,11 @@ class GitDirectorConsole(App):
             table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
         except Exception:
             pass  # Row may have been filtered out by active search
+
+    def _show_no_repos(self) -> None:
+        self.query_one("#repo-table", DataTable).display = False
+        self.query_one("#no-repos-message", Static).display = True
+        self._update_status("No repositories linked")
 
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
