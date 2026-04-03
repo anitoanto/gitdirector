@@ -61,15 +61,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-def main():
-    try:
-        cli()
-    except Exception as e:
-        console.print(f"\n  [red]Error:[/red] {str(e)}\n")
-        raise SystemExit(1)
-
-
-if __name__ == "__main__":
-    main()
