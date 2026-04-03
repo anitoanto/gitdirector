@@ -30,6 +30,7 @@ def show_help():
         ("status", "Show status summary and per-repo details"),
         ("pull", "Pull latest changes for all tracked repositories"),
         ("cd NAME", "Open or switch to a tmux session for a repository"),
+        ("console", "Interactive TUI for browsing and opening repositories"),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

@@ -15,3 +15,5 @@ wheels/
 # Pytest cache
 .pytest_cache
 .coverage
+
+.DS_Store
