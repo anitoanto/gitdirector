@@ -26,8 +26,7 @@ def register(cli: click.Group):
                         f"[bright_black]{repo_path}[/bright_black]"
                     )
             else:
-                for repo_path in repos:
-                    console.print(f"  [green]+[/green] {repo_path}")
+                console.print(f"  [green]+[/green] {message}")
         else:
             console.print(f"  [red]{message}[/red]")
             console.print()

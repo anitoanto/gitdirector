@@ -1,7 +1,7 @@
 class GitDirector < Formula
   include Language::Python::Virtualenv
 
-  desc "A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place."
+  desc "Python CLI tool for managing and synchronizing multiple git repositories — with an interactive TUI, tmux session management, and one-click AI agent launching"
   homepage "https://github.com/anitoanto/gitdirector"
   url "https://github.com/anitoanto/gitdirector.git",
       tag:      "v0.1.5",

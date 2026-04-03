@@ -32,6 +32,7 @@ def register(cli: click.Group):
 
         console.print()
         if success:
+            console.print(f"  {message}")
             if repos:
                 for repo_path in repos:
                     console.print(f"  [yellow]-[/yellow] {repo_path}")
