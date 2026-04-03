@@ -1,10 +1,9 @@
-"""tmux integration via libtmux."""
+"""tmux integration via subprocess."""
 
 import os
 import re
+import subprocess
 from pathlib import Path
-
-import libtmux
 
 
 def _safe_session_name(name: str) -> str:
@@ -12,32 +11,40 @@ def _safe_session_name(name: str) -> str:
     return re.sub(r"[.:]", "-", name)
 
 
-def open_in_tmux(repo_name: str, path: Path) -> None:
-    """Open or switch to a tmux session rooted at *path*.
+def _session_exists(session_name: str) -> bool:
+    """Check if a tmux session with the given name exists."""
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    )
+    return result.returncode == 0
 
-    Re-uses an existing session when one with the same sanitised name already
-    exists.  When called from inside tmux the current client is switched to
-    that session.  When called from outside tmux the current process is
-    replaced by ``tmux attach-session`` so the terminal is taken over
-    correctly.
+
+def prepare_tmux_session(repo_name: str, path: Path) -> str:
+    """Ensure a tmux session exists for *repo_name* and return the session name.
+
+    Creates the session (detached) if it doesn't already exist.
     """
     session_name = _safe_session_name(repo_name)
-    server = libtmux.Server()
 
-    if server.has_session(session_name):
-        sessions = server.sessions.filter(session_name=session_name)
-        session = sessions[0]
-    else:
-        session = server.new_session(
-            session_name=session_name,
-            start_directory=str(path),
-            attach=False,
+    if not _session_exists(session_name):
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session_name, "-c", str(path)],
+            check=True,
         )
 
+    return session_name
+
+
+def attach_tmux_session(session_name: str) -> None:
+    """Attach to an existing tmux session, blocking until detach/exit."""
     if os.environ.get("TMUX"):
-        # Already inside tmux: switch the current client to the target session.
-        server.switch_client(session.session_name)
+        subprocess.run(["tmux", "switch-client", "-t", session_name])
     else:
-        # Outside tmux: replace this process so the terminal is fully handed
-        # over to tmux attach-session.
-        os.execvp("tmux", ["tmux", "attach-session", "-t", session.session_name])
+        subprocess.run(["tmux", "attach-session", "-t", session_name])
+
+
+def open_in_tmux(repo_name: str, path: Path) -> None:
+    """Open or switch to a tmux session rooted at *path*."""
+    session_name = prepare_tmux_session(repo_name, path)
+    attach_tmux_session(session_name)
