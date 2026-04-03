@@ -1,10 +1,12 @@
 # GitDirector
 
-An interactive TUI for managing all your git repositories from one place — launch AI coding agents, spin up tmux sessions, and run multiple agents across repos in parallel.
+A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place.
 
 ## Why GitDirector?
 
-Stop context-switching between terminals. `gitdirector console` gives you a live dashboard of every repository you work on. Hit `enter`, pick a repo, and instantly drop into a tmux session with your AI agent of choice — OpenCode, Claude Code, GitHub Copilot, or Codex. Run them all at once, each in its own session, while you track sync state, branches, and changes across every repo in real time.
+If you work across more than a handful of repositories, the overhead adds up fast. Jumping between terminals to check states, pull changes, and babysit agents is friction you don't need.
+
+GitDirector gives you a single cockpit for all of it. See every repo's status, Drop into any of them. Run AI agents in parallel, each isolated in its own tmux session, while you monitor everything from the dashboard. Less tab-switching, more shipping.
 
 ## Installation
 
@@ -32,6 +34,26 @@ pip install gitdirector
 gitdirector link /path/to/repo
 gitdirector link /path/to/folder --discover   # recursively find and link all repos
 ```
+
+### console
+
+```bash
+gitdirector console
+```
+
+Opens a full interactive TUI dashboard.
+
+Features:
+
+- Live table with sync state, branch, changes, last commit, and active tmux sessions
+- `/` to filter repositories by name or path
+- `s` to cycle sort by any column
+- `r` to refresh all statuses
+- Press `enter` on any repository to open an action menu:
+  - **New tmux session** — create and attach a session for the repository
+  - **Attach existing session** — switch to any already-running tmux session
+  - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, or Codex in a new tmux session
+  - **Remove session** — kill a running tmux session
 
 ### unlink
 
@@ -80,26 +102,6 @@ Opens a [tmux](https://github.com/tmux/tmux) session rooted at the repository di
 > macOS: `brew install tmux`  
 > Debian/Ubuntu: `sudo apt install tmux`  
 > Arch: `sudo pacman -S tmux`
-
-### console
-
-```bash
-gitdirector console
-```
-
-Opens a full interactive TUI dashboard built with [Textual](https://github.com/Textualize/textual). All repositories load concurrently with live status updates.
-
-Features:
-
-- Live table with sync state, branch, changes, last commit, and active tmux sessions
-- `/` to filter repositories by name or path
-- `s` to cycle sort by any column
-- `r` to refresh all statuses
-- Press `enter` on any repository to open an action menu:
-  - **New tmux session** — create and attach a session for the repository
-  - **Attach existing session** — switch to any already-running tmux session
-  - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, or Codex in a new tmux session
-  - **Remove session** — kill a running tmux session
 
 ## Configuration
 

@@ -193,7 +193,7 @@ class TestListCommand:
         with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
-        assert "No repositories tracked" in result.output
+        assert "No repositories linked" in result.output
 
     def test_with_repos(self, runner, fake_git_repo):
         info = RepositoryInfo(
@@ -219,7 +219,7 @@ class TestStatusCommand:
         with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
-        assert "No repositories tracked" in result.output
+        assert "No repositories linked" in result.output
 
     def test_all_clean(self, runner, fake_git_repo):
         info = RepositoryInfo(
@@ -259,7 +259,7 @@ class TestPullCommand:
         with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["pull"])
         assert result.exit_code == 0
-        assert "No repositories tracked" in result.output
+        assert "No repositories linked" in result.output
 
     def test_all_success(self, runner, fake_git_repo):
         mgr = _mock_manager()
