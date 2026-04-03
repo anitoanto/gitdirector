@@ -352,9 +352,22 @@ class TestCdCommand:
         assert "libtmux" in result.output
 
 
+class TestHelpGroup:
+    def test_help_flag_uses_custom_format(self, runner):
+        """--help triggers _HelpGroup.format_help which calls show_help()."""
+        result = runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "GITDIRECTOR" in result.output
+
+
 class TestMain:
     def test_main_catches_exception(self):
         with patch("gitdirector.cli.cli", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
+
+    def test_main_success(self):
+        with patch("gitdirector.cli.cli") as mock_cli:
+            main()
+            mock_cli.assert_called_once()
