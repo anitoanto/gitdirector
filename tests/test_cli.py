@@ -96,14 +96,14 @@ class TestAddCommand:
         (repo / ".git").mkdir()
 
         mgr = _mock_manager(add_repository=(True, f"Added repository: {repo}", [repo], []))
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.add.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["add", str(repo)])
         assert result.exit_code == 0
         assert "Added" in result.output
 
     def test_add_failure(self, runner, tmp_path):
         mgr = _mock_manager(add_repository=(False, "Not a git repository: /x", [], []))
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.add.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["add", str(tmp_path)])
         assert result.exit_code == 1
 
@@ -111,7 +111,7 @@ class TestAddCommand:
         mgr = _mock_manager(
             add_repository=(True, "Added 2 repositories", [tmp_path / "a", tmp_path / "b"], [])
         )
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.add.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["add", str(tmp_path), "--discover"])
         assert result.exit_code == 0
         assert "Added 2" in result.output
@@ -120,14 +120,14 @@ class TestAddCommand:
 class TestRemoveCommand:
     def test_remove_success(self, runner, tmp_path):
         mgr = _mock_manager(remove_repository=(True, "Removed repository: /r", [tmp_path]))
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", str(tmp_path)])
         assert result.exit_code == 0
         assert "Removed" in result.output
 
     def test_remove_failure(self, runner, tmp_path):
         mgr = _mock_manager(remove_repository=(False, "Repository not tracked: /x", []))
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", str(tmp_path)])
         assert result.exit_code == 1
 
@@ -137,7 +137,7 @@ class TestRemoveCommand:
             remove_repository=(False, "Repository not tracked: /x", []),
             remove_by_name=(True, f"Removed repository: {tmp_path}", [tmp_path]),
         )
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", "my-repo"])
         assert result.exit_code == 0
         assert "Removed" in result.output
@@ -148,7 +148,7 @@ class TestRemoveCommand:
             remove_repository=(False, "Repository not tracked", []),
             remove_by_name=(False, "No tracked repository named: my-repo", []),
         )
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", "my-repo"])
         assert result.exit_code == 1
         assert "my-repo" in result.output
@@ -159,7 +159,7 @@ class TestRemoveCommand:
             remove_repository=(False, "Repository not tracked", []),
             remove_by_name=(False, "Multiple repositories named 'my-repo'", []),
         )
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", "my-repo"])
         assert result.exit_code == 1
         assert "multiple" in result.output.lower()
@@ -170,7 +170,7 @@ class TestRemoveCommand:
             remove_repository=(False, "Repository not tracked: /some/path/repo", []),
         )
         mgr.remove_by_name = MagicMock()
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", str(tmp_path / "repo")])
         assert result.exit_code == 1
         mgr.remove_by_name.assert_not_called()
@@ -182,7 +182,7 @@ class TestRemoveCommand:
             remove_repository=(False, f"Repository not tracked: {dot_target}", []),
         )
         mgr.remove_by_name = MagicMock()
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.remove.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["remove", dot_target])
         assert result.exit_code == 1
         mgr.remove_by_name.assert_not_called()
@@ -192,7 +192,7 @@ class TestListCommand:
     def test_empty(self, runner):
         mgr = _mock_manager()
         mgr.config.repositories = []
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
         assert "No repositories tracked" in result.output
@@ -208,7 +208,7 @@ class TestListCommand:
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
         assert fake_git_repo.name in result.output
@@ -218,7 +218,7 @@ class TestStatusCommand:
     def test_empty(self, runner):
         mgr = _mock_manager()
         mgr.config.repositories = []
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
         assert "No repositories tracked" in result.output
@@ -232,7 +232,7 @@ class TestStatusCommand:
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
         assert "clean" in result.output.lower()
@@ -248,7 +248,7 @@ class TestStatusCommand:
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
         assert "changed" in result.output.lower()
@@ -258,7 +258,7 @@ class TestPullCommand:
     def test_empty(self, runner):
         mgr = _mock_manager()
         mgr.config.repositories = []
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["pull"])
         assert result.exit_code == 0
         assert "No repositories tracked" in result.output
@@ -268,9 +268,9 @@ class TestPullCommand:
         mgr.config.repositories = [fake_git_repo]
         mgr.config.max_workers = 2
 
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             with patch(
-                "gitdirector.cli._pull_one",
+                "gitdirector.commands.pull._pull_one",
                 return_value=(fake_git_repo.name, True, "Already up to date."),
             ):
                 result = runner.invoke(cli, ["pull"])
@@ -282,9 +282,9 @@ class TestPullCommand:
         mgr.config.repositories = [fake_git_repo]
         mgr.config.max_workers = 2
 
-        with patch("gitdirector.cli.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             with patch(
-                "gitdirector.cli._pull_one",
+                "gitdirector.commands.pull._pull_one",
                 return_value=(fake_git_repo.name, False, "Cannot fast-forward"),
             ):
                 result = runner.invoke(cli, ["pull"])
