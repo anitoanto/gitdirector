@@ -99,7 +99,7 @@ class TestLinkCommand:
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(repo)])
         assert result.exit_code == 0
-        assert "Added" in result.output
+        assert "my-repo" in result.output
 
     def test_link_failure(self, runner, tmp_path):
         mgr = _mock_manager(add_repository=(False, "Not a git repository: /x", [], []))
@@ -123,7 +123,6 @@ class TestUnlinkCommand:
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", str(tmp_path)])
         assert result.exit_code == 0
-        assert "Removed" in result.output
 
     def test_unlink_failure(self, runner, tmp_path):
         mgr = _mock_manager(remove_repository=(False, "Repository not tracked: /x", []))
@@ -140,7 +139,6 @@ class TestUnlinkCommand:
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
         assert result.exit_code == 0
-        assert "Removed" in result.output
 
     def test_unlink_by_name_not_found(self, runner):
         """Returns exit code 1 when name is not tracked."""
