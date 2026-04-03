@@ -175,9 +175,7 @@ class TestGetTrackedSize:
 # ---------------------------------------------------------------------------
 
 
-def _setup_status_mocks(
-    mocker, ahead_behind="0\t0", porcelain="", fetch_ok=True, branch="main"
-):
+def _setup_status_mocks(mocker, ahead_behind="0\t0", porcelain="", fetch_ok=True, branch="main"):
     """Configure subprocess.run to return canned values for get_status flow."""
     calls = []
 
