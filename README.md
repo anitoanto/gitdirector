@@ -14,6 +14,10 @@ GitDirector gives you a single cockpit for all of it. See every repo's status, D
 pip install gitdirector
 ```
 
+## Support
+
+If you find GitDirector useful, please star this repository on GitHub, we need more stars to qualify for inclusion in Homebrew. Your support helps a lot, thank you!
+
 ## Usage
 
 | Command | Description |
