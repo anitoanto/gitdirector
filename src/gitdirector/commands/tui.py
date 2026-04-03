@@ -119,7 +119,7 @@ class ActionMenuScreen(ModalScreen[str]):
                 id="menu-branch",
             )
             items: list[Option] = [
-                Option("[white]＋[/white] [bold]TMUX Session[/bold]", id="new_session"),
+                Option("[white]+[/white] [bold]TMUX Session[/bold]", id="new_session"),
             ]
             if sessions:
                 items.append(

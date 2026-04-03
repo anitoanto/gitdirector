@@ -24,13 +24,14 @@ def show_help():
     cmd_table.add_column("desc", style="dim")
 
     for cmd, desc in [
-        ("add PATH [--discover]", "Add a repository or discover all repos under a path"),
-        ("remove PATH [--discover]", "Remove a repository or all repos under a path"),
+        ("link PATH [--discover]", "Link a repository or discover all repos under a path"),
+        ("unlink PATH [--discover]", "Unlink a repository or all repos under a path"),
         ("list", "List all tracked repositories"),
         ("status", "Show status summary and per-repo details"),
         ("pull", "Pull latest changes for all tracked repositories"),
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
+        ("autoclean links|sessions", "Clean broken links or stale tmux sessions"),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

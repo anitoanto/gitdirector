@@ -1,15 +1,12 @@
 """Tests for coverage gaps - error paths and edge cases."""
 
-import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gitdirector.cli import main
 from gitdirector.manager import RepositoryManager
-from gitdirector.repo import Repository, RepositoryInfo, RepoStatus
-
+from gitdirector.repo import Repository, RepoStatus
 
 # ---------------------------------------------------------------------------
 # Fixtures (copied from test_manager.py to avoid circular imports)
