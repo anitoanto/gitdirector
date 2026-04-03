@@ -9,7 +9,7 @@ import click
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
 from textual.widgets.option_list import Option
@@ -134,18 +134,29 @@ class ActionMenuScreen(ModalScreen[str]):
                     slug = s.rsplit("-", 1)[-1] if "-" in s else s
                     items.append(
                         Option(
-                            f"[cyan]●[/cyan] [bold]{slug}[/bold] [dim]{s}[/dim]",
+                            f"[white]●[/white] [bold]{slug}[/bold] [dim]{s}[/dim]",
                             id=f"attach:{s}",
                         )
                     )
-                items.append(
+            items.extend(
+                [
                     Option("", disabled=True),
-                )
-                items.append(
-                    Option(
-                        "[white]✕[/white] [dim]Remove Session…[/dim]",
-                        id="remove_session",
-                    )
+                    Option("[dim]Launch AI Agent[/dim]", disabled=True),
+                    Option("[white]◆[/white] [bold]OpenCode[/bold]", id="agent:opencode"),
+                    Option("[white]◆[/white] [bold]Claude Code[/bold]", id="agent:claude"),
+                    Option("[white]◆[/white] [bold]GitHub Copilot[/bold]", id="agent:copilot"),
+                    Option("[white]◆[/white] [bold]Codex[/bold]", id="agent:codex"),
+                ]
+            )
+            if sessions:
+                items.extend(
+                    [
+                        Option("", disabled=True),
+                        Option(
+                            "[white]✕[/white] [dim]Remove Session…[/dim]",
+                            id="remove_session",
+                        ),
+                    ]
                 )
             yield OptionList(*items, id="action-menu")
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
@@ -317,13 +328,25 @@ class GitDirectorConsole(App):
         color: $text;
         padding: 0 2;
     }
-    #search-bar {
+    #search-container {
         dock: bottom;
-        height: 1;
+        height: 3;
         display: none;
         background: $boost;
-        border: none;
         padding: 0 1;
+        align: left middle;
+    }
+    #search-label {
+        width: auto;
+        color: $accent;
+        padding: 0 1 0 0;
+    }
+    #search-bar {
+        width: 1fr;
+        height: 3;
+        border: none;
+        background: $boost;
+        color: $text;
     }
     DataTable {
         height: 1fr;
@@ -358,7 +381,9 @@ class GitDirectorConsole(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield DataTable(id="repo-table", cursor_type="row")
-        yield Input(placeholder="Search repositories…", id="search-bar")
+        with Horizontal(id="search-container"):
+            yield Static("/ search:", id="search-label")
+            yield Input(placeholder="type to filter…", id="search-bar")
         yield Static("Loading repositories…", id="status-bar")
         yield Footer()
 
@@ -472,16 +497,15 @@ class GitDirectorConsole(App):
     # -- Search ---------------------------------------------------------------
 
     def action_search(self) -> None:
-        search_bar = self.query_one("#search-bar", Input)
-        search_bar.display = True
-        search_bar.focus()
+        self.query_one("#search-container").display = True
+        self.query_one("#search-bar", Input).focus()
 
     def action_close_search(self) -> None:
-        search_bar = self.query_one("#search-bar", Input)
-        if not search_bar.display:
+        container = self.query_one("#search-container")
+        if not container.display:
             return
-        search_bar.value = ""
-        search_bar.display = False
+        self.query_one("#search-bar", Input).value = ""
+        container.display = False
         self._search_query = ""
         self._apply_filter_and_sort()
         self.query_one("#repo-table", DataTable).focus()
@@ -493,7 +517,7 @@ class GitDirectorConsole(App):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-bar":
-            self.query_one("#search-bar", Input).display = False
+            self.query_one("#search-container").display = False
             self.query_one("#repo-table", DataTable).focus()
 
     # -- Sort -----------------------------------------------------------------
@@ -588,8 +612,8 @@ class GitDirectorConsole(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.action_show_menu()
 
-    def action_open_tmux(self) -> None:
-        """Create a new tmux session and attach to it."""
+    def action_open_tmux(self, agent_cmd: str | None = None) -> None:
+        """Create a new tmux session and optionally launch an AI agent in it."""
         path = self._get_selected_path()
         if path is None:
             return
@@ -597,6 +621,14 @@ class GitDirectorConsole(App):
         from ..integrations.tmux import attach_tmux_session, create_tmux_session
 
         session_name = create_tmux_session(path.name, path)
+
+        if agent_cmd:
+            import subprocess
+
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session_name, agent_cmd, "Enter"],
+                check=False,
+            )
 
         import sys
 
@@ -627,11 +659,20 @@ class GitDirectorConsole(App):
             callback=self._handle_menu_action,
         )
 
+    _AGENT_COMMANDS = {
+        "agent:opencode": "opencode",
+        "agent:claude": "claude",
+        "agent:copilot": "copilot",
+        "agent:codex": "codex",
+    }
+
     def _handle_menu_action(self, action: str | None) -> None:
         if action is None:
             return
         if action == "new_session":
             self.action_open_tmux()
+        elif action in self._AGENT_COMMANDS:
+            self.action_open_tmux(agent_cmd=self._AGENT_COMMANDS[action])
         elif action.startswith("attach:"):
             session_name = action[len("attach:") :]
             self._attach_to_session(session_name)

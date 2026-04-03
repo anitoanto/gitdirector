@@ -514,8 +514,9 @@ class TestActionMenuScreen:
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
             # With 2 sessions we expect: new_session, separator, count label,
-            # 2 session opts, separator, remove option = 7 items
-            assert menu.option_count == 7
+            # 2 session opts, separator, "Launch AI Agent" label, opencode,
+            # claude, copilot, codex, separator, remove option = 13 items
+            assert menu.option_count == 13
 
 
 # ---------------------------------------------------------------------------
@@ -666,10 +667,10 @@ class TestSearch:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            search_bar = app.query_one("#search-bar", Input)
-            assert not search_bar.display
+            container = app.query_one("#search-container")
+            assert not container.display
             await pilot.press("slash")
-            assert search_bar.display
+            assert container.display
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_hides_on_enter(self, _mock_sessions):
@@ -684,12 +685,13 @@ class TestSearch:
             await app.workers.wait_for_complete()
             await pilot.pause()
             await pilot.press("slash")
+            container = app.query_one("#search-container")
             search_bar = app.query_one("#search-bar", Input)
             search_bar.value = "alpha"
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            assert not search_bar.display
+            assert not container.display
             assert app._search_query == "alpha"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -705,12 +707,13 @@ class TestSearch:
             await app.workers.wait_for_complete()
             await pilot.pause()
             await pilot.press("slash")
+            container = app.query_one("#search-container")
             search_bar = app.query_one("#search-bar", Input)
             search_bar.value = "alpha"
             await pilot.pause()
             await pilot.press("escape")
             await pilot.pause()
-            assert not search_bar.display
+            assert not container.display
             assert app._search_query == ""
             table = app.query_one("#repo-table", DataTable)
             assert table.row_count == 2
