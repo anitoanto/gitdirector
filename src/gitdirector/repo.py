@@ -44,6 +44,7 @@ class RepositoryInfo:
     staged_files: Optional[list[str]] = None
     unstaged_files: Optional[list[str]] = None
     last_updated: Optional[str] = None
+    last_commit_timestamp: Optional[int] = None
     size: Optional[int] = None
 
     def __repr__(self) -> str:
@@ -96,6 +97,15 @@ class Repository:
     def get_last_commit_date(self) -> Optional[str]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd", "--date=relative")
         return out if code == 0 and out else None
+
+    def get_last_commit_timestamp(self) -> Optional[int]:
+        code, out, _ = self._run_git("log", "-1", "--format=%ct")
+        if code == 0 and out:
+            try:
+                return int(out)
+            except ValueError:
+                return None
+        return None
 
     def get_tracked_size(self) -> Optional[int]:
         """Return total byte size of all tracked files (respects .gitignore)."""
@@ -162,6 +172,7 @@ class Repository:
                         unstaged_files.append(filename)
 
         last_updated = self.get_last_commit_date()
+        last_commit_ts = self.get_last_commit_timestamp()
         size = self.get_tracked_size()
 
         return RepositoryInfo(
@@ -175,6 +186,7 @@ class Repository:
             staged_files or None,
             unstaged_files or None,
             last_updated,
+            last_commit_ts,
             size,
         )
 

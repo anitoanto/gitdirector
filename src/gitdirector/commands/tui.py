@@ -11,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, OptionList, Static
+from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..manager import RepositoryManager
@@ -34,6 +34,25 @@ def _changes_label(info: RepositoryInfo) -> str:
     if info.unstaged:
         return "unstaged"
     return "—"
+
+
+_SORT_COLUMN_NAMES = {
+    0: "Repository",
+    1: "Sync",
+    2: "Branch",
+    3: "Changes",
+    4: "Last Commit",
+    5: "Sessions",
+    6: "Path",
+}
+
+_STATUS_ORDER = {
+    RepoStatus.UP_TO_DATE: 0,
+    RepoStatus.AHEAD: 1,
+    RepoStatus.BEHIND: 2,
+    RepoStatus.DIVERGED: 3,
+    RepoStatus.UNKNOWN: 4,
+}
 
 
 _MODAL_CSS = """
@@ -237,6 +256,54 @@ class ConfirmScreen(ModalScreen[bool]):
         self.query_one("#action-menu", OptionList).action_cursor_up()
 
 
+class SortMenuScreen(ModalScreen[tuple | None]):
+    """Modal for selecting the sort column and direction."""
+
+    BINDINGS = _MODAL_BINDINGS
+
+    CSS = "SortMenuScreen { align: center middle; }" + _MODAL_CSS
+
+    def __init__(self, current_column: int, current_reverse: bool) -> None:
+        super().__init__()
+        self._current_column = current_column
+        self._current_reverse = current_reverse
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-container"):
+            yield Static("[bold white]Sort by[/bold white]", id="menu-title")
+            items: list[Option] = []
+            for idx, name in _SORT_COLUMN_NAMES.items():
+                if idx == self._current_column:
+                    arrow = "▼" if self._current_reverse else "▲"
+                    label = f"[cyan]● {name} {arrow}[/cyan]"
+                else:
+                    label = f"  {name}"
+                items.append(Option(label, id=f"sort:{idx}"))
+            yield OptionList(*items, id="action-menu")
+            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
+
+    def on_mount(self) -> None:
+        menu = self.query_one("#action-menu", OptionList)
+        menu.focus()
+        menu.highlighted = self._current_column
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        col_idx = int(event.option.id.split(":")[1])
+        if col_idx == self._current_column:
+            self.dismiss((col_idx, not self._current_reverse))
+        else:
+            self.dismiss((col_idx, False))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#action-menu", OptionList).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#action-menu", OptionList).action_cursor_up()
+
+
 class GitDirectorConsole(App):
     CSS = """
     Screen {
@@ -249,6 +316,14 @@ class GitDirectorConsole(App):
         background: $accent;
         color: $text;
         padding: 0 2;
+    }
+    #search-bar {
+        dock: bottom;
+        height: 1;
+        display: none;
+        background: $boost;
+        border: none;
+        padding: 0 1;
     }
     DataTable {
         height: 1fr;
@@ -265,6 +340,9 @@ class GitDirectorConsole(App):
         Binding("r", "refresh", "Refresh", show=True),
         Binding("h", "cursor_left", "Left", show=False),
         Binding("l", "cursor_right", "Right", show=False),
+        Binding("slash", "search", "Search", show=True),
+        Binding("s", "sort", "Sort", show=True),
+        Binding("escape", "close_search", show=False),
     ]
 
     def __init__(self) -> None:
@@ -272,10 +350,15 @@ class GitDirectorConsole(App):
         self.manager = RepositoryManager()
         self._repo_paths: list[Path] = []
         self._results: dict[str, RepositoryInfo] = {}
+        self._sessions_cache: dict[str, int] = {}
+        self._search_query: str = ""
+        self._sort_column: int = 0
+        self._sort_reverse: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield DataTable(id="repo-table", cursor_type="row")
+        yield Input(placeholder="Search repositories…", id="search-bar")
         yield Static("Loading repositories…", id="status-bar")
         yield Footer()
 
@@ -314,6 +397,7 @@ class GitDirectorConsole(App):
                 self._results[str(info.path)] = info
                 done += 1
                 sessions_count = len(list_repo_sessions(info.path.name))
+                self._sessions_cache[str(info.path)] = sessions_count
                 self.call_from_thread(self._update_row, info, sessions_count)
                 remaining = total - done
                 if remaining > 0:
@@ -322,11 +406,13 @@ class GitDirectorConsole(App):
                         f"{done} done, {remaining} remaining…",
                     )
 
-        self.call_from_thread(
-            self._update_status,
-            f"{total} {'repository' if total == 1 else 'repositories'} loaded   "
-            "↑↓/jk navigate  [enter] open tmux  r refresh  q quit",
-        )
+        if self._search_query or self._sort_column != 0 or self._sort_reverse:
+            self.call_from_thread(self._apply_filter_and_sort)
+        else:
+            self.call_from_thread(
+                self._update_status,
+                self._build_loaded_status(total, total),
+            )
 
     def _populate_initial_rows(self) -> None:
         table = self.query_one("#repo-table", DataTable)
@@ -344,14 +430,18 @@ class GitDirectorConsole(App):
             )
 
     def _update_row(self, info: RepositoryInfo, sessions: int = 0) -> None:
+        self._sessions_cache[str(info.path)] = sessions
         table = self.query_one("#repo-table", DataTable)
         row_key = str(info.path)
         ck = self._col_keys
-        table.update_cell(row_key, ck[1], _STATUS_LABEL.get(info.status, "unknown"))
-        table.update_cell(row_key, ck[2], info.branch or "—")
-        table.update_cell(row_key, ck[3], _changes_label(info))
-        table.update_cell(row_key, ck[4], info.last_updated or "—")
-        table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
+        try:
+            table.update_cell(row_key, ck[1], _STATUS_LABEL.get(info.status, "unknown"))
+            table.update_cell(row_key, ck[2], info.branch or "—")
+            table.update_cell(row_key, ck[3], _changes_label(info))
+            table.update_cell(row_key, ck[4], info.last_updated or "—")
+            table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
+        except Exception:
+            pass  # Row may have been filtered out by active search
 
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
@@ -378,6 +468,122 @@ class GitDirectorConsole(App):
     def action_cursor_right(self) -> None:
         table = self.query_one("#repo-table", DataTable)
         table.scroll_right()
+
+    # -- Search ---------------------------------------------------------------
+
+    def action_search(self) -> None:
+        search_bar = self.query_one("#search-bar", Input)
+        search_bar.display = True
+        search_bar.focus()
+
+    def action_close_search(self) -> None:
+        search_bar = self.query_one("#search-bar", Input)
+        if not search_bar.display:
+            return
+        search_bar.value = ""
+        search_bar.display = False
+        self._search_query = ""
+        self._apply_filter_and_sort()
+        self.query_one("#repo-table", DataTable).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "search-bar":
+            self._search_query = event.value
+            self._apply_filter_and_sort()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "search-bar":
+            self.query_one("#search-bar", Input).display = False
+            self.query_one("#repo-table", DataTable).focus()
+
+    # -- Sort -----------------------------------------------------------------
+
+    def action_sort(self) -> None:
+        self.push_screen(
+            SortMenuScreen(self._sort_column, self._sort_reverse),
+            callback=self._handle_sort_selection,
+        )
+
+    def _handle_sort_selection(self, result: tuple | None) -> None:
+        if result is None:
+            return
+        self._sort_column, self._sort_reverse = result
+        self._apply_filter_and_sort()
+
+    # -- Filter / sort helpers ------------------------------------------------
+
+    def _sort_key_func(self):
+        col = self._sort_column
+        if col == 1:
+            return lambda i: _STATUS_ORDER.get(i.status, 99)
+        if col == 2:
+            return lambda i: (i.branch or "").lower()
+        if col == 3:
+            return lambda i: _changes_label(i)
+        if col == 4:
+            return lambda i: i.last_commit_timestamp or 0
+        if col == 5:
+            return lambda i: self._sessions_cache.get(str(i.path), 0)
+        if col == 6:
+            return lambda i: str(i.path).lower()
+        return lambda i: i.name.lower()  # col == 0 (default)
+
+    def _apply_filter_and_sort(self) -> None:
+        """Rebuild table rows based on current search query and sort state."""
+        table = self.query_one("#repo-table", DataTable)
+        table.clear()
+
+        infos = list(self._results.values())
+        total = len(infos)
+
+        if self._search_query:
+            q = self._search_query.lower()
+            infos = [
+                i
+                for i in infos
+                if q in i.name.lower() or q in (i.branch or "").lower() or q in str(i.path).lower()
+            ]
+
+        infos.sort(key=self._sort_key_func(), reverse=self._sort_reverse)
+
+        for info in infos:
+            sessions = self._sessions_cache.get(str(info.path), 0)
+            table.add_row(
+                info.name,
+                _STATUS_LABEL.get(info.status, "unknown"),
+                info.branch or "—",
+                _changes_label(info),
+                info.last_updated or "—",
+                str(sessions) if sessions > 0 else "—",
+                str(info.path),
+                key=str(info.path),
+            )
+
+        self._update_status(self._build_loaded_status(len(infos), total))
+
+    def _build_loaded_status(self, shown: int, total: int) -> str:
+        if total == 0 and not self._search_query:
+            return "No repositories tracked"
+
+        if self._search_query:
+            count_str = f"{shown} of {total}"
+        else:
+            count_str = str(total)
+
+        label = "repository" if shown == 1 else "repositories"
+        msg = f"{count_str} {label} loaded"
+
+        indicators: list[str] = []
+        if self._search_query:
+            indicators.append(f"filter: '{self._search_query}'")
+        if self._sort_column != 0 or self._sort_reverse:
+            direction = "▼" if self._sort_reverse else "▲"
+            indicators.append(f"sort: {_SORT_COLUMN_NAMES[self._sort_column]} {direction}")
+        if indicators:
+            msg += f"  ({', '.join(indicators)})"
+
+        msg += "   ↑↓/jk navigate  [enter] open  / search  s sort  r refresh  q quit"
+        return msg
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.action_show_menu()
@@ -454,6 +660,7 @@ class GitDirectorConsole(App):
 
     def action_refresh(self) -> None:
         self._results.clear()
+        self._sessions_cache.clear()
         self._load_repos()
 
 
