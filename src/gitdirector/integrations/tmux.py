@@ -5,10 +5,19 @@ import re
 import subprocess
 from pathlib import Path
 
+import coolname
 
-def _safe_session_name(name: str) -> str:
-    """Replace characters that are invalid in tmux session names (. and :)."""
-    return re.sub(r"[.:]", "-", name)
+
+def _alphanumeric_name(name: str) -> str:
+    """Strip non-alphanumeric characters from a name."""
+    return re.sub(r"[^a-zA-Z0-9]", "", name)
+
+
+def _make_session_name(repo_name: str) -> str:
+    """Generate a unique tmux session name: gd-{alphanumeric}-{coolname-slug}."""
+    clean = _alphanumeric_name(repo_name)
+    slug = coolname.generate_slug(2)
+    return f"gd-{clean}-{slug}"
 
 
 def _session_exists(session_name: str) -> bool:
@@ -20,20 +29,41 @@ def _session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
-def prepare_tmux_session(repo_name: str, path: Path) -> str:
-    """Ensure a tmux session exists for *repo_name* and return the session name.
+def list_repo_sessions(repo_name: str) -> list[str]:
+    """List all tmux sessions matching gd-{alphanumeric_repo}-*."""
+    clean = _alphanumeric_name(repo_name)
+    prefix = f"gd-{clean}-"
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    sessions = result.stdout.strip().split("\n")
+    return sorted([s for s in sessions if s.startswith(prefix)])
 
-    Creates the session (detached) if it doesn't already exist.
-    """
-    session_name = _safe_session_name(repo_name)
 
-    if not _session_exists(session_name):
-        subprocess.run(
-            ["tmux", "new-session", "-d", "-s", session_name, "-c", str(path)],
-            check=True,
-        )
-
+def create_tmux_session(repo_name: str, path: Path) -> str:
+    """Create a new detached tmux session with a unique name and return it."""
+    for _ in range(10):
+        session_name = _make_session_name(repo_name)
+        if not _session_exists(session_name):
+            break
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session_name, "-c", str(path)],
+        check=True,
+    )
     return session_name
+
+
+def kill_tmux_session(session_name: str) -> bool:
+    """Kill a tmux session. Returns True on success."""
+    result = subprocess.run(
+        ["tmux", "kill-session", "-t", session_name],
+        capture_output=True,
+    )
+    return result.returncode == 0
 
 
 def attach_tmux_session(session_name: str) -> None:
@@ -45,6 +75,6 @@ def attach_tmux_session(session_name: str) -> None:
 
 
 def open_in_tmux(repo_name: str, path: Path) -> None:
-    """Open or switch to a tmux session rooted at *path*."""
-    session_name = prepare_tmux_session(repo_name, path)
+    """Create and attach to a new tmux session rooted at *path*."""
+    session_name = create_tmux_session(repo_name, path)
     attach_tmux_session(session_name)

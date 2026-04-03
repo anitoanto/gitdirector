@@ -36,25 +36,13 @@ def _changes_label(info: RepositoryInfo) -> str:
     return "—"
 
 
-class ActionMenuScreen(ModalScreen[str]):
-    """Modal popup with actions for the selected repository."""
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Esc close", show=True),
-        Binding("j", "cursor_down", "↓", show=False),
-        Binding("k", "cursor_up", "↑", show=False),
-    ]
-
-    CSS = """
-    ActionMenuScreen {
-        align: center middle;
-    }
+_MODAL_CSS = """
     #menu-container {
         width: 50%;
         height: auto;
         border: panel $panel;
         background: $panel;
-        padding: 0 2;
+        padding: 1 2;
     }
     #menu-title {
         text-align: center;
@@ -70,32 +58,77 @@ class ActionMenuScreen(ModalScreen[str]):
         width: 1fr;
         height: auto;
         border: none;
-        padding: 0;
+        padding: 1 2;
         margin: 1 0;
     }
     #menu-hint {
         text-align: center;
-        padding: 0 1 1 1;
+        padding: 1 1 1 1;
         color: $text-muted;
     }
-    """
+"""
 
-    def __init__(self, repo_name: str, branch: str | None = None) -> None:
+_MODAL_BINDINGS = [
+    Binding("escape", "cancel", "Esc close", show=True),
+    Binding("j", "cursor_down", "↓", show=False),
+    Binding("k", "cursor_up", "↑", show=False),
+]
+
+
+class ActionMenuScreen(ModalScreen[str]):
+    """Modal popup with actions for the selected repository."""
+
+    BINDINGS = _MODAL_BINDINGS
+
+    CSS = "ActionMenuScreen { align: center middle; }" + _MODAL_CSS
+
+    def __init__(self, repo_name: str, repo_path: Path, branch: str | None = None) -> None:
         super().__init__()
         self.repo_name = repo_name
+        self.repo_path = repo_path
         self.branch = branch
 
     def compose(self) -> ComposeResult:
+        from ..integrations.tmux import list_repo_sessions
+
+        sessions = list_repo_sessions(self.repo_name)
+
         with Vertical(id="menu-container"):
             yield Static(f"[bold white]{self.repo_name}[/bold white]", id="menu-title")
             yield Static(
                 f"[dim]branch:[/dim] [cyan]{self.branch or '—'}[/cyan]",
                 id="menu-branch",
             )
-            yield OptionList(
-                Option("TMUX Session", id="open_tmux"),
-                id="action-menu",
-            )
+            items: list[Option] = [
+                Option("[white]＋[/white] [bold]TMUX Session[/bold]", id="new_session"),
+            ]
+            if sessions:
+                items.append(
+                    Option("", disabled=True),
+                )
+                count = len(sessions)
+                label = "session" if count == 1 else "sessions"
+                items.append(
+                    Option(f"[dim]{count} active {label}[/dim]", disabled=True),
+                )
+                for s in sessions:
+                    slug = s.rsplit("-", 1)[-1] if "-" in s else s
+                    items.append(
+                        Option(
+                            f"[cyan]●[/cyan] [bold]{slug}[/bold] [dim]{s}[/dim]",
+                            id=f"attach:{s}",
+                        )
+                    )
+                items.append(
+                    Option("", disabled=True),
+                )
+                items.append(
+                    Option(
+                        "[white]✕[/white] [dim]Remove Session…[/dim]",
+                        id="remove_session",
+                    )
+                )
+            yield OptionList(*items, id="action-menu")
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
 
     def on_mount(self) -> None:
@@ -106,6 +139,96 @@ class ActionMenuScreen(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#action-menu", OptionList).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#action-menu", OptionList).action_cursor_up()
+
+
+class RemoveSessionScreen(ModalScreen[str | None]):
+    """Modal listing sessions available for removal."""
+
+    BINDINGS = _MODAL_BINDINGS
+
+    CSS = "RemoveSessionScreen { align: center middle; }" + _MODAL_CSS
+
+    def __init__(self, repo_name: str) -> None:
+        super().__init__()
+        self.repo_name = repo_name
+
+    def compose(self) -> ComposeResult:
+        from ..integrations.tmux import list_repo_sessions
+
+        sessions = list_repo_sessions(self.repo_name)
+
+        with Vertical(id="menu-container"):
+            yield Static("[bold white]Select session to remove[/bold white]", id="menu-title")
+            if sessions:
+                options = [
+                    Option(
+                        f"[red]●[/red] [bold]{s.rsplit('-', 1)[-1]}[/bold] [dim]{s}[/dim]",
+                        id=s,
+                    )
+                    for s in sessions
+                ]
+                yield OptionList(*options, id="action-menu")
+            else:
+                yield Static("[dim]No active sessions[/dim]", id="menu-branch")
+            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
+
+    def on_mount(self) -> None:
+        menu = self.query("#action-menu")
+        if menu:
+            menu.first().focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        menu = self.query("#action-menu")
+        if menu:
+            menu.first().action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        menu = self.query("#action-menu")
+        if menu:
+            menu.first().action_cursor_up()
+
+
+class ConfirmScreen(ModalScreen[bool]):
+    """Simple yes/no confirmation dialog."""
+
+    BINDINGS = _MODAL_BINDINGS
+
+    CSS = "ConfirmScreen { align: center middle; }" + _MODAL_CSS
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-container"):
+            yield Static(f"[bold white]{self.message}[/bold white]", id="menu-title")
+            yield OptionList(
+                Option("[green]✓[/green] [bold]Yes[/bold]", id="yes"),
+                Option("[dim]✗ No[/dim]", id="no"),
+                id="action-menu",
+            )
+            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#action-menu", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id == "yes")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
     def action_cursor_down(self) -> None:
         self.query_one("#action-menu", OptionList).action_cursor_down()
@@ -125,12 +248,13 @@ class GitDirectorConsole(App):
         height: 1;
         background: $accent;
         color: $text;
-        padding: 0 1;
+        padding: 0 2;
     }
     DataTable {
         height: 1fr;
         overflow-x: auto;
         overflow-y: auto;
+        padding: 0 1;
     }
     """
 
@@ -254,20 +378,29 @@ class GitDirectorConsole(App):
         self.action_show_menu()
 
     def action_open_tmux(self) -> None:
+        """Create a new tmux session and attach to it."""
         path = self._get_selected_path()
         if path is None:
             return
-        repo_name = path.name
 
-        from ..integrations.tmux import attach_tmux_session, prepare_tmux_session
+        from ..integrations.tmux import attach_tmux_session, create_tmux_session
 
-        # Prepare session while TUI still owns stdout (avoids encoding errors)
-        session_name = prepare_tmux_session(repo_name, path)
+        session_name = create_tmux_session(path.name, path)
 
         import sys
 
         with self.suspend():
-            # Re-enter alternate screen immediately to hide the shell flash
+            sys.stdout.write("\033[?1049h\033[H\033[2J")
+            sys.stdout.flush()
+            attach_tmux_session(session_name)
+
+    def _attach_to_session(self, session_name: str) -> None:
+        """Attach to an existing tmux session."""
+        import sys
+
+        from ..integrations.tmux import attach_tmux_session
+
+        with self.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J")
             sys.stdout.flush()
             attach_tmux_session(session_name)
@@ -278,13 +411,41 @@ class GitDirectorConsole(App):
             return
         info = self._results.get(str(path))
         branch = info.branch if info else None
-        self.push_screen(ActionMenuScreen(path.name, branch), callback=self._handle_menu_action)
+        self.push_screen(
+            ActionMenuScreen(path.name, path, branch),
+            callback=self._handle_menu_action,
+        )
 
     def _handle_menu_action(self, action: str | None) -> None:
         if action is None:
             return
-        if action == "open_tmux":
+        if action == "new_session":
             self.action_open_tmux()
+        elif action.startswith("attach:"):
+            session_name = action[len("attach:") :]
+            self._attach_to_session(session_name)
+        elif action == "remove_session":
+            path = self._get_selected_path()
+            if path:
+                self.push_screen(
+                    RemoveSessionScreen(path.name),
+                    callback=self._handle_remove_selection,
+                )
+
+    def _handle_remove_selection(self, session_name: str | None) -> None:
+        if session_name is None:
+            return
+        self.push_screen(
+            ConfirmScreen(f"Remove session '{session_name}'?"),
+            callback=lambda confirmed: self._do_remove(confirmed, session_name),
+        )
+
+    def _do_remove(self, confirmed: bool, session_name: str) -> None:
+        if confirmed:
+            from ..integrations.tmux import kill_tmux_session
+
+            kill_tmux_session(session_name)
+            self._update_status(f"Session '{session_name}' removed")
 
     def action_refresh(self) -> None:
         self._results.clear()
