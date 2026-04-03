@@ -258,9 +258,19 @@ class GitDirectorConsole(App):
         if path is None:
             return
         repo_name = path.name
-        # Exit the TUI before handing over to tmux
-        self._tmux_target = (repo_name, path)
-        self.exit(result=("tmux", repo_name, path))
+
+        from ..integrations.tmux import attach_tmux_session, prepare_tmux_session
+
+        # Prepare session while TUI still owns stdout (avoids encoding errors)
+        session_name = prepare_tmux_session(repo_name, path)
+
+        import sys
+
+        with self.suspend():
+            # Re-enter alternate screen immediately to hide the shell flash
+            sys.stdout.write("\033[?1049h\033[H\033[2J")
+            sys.stdout.flush()
+            attach_tmux_session(session_name)
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()
@@ -283,13 +293,7 @@ class GitDirectorConsole(App):
 
 def _run_console() -> None:
     app = GitDirectorConsole()
-    result = app.run()
-    if result is not None:
-        action, repo_name, path = result
-        if action == "tmux":
-            from ..integrations.tmux import open_in_tmux
-
-            open_in_tmux(repo_name, path)
+    app.run()
 
 
 def register(cli: click.Group):
