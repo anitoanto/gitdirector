@@ -9,8 +9,8 @@ from . import console
 def register(cli: click.Group):
     @cli.command()
     @click.argument("target", type=click.Path(exists=False))
-    @click.option("--discover", is_flag=True, help="Recursively discover repositories to remove")
-    def remove(target: str, discover: bool):
+    @click.option("--discover", is_flag=True, help="Recursively discover repositories to unlink")
+    def unlink(target: str, discover: bool):
         manager = RepositoryManager()
         success, message, repos = manager.remove_repository(Path(target), discover=discover)
 

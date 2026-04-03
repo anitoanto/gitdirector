@@ -10,7 +10,7 @@ def register(cli: click.Group):
     @cli.command()
     @click.argument("path", type=click.Path(exists=False))
     @click.option("--discover", is_flag=True, help="Recursively discover repositories")
-    def add(path: str, discover: bool):
+    def link(path: str, discover: bool):
         manager = RepositoryManager()
         success, message, repos, skipped = manager.add_repository(Path(path), discover=discover)
 

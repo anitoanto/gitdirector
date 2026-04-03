@@ -10,29 +10,30 @@ pip install gitdirector
 
 ## Usage
 
-```
-gitdirector add PATH [--discover]          Add a repository or discover all under a path
-gitdirector remove PATH|NAME [--discover]  Remove a repository by path, name, or all under a path
-gitdirector list                           List all tracked repositories with live status
-gitdirector status                         Show dirty repositories with staged/unstaged files
-gitdirector pull                           Pull latest changes for all tracked repositories
-gitdirector cd NAME                        Open or switch to a tmux session for a repository
-gitdirector help                           Show help
-```
+| Command | Description |
+| --- | --- |
+| `gitdirector link PATH [--discover]` | Link a repository or discover all under a path |
+| `gitdirector unlink PATH\|NAME [--discover]` | Unlink a repository by path, name, or all under a path |
+| `gitdirector list` | List all tracked repositories with live status |
+| `gitdirector status` | Show dirty repositories with staged/unstaged files |
+| `gitdirector pull` | Pull latest changes for all tracked repositories |
+| `gitdirector cd NAME` | Open or switch to a tmux session for a repository |
+| `gitdirector autoclean links\|sessions` | Clean broken links or stale tmux sessions |
+| `gitdirector help` | Show help |
 
-### add
-
-```bash
-gitdirector add /path/to/repo
-gitdirector add /path/to/folder --discover   # recursively find and add all repos
-```
-
-### remove
+### link
 
 ```bash
-gitdirector remove /path/to/repo         # remove by full path
-gitdirector remove my-repo               # remove by repository name
-gitdirector remove /path/to/folder --discover  # remove all repos under a path
+gitdirector link /path/to/repo
+gitdirector link /path/to/folder --discover   # recursively find and link all repos
+```
+
+### unlink
+
+```bash
+gitdirector unlink /path/to/repo         # unlink by full path
+gitdirector unlink my-repo               # unlink by repository name
+gitdirector unlink /path/to/folder --discover  # unlink all repos under a path
 ```
 
 If multiple tracked repositories share the same name, `gitdirector` will refuse and list the conflicting paths so you can use the full path instead.

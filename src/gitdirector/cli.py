@@ -5,15 +5,16 @@ from .commands import (
     _format_size,
     _path_text,
     _status_text,
-    add,
+    autoclean,
     cd,
     console,
     help,
+    link,
     listt,
     pull,
-    remove,
     status,
     tui,
+    unlink,
 )
 from .commands.help import show_help
 
@@ -39,14 +40,15 @@ def cli(ctx):
         show_help()
 
 
-add.register(cli)
-remove.register(cli)
+link.register(cli)
+unlink.register(cli)
 listt.register(cli)
 status.register(cli)
 pull.register(cli)
 cd.register(cli)
 help.register(cli)
 tui.register(cli)
+autoclean.register(cli)
 
 
 def main():
