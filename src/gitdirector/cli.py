@@ -13,6 +13,7 @@ from .commands import (
     pull,
     remove,
     status,
+    tui,
 )
 from .commands.help import show_help
 
@@ -45,6 +46,7 @@ status.register(cli)
 pull.register(cli)
 cd.register(cli)
 help.register(cli)
+tui.register(cli)
 
 
 def main():
