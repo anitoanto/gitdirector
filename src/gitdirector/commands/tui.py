@@ -215,8 +215,8 @@ class ConfirmScreen(ModalScreen[bool]):
         with Vertical(id="menu-container"):
             yield Static(f"[bold white]{self.message}[/bold white]", id="menu-title")
             yield OptionList(
-                Option("[green]✓[/green] [bold]Yes[/bold]", id="yes"),
                 Option("[dim]✗ No[/dim]", id="no"),
+                Option("[white]✓[/white] [bold]Yes[/bold]", id="yes"),
                 id="action-menu",
             )
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
@@ -282,7 +282,7 @@ class GitDirectorConsole(App):
     def on_mount(self) -> None:
         table = self.query_one("#repo-table", DataTable)
         self._col_keys = table.add_columns(
-            "Repository", "Sync", "Branch", "Changes", "Last Commit", "Path"
+            "Repository", "Sync", "Branch", "Changes", "Last Commit", "Sessions", "Path"
         )
         self._load_repos()
 
@@ -308,10 +308,13 @@ class GitDirectorConsole(App):
                 for path in self._repo_paths
             }
             for future in as_completed(futures):
+                from ..integrations.tmux import list_repo_sessions
+
                 info = future.result()
                 self._results[str(info.path)] = info
                 done += 1
-                self.call_from_thread(self._update_row, info)
+                sessions_count = len(list_repo_sessions(info.path.name))
+                self.call_from_thread(self._update_row, info, sessions_count)
                 remaining = total - done
                 if remaining > 0:
                     self.call_from_thread(
@@ -335,11 +338,12 @@ class GitDirectorConsole(App):
                 "... ... ... ...",
                 "... ... ... ...",
                 "... ... ... ... ... ...",
+                "...",
                 str(path),
                 key=str(path),
             )
 
-    def _update_row(self, info: RepositoryInfo) -> None:
+    def _update_row(self, info: RepositoryInfo, sessions: int = 0) -> None:
         table = self.query_one("#repo-table", DataTable)
         row_key = str(info.path)
         ck = self._col_keys
@@ -347,6 +351,7 @@ class GitDirectorConsole(App):
         table.update_cell(row_key, ck[2], info.branch or "—")
         table.update_cell(row_key, ck[3], _changes_label(info))
         table.update_cell(row_key, ck[4], info.last_updated or "—")
+        table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
 
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)

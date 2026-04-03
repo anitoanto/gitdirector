@@ -123,7 +123,8 @@ class TestGitDirectorConsole:
             table = app.query_one("#repo-table", DataTable)
             assert table.row_count == 0
 
-    async def test_table_populated_with_repos(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_table_populated_with_repos(self, _mock_sessions):
         """Tracked repos appear as rows in the DataTable."""
         repos = [
             _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main"),
@@ -147,7 +148,8 @@ class TestGitDirectorConsole:
             # If we get here without hanging, quit worked
             assert True
 
-    async def test_cursor_down_binding(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_cursor_down_binding(self, _mock_sessions):
         """Pressing 'j' moves cursor down in the DataTable."""
         repos = [
             _make_info("alpha", Path("/tmp/alpha")),
@@ -164,7 +166,8 @@ class TestGitDirectorConsole:
             await pilot.press("j")
             assert table.cursor_coordinate.row == initial_row + 1
 
-    async def test_cursor_up_binding(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_cursor_up_binding(self, _mock_sessions):
         """Pressing 'k' moves cursor up in the DataTable."""
         repos = [
             _make_info("alpha", Path("/tmp/alpha")),
@@ -181,7 +184,8 @@ class TestGitDirectorConsole:
             await pilot.press("k")
             assert table.cursor_coordinate.row == 0
 
-    async def test_refresh_binding(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_refresh_binding(self, _mock_sessions):
         """Pressing 'r' triggers a refresh (clears results and reloads)."""
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
@@ -197,7 +201,8 @@ class TestGitDirectorConsole:
             # get_repository_status should have been called again
             assert app.manager.get_repository_status.call_count == 1
 
-    async def test_status_bar_updates(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_status_bar_updates(self, _mock_sessions):
         """Status bar should show loaded message after repos load."""
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
@@ -219,15 +224,16 @@ class TestGitDirectorConsole:
             assert "No repositories tracked" in status_text
 
     async def test_table_columns_created(self):
-        """DataTable should have the expected 6 columns."""
+        """DataTable should have the expected 7 columns."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             table = app.query_one("#repo-table", DataTable)
-            assert len(table.columns) == 6
+            assert len(table.columns) == 7
 
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch("gitdirector.commands.tui.ActionMenuScreen")
-    async def test_enter_opens_action_menu(self, mock_screen_cls):
+    async def test_enter_opens_action_menu(self, mock_screen_cls, _mock_sessions):
         """Pressing enter on a row should push ActionMenuScreen."""
         repos = [_make_info("alpha", Path("/tmp/alpha"), branch="main")]
         app = GitDirectorConsole()
@@ -240,7 +246,8 @@ class TestGitDirectorConsole:
             # Verify nothing crashes on None
             assert True
 
-    async def test_handle_menu_action_new_session(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_handle_menu_action_new_session(self, _mock_sessions):
         """_handle_menu_action routes 'new_session' to action_open_tmux."""
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
@@ -251,7 +258,8 @@ class TestGitDirectorConsole:
             app._handle_menu_action("new_session")
             app.action_open_tmux.assert_called_once()
 
-    async def test_handle_menu_action_attach(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_handle_menu_action_attach(self, _mock_sessions):
         """_handle_menu_action routes 'attach:session-name' to _attach_to_session."""
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
@@ -270,7 +278,21 @@ class TestGitDirectorConsole:
             app._handle_menu_action(None)
             # No exception means success
 
-    async def test_row_data_reflects_status(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd-alpha-slug"])
+    async def test_sessions_column_shows_count(self, _mock_sessions):
+        """Sessions column shows the active session count when > 0."""
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            row_key = str(repos[0].path)
+            assert table.get_cell(row_key, app._col_keys[5]) == "1"
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_row_data_reflects_status(self, _mock_sessions):
         """Loaded row data should match repo info after worker finishes."""
         repos = [
             _make_info(
@@ -296,8 +318,10 @@ class TestGitDirectorConsole:
             assert table.get_cell(row_key, ck[2]) == "develop"
             assert table.get_cell(row_key, ck[3]) == "staged"
             assert table.get_cell(row_key, ck[4]) == "5 min ago"
+            assert table.get_cell(row_key, ck[5]) == "—"
 
-    async def test_multiple_repos_status(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_multiple_repos_status(self, _mock_sessions):
         """Status bar pluralises correctly for >1 repo."""
         repos = [
             _make_info("alpha", Path("/tmp/alpha")),
@@ -339,10 +363,11 @@ class TestConfirmScreen:
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(screen, callback=lambda v: results.append(v))
             await pilot.pause()
-            # The first option is "Yes" – press enter to select it
+            # "No" is first, move down to "Yes" then press enter
             menu = app.screen.query_one("#action-menu", OptionList)
             menu.focus()
             await pilot.pause()
+            await pilot.press("down")
             await pilot.press("enter")
             await pilot.pause()
             assert results == [True]
@@ -356,11 +381,10 @@ class TestConfirmScreen:
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(screen, callback=lambda v: results.append(v))
             await pilot.pause()
+            # "No" is first – press enter to select it
             menu = app.screen.query_one("#action-menu", OptionList)
             menu.focus()
             await pilot.pause()
-            # Move down to "No" then press enter
-            await pilot.press("down")
             await pilot.press("enter")
             await pilot.pause()
             assert results == [False]
@@ -590,7 +614,8 @@ class TestRemoveFlow:
             await pilot.pause()
             assert app._get_selected_path() is None
 
-    async def test_get_selected_path_with_repos(self):
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_get_selected_path_with_repos(self, _mock_sessions):
         """_get_selected_path returns the path of the highlighted row."""
         repos = [
             _make_info("alpha", Path("/tmp/alpha")),
