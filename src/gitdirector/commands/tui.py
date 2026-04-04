@@ -708,11 +708,16 @@ class GitDirectorConsole(App):
                 ["tmux", "send-keys", "-t", session_name, f"clear && {agent_cmd}", "Enter"],
                 check=False,
             )
-            self.push_screen(_AgentLoadingScreen(agent_cmd, session_name))
+            self.push_screen(
+                _AgentLoadingScreen(agent_cmd, session_name),
+                callback=lambda _: self.set_timer(
+                    0.2, lambda: self._refresh_sessions_for_path(path)
+                ),
+            )
         else:
-            self._suspend_and_attach(session_name)
+            self._suspend_and_attach(session_name, path)
 
-    def _suspend_and_attach(self, session_name: str) -> None:
+    def _suspend_and_attach(self, session_name: str, path: Path | None = None) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
 
@@ -725,9 +730,28 @@ class GitDirectorConsole(App):
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()
 
-    def _attach_to_session(self, session_name: str) -> None:
+        if path is not None:
+            self.set_timer(0.2, lambda: self._refresh_sessions_for_path(path))
+
+    def _refresh_sessions_for_path(self, path: Path) -> None:
+        """Update only the sessions cell for the given repo path."""
+        from ..integrations.tmux import list_repo_sessions
+
+        count = len(list_repo_sessions(path.name))
+        self._sessions_cache[str(path)] = count
+        table = self.query_one("#repo-table", DataTable)
+        try:
+            table.update_cell(
+                str(path),
+                self._col_keys[5],
+                str(count) if count > 0 else "—",
+            )
+        except Exception:
+            pass
+
+    def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""
-        self._suspend_and_attach(session_name)
+        self._suspend_and_attach(session_name, path)
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()
@@ -756,7 +780,8 @@ class GitDirectorConsole(App):
             self.action_open_tmux(agent_cmd=self._AGENT_COMMANDS[action])
         elif action.startswith("attach:"):
             session_name = action[len("attach:") :]
-            self._attach_to_session(session_name)
+            path = self._get_selected_path()
+            self._attach_to_session(session_name, path)
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
