@@ -271,7 +271,9 @@ class TestGitDirectorConsole:
             await app.workers.wait_for_complete()
             await pilot.pause()
             app._handle_menu_action("attach:gd-alpha-happy-panda")
-            app._attach_to_session.assert_called_once_with("gd-alpha-happy-panda")
+            app._attach_to_session.assert_called_once_with(
+                "gd-alpha-happy-panda", Path("/tmp/alpha")
+            )
 
     async def test_handle_menu_action_none_is_noop(self):
         """Dismissing the menu (None) should not crash."""
