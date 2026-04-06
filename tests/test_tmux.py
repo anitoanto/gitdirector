@@ -34,15 +34,17 @@ class TestAlphanumericName:
 
 
 class TestMakeSessionName:
-    @patch("gitdirector.integrations.tmux.coolname.generate_slug", return_value="happy-panda")
-    def test_format(self, _mock_slug):
+    @patch("gitdirector.integrations.tmux._fake.city", return_value="New York")
+    @patch("gitdirector.integrations.tmux._fake.color_name", return_value="Blue Sky")
+    def test_format(self, _mock_color_name, _mock_city):
         name = _make_session_name("my-repo")
-        assert name == "gd-myrepo-happy-panda"
+        assert name == "gd-myrepo-blue-sky-new-york"
 
-    @patch("gitdirector.integrations.tmux.coolname.generate_slug", return_value="cool-slug")
-    def test_special_chars_stripped(self, _mock_slug):
+    @patch("gitdirector.integrations.tmux._fake.city", return_value="San José!")
+    @patch("gitdirector.integrations.tmux._fake.color_name", return_value="Cool Color")
+    def test_special_chars_stripped(self, _mock_color_name, _mock_city):
         name = _make_session_name("foo.bar/baz")
-        assert name == "gd-foobarbaz-cool-slug"
+        assert name == "gd-foobarbaz-cool-color-san-jose"
 
 
 # ---------------------------------------------------------------------------

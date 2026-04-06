@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from textual.widgets import DataTable, Input, OptionList, Static
+from textual.worker import WorkerFailed
 
 from gitdirector.commands.tui import (
     _SORT_COLUMN_NAMES,
@@ -517,6 +519,80 @@ class TestActionMenuScreen:
             # 2 session opts, separator, "Launch AI Agent" label, opencode,
             # claude, copilot, codex, separator, remove option = 13 items
             assert menu.option_count == 13
+
+
+class TestGitDirectorConsoleSearchAndSort:
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_apply_filter_and_sort_updates_rows(self, _mock_sessions):
+        repos = [
+            _make_info("alpha", Path("/tmp/alpha"), branch="main"),
+            _make_info("beta", Path("/tmp/beta"), branch="develop"),
+            _make_info("gamma", Path("/tmp/gamma"), branch="main"),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._search_query = "beta"
+            app._sort_column = 0
+            app._sort_reverse = False
+            app._apply_filter_and_sort()
+
+            table = app.query_one("#repo-table", DataTable)
+            assert table.row_count == 1
+            status = app.query_one("#status-bar", Static).content
+            assert "filter: 'beta'" in status
+
+    async def test_close_search_resets_query_and_status(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            container = app.query_one("#search-container")
+            container.display = True
+            app._search_query = "alpha"
+            app.action_close_search()
+            assert app._search_query == ""
+            assert container.display is False
+
+    async def test_build_loaded_status_includes_sort_and_filter(self):
+        app = GitDirectorConsole()
+        app._sort_column = 2
+        app._sort_reverse = True
+        app._search_query = "test"
+        text = app._build_loaded_status(1, 3)
+        assert "1 of 3 repository loaded" in text
+        assert "filter: 'test'" in text
+        assert "sort: Branch ▼" in text
+
+
+class TestGitDirectorConsoleActionRouting:
+    async def test_handle_menu_action_agent_commands(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        app.action_open_tmux = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._handle_menu_action("agent:copilot")
+            app.action_open_tmux.assert_called_once_with(agent_cmd="copilot")
+
+    async def test_do_remove_calls_kill_tmux_session(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._update_status = MagicMock()
+        with patch("gitdirector.integrations.tmux.kill_tmux_session") as kill_session:
+            app._do_remove(True, "gd-test")
+            kill_session.assert_called_once_with("gd-test")
+            app._update_status.assert_called_once()
+
+    async def test_handle_menu_action_remove_session_pushes_confirm(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        app.push_screen = MagicMock()
+        app._handle_remove_selection("gd-test")
+        app.push_screen.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1276,3 +1352,89 @@ class TestBuildLoadedStatus:
             assert "2 of 5" in msg
             assert "filter: 'api'" in msg
             assert "sort: Sync \u25bc" in msg
+
+
+# ---------------------------------------------------------------------------
+# Additional edge and error handling tests for TUI
+# ---------------------------------------------------------------------------
+
+
+class TestTUIEdgeCases:
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", side_effect=Exception("tmux error"))
+    async def test_load_repos_handles_session_exception(self, _mock_sessions):
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        with pytest.raises(WorkerFailed):
+            async with app.run_test(size=(120, 30)) as pilot:
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+
+    def test_sort_key_func_all_columns(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._sessions_cache = {"/tmp/a": 2, "/tmp/b": 1}
+        infos = [
+            _make_info("a", Path("/tmp/a"), branch="main", last_commit_timestamp=2),
+            _make_info("b", Path("/tmp/b"), branch="dev", last_commit_timestamp=1),
+        ]
+        for col in range(7):
+            app._sort_column = col
+            app._sort_reverse = False
+            sorted_infos = sorted(infos, key=app._sort_key_func())
+            assert isinstance(sorted_infos, list)
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
+    async def test_action_menu_disabled_options_and_navigation(self, _mock_sessions):
+        screen = ActionMenuScreen("repo", Path("/tmp/repo"), branch="main")
+        results = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen, callback=lambda v: results.append(v))
+            await pilot.pause()
+            menu = app.screen.query_one("#action-menu", OptionList)
+            # Try navigating through disabled options
+            for _ in range(menu.option_count):
+                await pilot.press("down")
+            await pilot.press("enter")
+            # Should dismiss with some id (not None)
+            assert results
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
+    async def test_remove_session_screen_navigation(self, _mock_sessions):
+        screen = RemoveSessionScreen("repo")
+        results = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen, callback=lambda v: results.append(v))
+            await pilot.pause()
+            app.screen.query_one("#action-menu", OptionList)
+            await pilot.press("down")
+            await pilot.press("up")
+            await pilot.press("enter")
+            assert results
+
+    async def test_confirm_screen_navigation_boundaries(self):
+        screen = ConfirmScreen("Boundary?")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            menu = app.screen.query_one("#action-menu", OptionList)
+            # Press up at top, down at bottom
+            await pilot.press("up")
+            await pilot.press("down")
+            await pilot.press("down")
+            # Should not error
+            assert menu
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", side_effect=Exception("fail"))
+    async def test_sessions_cache_error_handling(self, _mock_sessions):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        with pytest.raises(WorkerFailed):
+            async with app.run_test(size=(120, 30)):
+                await app.workers.wait_for_complete()

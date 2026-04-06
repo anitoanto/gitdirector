@@ -125,7 +125,7 @@ class Repository:
     def get_status(self) -> RepositoryInfo:
         branch = self.get_current_branch()
 
-        code, out, err = self._run_git("fetch", "--dry-run")
+        code, out, err = self._run_git("fetch")
         if code != 0:
             return RepositoryInfo(self.path, self.name, RepoStatus.UNKNOWN, branch, err)
 
