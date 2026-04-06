@@ -3,9 +3,12 @@
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
-import coolname
+from faker import Faker
+
+_fake = Faker()
 
 
 def _alphanumeric_name(name: str) -> str:
@@ -13,10 +16,20 @@ def _alphanumeric_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "", name)
 
 
+def slugify(text):
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = text.replace(" ", "-")
+    text = re.sub(r"[^a-z-]", "", text)
+    text = re.sub(r"-+", "-", text)
+    return text.strip("-")
+
+
 def _make_session_name(repo_name: str) -> str:
-    """Generate a unique tmux session name: gd-{alphanumeric}-{coolname-slug}."""
+    """Generate a unique tmux session name: gd-{alphanumeric}-{faker-slug}."""
     clean = _alphanumeric_name(repo_name)
-    slug = coolname.generate_slug(2)
+    slug = f"{slugify(_fake.color_name())}-{slugify(_fake.city())}"
     return f"gd-{clean}-{slug}"
 
 
