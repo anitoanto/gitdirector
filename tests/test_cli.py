@@ -116,6 +116,16 @@ class TestLinkCommand:
         assert result.exit_code == 0
         assert "Added 2" in result.output
 
+    def test_link_discover_none_found(self, runner, tmp_path):
+        """--discover finds no repositories: should print message and succeed."""
+        mgr = _mock_manager(add_repository=(True, "No repositories found", [], []))
+        with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
+        assert result.exit_code == 0
+        assert (
+            "no repositories" in result.output.lower() or "nothing to do" in result.output.lower()
+        )
+
 
 class TestUnlinkCommand:
     def test_unlink_success(self, runner, tmp_path):
@@ -210,6 +220,25 @@ class TestListCommand:
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
         assert fake_git_repo.name in result.output
+
+    def test_with_multiple_repos(self, runner, tmp_path):
+        """List with >1 repo triggers Live multi-update UI."""
+        repo1 = tmp_path / "repo1"
+        repo2 = tmp_path / "repo2"
+        repo1.mkdir()
+        repo2.mkdir()
+        info1 = RepositoryInfo(repo1, "repo1", RepoStatus.UP_TO_DATE, "main")
+        info2 = RepositoryInfo(repo2, "repo2", RepoStatus.UP_TO_DATE, "dev")
+        mgr = _mock_manager()
+        mgr.get_repository_status = lambda path: info1 if path == repo1 else info2
+        mgr.config.repositories = [repo1, repo2]
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["list"])
+        assert result.exit_code == 0
+        assert "repo1" in result.output
+        assert "repo2" in result.output
+        # Check spinner/table summary for plural
+        assert "2 repositories" in result.output or "2 repos" in result.output
 
 
 class TestStatusCommand:
