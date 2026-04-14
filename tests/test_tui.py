@@ -286,7 +286,10 @@ class TestGitDirectorConsole:
             app._handle_menu_action(None)
             # No exception means success
 
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd-alpha-slug"])
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[{"session_name": "gd-alpha-slug", "repo": "alpha", "slug": "slug"}],
+    )
     async def test_sessions_column_shows_count(self, _mock_sessions):
         """Sessions column shows the active session count when > 0."""
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
@@ -1634,7 +1637,9 @@ class TestBuildLoadedStatus:
 
 
 class TestTUIEdgeCases:
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", side_effect=Exception("tmux error"))
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("tmux error")
+    )
     async def test_load_repos_handles_session_exception(self, _mock_sessions):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
@@ -1705,7 +1710,7 @@ class TestTUIEdgeCases:
             # Should not error
             assert menu
 
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", side_effect=Exception("fail"))
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("fail"))
     async def test_sessions_cache_error_handling(self, _mock_sessions):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])

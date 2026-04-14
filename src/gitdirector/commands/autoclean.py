@@ -58,8 +58,7 @@ def _autoclean_links():
         console.print()
         return
 
-    for p in broken:
-        config.remove_repository(p)
+    config.remove_repositories(broken)
 
     console.print()
     console.print(f"  [green]Removed {len(broken)} broken link(s).[/green]")
