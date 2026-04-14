@@ -3,9 +3,12 @@
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
-import coolname
+from faker import Faker
+
+_fake = Faker()
 
 
 def _alphanumeric_name(name: str) -> str:
@@ -13,10 +16,20 @@ def _alphanumeric_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "", name)
 
 
+def slugify(text):
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = text.replace(" ", "-")
+    text = re.sub(r"[^a-z-]", "", text)
+    text = re.sub(r"-+", "-", text)
+    return text.strip("-")
+
+
 def _make_session_name(repo_name: str) -> str:
-    """Generate a unique tmux session name: gd-{alphanumeric}-{coolname-slug}."""
+    """Generate a unique tmux session name: gd-{alphanumeric}-{faker-slug}."""
     clean = _alphanumeric_name(repo_name)
-    slug = coolname.generate_slug(2)
+    slug = f"{slugify(_fake.color_name())}-{slugify(_fake.city())}"
     return f"gd-{clean}-{slug}"
 
 
@@ -42,6 +55,31 @@ def list_repo_sessions(repo_name: str) -> list[str]:
         return []
     sessions = result.stdout.strip().split("\n")
     return sorted([s for s in sessions if s.startswith(prefix)])
+
+
+def list_all_gd_sessions() -> list[dict[str, str]]:
+    """List all GitDirector tmux sessions (gd-* prefix).
+
+    Returns a list of dicts with keys: session_name, repo, slug.
+    """
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    sessions = result.stdout.strip().split("\n")
+    entries = []
+    for s in sorted(sessions):
+        if not s.startswith("gd-"):
+            continue
+        rest = s[3:]  # strip "gd-"
+        parts = rest.split("-", 1)
+        repo = parts[0] if parts else rest
+        slug = parts[1] if len(parts) > 1 else ""
+        entries.append({"session_name": s, "repo": repo, "slug": slug})
+    return entries
 
 
 def create_tmux_session(repo_name: str, path: Path) -> str:

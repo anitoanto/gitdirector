@@ -1,4 +1,3 @@
-from importlib.metadata import version
 from typing import Optional
 
 from rich import box
@@ -8,7 +7,22 @@ from rich.text import Text
 
 from ..repo import RepoStatus
 
-__version__ = version("gitdirector")
+
+def _get_version() -> str:
+    from importlib.metadata import version
+
+    return version("gitdirector")
+
+
+__version__: Optional[str] = None
+
+
+def get_version() -> str:
+    global __version__
+    if __version__ is None:
+        __version__ = _get_version()
+    return __version__
+
 
 console = Console(highlight=False)
 

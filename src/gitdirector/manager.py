@@ -55,12 +55,10 @@ class RepositoryManager:
             if self.config.has_repository(repo_path):
                 skipped.append(repo_path)
                 continue
+            repos.append(repo_path)
 
-            try:
-                self.config.add_repository(repo_path)
-                repos.append(repo_path)
-            except Exception as _:
-                skipped.append(repo_path)
+        if repos:
+            self.config.add_repositories(repos)
 
         if not repos:
             msg = "No new repositories found" if skipped else "No git repositories found"
@@ -122,8 +120,7 @@ class RepositoryManager:
             return False, f"No tracked repositories found under: {root}", []
 
         try:
-            for repo_path in repos_to_remove:
-                self.config.remove_repository(repo_path)
+            self.config.remove_repositories(repos_to_remove)
 
             msg = (
                 f"Removed {len(repos_to_remove)} repository"
