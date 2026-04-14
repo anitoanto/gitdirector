@@ -125,54 +125,79 @@ class Repository:
                     pass
         return total
 
-    def get_status(self) -> RepositoryInfo:
-        branch = self.get_current_branch()
+    def get_status(self, *, fetch: bool = False) -> RepositoryInfo:
+        if fetch:
+            code, _, err = self._run_git("fetch")
+            if code != 0:
+                branch = self.get_current_branch()
+                return RepositoryInfo(self.path, self.name, RepoStatus.UNKNOWN, branch, err)
 
-        code, out, err = self._run_git("fetch")
-        if code != 0:
-            return RepositoryInfo(self.path, self.name, RepoStatus.UNKNOWN, branch, err)
-
-        code, ahead_behind, _ = self._run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
-
+        code, out, _ = self._run_git("status", "--porcelain=v2", "--branch", _strip=False)
         if code != 0:
             return RepositoryInfo(
-                self.path, self.name, RepoStatus.UNKNOWN, branch, "No tracking branch"
+                self.path, self.name, RepoStatus.UNKNOWN, None, "git status failed"
             )
 
-        try:
-            behind, ahead = map(int, ahead_behind.split())
-            if ahead > 0 and behind > 0:
-                status = RepoStatus.DIVERGED
-                msg = f"ahead {ahead}, behind {behind}"
-            elif ahead > 0:
-                status = RepoStatus.AHEAD
-                msg = f"ahead {ahead}"
-            elif behind > 0:
-                status = RepoStatus.BEHIND
-                msg = f"behind {behind}"
-            else:
-                status = RepoStatus.UP_TO_DATE
-                msg = ""
-        except ValueError:
-            status = RepoStatus.UNKNOWN
-            msg = "Could not parse git status"
-
-        code, porcelain, _ = self._run_git("status", "--porcelain", _strip=False)
+        branch = None
+        has_upstream = False
+        ahead = 0
+        behind = 0
         staged = False
         unstaged = False
         staged_files: list[str] = []
         unstaged_files: list[str] = []
-        if code == 0 and porcelain:
-            for line in porcelain.splitlines():
-                if len(line) >= 2:
-                    x, y = line[0], line[1]
-                    filename = line[3:].strip()
-                    if x not in (" ", "?"):
-                        staged = True
-                        staged_files.append(filename)
-                    if y not in (" ", "?"):
-                        unstaged = True
-                        unstaged_files.append(filename)
+
+        for line in out.splitlines():
+            if line.startswith("# branch.head "):
+                branch = line[14:]
+                if branch == "(detached)":
+                    branch = None
+            elif line.startswith("# branch.ab "):
+                has_upstream = True
+                parts = line.split()
+                try:
+                    ahead = int(parts[2].lstrip("+"))
+                    behind = abs(int(parts[3]))
+                except (IndexError, ValueError):
+                    pass
+            elif line.startswith("1 ") or line.startswith("2 "):
+                xy = line[2:4]
+                x, y = xy[0], xy[1]
+                if line.startswith("1 "):
+                    parts = line.split(" ", 8)
+                    filename = parts[8] if len(parts) > 8 else ""
+                else:
+                    parts = line.split(" ", 9)
+                    filename = parts[9].split("\t")[0] if len(parts) > 9 else ""
+                if x not in (".", "?"):
+                    staged = True
+                    staged_files.append(filename)
+                if y not in (".", "?"):
+                    unstaged = True
+                    unstaged_files.append(filename)
+            elif line.startswith("u "):
+                parts = line.split(" ", 10)
+                filename = parts[10] if len(parts) > 10 else ""
+                staged = True
+                unstaged = True
+                staged_files.append(filename)
+                unstaged_files.append(filename)
+
+        if not has_upstream:
+            status = RepoStatus.UNKNOWN
+            msg = "No tracking branch"
+        elif ahead > 0 and behind > 0:
+            status = RepoStatus.DIVERGED
+            msg = f"ahead {ahead}, behind {behind}"
+        elif ahead > 0:
+            status = RepoStatus.AHEAD
+            msg = f"ahead {ahead}"
+        elif behind > 0:
+            status = RepoStatus.BEHIND
+            msg = f"behind {behind}"
+        else:
+            status = RepoStatus.UP_TO_DATE
+            msg = ""
 
         last_updated, last_commit_ts = self.get_last_commit_info()
         size = self.get_tracked_size()

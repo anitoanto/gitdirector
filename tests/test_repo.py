@@ -178,15 +178,29 @@ def _setup_status_mocks(mocker, ahead_behind="0\t0", porcelain="", fetch_ok=True
         git_args = args[1:]  # strip the repo path
         calls.append(git_args)
 
-        if "rev-parse" in git_args:
-            return _make_run_result(0, f"{branch}\n", "")
         if "fetch" in git_args:
             return _make_run_result(0 if fetch_ok else 1, "", "" if fetch_ok else "fetch error")
-        if "rev-list" in git_args:
-            code = 0 if ahead_behind else 1
-            return _make_run_result(code, ahead_behind + "\n" if ahead_behind else "", "")
         if "status" in git_args:
-            return _make_run_result(0, porcelain, "")
+            v2 = f"# branch.oid abc123\n# branch.head {branch}\n"
+            if ahead_behind:
+                try:
+                    behind_val, ahead_val = ahead_behind.split("\t")
+                    v2 += f"# branch.upstream origin/{branch}\n"
+                    v2 += f"# branch.ab +{ahead_val} -{behind_val}\n"
+                except ValueError:
+                    pass
+            if porcelain:
+                for line in porcelain.splitlines():
+                    if len(line) >= 2:
+                        x, y = line[0], line[1]
+                        filename = line[3:].strip() if len(line) > 3 else ""
+                        if x == "?" and y == "?":
+                            v2 += f"? {filename}\n"
+                        else:
+                            v2_x = x if x != " " else "."
+                            v2_y = y if y != " " else "."
+                            v2 += f"1 {v2_x}{v2_y} N... 100644 100644 100644 abc def {filename}\n"
+            return _make_run_result(0, v2, "")
         if "log" in git_args:
             return _make_run_result(0, "5 minutes ago\n", "")
         if "ls-files" in git_args:
@@ -224,7 +238,7 @@ class TestGetStatusSync:
 
     def test_fetch_failure(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, fetch_ok=False)
-        info = Repository(fake_git_repo).get_status()
+        info = Repository(fake_git_repo).get_status(fetch=True)
         assert info.status == RepoStatus.UNKNOWN
 
     def test_no_tracking_branch(self, fake_git_repo, mocker):
