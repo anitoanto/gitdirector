@@ -272,39 +272,37 @@ class TestRepoGetStatusParsingErrors:
     """Test error paths when parsing git status output."""
 
     def test_get_status_invalid_ahead_behind_format(self, fake_git_repo, mocker):
-        """When rev-list output can't be parsed as two ints, returns UNKNOWN."""
+        """When branch.ab line has invalid format, ahead/behind default to 0."""
 
-        # Mock all subprocess.run calls
         def mock_run(*args, **kwargs):
-            # Check which git command this is
             git_cmd = args[0]
-            if "fetch" in git_cmd:
-                return MagicMock(returncode=0, stdout="", stderr="")
-            elif "rev-list" in git_cmd:
-                return MagicMock(returncode=0, stdout="invalid format\n", stderr="")
+            if "status" in git_cmd:
+                v2 = "# branch.oid abc\n# branch.head main\n"
+                v2 += "# branch.upstream origin/main\n"
+                v2 += "# branch.ab invalid format\n"
+                return MagicMock(returncode=0, stdout=v2, stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mocker.patch("subprocess.run", side_effect=mock_run)
         repo = Repository(fake_git_repo)
         status = repo.get_status()
-        assert status.status == RepoStatus.UNKNOWN
+        assert status.status == RepoStatus.UP_TO_DATE
 
     def test_get_status_no_tracking_branch(self, fake_git_repo, mocker):
         """When no tracking branch exists, returns UNKNOWN."""
 
         def mock_run(*args, **kwargs):
             git_cmd = args[0]
-            if "fetch" in git_cmd:
-                return MagicMock(returncode=0, stdout="", stderr="")
-            elif "rev-list" in git_cmd:
-                return MagicMock(returncode=128, stdout="", stderr="fatal: no upstream branch\n")
+            if "status" in git_cmd:
+                v2 = "# branch.oid abc\n# branch.head main\n"
+                return MagicMock(returncode=0, stdout=v2, stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mocker.patch("subprocess.run", side_effect=mock_run)
         repo = Repository(fake_git_repo)
         status = repo.get_status()
         assert status.status == RepoStatus.UNKNOWN
-        assert "upstream" in status.message.lower() or "tracking" in status.message.lower()
+        assert "tracking" in status.message.lower()
 
 
 # ---------------------------------------------------------------------------
