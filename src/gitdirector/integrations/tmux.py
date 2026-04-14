@@ -57,6 +57,31 @@ def list_repo_sessions(repo_name: str) -> list[str]:
     return sorted([s for s in sessions if s.startswith(prefix)])
 
 
+def list_all_gd_sessions() -> list[dict[str, str]]:
+    """List all GitDirector tmux sessions (gd-* prefix).
+
+    Returns a list of dicts with keys: session_name, repo, slug.
+    """
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    sessions = result.stdout.strip().split("\n")
+    entries = []
+    for s in sorted(sessions):
+        if not s.startswith("gd-"):
+            continue
+        rest = s[3:]  # strip "gd-"
+        parts = rest.split("-", 1)
+        repo = parts[0] if parts else rest
+        slug = parts[1] if len(parts) > 1 else ""
+        entries.append({"session_name": s, "repo": repo, "slug": slug})
+    return entries
+
+
 def create_tmux_session(repo_name: str, path: Path) -> str:
     """Create a new detached tmux session with a unique name and return it."""
     for _ in range(10):
