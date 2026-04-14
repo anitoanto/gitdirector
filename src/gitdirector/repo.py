@@ -1,27 +1,27 @@
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-_AUTH_ERROR_PATTERNS = (
-    "could not read username",
-    "authentication failed",
-    "permission denied",
-    "terminal prompts disabled",
-    "could not read from remote repository",
-    "unable to access",
-    "returned error: 401",
-    "returned error: 403",
-    "invalid credentials",
-    "logon failed",
+_AUTH_ERROR_RE = re.compile(
+    r"could not read username"
+    r"|authentication failed"
+    r"|permission denied"
+    r"|terminal prompts disabled"
+    r"|could not read from remote repository"
+    r"|unable to access"
+    r"|returned error: 40[13]"
+    r"|invalid credentials"
+    r"|logon failed",
+    re.IGNORECASE,
 )
 
 
 def _is_auth_error(stderr: str) -> bool:
-    lower = stderr.lower()
-    return any(p in lower for p in _AUTH_ERROR_PATTERNS)
+    return _AUTH_ERROR_RE.search(stderr) is not None
 
 
 class RepoStatus(Enum):
@@ -94,38 +94,41 @@ class Repository:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         return out if code == 0 else None
 
-    def get_last_commit_date(self) -> Optional[str]:
-        code, out, _ = self._run_git("log", "-1", "--format=%cd", "--date=relative")
-        return out if code == 0 and out else None
-
-    def get_last_commit_timestamp(self) -> Optional[int]:
-        code, out, _ = self._run_git("log", "-1", "--format=%ct")
-        if code == 0 and out:
+    def get_last_commit_info(self) -> tuple[Optional[str], Optional[int]]:
+        code, out, _ = self._run_git("log", "-1", "--format=%cd%n%ct", "--date=relative")
+        if code != 0 or not out:
+            return None, None
+        lines = out.split("\n", 1)
+        date = lines[0] if lines[0] else None
+        ts: Optional[int] = None
+        if len(lines) > 1 and lines[1]:
             try:
-                return int(out)
+                ts = int(lines[1])
             except ValueError:
-                return None
-        return None
+                pass
+        return date, ts
 
     def get_tracked_size(self) -> Optional[int]:
         """Return total byte size of all tracked files (respects .gitignore)."""
-        code, out, _ = self._run_git("ls-files", "-z", _strip=False)
+        code, out, _ = self._run_git("ls-tree", "-r", "-l", "--full-tree", "HEAD", _strip=False)
         if code != 0 or not out:
             return None
         total = 0
-        for filename in out.split("\0"):
-            if not filename:
+        for line in out.split("\n"):
+            if not line:
                 continue
-            try:
-                total += (self.path / filename).stat().st_size
-            except OSError:
-                pass
+            parts = line.split(None, 4)
+            if len(parts) >= 4:
+                try:
+                    total += int(parts[3])
+                except ValueError:
+                    pass
         return total
 
     def get_status(self) -> RepositoryInfo:
         branch = self.get_current_branch()
 
-        code, out, err = self._run_git("fetch", "--dry-run")
+        code, out, err = self._run_git("fetch")
         if code != 0:
             return RepositoryInfo(self.path, self.name, RepoStatus.UNKNOWN, branch, err)
 
@@ -171,8 +174,7 @@ class Repository:
                         unstaged = True
                         unstaged_files.append(filename)
 
-        last_updated = self.get_last_commit_date()
-        last_commit_ts = self.get_last_commit_timestamp()
+        last_updated, last_commit_ts = self.get_last_commit_info()
         size = self.get_tracked_size()
 
         return RepositoryInfo(
