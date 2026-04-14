@@ -93,6 +93,14 @@ class GitDirectorConsole(App):
         padding: 2 4;
         content-align: center middle;
     }
+    .search-indicator {
+        dock: top;
+        height: 1;
+        display: none;
+        background: $accent 30%;
+        color: $text;
+        padding: 0 2;
+    }
     TabbedContent {
         height: 1fr;
     }
@@ -135,6 +143,7 @@ class GitDirectorConsole(App):
         yield Header(show_clock=True)
         with TabbedContent(id="tabs"):
             with TabPane("Repositories", id="repos"):
+                yield Static("", id="repo-search-indicator", classes="search-indicator")
                 yield DataTable(id="repo-table", cursor_type="row")
                 yield Static(
                     "No repositories linked.  Run"
@@ -142,6 +151,7 @@ class GitDirectorConsole(App):
                     id="no-repos-message",
                 )
             with TabPane("Sessions", id="sessions"):
+                yield Static("", id="sessions-search-indicator", classes="search-indicator")
                 yield DataTable(id="sessions-table", cursor_type="row")
                 yield Static(
                     "No active sessions.  Open a repository and start a tmux session"
@@ -354,6 +364,19 @@ class GitDirectorConsole(App):
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
 
+    def _update_search_indicator(self) -> None:
+        repo_ind = self.query_one("#repo-search-indicator", Static)
+        sess_ind = self.query_one("#sessions-search-indicator", Static)
+        if self._search_query:
+            text = f"Search results for '[bold]{self._search_query}[/bold]'  —  press [bold]esc[/bold] to clear"
+            repo_ind.update(text)
+            sess_ind.update(text)
+            repo_ind.display = True
+            sess_ind.display = True
+        else:
+            repo_ind.display = False
+            sess_ind.display = False
+
     def _get_selected_path(self) -> Path | None:
         table = self.query_one("#repo-table", DataTable)
         if table.row_count == 0:
@@ -390,6 +413,7 @@ class GitDirectorConsole(App):
             self.query_one("#search-bar", Input).value = ""
             container.display = False
             self._search_query = ""
+            self._update_search_indicator()
             if self._active_tab == "sessions":
                 self._apply_sessions_filter_and_sort()
             else:
@@ -397,6 +421,7 @@ class GitDirectorConsole(App):
             self._get_active_table().focus()
         elif self._search_query:
             self._search_query = ""
+            self._update_search_indicator()
             if self._active_tab == "sessions":
                 self._apply_sessions_filter_and_sort()
             else:
@@ -412,6 +437,12 @@ class GitDirectorConsole(App):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-bar":
+            self._search_query = event.value
+            self._update_search_indicator()
+            if self._active_tab == "sessions":
+                self._apply_sessions_filter_and_sort()
+            else:
+                self._apply_filter_and_sort()
             self.query_one("#search-container").display = False
             self._get_active_table().focus()
 

@@ -116,6 +116,17 @@ class TestLinkCommand:
         assert result.exit_code == 0
         assert "Added 2" in result.output
 
+    def test_link_discover_with_skipped(self, runner, tmp_path):
+        """--discover with skipped repos prints skipped messages."""
+        skipped = [tmp_path / "already-tracked"]
+        mgr = _mock_manager(
+            add_repository=(True, "Added 1 repository", [tmp_path / "new"], skipped)
+        )
+        with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
+        assert result.exit_code == 0
+        assert "skipped" in result.output.lower()
+
     def test_link_discover_none_found(self, runner, tmp_path):
         """--discover finds no repositories: should print message and succeed."""
         mgr = _mock_manager(add_repository=(True, "No repositories found", [], []))
@@ -272,6 +283,22 @@ class TestStatusCommand:
             "main",
             staged=True,
             staged_files=["a.py"],
+        )
+        mgr = _mock_manager(get_repository_status=info)
+        mgr.config.repositories = [fake_git_repo]
+        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0
+        assert "changed" in result.output.lower()
+
+    def test_dirty_with_unstaged(self, runner, fake_git_repo):
+        info = RepositoryInfo(
+            fake_git_repo,
+            fake_git_repo.name,
+            RepoStatus.UP_TO_DATE,
+            "main",
+            unstaged=True,
+            unstaged_files=["b.py"],
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
