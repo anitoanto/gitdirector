@@ -11,7 +11,17 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, LoadingIndicator, OptionList, Static
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    LoadingIndicator,
+    OptionList,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 from textual.widgets.option_list import Option
 
 from ..manager import RepositoryManager
@@ -54,12 +64,18 @@ _STATUS_ORDER = {
     RepoStatus.UNKNOWN: 4,
 }
 
+_SESSIONS_SORT_COLUMN_NAMES = {
+    0: "Session",
+    1: "Repository",
+    2: "Session Name",
+}
+
 
 _MODAL_CSS = """
     #menu-container {
         width: 50%;
         height: auto;
-        border: panel $panel;
+        border: round $primary;
         background: $panel;
         padding: 1 2;
     }
@@ -99,7 +115,11 @@ class ActionMenuScreen(ModalScreen[str]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = "ActionMenuScreen { align: center middle; }" + _MODAL_CSS
+    CSS = (
+        "ActionMenuScreen {"
+        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
+        " }" + _MODAL_CSS
+    )
 
     def __init__(self, repo_name: str, repo_path: Path, branch: str | None = None) -> None:
         super().__init__()
@@ -182,7 +202,11 @@ class RemoveSessionScreen(ModalScreen[str | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = "RemoveSessionScreen { align: center middle; }" + _MODAL_CSS
+    CSS = (
+        "RemoveSessionScreen {"
+        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
+        " }" + _MODAL_CSS
+    )
 
     def __init__(self, repo_name: str) -> None:
         super().__init__()
@@ -235,7 +259,10 @@ class ConfirmScreen(ModalScreen[bool]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = "ConfirmScreen { align: center middle; }" + _MODAL_CSS
+    CSS = (
+        "ConfirmScreen { align: center middle; background: $panel 80%; hatch: right $primary 30%; }"
+        + _MODAL_CSS
+    )
 
     def __init__(self, message: str) -> None:
         super().__init__()
@@ -272,18 +299,25 @@ class SortMenuScreen(ModalScreen[tuple | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = "SortMenuScreen { align: center middle; }" + _MODAL_CSS
+    CSS = (
+        "SortMenuScreen {"
+        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
+        " }" + _MODAL_CSS
+    )
 
-    def __init__(self, current_column: int, current_reverse: bool) -> None:
+    def __init__(
+        self, current_column: int, current_reverse: bool, column_names: dict[int, str] | None = None
+    ) -> None:
         super().__init__()
         self._current_column = current_column
         self._current_reverse = current_reverse
+        self._column_names = column_names or _SORT_COLUMN_NAMES
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
             yield Static("[bold white]Sort by[/bold white]", id="menu-title")
             items: list[Option] = []
-            for idx, name in _SORT_COLUMN_NAMES.items():
+            for idx, name in self._column_names.items():
                 if idx == self._current_column:
                     arrow = "▼" if self._current_reverse else "▲"
                     label = f"[cyan]● {name} {arrow}[/cyan]"
@@ -423,11 +457,28 @@ class GitDirectorConsole(App):
         display: none;
         align: center middle;
         color: $text-muted;
+        padding: 2 4;
+        content-align: center middle;
+    }
+    #no-sessions-message {
+        height: 1fr;
+        display: none;
+        align: center middle;
+        color: $text-muted;
+        padding: 2 4;
+        content-align: center middle;
+    }
+    TabbedContent {
+        height: 1fr;
+    }
+    TabPane {
+        padding: 0;
     }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
+        Binding("enter", "select_row", "Open", show=False),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
         Binding("r", "refresh", "Refresh", show=True),
@@ -436,6 +487,8 @@ class GitDirectorConsole(App):
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
         Binding("escape", "close_search", show=False),
+        Binding("1", "tab_repos", "Repos", show=True),
+        Binding("2", "tab_sessions", "Sessions", show=True),
     ]
 
     def __init__(self) -> None:
@@ -447,14 +500,29 @@ class GitDirectorConsole(App):
         self._search_query: str = ""
         self._sort_column: int = 0
         self._sort_reverse: bool = False
+        self._active_tab: str = "repos"
+        self._sessions_entries: list[dict[str, str]] = []
+        self._sessions_sort_column: int = 0
+        self._sessions_sort_reverse: bool = False
+        self._repos_stale: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield DataTable(id="repo-table", cursor_type="row")
-        yield Static(
-            "No repositories linked.  Run [bold]gitdirector link <path>[/bold] to get started.",
-            id="no-repos-message",
-        )
+        with TabbedContent(id="tabs"):
+            with TabPane("Repositories", id="repos"):
+                yield DataTable(id="repo-table", cursor_type="row")
+                yield Static(
+                    "No repositories linked.  Run"
+                    " [bold]gitdirector link <path>[/bold] to get started.",
+                    id="no-repos-message",
+                )
+            with TabPane("Sessions", id="sessions"):
+                yield DataTable(id="sessions-table", cursor_type="row")
+                yield Static(
+                    "No active sessions.  Open a repository and start a tmux session"
+                    " to see it here.",
+                    id="no-sessions-message",
+                )
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
             yield Input(placeholder="type to filter…", id="search-bar")
@@ -466,6 +534,8 @@ class GitDirectorConsole(App):
         self._col_keys = table.add_columns(
             "Repository", "Sync", "Branch", "Changes", "Last Commit", "Sessions", "Path"
         )
+        sessions_table = self.query_one("#sessions-table", DataTable)
+        self._sess_col_keys = sessions_table.add_columns("Session", "Repository", "Session Name")
         self._load_repos()
 
     @work(thread=True)
@@ -547,6 +617,110 @@ class GitDirectorConsole(App):
         self.query_one("#no-repos-message", Static).display = True
         self._update_status("No repositories linked")
 
+    # -- Tab switching --------------------------------------------------------
+
+    def action_tab_repos(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "repos"
+
+    def action_tab_sessions(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "sessions"
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        tab_id = event.pane.id or ""
+        self._active_tab = tab_id
+        if tab_id == "sessions":
+            self._load_sessions()
+        elif tab_id == "repos":
+            if self._repos_stale:
+                self._repos_stale = False
+                self._results.clear()
+                self._sessions_cache.clear()
+                self._load_repos()
+            else:
+                total = len(self._results)
+                shown = self.query_one("#repo-table", DataTable).row_count
+                self._update_status(self._build_loaded_status(shown, total))
+
+    @work(thread=True)
+    def _load_sessions(self) -> None:
+        from ..integrations.tmux import list_all_gd_sessions
+
+        self.call_from_thread(self._update_status, "Loading sessions…")
+        entries = list_all_gd_sessions()
+        self.call_from_thread(self._populate_sessions_table, entries)
+
+    def _populate_sessions_table(self, entries: list[dict[str, str]]) -> None:
+        self._sessions_entries = entries
+        self._apply_sessions_filter_and_sort()
+
+    def _apply_sessions_filter_and_sort(self) -> None:
+        table = self.query_one("#sessions-table", DataTable)
+        table.clear()
+        no_msg = self.query_one("#no-sessions-message", Static)
+
+        entries = list(self._sessions_entries)
+        total = len(entries)
+
+        if self._search_query:
+            q = self._search_query.lower()
+            entries = [
+                e
+                for e in entries
+                if q in e["session_name"].lower()
+                or q in e["repo"].lower()
+                or q in e["slug"].lower()
+            ]
+
+        sort_keys = {
+            0: lambda e: e["slug"].lower(),
+            1: lambda e: e["repo"].lower(),
+            2: lambda e: e["session_name"].lower(),
+        }
+        key_func = sort_keys.get(self._sessions_sort_column, sort_keys[0])
+        entries.sort(key=key_func, reverse=self._sessions_sort_reverse)
+
+        if not entries and total == 0 and not self._search_query:
+            table.display = False
+            no_msg.display = True
+        else:
+            table.display = True
+            no_msg.display = False
+            for entry in entries:
+                table.add_row(
+                    entry["slug"], entry["repo"], entry["session_name"], key=entry["session_name"]
+                )
+
+        self._update_status(self._build_sessions_loaded_status(len(entries), total))
+
+    def _build_sessions_loaded_status(self, shown: int, total: int) -> str:
+        if total == 0 and not self._search_query:
+            return "No active sessions"
+
+        if self._search_query:
+            count_str = f"{shown} of {total}"
+        else:
+            count_str = str(total)
+
+        label_count = shown if self._search_query else total
+        label = "session" if label_count == 1 else "sessions"
+        msg = f"{count_str} active {label}"
+
+        indicators: list[str] = []
+        if self._search_query:
+            indicators.append(f"filter: '{self._search_query}'")
+        if self._sessions_sort_column != 0 or self._sessions_sort_reverse:
+            direction = "▼" if self._sessions_sort_reverse else "▲"
+            indicators.append(
+                f"sort: {_SESSIONS_SORT_COLUMN_NAMES[self._sessions_sort_column]} {direction}"
+            )
+        if indicators:
+            msg += f"  ({', '.join(indicators)})"
+
+        msg += "   ↑↓/jk navigate  [enter] attach  1 repos  2 sessions  r refresh  q quit"
+        if self._search_query:
+            msg += "  [esc] clear search"
+        return msg
+
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
 
@@ -557,21 +731,22 @@ class GitDirectorConsole(App):
         row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
         return Path(str(row_key.value))
 
+    def _get_active_table(self) -> DataTable:
+        if self._active_tab == "sessions":
+            return self.query_one("#sessions-table", DataTable)
+        return self.query_one("#repo-table", DataTable)
+
     def action_cursor_down(self) -> None:
-        table = self.query_one("#repo-table", DataTable)
-        table.action_cursor_down()
+        self._get_active_table().action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        table = self.query_one("#repo-table", DataTable)
-        table.action_cursor_up()
+        self._get_active_table().action_cursor_up()
 
     def action_cursor_left(self) -> None:
-        table = self.query_one("#repo-table", DataTable)
-        table.scroll_left()
+        self._get_active_table().scroll_left()
 
     def action_cursor_right(self) -> None:
-        table = self.query_one("#repo-table", DataTable)
-        table.scroll_right()
+        self._get_active_table().scroll_right()
 
     # -- Search ---------------------------------------------------------------
 
@@ -581,37 +756,64 @@ class GitDirectorConsole(App):
 
     def action_close_search(self) -> None:
         container = self.query_one("#search-container")
-        if not container.display:
-            return
-        self.query_one("#search-bar", Input).value = ""
-        container.display = False
-        self._search_query = ""
-        self._apply_filter_and_sort()
-        self.query_one("#repo-table", DataTable).focus()
+        if container.display:
+            self.query_one("#search-bar", Input).value = ""
+            container.display = False
+            self._search_query = ""
+            if self._active_tab == "sessions":
+                self._apply_sessions_filter_and_sort()
+            else:
+                self._apply_filter_and_sort()
+            self._get_active_table().focus()
+        elif self._search_query:
+            self._search_query = ""
+            if self._active_tab == "sessions":
+                self._apply_sessions_filter_and_sort()
+            else:
+                self._apply_filter_and_sort()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search-bar":
             self._search_query = event.value
-            self._apply_filter_and_sort()
+            if self._active_tab == "sessions":
+                self._apply_sessions_filter_and_sort()
+            else:
+                self._apply_filter_and_sort()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-bar":
             self.query_one("#search-container").display = False
-            self.query_one("#repo-table", DataTable).focus()
+            self._get_active_table().focus()
 
     # -- Sort -----------------------------------------------------------------
 
     def action_sort(self) -> None:
-        self.push_screen(
-            SortMenuScreen(self._sort_column, self._sort_reverse),
-            callback=self._handle_sort_selection,
-        )
+        if self._active_tab == "sessions":
+            self.push_screen(
+                SortMenuScreen(
+                    self._sessions_sort_column,
+                    self._sessions_sort_reverse,
+                    _SESSIONS_SORT_COLUMN_NAMES,
+                ),
+                callback=self._handle_sessions_sort_selection,
+            )
+        else:
+            self.push_screen(
+                SortMenuScreen(self._sort_column, self._sort_reverse),
+                callback=self._handle_sort_selection,
+            )
 
     def _handle_sort_selection(self, result: tuple | None) -> None:
         if result is None:
             return
         self._sort_column, self._sort_reverse = result
         self._apply_filter_and_sort()
+
+    def _handle_sessions_sort_selection(self, result: tuple | None) -> None:
+        if result is None:
+            return
+        self._sessions_sort_column, self._sessions_sort_reverse = result
+        self._apply_sessions_filter_and_sort()
 
     # -- Filter / sort helpers ------------------------------------------------
 
@@ -686,10 +888,27 @@ class GitDirectorConsole(App):
             msg += f"  ({', '.join(indicators)})"
 
         msg += "   ↑↓/jk navigate  [enter] open  / search  s sort  r refresh  q quit"
+        if self._search_query:
+            msg += "  [esc] clear search"
         return msg
 
+    def action_select_row(self) -> None:
+        if self._active_tab == "sessions":
+            table = self.query_one("#sessions-table", DataTable)
+            if table.row_count == 0:
+                return
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            session_name = str(row_key.value)
+            self._suspend_and_attach(session_name)
+        else:
+            self.action_show_menu()
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        self.action_show_menu()
+        if event.data_table.id == "sessions-table":
+            session_name = str(event.row_key.value)
+            self._suspend_and_attach(session_name)
+        else:
+            self.action_show_menu()
 
     def action_open_tmux(self, agent_cmd: str | None = None) -> None:
         """Create a new tmux session and optionally launch an AI agent in it."""
@@ -710,9 +929,7 @@ class GitDirectorConsole(App):
             )
             self.push_screen(
                 _AgentLoadingScreen(agent_cmd, session_name),
-                callback=lambda _: self.set_timer(
-                    0.2, lambda: self._refresh_sessions_for_path(path)
-                ),
+                callback=lambda _: self.set_timer(0.2, lambda: self._refresh_repo_for_path(path)),
             )
         else:
             self._suspend_and_attach(session_name, path)
@@ -730,24 +947,22 @@ class GitDirectorConsole(App):
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()
 
+        self._repos_stale = True
         if path is not None:
-            self.set_timer(0.2, lambda: self._refresh_sessions_for_path(path))
+            self.set_timer(0.2, lambda: self._refresh_repo_for_path(path))
+        if self._active_tab == "sessions":
+            self.set_timer(0.3, lambda: self._load_sessions())
 
-    def _refresh_sessions_for_path(self, path: Path) -> None:
-        """Update only the sessions cell for the given repo path."""
+    @work(thread=True)
+    def _refresh_repo_for_path(self, path: Path) -> None:
+        """Re-fetch full repository status and session count for the given path."""
         from ..integrations.tmux import list_repo_sessions
 
-        count = len(list_repo_sessions(path.name))
-        self._sessions_cache[str(path)] = count
-        table = self.query_one("#repo-table", DataTable)
-        try:
-            table.update_cell(
-                str(path),
-                self._col_keys[5],
-                str(count) if count > 0 else "—",
-            )
-        except Exception:
-            pass
+        info = self.manager.get_repository_status(path)
+        self._results[str(path)] = info
+        sessions_count = len(list_repo_sessions(path.name))
+        self._sessions_cache[str(path)] = sessions_count
+        self.call_from_thread(self._update_row, info, sessions_count)
 
     def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""
@@ -809,6 +1024,8 @@ class GitDirectorConsole(App):
         self._results.clear()
         self._sessions_cache.clear()
         self._load_repos()
+        if self._active_tab == "sessions":
+            self._load_sessions()
 
 
 def _run_console() -> None:
