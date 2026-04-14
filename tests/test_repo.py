@@ -303,6 +303,20 @@ class TestPull:
 # ---------------------------------------------------------------------------
 
 
+class TestGetTrackedSizeValueError:
+    def test_non_integer_size_field(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(
+                0,
+                "100644 blob abc123       NaN\ta.txt\n100644 blob def456       6\tb.txt\n",
+                "",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+        assert repo.get_tracked_size() == 6
+
+
 class TestRepositoryInfo:
     def test_repr(self):
         info = RepositoryInfo(

@@ -305,3 +305,74 @@ class TestRepoGetStatusParsingErrors:
         status = repo.get_status()
         assert status.status == RepoStatus.UNKNOWN
         assert "upstream" in status.message.lower() or "tracking" in status.message.lower()
+
+
+# ---------------------------------------------------------------------------
+# pull._pull_one – direct unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestPullOne:
+    """Direct tests for _pull_one helper."""
+
+    def test_path_not_found(self, tmp_path):
+        from gitdirector.commands.pull import _pull_one
+
+        name, ok, msg = _pull_one(tmp_path / "gone")
+        assert ok is False
+        assert "path not found" in msg
+
+    def test_not_a_git_dir(self, tmp_path):
+        from gitdirector.commands.pull import _pull_one
+
+        d = tmp_path / "plain"
+        d.mkdir()
+        name, ok, msg = _pull_one(d)
+        assert ok is False
+        assert "path not found" in msg
+
+    def test_success(self, fake_git_repo, mocker):
+        from gitdirector.commands.pull import _pull_one
+
+        mocker.patch(
+            "subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="Already up to date.\n", stderr=""),
+        )
+        name, ok, msg = _pull_one(fake_git_repo)
+        assert ok is True
+        assert name == fake_git_repo.name
+
+    def test_exception(self, fake_git_repo, mocker):
+        from gitdirector.commands.pull import _pull_one
+
+        mocker.patch("gitdirector.commands.pull.Repository", side_effect=Exception("boom"))
+        name, ok, msg = _pull_one(fake_git_repo)
+        assert ok is False
+        assert "boom" in msg
+
+
+# ---------------------------------------------------------------------------
+# status._build_dirty_display – unstaged files
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDirtyDisplay:
+    """Direct tests for _build_dirty_display helper."""
+
+    def test_unstaged_files_rendered(self):
+        from pathlib import Path
+
+        from gitdirector.commands.status import _build_dirty_display
+        from gitdirector.repo import RepositoryInfo, RepoStatus
+
+        info = RepositoryInfo(
+            Path("/tmp/repo"),
+            "repo",
+            RepoStatus.UP_TO_DATE,
+            "main",
+            unstaged=True,
+            unstaged_files=["file.py"],
+        )
+        output = _build_dirty_display([info])
+        assert "unstaged:" in output.plain
+        assert "file.py" in output.plain
