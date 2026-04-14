@@ -21,7 +21,7 @@ from textual.widgets import (
 )
 
 from ...manager import RepositoryManager
-from ...repo import RepositoryInfo, RepoStatus
+from ...repo import RepositoryInfo
 from .constants import (
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
