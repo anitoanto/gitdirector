@@ -6,7 +6,6 @@ from textual.binding import Binding
 
 from ...repo import RepositoryInfo, RepoStatus
 
-
 _STATUS_LABEL = {
     RepoStatus.UP_TO_DATE: "up to date",
     RepoStatus.BEHIND: "behind",
