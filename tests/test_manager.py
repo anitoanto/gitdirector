@@ -148,6 +148,16 @@ class TestRemoveByName:
         assert "multiple" in msg.lower()
         assert removed == []
 
+    def test_remove_by_name_config_exception(self, manager, fake_git_repo, mocker):
+        manager.add_repository(fake_git_repo)
+        mocker.patch.object(
+            manager.config, "remove_repository", side_effect=Exception("Write failed")
+        )
+        ok, msg, removed = manager.remove_by_name(fake_git_repo.name)
+        assert ok is False
+        assert "Error removing repository" in msg
+        assert removed == []
+
 
 # ---------------------------------------------------------------------------
 # remove – discover

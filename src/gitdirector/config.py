@@ -20,9 +20,11 @@ class Config:
             with open(self.config_file, "r") as f:
                 data = yaml.safe_load(f) or {}
                 self.repositories = [Path(p) for p in data.get("repositories", [])]
+                self._repo_set: set[Path] = set(self.repositories)
                 self.max_workers = int(data.get("max_workers", self.DEFAULT_MAX_WORKERS))
         else:
             self.repositories = []
+            self._repo_set: set[Path] = set()
             self.max_workers = self.DEFAULT_MAX_WORKERS
 
     def save(self) -> None:
@@ -33,22 +35,47 @@ class Config:
             yaml.dump(data, f, default_flow_style=False)
 
     def add_repository(self, path: Path) -> bool:
-        if path not in self.repositories:
+        if path not in self._repo_set:
             self.repositories.append(path)
+            self._repo_set.add(path)
             self.save()
             return True
         return False
+
+    def add_repositories(self, paths: list[Path]) -> int:
+        count = 0
+        for path in paths:
+            if path not in self._repo_set:
+                self.repositories.append(path)
+                self._repo_set.add(path)
+                count += 1
+        if count:
+            self.save()
+        return count
 
     def remove_repository(self, path: Path) -> bool:
-        if path in self.repositories:
+        if path in self._repo_set:
             self.repositories.remove(path)
+            self._repo_set.discard(path)
             self.save()
             return True
         return False
 
+    def remove_repositories(self, paths: list[Path]) -> int:
+        count = 0
+        for path in paths:
+            if path in self._repo_set:
+                self.repositories.remove(path)
+                self._repo_set.discard(path)
+                count += 1
+        if count:
+            self.save()
+        return count
+
     def has_repository(self, path: Path) -> bool:
-        return path in self.repositories
+        return path in self._repo_set
 
     def clear(self) -> None:
         self.repositories = []
+        self._repo_set = set()
         self.save()

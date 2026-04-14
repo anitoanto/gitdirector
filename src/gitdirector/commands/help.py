@@ -1,14 +1,14 @@
 import click
 from rich.table import Table
 
-from . import __version__, console
+from . import get_version, console
 
 
 def show_help():
     console.print()
     console.print(
         f" [bold white]GITDIRECTOR[/bold white]  "
-        f"[dim]v{__version__} - Manage multiple git repositories[/dim]\n"
+        f"[dim]v{get_version()} - Manage multiple git repositories[/dim]\n"
     )
 
     console.print(" [dim]Commands[/dim]\n")

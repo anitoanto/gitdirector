@@ -52,9 +52,7 @@ class TestAutocleanLinks:
         assert result.exit_code == 0
         assert "2" in result.output
         assert "Removed" in result.output
-        assert config.remove_repository.call_count == 2
-        config.remove_repository.assert_any_call(broken1)
-        config.remove_repository.assert_any_call(broken2)
+        config.remove_repositories.assert_called_once_with([broken1, broken2])
 
     def test_broken_links_cancelled(self, runner, tmp_path):
         """When user declines, no links are removed."""
