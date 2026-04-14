@@ -177,18 +177,25 @@ class GitDirectorConsole(App):
         done = 0
         self.call_from_thread(self._update_status, f"Checking {total} repositories…")
 
+        from ...integrations.tmux import _alphanumeric_name, list_all_gd_sessions
+
+        all_sessions = list_all_gd_sessions()
+        sessions_by_repo: dict[str, int] = {}
+        for entry in all_sessions:
+            repo = entry["repo"]
+            sessions_by_repo[repo] = sessions_by_repo.get(repo, 0) + 1
+
         with ThreadPoolExecutor(max_workers=self.manager.config.max_workers) as executor:
             futures = {
                 executor.submit(self.manager.get_repository_status, path): path
                 for path in self._repo_paths
             }
             for future in as_completed(futures):
-                from ...integrations.tmux import list_repo_sessions
-
                 info = future.result()
                 self._results[str(info.path)] = info
                 done += 1
-                sessions_count = len(list_repo_sessions(info.path.name))
+                clean_name = _alphanumeric_name(info.path.name)
+                sessions_count = sessions_by_repo.get(clean_name, 0)
                 self._sessions_cache[str(info.path)] = sessions_count
                 self.call_from_thread(self._update_row, info, sessions_count)
                 remaining = total - done

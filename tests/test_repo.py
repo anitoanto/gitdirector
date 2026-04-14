@@ -103,18 +103,20 @@ class TestGetCurrentBranch:
 
 
 # ---------------------------------------------------------------------------
-# get_last_commit_date
+# get_last_commit_info
 # ---------------------------------------------------------------------------
 
 
-class TestGetLastCommitDate:
+class TestGetLastCommitInfo:
     def test_success(self, fake_git_repo, mocker):
         mocker.patch(
             "subprocess.run",
-            return_value=_make_run_result(0, "2 hours ago\n", ""),
+            return_value=_make_run_result(0, "2 hours ago\n1700000000\n", ""),
         )
         repo = Repository(fake_git_repo)
-        assert repo.get_last_commit_date() == "2 hours ago"
+        date, ts = repo.get_last_commit_info()
+        assert date == "2 hours ago"
+        assert ts == 1700000000
 
     def test_empty_repo(self, fake_git_repo, mocker):
         mocker.patch(
@@ -122,7 +124,9 @@ class TestGetLastCommitDate:
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
-        assert repo.get_last_commit_date() is None
+        date, ts = repo.get_last_commit_info()
+        assert date is None
+        assert ts is None
 
 
 # ---------------------------------------------------------------------------
@@ -132,13 +136,13 @@ class TestGetLastCommitDate:
 
 class TestGetTrackedSize:
     def test_computes_total(self, fake_git_repo, mocker):
-        # Create files first
-        (fake_git_repo / "a.txt").write_text("hello")  # 5 bytes
-        (fake_git_repo / "b.txt").write_text("world!")  # 6 bytes
-
         mocker.patch(
             "subprocess.run",
-            return_value=_make_run_result(0, "a.txt\0b.txt\0", ""),
+            return_value=_make_run_result(
+                0,
+                "100644 blob abc123       5\ta.txt\n100644 blob def456       6\tb.txt\n",
+                "",
+            ),
         )
         repo = Repository(fake_git_repo)
         assert repo.get_tracked_size() == 11
@@ -158,16 +162,6 @@ class TestGetTrackedSize:
         )
         repo = Repository(fake_git_repo)
         assert repo.get_tracked_size() is None
-
-    def test_missing_file_skipped(self, fake_git_repo, mocker):
-        (fake_git_repo / "exists.txt").write_text("data")  # 4 bytes
-
-        mocker.patch(
-            "subprocess.run",
-            return_value=_make_run_result(0, "exists.txt\0gone.txt\0", ""),
-        )
-        repo = Repository(fake_git_repo)
-        assert repo.get_tracked_size() == 4
 
 
 # ---------------------------------------------------------------------------
