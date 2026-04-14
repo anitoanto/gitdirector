@@ -131,11 +131,11 @@ class RepositoryManager:
         except Exception as e:
             return False, f"Error removing repositories: {str(e)}", []
 
-    def get_repository_status(self, path: Path) -> RepositoryInfo:
+    def get_repository_status(self, path: Path, *, fetch: bool = False) -> RepositoryInfo:
         if path.exists() and (path / ".git").is_dir():
             try:
                 repo = Repository(path)
-                return repo.get_status()
+                return repo.get_status(fetch=fetch)
             except Exception as e:
                 return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(e))
         return RepositoryInfo(
