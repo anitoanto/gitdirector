@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -155,6 +156,22 @@ def _count_tokens(text: str) -> int:
         return len(encoder.encode(text, disallowed_special=()))
 
 
+def _process_file(repo_path: Path, rel_path: str) -> tuple[str, str, int | None, int | None]:
+    _, ext = os.path.splitext(rel_path)
+    ext = ext.lower() if ext else "(no ext)"
+
+    if ext != "(no ext)" and ext in _BINARY_EXTENSIONS:
+        return rel_path, ext, None, None
+
+    text = _read_text(repo_path / rel_path)
+    if text is None:
+        return rel_path, ext, None, None
+
+    lines = _count_lines_from_text(text)
+    tokens = _count_tokens(text)
+    return rel_path, ext, lines, tokens
+
+
 def gather_repo_info(repo_path: Path, *, full: bool = False) -> RepoInfoResult:
     files = _get_non_ignored_files(repo_path)
     total_files = len(files)
@@ -164,6 +181,8 @@ def gather_repo_info(repo_path: Path, *, full: bool = False) -> RepoInfoResult:
             total_files=0, file_types=[], total_lines=0, total_tokens=0, max_depth=0
         )
 
+    _get_encoder()
+
     ext_counter: Counter[str] = Counter()
     ext_line_counts: dict[str, int] = {}
     ext_token_counts: dict[str, int] = {}
@@ -172,24 +191,17 @@ def gather_repo_info(repo_path: Path, *, full: bool = False) -> RepoInfoResult:
     total_lines = 0
     total_tokens = 0
 
-    for rel_path in files:
+    with ThreadPoolExecutor() as pool:
+        results = pool.map(_process_file, [repo_path] * total_files, files)
+
+    for rel_path, ext, lines, tokens in results:
         depth = rel_path.count("/")
         if depth > max_depth:
             max_depth = depth
 
-        _, ext = os.path.splitext(rel_path)
-        ext = ext.lower() if ext else "(no ext)"
         ext_counter[ext] += 1
 
-        if ext != "(no ext)" and ext in _BINARY_EXTENSIONS:
-            ext_has_text.setdefault(ext, False)
-            continue
-
-        full_path = repo_path / rel_path
-        text = _read_text(full_path)
-        if text is not None:
-            lines = _count_lines_from_text(text)
-            tokens = _count_tokens(text)
+        if lines is not None and tokens is not None:
             total_lines += lines
             total_tokens += tokens
             ext_line_counts[ext] = ext_line_counts.get(ext, 0) + lines
