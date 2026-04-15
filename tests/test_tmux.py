@@ -32,6 +32,9 @@ from gitdirector.integrations.tmux import (
     resolve_pane_status,
 )
 
+REAL_TMUX_MONITOR_START = TmuxMonitor.start
+REAL_TMUX_MONITOR_STOP = TmuxMonitor.stop
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
@@ -399,6 +402,12 @@ class TestResolvePaneCommand:
 
 class TestGetAllSessionStatuses:
     @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_empty_when_no_gd_panes_exist(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="other-session|bash|0|301\n")
+
+        assert get_all_session_statuses() == {}
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_parses_output(self, mock_run):
         mock_run.side_effect = [
             MagicMock(
@@ -611,6 +620,25 @@ class TestControlModeReader:
 
         reader._process.kill.assert_called_once_with()
 
+    def test_stop_waits_for_process_when_terminate_succeeds(self):
+        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
+        reader._process = MagicMock()
+
+        reader.stop()
+
+        reader._process.terminate.assert_called_once_with()
+        reader._process.wait.assert_called_once_with(timeout=2)
+
+    def test_stop_ignores_kill_failure(self):
+        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
+        reader._process = MagicMock()
+        reader._process.terminate.side_effect = RuntimeError("boom")
+        reader._process.kill.side_effect = RuntimeError("still broken")
+
+        reader.stop()
+
+        reader._process.kill.assert_called_once_with()
+
     def test_is_alive_reflects_thread_state(self):
         reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
         reader._running = True
@@ -666,6 +694,37 @@ class TestControlModeReader:
         assert reader._running is False
         assert reader._process is None
 
+    @patch("gitdirector.integrations.tmux.subprocess.Popen")
+    def test_run_stops_before_parsing_when_not_running(self, mock_popen):
+        events = []
+        process = MagicMock()
+        process.stdout = iter(["%bell @0 0\n"])
+        mock_popen.return_value = process
+        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
+        reader._running = False
+
+        reader._run()
+
+        assert events == []
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
+
+    @patch("gitdirector.integrations.tmux.subprocess.Popen")
+    def test_run_ignores_kill_failure_during_cleanup(self, mock_popen):
+        process = MagicMock()
+        process.stdout = iter(())
+        process.terminate.side_effect = RuntimeError("boom")
+        process.kill.side_effect = RuntimeError("still broken")
+        mock_popen.return_value = process
+        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
+        reader._running = True
+
+        reader._run()
+
+        process.kill.assert_called_once_with()
+        assert reader._running is False
+        assert reader._process is None
+
     @patch("gitdirector.integrations.tmux.subprocess.Popen", side_effect=RuntimeError("boom"))
     def test_run_ignores_popen_errors(self, _mock_popen):
         reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
@@ -678,6 +737,36 @@ class TestControlModeReader:
 
 
 class TestTmuxMonitor:
+    @patch("gitdirector.integrations.tmux.threading.Thread")
+    def test_start_spawns_sync_thread_once(self, mock_thread_cls):
+        monitor = TmuxMonitor()
+        thread = MagicMock()
+        mock_thread_cls.return_value = thread
+
+        REAL_TMUX_MONITOR_START(monitor)
+        REAL_TMUX_MONITOR_START(monitor)
+
+        assert monitor._running is True
+        mock_thread_cls.assert_called_once_with(target=monitor._sync_sessions, daemon=True)
+        thread.start.assert_called_once_with()
+
+    def test_stop_stops_all_readers_and_clears_registry(self):
+        monitor = TmuxMonitor()
+        reader_one = MagicMock()
+        reader_two = MagicMock()
+        monitor._readers = {
+            "gd/alpha/shell/1": reader_one,
+            "gd/beta/claude/1": reader_two,
+        }
+        monitor._running = True
+
+        REAL_TMUX_MONITOR_STOP(monitor)
+
+        assert monitor._running is False
+        assert monitor._readers == {}
+        reader_one.stop.assert_called_once_with()
+        reader_two.stop.assert_called_once_with()
+
     @patch("gitdirector.integrations.tmux._ControlModeReader")
     def test_add_reader_starts_control_reader(self, mock_reader_cls):
         monitor = TmuxMonitor()
