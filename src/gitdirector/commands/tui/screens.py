@@ -15,6 +15,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from ...info import RepoInfoResult
 from .constants import _MODAL_BINDINGS, _MODAL_CSS, _SORT_COLUMN_NAMES
 
 
@@ -364,4 +365,102 @@ class AgentLoadingScreen(ModalScreen[None]):
             except (AttributeError, OSError):
                 pass
 
+        self.dismiss(None)
+
+
+class RepoInfoScreen(ModalScreen[None]):
+    """Modal popup showing repository file statistics."""
+
+    BINDINGS = [_MODAL_BINDINGS[0]]
+
+    CSS = (
+        "RepoInfoScreen {"
+        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
+        " }"
+        """
+    #info-container {
+        width: 80;
+        height: auto;
+        border: round $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    #info-title {
+        text-align: center;
+        padding: 1 1 0 1;
+        color: $text;
+    }
+    #info-path {
+        text-align: center;
+        padding: 0 1 1 1;
+        color: $text-muted;
+    }
+    #info-loading {
+        height: 3;
+        padding: 1 0;
+    }
+    #info-stats {
+        padding: 0 3;
+        color: $text;
+        text-align: center;
+    }
+    #info-table {
+        padding: 1 3 0 3;
+        color: $text;
+        text-align: center;
+    }
+    #info-hint {
+        text-align: center;
+        padding: 1 1 1 1;
+        color: $text-muted;
+    }
+    """
+    )
+
+    def __init__(self, repo_name: str, repo_path: Path) -> None:
+        super().__init__()
+        self.repo_name = repo_name
+        self.repo_path = repo_path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="info-container"):
+            yield Static(
+                f"[bold white]{self.repo_name}[/bold white]",
+                id="info-title",
+            )
+            yield Static(
+                f"[dim]{self.repo_path}[/dim]",
+                id="info-path",
+            )
+            yield LoadingIndicator(id="info-loading")
+            yield Static("", id="info-hint")
+
+    def populate(self, result: RepoInfoResult) -> None:
+        self.query_one("#info-loading", LoadingIndicator).remove()
+        r = result
+        stats = Static(
+            f"[dim]Files[/dim]  [bold white]{r.total_files:,}[/bold white]    "
+            f"[dim]Lines[/dim]  [bold white]{r.total_lines:,}[/bold white]\n"
+            f"[dim]Tokens[/dim]  [bold white]{r.total_tokens:,}[/bold white]    "
+            f"[dim]Max Depth[/dim]  [bold white]{r.max_depth}[/bold white]",
+            id="info-stats",
+        )
+        hint = self.query_one("#info-hint", Static)
+        hint.mount(stats, before=hint)
+        if r.file_types:
+            rows = f"[dim]{'':>2}{'EXTENSION':<12} {'FILES':>6}   {'LINES':>8}   {'TOKENS':>10}[/dim]\n"
+            for ft in r.file_types:
+                lines_str = f"{ft.line_count:,}" if ft.line_count is not None else "-"
+                tokens_str = f"{ft.token_count:,}" if ft.token_count is not None else "-"
+                rows += (
+                    f"[cyan]  {ft.extension:<12}[/cyan]"
+                    f" [white]{ft.count:>6}[/white]"
+                    f"   [dim]{lines_str:>8}[/dim]"
+                    f"   [dim]{tokens_str:>10}[/dim]\n"
+                )
+            table = Static(rows.rstrip(), id="info-table")
+            hint.mount(table, before=hint)
+        hint.update("\\[esc] close")
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

@@ -15,6 +15,7 @@ from .screens import (
     AgentLoadingScreen,
     ConfirmScreen,
     RemoveSessionScreen,
+    RepoInfoScreen,
     SortMenuScreen,
 )
 
@@ -24,6 +25,7 @@ __all__ = [
     "ConfirmScreen",
     "GitDirectorConsole",
     "RemoveSessionScreen",
+    "RepoInfoScreen",
     "SortMenuScreen",
     "_SESSION_STATUS_LABEL",
     "_SESSION_STATUS_ORDER",

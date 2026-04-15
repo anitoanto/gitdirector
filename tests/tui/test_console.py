@@ -9,6 +9,7 @@ from textual.widgets import DataTable, Static
 
 from gitdirector.commands.tui import GitDirectorConsole
 from gitdirector.commands.tui.app import _run_console
+from gitdirector.info import RepoInfoResult
 from gitdirector.repo import RepoStatus
 
 from .conftest import _make_info, _mock_manager
@@ -341,6 +342,79 @@ class TestGitDirectorConsoleActionRouting:
 
 
 class TestGitDirectorConsoleDirectBranches:
+    def test_action_show_info_ignored_outside_repo_tab(self):
+        app = GitDirectorConsole()
+        app._active_tab = "sessions"
+        app._get_selected_path = MagicMock()
+
+        app.action_show_info()
+
+        app._get_selected_path.assert_not_called()
+
+    def test_action_show_info_ignored_without_selected_path(self):
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._get_selected_path = MagicMock(return_value=None)
+        app.push_screen = MagicMock()
+        app._gather_and_show_info = MagicMock()
+
+        app.action_show_info()
+
+        app.push_screen.assert_not_called()
+        app._gather_and_show_info.assert_not_called()
+
+    @patch("gitdirector.commands.tui.app.RepoInfoScreen")
+    def test_action_show_info_pushes_screen_and_starts_worker(self, mock_screen_cls):
+        path = Path("/tmp/alpha")
+        screen = MagicMock()
+        mock_screen_cls.return_value = screen
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._get_selected_path = MagicMock(return_value=path)
+        app.push_screen = MagicMock()
+        app._gather_and_show_info = MagicMock()
+
+        app.action_show_info()
+
+        mock_screen_cls.assert_called_once_with("alpha", path)
+        app.push_screen.assert_called_once_with(screen)
+        app._gather_and_show_info.assert_called_once_with(path, screen)
+
+    @patch("gitdirector.info.gather_repo_info")
+    def test_gather_and_show_info_populates_screen_from_worker(self, mock_gather):
+        path = Path("/tmp/alpha")
+        result = RepoInfoResult(0, [], 0, 0, 0)
+        screen = MagicMock()
+        app = GitDirectorConsole()
+        app.call_from_thread = MagicMock()
+        mock_gather.return_value = result
+
+        GitDirectorConsole._gather_and_show_info.__wrapped__(app, path, screen)
+
+        mock_gather.assert_called_once_with(path)
+        app.call_from_thread.assert_called_once_with(screen.populate, result)
+
+    @patch("gitdirector.commands.tui.app.RepoInfoScreen")
+    def test_push_info_screen_updates_status(self, mock_screen_cls):
+        path = Path("/tmp/alpha")
+        screen = MagicMock()
+        table = MagicMock()
+        table.row_count = 2
+        mock_screen_cls.return_value = screen
+        app = GitDirectorConsole()
+        app._results = [object(), object(), object()]
+        app.push_screen = MagicMock()
+        app.query_one = MagicMock(return_value=table)
+        app._build_loaded_status = MagicMock(return_value="2/3 loaded")
+        app._update_status = MagicMock()
+
+        app._push_info_screen("alpha", path, object())
+
+        mock_screen_cls.assert_called_once_with("alpha", path)
+        app.push_screen.assert_called_once_with(screen)
+        app._build_loaded_status.assert_called_once_with(2, 3)
+        app._update_status.assert_called_once_with("2/3 loaded")
+
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     def test_load_repos_reapplies_filter_when_search_active(self, _mock_sessions):
         info = _make_info("alpha", Path("/tmp/alpha"))

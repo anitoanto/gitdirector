@@ -45,6 +45,14 @@ Notes:
 - agent sessions prefer the actual agent process over helper children like node
 - background status refresh updates status cells in place and does not reorder rows
 
+## Repo Info Tokens
+
+`gitdirector info` computes token counts with `tiktoken` using the `cl100k_base` encoding.
+
+This is the same tokenizer family used by OpenAI embedding models such as `text-embedding-3-small`, `text-embedding-3-large`, and the older `text-embedding-ada-002`.
+
+Special-token-like strings in source files are counted as normal text so token counting does not fail on content like `<|endoftext|>`.
+
 ## Tests
 
 ```bash
