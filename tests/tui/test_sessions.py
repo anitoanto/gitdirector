@@ -398,6 +398,42 @@ class TestSessionsSearchAndSort:
             assert "\u25bc" in status_text
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_status_refresh_does_not_resort_rows_when_sorted_by_status(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._sessions_sort_column = 0
+            app._sessions_sort_reverse = False
+            app._session_statuses = {
+                "gd/alpha/shell/1": {"command": "python", "dead": False},
+                "gd/beta/claude/1": {"command": "zsh", "dead": False},
+                "gd/gamma/copilot/1": {"command": "zsh", "dead": False},
+            }
+            app._apply_sessions_filter_and_sort()
+
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/alpha/shell/1"
+
+            app._session_statuses = {
+                "gd/alpha/shell/1": {"command": "zsh", "dead": False},
+                "gd/beta/claude/1": {"command": "python", "dead": False},
+                "gd/gamma/copilot/1": {"command": "zsh", "dead": False},
+            }
+            app._active_tab = "sessions"
+            app._on_statuses_updated()
+            await pilot.pause()
+
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/alpha/shell/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_sort_action_on_sessions_tab(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()

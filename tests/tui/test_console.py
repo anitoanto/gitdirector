@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from textual.widgets import DataTable, Static
 
 from gitdirector.commands.tui import GitDirectorConsole
+from gitdirector.commands.tui.app import _run_console
 from gitdirector.repo import RepoStatus
 
 from .conftest import _make_info, _mock_manager
@@ -337,6 +338,146 @@ class TestGitDirectorConsoleActionRouting:
         app.push_screen = MagicMock()
         app._handle_remove_selection("gd-test")
         app.push_screen.assert_called_once()
+
+
+class TestGitDirectorConsoleDirectBranches:
+    def test_trigger_status_poll_delegates_to_worker(self):
+        app = GitDirectorConsole()
+        app._poll_session_statuses = MagicMock()
+
+        app._trigger_status_poll()
+
+        app._poll_session_statuses.assert_called_once_with()
+
+    def test_resolve_session_status_waits_without_tmux_info(self):
+        app = GitDirectorConsole()
+        app._monitor = MagicMock()
+        app._monitor.get_bell_state.return_value = True
+        app._session_statuses = {}
+
+        status = app._resolve_session_status(
+            {"session_name": "gd/alpha/shell/1", "purpose": "shell"}
+        )
+
+        assert status == "waiting"
+
+    def test_resolve_session_status_runs_without_tmux_info(self):
+        app = GitDirectorConsole()
+        app._monitor = MagicMock()
+        app._monitor.get_bell_state.return_value = False
+        app._session_statuses = {}
+
+        status = app._resolve_session_status(
+            {"session_name": "gd/alpha/shell/1", "purpose": "shell"}
+        )
+
+        assert status == "running"
+
+    def test_on_statuses_updated_refreshes_repo_status_bar_when_waiting_changes(self):
+        app = GitDirectorConsole()
+        app._sessions_entries = [{"session_name": "gd/alpha/shell/1", "purpose": "shell"}]
+        app._resolve_session_status = MagicMock(return_value="waiting")
+        app._waiting_count = 0
+        app._active_tab = "repos"
+        app._results = {"/tmp/alpha": object()}
+        table = MagicMock()
+        table.row_count = 1
+        app.query_one = MagicMock(return_value=table)
+        app._build_loaded_status = MagicMock(return_value="1 repository loaded")
+        app._update_status = MagicMock()
+
+        app._on_statuses_updated()
+
+        assert app._sessions_entries[0]["status"] == "waiting"
+        assert app._waiting_count == 1
+        app._update_status.assert_called_once_with("1 repository loaded")
+
+    def test_update_session_status_cells_ignores_table_errors(self):
+        app = GitDirectorConsole()
+        app._sessions_entries = [{"session_name": "gd/alpha/shell/1", "purpose": "shell"}]
+        app._sess_col_keys = ("status",)
+        app._resolve_session_status = MagicMock(return_value="waiting")
+        table = MagicMock()
+        table.update_cell.side_effect = RuntimeError("boom")
+        app.query_one = MagicMock(return_value=table)
+
+        app._update_session_status_cells()
+
+        assert app._sessions_entries[0]["status"] == "waiting"
+
+    def test_build_loaded_status_includes_waiting_count(self):
+        app = GitDirectorConsole()
+        app._waiting_count = 2
+
+        msg = app._build_loaded_status(3, 3)
+
+        assert "2 sessions waiting" in msg
+
+    @patch("gitdirector.integrations.tmux.create_tmux_session", return_value="gd/alpha/shell/1")
+    def test_action_open_tmux_shell_attaches_to_new_session(self, mock_create):
+        app = GitDirectorConsole()
+        app._get_selected_path = MagicMock(return_value=Path("/tmp/alpha"))
+        app._suspend_and_attach = MagicMock()
+
+        app.action_open_tmux()
+
+        mock_create.assert_called_once_with("alpha", Path("/tmp/alpha"), purpose="shell")
+        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
+
+    def test_action_open_tmux_without_selection_is_noop(self):
+        app = GitDirectorConsole()
+        app._get_selected_path = MagicMock(return_value=None)
+        app._suspend_and_attach = MagicMock()
+
+        app.action_open_tmux()
+
+        app._suspend_and_attach.assert_not_called()
+
+    def test_action_show_menu_without_selection_is_noop(self):
+        app = GitDirectorConsole()
+        app._get_selected_path = MagicMock(return_value=None)
+        app.push_screen = MagicMock()
+
+        app.action_show_menu()
+
+        app.push_screen.assert_not_called()
+
+    def test_handle_remove_selection_none_is_noop(self):
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+
+        app._handle_remove_selection(None)
+
+        app.push_screen.assert_not_called()
+
+    def test_action_refresh_loads_sessions_on_sessions_tab(self):
+        app = GitDirectorConsole()
+        app._results = {"/tmp/alpha": object()}
+        app._sessions_cache = {"/tmp/alpha": 1}
+        app._load_repos = MagicMock()
+        app._load_sessions = MagicMock()
+        app._active_tab = "sessions"
+
+        app.action_refresh()
+
+        assert app._results == {}
+        assert app._sessions_cache == {}
+        app._load_repos.assert_called_once_with()
+        app._load_sessions.assert_called_once_with()
+
+    @patch("gitdirector.commands.tui.app.GitDirectorConsole")
+    def test_run_console_stops_monitor_when_run_raises(self, mock_console_cls):
+        app = MagicMock()
+        app.run.side_effect = RuntimeError("boom")
+        mock_console_cls.return_value = app
+
+        with patch.object(app._monitor, "stop") as mock_stop:
+            try:
+                _run_console()
+            except RuntimeError:
+                pass
+
+        mock_stop.assert_called_once_with()
 
 
 class TestBuildLoadedStatus:
