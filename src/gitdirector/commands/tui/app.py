@@ -133,6 +133,8 @@ class GitDirectorConsole(App):
 
     def __init__(self) -> None:
         super().__init__()
+        from ...integrations.tmux import TmuxMonitor
+
         self.manager = RepositoryManager()
         self.theme = self.manager.config.theme
         self._repo_paths: list[Path] = []
@@ -146,7 +148,7 @@ class GitDirectorConsole(App):
         self._sessions_sort_column: int = _DEFAULT_SESSIONS_SORT_COLUMN
         self._sessions_sort_reverse: bool = False
         self._repos_stale: bool = False
-        self._bell_seen: set[str] = set()
+        self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
         self._waiting_count: int = 0
         self._resume_target_tab: str | None = None
@@ -191,6 +193,7 @@ class GitDirectorConsole(App):
         )
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
+        self._monitor.start()
         self._load_repos()
 
     @work(thread=True)
@@ -365,11 +368,6 @@ class GitDirectorConsole(App):
         self.call_from_thread(self._update_status, "Loading sessions…")
         entries = list_all_gd_sessions()
         statuses = get_all_session_statuses()
-        for session_name, info in statuses.items():
-            if info["bell"]:
-                self._bell_seen.add(session_name)
-        existing = set(statuses.keys())
-        self._bell_seen &= existing
         self._session_statuses = statuses
         self.call_from_thread(self._populate_sessions_table, entries)
 
@@ -471,25 +469,22 @@ class GitDirectorConsole(App):
         from ...integrations.tmux import get_all_session_statuses
 
         statuses = get_all_session_statuses()
-        for session_name, info in statuses.items():
-            if info["bell"]:
-                self._bell_seen.add(session_name)
-        existing = set(statuses.keys())
-        self._bell_seen &= existing
         self._session_statuses = statuses
         self.call_from_thread(self._on_statuses_updated)
 
     def _on_statuses_updated(self) -> None:
         waiting = 0
         for entry in self._sessions_entries:
-            if self._resolve_session_status(entry) == "waiting":
+            new_status = self._resolve_session_status(entry)
+            entry["status"] = new_status
+            if new_status == "waiting":
                 waiting += 1
-        changed = waiting != self._waiting_count
+        count_changed = waiting != self._waiting_count
         self._waiting_count = waiting
 
         if self._active_tab == "sessions" and self._sessions_entries:
             self._update_session_status_cells()
-        elif changed:
+        elif count_changed:
             total = len(self._results)
             shown = self.query_one("#repo-table", DataTable).row_count
             self._update_status(self._build_loaded_status(shown, total))
@@ -498,16 +493,17 @@ class GitDirectorConsole(App):
         from ...integrations.tmux import resolve_pane_status
 
         session_name = entry["session_name"]
-        if session_name in self._bell_seen:
-            return "waiting"
+        bell = self._monitor.get_bell_state(session_name)
         tmux_info = self._session_statuses.get(session_name)
         if tmux_info is None:
-            return "running"
+            return "waiting" if bell else "running"
+        last_content_change = self._monitor.get_last_content_change_time(session_name)
         return resolve_pane_status(
             entry["purpose"],
             str(tmux_info["command"]),
             bool(tmux_info["dead"]),
-            int(tmux_info.get("activity", 0)),
+            bell=bell,
+            last_output_time=last_content_change,
         )
 
     def _update_session_status_cells(self) -> None:
@@ -840,7 +836,7 @@ class GitDirectorConsole(App):
 
         from ...integrations.tmux import attach_tmux_session
 
-        self._bell_seen.discard(session_name)
+        self._monitor.clear_bell(session_name)
         restore_tab = self._active_tab
         self._resume_target_tab = restore_tab
         self._resume_refresh_path = path
@@ -953,7 +949,10 @@ class GitDirectorConsole(App):
 
 def _run_console() -> None:
     app = GitDirectorConsole()
-    app.run()
+    try:
+        app.run()
+    finally:
+        app._monitor.stop()
 
 
 def register(cli: click.Group):

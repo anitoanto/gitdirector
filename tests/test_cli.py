@@ -307,6 +307,30 @@ class TestStatusCommand:
         assert result.exit_code == 0
         assert "changed" in result.output.lower()
 
+    def test_multiple_repos_updates_progress_display(self, runner, tmp_path):
+        repo1 = tmp_path / "alpha"
+        repo2 = tmp_path / "beta"
+        repo1.mkdir()
+        repo2.mkdir()
+        info1 = RepositoryInfo(repo1, repo1.name, RepoStatus.UP_TO_DATE, "main")
+        info2 = RepositoryInfo(
+            repo2,
+            repo2.name,
+            RepoStatus.UP_TO_DATE,
+            "develop",
+            staged=True,
+            staged_files=["tracked.py"],
+        )
+        mgr = _mock_manager()
+        mgr.config.repositories = [repo1, repo2]
+        mgr.get_repository_status = lambda path: info1 if path == repo1 else info2
+
+        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["status"])
+
+        assert result.exit_code == 0
+        assert "2 repositories" in result.output
+
 
 class TestPullCommand:
     def test_empty(self, runner):
@@ -354,6 +378,25 @@ class TestPullCommand:
             result = runner.invoke(cli, ["pull"], input="n\n")
         assert result.exit_code == 0
         assert "Aborted" in result.output
+
+    def test_confirmed_multiple_repos_updates_progress(self, runner, tmp_path):
+        repo1 = tmp_path / "alpha"
+        repo2 = tmp_path / "beta"
+        repo1.mkdir()
+        repo2.mkdir()
+        mgr = _mock_manager()
+        mgr.config.repositories = [repo1, repo2]
+        mgr.config.max_workers = 2
+
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
+            with patch(
+                "gitdirector.commands.pull._pull_one",
+                side_effect=lambda path: (path.name, True, "Already up to date."),
+            ):
+                result = runner.invoke(cli, ["pull"], input="y\n")
+
+        assert result.exit_code == 0
+        assert "2 repositories" in result.output
 
 
 class TestMainEntry:

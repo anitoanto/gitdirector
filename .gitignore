@@ -15,5 +15,5 @@ wheels/
 # Pytest cache
 .pytest_cache
 .coverage
-.converage.*
+.coverage.*
 **/.DS_Store
