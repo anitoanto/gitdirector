@@ -1,7 +1,7 @@
 import click
 from rich.table import Table
 
-from . import get_version, console
+from . import console, get_version
 
 
 def show_help():

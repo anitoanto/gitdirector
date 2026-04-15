@@ -273,10 +273,8 @@ class TestGitDirectorConsole:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._handle_menu_action("attach:gd-alpha-happy-panda")
-            app._attach_to_session.assert_called_once_with(
-                "gd-alpha-happy-panda", Path("/tmp/alpha")
-            )
+            app._handle_menu_action("attach:gd/alpha/shell/1")
+            app._attach_to_session.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
 
     async def test_handle_menu_action_none_is_noop(self):
         """Dismissing the menu (None) should not crash."""
@@ -288,7 +286,7 @@ class TestGitDirectorConsole:
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
-        return_value=[{"session_name": "gd-alpha-slug", "repo": "alpha", "slug": "slug"}],
+        return_value=[{"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"}],
     )
     async def test_sessions_column_shows_count(self, _mock_sessions):
         """Sessions column shows the active session count when > 0."""
@@ -463,7 +461,7 @@ class TestActionMenuScreen:
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
-        return_value=["gd-myrepo-happy-panda"],
+        return_value=["gd/my-repo/shell/1"],
     )
     async def test_compose_with_sessions(self, mock_sessions):
         """With active sessions, they appear in the option list."""
@@ -508,7 +506,7 @@ class TestActionMenuScreen:
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
-        return_value=["gd-myrepo-happy-panda", "gd-myrepo-cool-tiger"],
+        return_value=["gd/my-repo/shell/1", "gd/my-repo/claude/1"],
     )
     async def test_session_count_label(self, mock_sessions):
         """Multiple sessions show correct count label."""
@@ -609,7 +607,7 @@ class TestGitDirectorConsoleActionRouting:
 class TestRemoveSessionScreen:
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
-        return_value=["gd-myrepo-happy-panda"],
+        return_value=["gd/my-repo/shell/1"],
     )
     async def test_compose_with_sessions(self, mock_sessions):
         """Shows sessions available for removal."""
@@ -637,7 +635,7 @@ class TestRemoveSessionScreen:
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
-        return_value=["gd-myrepo-happy-panda"],
+        return_value=["gd/my-repo/shell/1"],
     )
     async def test_escape_dismisses(self, mock_sessions):
         """Pressing Escape dismisses with None."""
@@ -665,15 +663,15 @@ class TestListAllGdSessions:
 
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="gd-myrepo-happy-panda\ngd-myrepo-cool-tiger\ngd-other-blue-city\nrandom-session\n",
+            stdout="gd/myrepo/shell/1\ngd/myrepo/claude/1\ngd/other/shell/1\nrandom-session\n",
         )
         result = list_all_gd_sessions()
         assert len(result) == 3
-        assert result[0]["session_name"] == "gd-myrepo-cool-tiger"
+        assert result[0]["session_name"] == "gd/myrepo/claude/1"
         assert result[0]["repo"] == "myrepo"
-        assert result[0]["slug"] == "cool-tiger"
-        assert result[1]["session_name"] == "gd-myrepo-happy-panda"
-        assert result[2]["session_name"] == "gd-other-blue-city"
+        assert result[0]["purpose"] == "claude"
+        assert result[1]["session_name"] == "gd/myrepo/shell/1"
+        assert result[2]["session_name"] == "gd/other/shell/1"
         assert result[2]["repo"] == "other"
 
     @patch("subprocess.run")
@@ -751,8 +749,8 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
-            {"session_name": "gd-beta-cool-tiger", "repo": "beta", "slug": "cool-tiger"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
         ],
     )
     async def test_sessions_populated(self, _mock):
@@ -769,7 +767,7 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
         ],
     )
     async def test_sessions_status_bar_singular(self, _mock):
@@ -786,9 +784,9 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
-            {"session_name": "gd-beta-cool-tiger", "repo": "beta", "slug": "cool-tiger"},
-            {"session_name": "gd-gamma-red-fox", "repo": "gamma", "slug": "red-fox"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
+            {"session_name": "gd/gamma/copilot/1", "repo": "gamma", "purpose": "copilot"},
         ],
     )
     async def test_sessions_status_bar_plural(self, _mock):
@@ -805,7 +803,7 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
         ],
     )
     async def test_session_row_select_attaches(self, _mock):
@@ -822,7 +820,7 @@ class TestSessionsTab:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            app._suspend_and_attach.assert_called_once_with("gd-alpha-happy-panda")
+            app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1")
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_sessions_no_sessions_status(self, _mock):
@@ -881,8 +879,8 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
-            {"session_name": "gd-beta-cool-tiger", "repo": "beta", "slug": "cool-tiger"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
         ],
     )
     async def test_cursor_navigation_on_sessions_tab(self, _mock):
@@ -905,7 +903,7 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
         ],
     )
     async def test_sessions_table_cell_values(self, _mock):
@@ -918,14 +916,14 @@ class TestSessionsTab:
             await pilot.pause()
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
-            row_key = "gd-alpha-happy-panda"
-            assert table.get_cell(row_key, ck[0]) == "happy-panda"
+            row_key = "gd/alpha/shell/1"
+            assert table.get_cell(row_key, ck[0]) == "shell"
             assert table.get_cell(row_key, ck[1]) == "alpha"
-            assert table.get_cell(row_key, ck[2]) == "gd-alpha-happy-panda"
+            assert table.get_cell(row_key, ck[2]) == "gd/alpha/shell/1"
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
-        return_value=["gd-myrepo-happy-panda"],
+        return_value=["gd/my-repo/shell/1"],
     )
     async def test_select_session_to_remove(self, mock_sessions):
         """Selecting a session dismisses with the session name."""
@@ -938,7 +936,7 @@ class TestSessionsTab:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            assert results == ["gd-myrepo-happy-panda"]
+            assert results == ["gd/my-repo/shell/1"]
 
 
 # ---------------------------------------------------------------------------
@@ -953,8 +951,8 @@ class TestRemoveFlow:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)) as _:
-            app._do_remove(True, "gd-myrepo-happy-panda")
-            mock_kill.assert_called_once_with("gd-myrepo-happy-panda")
+            app._do_remove(True, "gd/my-repo/shell/1")
+            mock_kill.assert_called_once_with("gd/my-repo/shell/1")
 
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
     async def test_do_remove_not_confirmed(self, mock_kill):
@@ -962,7 +960,7 @@ class TestRemoveFlow:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)) as _:
-            app._do_remove(False, "gd-myrepo-happy-panda")
+            app._do_remove(False, "gd/my-repo/shell/1")
             mock_kill.assert_not_called()
 
     async def test_get_selected_path_empty_table(self):
@@ -1724,9 +1722,9 @@ class TestTUIEdgeCases:
 # ---------------------------------------------------------------------------
 
 _SAMPLE_SESSIONS = [
-    {"session_name": "gd-alpha-happy-panda", "repo": "alpha", "slug": "happy-panda"},
-    {"session_name": "gd-beta-cool-tiger", "repo": "beta", "slug": "cool-tiger"},
-    {"session_name": "gd-gamma-red-fox", "repo": "gamma", "slug": "red-fox"},
+    {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+    {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
+    {"session_name": "gd/gamma/copilot/1", "repo": "gamma", "purpose": "copilot"},
 ]
 
 
@@ -1745,14 +1743,14 @@ class TestSessionsSearchAndSort:
             assert table.row_count == 1
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_SAMPLE_SESSIONS)
-    async def test_search_filters_sessions_by_slug(self, _mock):
+    async def test_search_filters_sessions_by_purpose(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._search_query = "tiger"
+            app._search_query = "claude"
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
@@ -1765,7 +1763,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._search_query = "gd-gamma"
+            app._search_query = "gd/gamma"
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
@@ -1797,10 +1795,10 @@ class TestSessionsSearchAndSort:
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
-            assert table.get_cell("gd-alpha-happy-panda", ck[1]) == "alpha"
+            assert table.get_cell("gd/alpha/shell/1", ck[1]) == "alpha"
             table.move_cursor(row=0)
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd-alpha-happy-panda"
+            assert str(row_key.value) == "gd/alpha/shell/1"
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_SAMPLE_SESSIONS)
     async def test_sort_sessions_by_repo_descending(self, _mock):
@@ -1816,7 +1814,7 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             table.move_cursor(row=0)
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd-gamma-red-fox"
+            assert str(row_key.value) == "gd/gamma/copilot/1"
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_SAMPLE_SESSIONS)
     async def test_sort_sessions_by_session_name(self, _mock):
@@ -1832,7 +1830,7 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             table.move_cursor(row=0)
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd-alpha-happy-panda"
+            assert str(row_key.value) == "gd/alpha/shell/1"
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_SAMPLE_SESSIONS)
     async def test_sort_sessions_combined_with_search(self, _mock):
@@ -1842,7 +1840,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._search_query = "gd-"
+            app._search_query = "gd/"
             app._sessions_sort_column = 1
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
@@ -1850,7 +1848,7 @@ class TestSessionsSearchAndSort:
             assert table.row_count == 3
             table.move_cursor(row=0)
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd-gamma-red-fox"
+            assert str(row_key.value) == "gd/gamma/copilot/1"
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_SAMPLE_SESSIONS)
     async def test_sessions_status_bar_with_filter(self, _mock):
@@ -2114,7 +2112,7 @@ class TestSortMenuScreenCustomColumns:
 
 
 class TestRefreshRepoForPath:
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd-alpha-slug"])
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd/alpha/shell/1"])
     async def test_refresh_updates_results_and_row(self, _mock_list):
         repos = [_make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")]
         updated_info = _make_info(

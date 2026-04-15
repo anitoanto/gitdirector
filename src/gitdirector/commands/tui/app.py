@@ -187,7 +187,7 @@ class GitDirectorConsole(App):
         done = 0
         self.call_from_thread(self._update_status, f"Checking {total} repositories…")
 
-        from ...integrations.tmux import _alphanumeric_name, list_all_gd_sessions
+        from ...integrations.tmux import _sanitize_repo_name, list_all_gd_sessions
 
         all_sessions = list_all_gd_sessions()
         sessions_by_repo: dict[str, int] = {}
@@ -204,7 +204,7 @@ class GitDirectorConsole(App):
                 info = future.result()
                 self._results[str(info.path)] = info
                 done += 1
-                clean_name = _alphanumeric_name(info.path.name)
+                clean_name = _sanitize_repo_name(info.path.name)
                 sessions_count = sessions_by_repo.get(clean_name, 0)
                 self._sessions_cache[str(info.path)] = sessions_count
                 self.call_from_thread(self._update_row, info, sessions_count)
@@ -308,11 +308,11 @@ class GitDirectorConsole(App):
                 for e in entries
                 if q in e["session_name"].lower()
                 or q in e["repo"].lower()
-                or q in e["slug"].lower()
+                or q in e["purpose"].lower()
             ]
 
         sort_keys = {
-            0: lambda e: e["slug"].lower(),
+            0: lambda e: e["purpose"].lower(),
             1: lambda e: e["repo"].lower(),
             2: lambda e: e["session_name"].lower(),
         }
@@ -327,7 +327,10 @@ class GitDirectorConsole(App):
             no_msg.display = False
             for entry in entries:
                 table.add_row(
-                    entry["slug"], entry["repo"], entry["session_name"], key=entry["session_name"]
+                    entry["purpose"],
+                    entry["repo"],
+                    entry["session_name"],
+                    key=entry["session_name"],
                 )
 
         self._update_status(self._build_sessions_loaded_status(len(entries), total))
@@ -368,7 +371,10 @@ class GitDirectorConsole(App):
         repo_ind = self.query_one("#repo-search-indicator", Static)
         sess_ind = self.query_one("#sessions-search-indicator", Static)
         if self._search_query:
-            text = f"Search results for '[bold]{self._search_query}[/bold]'  —  press [bold]esc[/bold] to clear"
+            text = (
+                f"Search results for '[bold]{self._search_query}[/bold]'"
+                "  —  press [bold]esc[/bold] to clear"
+            )
             repo_ind.update(text)
             sess_ind.update(text)
             repo_ind.display = True
@@ -581,7 +587,8 @@ class GitDirectorConsole(App):
 
         from ...integrations.tmux import create_tmux_session
 
-        session_name = create_tmux_session(path.name, path)
+        purpose = agent_cmd if agent_cmd else "shell"
+        session_name = create_tmux_session(path.name, path, purpose=purpose)
 
         if agent_cmd:
             subprocess.run(
