@@ -236,11 +236,11 @@ class Repository:
         )
 
     def pull(self, *, retries: int = 1) -> tuple[bool, str]:
-        for attempt in range(1 + retries):
+        attempts = max(1, 1 + retries)
+        for attempt in range(attempts):
             code, out, err = self._run_git("pull", "--ff-only")
             if code == 0:
                 return True, out
-            if attempt < retries and "network error" in err:
+            if attempt < attempts - 1 and "network error" in err:
                 continue
             return False, err
-        return False, err

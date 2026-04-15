@@ -462,6 +462,55 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
 
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_submit_on_sessions_tab_hides_input_and_filters(
+        self, _mock_list, _mock_status
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            await pilot.press("slash")
+            search_bar = app.query_one("#search-bar", Input)
+            search_bar.value = "beta"
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            container = app.query_one("#search-container")
+            table = app.query_one("#sessions-table", DataTable)
+            assert container.display is False
+            assert table.row_count == 1
+
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_escape_on_sessions_tab_clears_live_search(
+        self, _mock_list, _mock_status
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            await pilot.press("slash")
+            search_bar = app.query_one("#search-bar", Input)
+            search_bar.value = "beta"
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            container = app.query_one("#search-container")
+            table = app.query_one("#sessions-table", DataTable)
+            assert container.display is False
+            assert app._search_query == ""
+            assert table.row_count == 3
+
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_handle_sessions_sort_selection_none(self, _mock):
         app = GitDirectorConsole()
@@ -730,6 +779,86 @@ class TestTabRestorationAfterSuspend:
             tabs = app.query_one("#tabs", TabbedContent)
             assert tabs.active == "sessions"
             assert app._resume_target_tab == "sessions"
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_repo_table_restore_falls_back_to_saved_row_position(self, _mock_sessions):
+        repos = [
+            _make_info("alpha", Path("/tmp/alpha")),
+            _make_info("beta", Path("/tmp/beta")),
+            _make_info("gamma", Path("/tmp/gamma")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=2)
+            await pilot.pause()
+
+            app._capture_resume_selection("repos")
+            app._results = {
+                str(repos[0].path): repos[0],
+                str(repos[1].path): repos[1],
+            }
+            app._apply_filter_and_sort()
+            await pilot.pause()
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert table.cursor_coordinate.row == 1
+            assert str(row_key.value) == str(repos[1].path)
+
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sessions_table_restore_falls_back_to_saved_row_position(
+        self, _mock_list, _mock_status
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=1)
+            await pilot.pause()
+
+            app._capture_resume_selection("sessions")
+            app._sessions_entries = [SAMPLE_SESSIONS[0], SAMPLE_SESSIONS[2]]
+            app._apply_sessions_filter_and_sort()
+            await pilot.pause()
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert table.cursor_coordinate.row == 1
+            assert str(row_key.value) == "gd/gamma/copilot/1"
+
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sessions_table_restore_clears_saved_selection_when_empty(
+        self, _mock_list, _mock_status
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=1)
+            await pilot.pause()
+
+            app._capture_resume_selection("sessions")
+            app._sessions_entries = []
+            app._apply_sessions_filter_and_sort()
+            await pilot.pause()
+
+            assert table.row_count == 0
+            assert app._resume_selection_tab is None
+            assert app._resume_selection_key is None
+            assert app._resume_selection_row is None
 
     async def test_with_filter_and_sort(self):
         app = GitDirectorConsole()

@@ -1,3 +1,5 @@
+import runpy
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -399,11 +401,43 @@ class TestPullCommand:
         assert "2 repositories" in result.output
 
 
+class TestConsoleCommand:
+    @patch("gitdirector.commands.tui.app._run_console")
+    def test_console_command_invokes_tui_runner(self, mock_run_console, runner):
+        result = runner.invoke(cli, ["console"])
+
+        assert result.exit_code == 0
+        mock_run_console.assert_called_once_with()
+
+
 class TestMainEntry:
     def test_main_exception_handler(self, runner):
         with patch("gitdirector.cli.cli", side_effect=RuntimeError("boom")):
             with pytest.raises(SystemExit):
                 main()
+
+    def test_cli_module_runs_main_from_dunder_main(self, monkeypatch):
+        import click
+        import sys
+
+        calls = []
+
+        def fake_main(self, *args, **kwargs):
+            calls.append((self.name, args, kwargs))
+            return None
+
+        monkeypatch.setattr(click.core.Command, "main", fake_main)
+        monkeypatch.setattr(sys, "argv", ["gitdirector"])
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"'gitdirector\.cli' found in sys\.modules after import of package 'gitdirector'",
+                category=RuntimeWarning,
+            )
+            runpy.run_module("gitdirector.cli", run_name="__main__")
+
+        assert len(calls) == 1
 
 
 class TestHelpCommand:

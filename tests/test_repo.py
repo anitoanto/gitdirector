@@ -435,6 +435,18 @@ class TestPull:
         assert ok is False
         assert "network error" in msg
 
+    def test_negative_retries_still_attempt_once(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(1, "", "fatal: some error"),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, msg = repo.pull(retries=-1)
+
+        assert ok is False
+        assert "fatal" in msg
+
 
 # ---------------------------------------------------------------------------
 # _classify_remote_error
