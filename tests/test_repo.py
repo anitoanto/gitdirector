@@ -4,7 +4,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gitdirector.repo import Repository, RepositoryInfo, RepoStatus
+from gitdirector.repo import (
+    Repository,
+    RepositoryInfo,
+    RepoStatus,
+    _classify_remote_error,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -248,6 +253,18 @@ class TestGetStatusSync:
         assert info.status == RepoStatus.UNKNOWN
         assert "No tracking branch" in info.message
 
+    def test_git_status_fails(self, fake_git_repo, mocker):
+        def side_effect(cmd, **kwargs):
+            git_args = cmd[3:]
+            if "status" in git_args:
+                return _make_run_result(1, "", "error")
+            return _make_run_result(0, "", "")
+
+        mocker.patch("subprocess.run", side_effect=side_effect)
+        info = Repository(fake_git_repo).get_status()
+        assert info.status == RepoStatus.UNKNOWN
+        assert info.message == "git status failed"
+
 
 class TestGetStatusChanges:
     def test_staged_files(self, fake_git_repo, mocker):
@@ -286,6 +303,79 @@ class TestGetStatusChanges:
 
 
 # ---------------------------------------------------------------------------
+# get_status – detached HEAD, renames, unmerged
+# ---------------------------------------------------------------------------
+
+
+def _setup_raw_status(mocker, status_output):
+    """Mock _run_git to return raw v2 status output for get_status tests."""
+
+    def side_effect(cmd, **kwargs):
+        args = cmd[2:]
+        git_args = args[1:]
+
+        if "status" in git_args:
+            return _make_run_result(0, status_output, "")
+        if "log" in git_args:
+            return _make_run_result(0, "5 minutes ago\n1700000000\n", "")
+        if "ls-tree" in git_args:
+            return _make_run_result(0, "", "")
+        return _make_run_result(0, "", "")
+
+    mocker.patch("subprocess.run", side_effect=side_effect)
+
+
+class TestGetStatusDetachedHead:
+    def test_detached_head(self, fake_git_repo, mocker):
+        v2 = "# branch.oid abc123\n# branch.head (detached)\n# branch.ab +0 -0\n"
+        _setup_raw_status(mocker, v2)
+        info = Repository(fake_git_repo).get_status()
+        assert info.branch is None
+
+
+class TestGetStatusRenameEntry:
+    def test_staged_rename(self, fake_git_repo, mocker):
+        v2 = (
+            "# branch.oid abc123\n"
+            "# branch.head main\n"
+            "# branch.ab +0 -0\n"
+            "2 R. N... 100644 100644 100644 abc def R100\told.py\tnew.py\n"
+        )
+        _setup_raw_status(mocker, v2)
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is True
+        assert info.staged_files is not None
+
+    def test_unstaged_rename(self, fake_git_repo, mocker):
+        v2 = (
+            "# branch.oid abc123\n"
+            "# branch.head main\n"
+            "# branch.ab +0 -0\n"
+            "2 .R N... 100644 100644 100644 abc def R100\told.py\tnew.py\n"
+        )
+        _setup_raw_status(mocker, v2)
+        info = Repository(fake_git_repo).get_status()
+        assert info.unstaged is True
+        assert info.unstaged_files is not None
+
+
+class TestGetStatusUnmergedEntry:
+    def test_unmerged_file(self, fake_git_repo, mocker):
+        v2 = (
+            "# branch.oid abc123\n"
+            "# branch.head main\n"
+            "# branch.ab +0 -0\n"
+            "u UU N... 100644 100644 100644 100644 abc def ghi conflict.py\n"
+        )
+        _setup_raw_status(mocker, v2)
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is True
+        assert info.unstaged is True
+        assert "conflict.py" in (info.staged_files or [])
+        assert "conflict.py" in (info.unstaged_files or [])
+
+
+# ---------------------------------------------------------------------------
 # pull
 # ---------------------------------------------------------------------------
 
@@ -310,6 +400,83 @@ class TestPull:
         ok, msg = repo.pull()
         assert ok is False
         assert "fast-forward" in msg
+
+    def test_retry_on_network_error(self, fake_git_repo, mocker):
+        calls = []
+
+        def side_effect(cmd, **kwargs):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return _make_run_result(1, "", "network error \u2014 could not reach remote")
+            return _make_run_result(0, "Updated.\n", "")
+
+        mocker.patch("subprocess.run", side_effect=side_effect)
+        repo = Repository(fake_git_repo)
+        ok, msg = repo.pull()
+        assert ok is True
+        assert len(calls) == 2
+
+    def test_no_retry_on_non_network_error(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(1, "", "fatal: some error"),
+        )
+        repo = Repository(fake_git_repo)
+        ok, msg = repo.pull()
+        assert ok is False
+
+    def test_retry_exhausted(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(1, "", "network error \u2014 could not reach remote"),
+        )
+        repo = Repository(fake_git_repo)
+        ok, msg = repo.pull(retries=2)
+        assert ok is False
+        assert "network error" in msg
+
+
+# ---------------------------------------------------------------------------
+# _classify_remote_error
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyRemoteError:
+    def test_network_error(self):
+        assert "network error" in _classify_remote_error("connection refused")
+
+    def test_auth_error(self):
+        assert "authentication" in _classify_remote_error("authentication failed")
+
+    def test_no_match(self):
+        assert _classify_remote_error("fatal: some other error") is None
+
+
+# ---------------------------------------------------------------------------
+# _run_git error classification
+# ---------------------------------------------------------------------------
+
+
+class TestRunGitErrorClassification:
+    def test_network_error_classified(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(128, "", "connection refused\n"),
+        )
+        repo = Repository(fake_git_repo)
+        code, out, err = repo._run_git("fetch")
+        assert code == 128
+        assert "network error" in err
+
+    def test_auth_error_classified(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(128, "", "authentication failed\n"),
+        )
+        repo = Repository(fake_git_repo)
+        code, out, err = repo._run_git("fetch")
+        assert code == 128
+        assert "authentication" in err
 
 
 # ---------------------------------------------------------------------------

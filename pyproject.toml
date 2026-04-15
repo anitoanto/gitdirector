@@ -71,6 +71,7 @@ dev = [
     "black>=23.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [tool.black]
@@ -95,5 +96,5 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=src/gitdirector --cov-report=term-missing"
+addopts = "-n auto --cov=src/gitdirector --cov-report=term-missing"
 asyncio_mode = "auto"

@@ -582,3 +582,115 @@ class TestSessionsRefreshOnReturn:
         app.on_input_changed(event)
         assert app._search_query == "test"
         app._apply_filter_and_sort.assert_called_once()
+
+
+class TestRemoveSessionUpdatesTable:
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_do_remove_updates_sessions_table(self, _mock_list, _mock_kill):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 3
+            app._do_remove(True, "gd/alpha/shell/1")
+            await pilot.pause()
+            assert table.row_count == 2
+            _mock_kill.assert_called_once_with("gd/alpha/shell/1")
+
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_do_remove_removes_from_sessions_entries(self, _mock_list, _mock_kill):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._do_remove(True, "gd/beta/claude/1")
+            await pilot.pause()
+            remaining = [e["session_name"] for e in app._sessions_entries]
+            assert "gd/beta/claude/1" not in remaining
+            assert len(remaining) == 2
+
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_do_remove_updates_status_bar(self, _mock_list, _mock_kill):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._do_remove(True, "gd/alpha/shell/1")
+            await pilot.pause()
+            status_text = app.query_one("#status-bar", Static).content
+            assert "2 active sessions" in status_text
+
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+        ],
+    )
+    async def test_do_remove_last_session_shows_no_sessions(self, _mock_list, _mock_kill):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._do_remove(True, "gd/alpha/shell/1")
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 0
+
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_do_remove_not_confirmed_does_nothing(self, _mock_list, _mock_kill):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._do_remove(False, "gd/alpha/shell/1")
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 3
+            _mock_kill.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd/alpha/shell/1"])
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+        ],
+    )
+    async def test_do_remove_updates_repo_table_session_count(
+        self, _mock_list_all, _mock_kill, _mock_list_repo
+    ):
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_cache[str(Path("/tmp/alpha"))] = 1
+            app._update_row(repos[0], 1)
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            ck = app._col_keys
+            assert table.get_cell(str(Path("/tmp/alpha")), ck[5]) == "1"
+            app._sessions_entries = [
+                {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            ]
+            app._do_remove(True, "gd/alpha/shell/1")
+            await pilot.pause()
+            assert table.get_cell(str(Path("/tmp/alpha")), ck[5]) == "—"
+            assert app._sessions_cache[str(Path("/tmp/alpha"))] == 0

@@ -286,11 +286,11 @@ class TestGitDirectorConsoleActionRouting:
     async def test_do_remove_calls_kill_tmux_session(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        app._update_status = MagicMock()
+        app._apply_sessions_filter_and_sort = MagicMock()
         with patch("gitdirector.integrations.tmux.kill_tmux_session") as kill_session:
             app._do_remove(True, "gd-test")
             kill_session.assert_called_once_with("gd-test")
-            app._update_status.assert_called_once()
+            app._apply_sessions_filter_and_sort.assert_called_once()
 
     async def test_handle_menu_action_remove_session_pushes_confirm(self):
         app = GitDirectorConsole()
