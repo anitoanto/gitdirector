@@ -197,6 +197,7 @@ class GitDirectorConsole(App):
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
         self._monitor.start()
         self._load_repos()
+        self._trigger_status_poll()
 
     @work(thread=True)
     def _load_repos(self) -> None:
@@ -212,7 +213,10 @@ class GitDirectorConsole(App):
         done = 0
         self.call_from_thread(self._update_status, f"Checking {total} repositories…")
 
-        from ...integrations.tmux import _sanitize_repo_name, list_all_gd_sessions
+        from ...integrations.tmux import (
+            _sanitize_repo_name,
+            list_all_gd_sessions,
+        )
 
         all_sessions = list_all_gd_sessions()
         sessions_by_repo: dict[str, int] = {}
@@ -468,10 +472,14 @@ class GitDirectorConsole(App):
 
     @work(thread=True, exclusive=True, group="status_poll")
     def _poll_session_statuses(self) -> None:
-        from ...integrations.tmux import get_all_session_statuses
+        from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
 
+        entries = list_all_gd_sessions()
         statuses = get_all_session_statuses()
         self._session_statuses = statuses
+        self._sessions_entries = entries
+        for entry in entries:
+            entry["status"] = self._resolve_session_status(entry)
         self.call_from_thread(self._on_statuses_updated)
 
     def _on_statuses_updated(self) -> None:
@@ -486,7 +494,8 @@ class GitDirectorConsole(App):
 
         if self._active_tab == "sessions" and self._sessions_entries:
             self._update_session_status_cells()
-        elif count_changed:
+
+        if self._active_tab == "repos" and count_changed:
             total = len(self._results)
             shown = self.query_one("#repo-table", DataTable).row_count
             self._update_status(self._build_loaded_status(shown, total))
