@@ -3,6 +3,7 @@
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -120,3 +121,79 @@ def open_in_tmux(repo_name: str, path: Path) -> None:
     """Create and attach to a new tmux session rooted at *path*."""
     session_name = create_tmux_session(repo_name, path)
     attach_tmux_session(session_name)
+
+
+_SHELL_COMMANDS = frozenset(
+    {
+        "zsh",
+        "bash",
+        "fish",
+        "sh",
+        "dash",
+        "tcsh",
+        "csh",
+        "ksh",
+    }
+)
+
+_SILENCE_THRESHOLD_SECS = 10
+
+
+def get_all_session_statuses() -> dict[str, dict[str, object]]:
+    """Query tmux for bell, foreground command, and dead status of all gd/ panes.
+
+    Returns a dict keyed by session_name with:
+      - bell: bool
+      - command: str (foreground process name)
+      - dead: bool
+    """
+    result = subprocess.run(
+        [
+            "tmux",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}|#{window_bell_flag}|#{pane_current_command}|#{pane_dead}|#{window_activity}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}
+
+    statuses: dict[str, dict[str, object]] = {}
+    for line in result.stdout.strip().split("\n"):
+        if not line or not line.startswith("gd/"):
+            continue
+        parts = line.split("|", 4)
+        if len(parts) < 5:
+            continue
+        try:
+            activity = int(parts[4])
+        except (ValueError, IndexError):
+            activity = 0
+        statuses[parts[0]] = {
+            "bell": parts[1] == "1",
+            "command": parts[2],
+            "dead": parts[3] == "1",
+            "activity": activity,
+        }
+    return statuses
+
+
+def resolve_pane_status(purpose: str, command: str, dead: bool, last_activity: int = 0) -> str:
+    """Determine pane status from tmux info (without considering bell state).
+
+    Returns one of: "running", "waiting", "idle".
+    """
+    if dead:
+        return "idle"
+    clean_cmd = command.lstrip("-")
+    is_shell = clean_cmd in _SHELL_COMMANDS
+    if is_shell:
+        return "idle"
+    if purpose != "shell" and last_activity > 0:
+        elapsed = int(time.time()) - last_activity
+        if elapsed >= _SILENCE_THRESHOLD_SECS:
+            return "waiting"
+    return "running"

@@ -279,7 +279,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 3
+            assert menu.option_count == 4
 
     async def test_default_column_names(self):
         screen = SortMenuScreen(0, False)

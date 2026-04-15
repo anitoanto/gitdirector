@@ -24,6 +24,8 @@ from ...manager import RepositoryManager
 from ...repo import RepositoryInfo
 from .. import get_version
 from .constants import (
+    _SESSION_STATUS_LABEL,
+    _SESSION_STATUS_ORDER,
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
@@ -141,6 +143,11 @@ class GitDirectorConsole(App):
         self._sessions_sort_column: int = 0
         self._sessions_sort_reverse: bool = False
         self._repos_stale: bool = False
+        self._bell_seen: set[str] = set()
+        self._session_statuses: dict[str, dict[str, object]] = {}
+        self._waiting_count: int = 0
+        self._resume_target_tab: str | None = None
+        self._resume_refresh_path: Path | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -173,7 +180,11 @@ class GitDirectorConsole(App):
             "Repository", "Sync", "Branch", "Changes", "Last Commit", "Sessions", "Path"
         )
         sessions_table = self.query_one("#sessions-table", DataTable)
-        self._sess_col_keys = sessions_table.add_columns("Session", "Repository", "Session Name")
+        self._sess_col_keys = sessions_table.add_columns(
+            "Status", "Session", "Repository", "Session Name"
+        )
+        self.app_resume_signal.subscribe(self, self._handle_app_resume)
+        self._poll_timer = self.set_interval(3, self._trigger_status_poll)
         self._load_repos()
 
     @work(thread=True)
@@ -263,13 +274,23 @@ class GitDirectorConsole(App):
     # -- Tab switching --------------------------------------------------------
 
     def action_tab_repos(self) -> None:
+        if self._resume_target_tab is not None and self._resume_target_tab != "repos":
+            return
         self.query_one("#tabs", TabbedContent).active = "repos"
 
     def action_tab_sessions(self) -> None:
+        if self._resume_target_tab is not None and self._resume_target_tab != "sessions":
+            return
         self.query_one("#tabs", TabbedContent).active = "sessions"
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
+        if self._resume_target_tab is not None:
+            if tab_id != self._resume_target_tab:
+                self.query_one("#tabs", TabbedContent).active = self._resume_target_tab
+                return
+            self._active_tab = tab_id
+            return
         self._active_tab = tab_id
         if tab_id == "sessions":
             self._load_sessions()
@@ -284,12 +305,64 @@ class GitDirectorConsole(App):
                 shown = self.query_one("#repo-table", DataTable).row_count
                 self._update_status(self._build_loaded_status(shown, total))
 
+    def _handle_app_resume(self, _app: App) -> None:
+        if self._resume_target_tab is None:
+            return
+
+        import sys
+        import termios
+
+        try:
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except (AttributeError, OSError):
+            pass
+
+        self.call_after_refresh(
+            self._restore_after_resume,
+            self._resume_target_tab,
+            self._resume_refresh_path,
+        )
+
+    def _restore_after_resume(self, restore_tab: str, restore_path: Path | None) -> None:
+        if self._resume_target_tab != restore_tab:
+            return
+
+        tabs = self.query_one("#tabs", TabbedContent)
+
+        if tabs.active != restore_tab:
+            tabs.active = restore_tab
+        self._active_tab = restore_tab
+
+        if restore_tab == "sessions":
+            self._load_sessions()
+            self.query_one("#sessions-table", DataTable).focus()
+        else:
+            self.query_one("#repo-table", DataTable).focus()
+
+        if restore_path is not None:
+            self._refresh_repo_for_path(restore_path)
+
+        self.call_after_refresh(self._clear_resume_restore, restore_tab)
+
+    def _clear_resume_restore(self, restore_tab: str) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        if self._resume_target_tab == restore_tab and tabs.active == restore_tab:
+            self._resume_target_tab = None
+            self._resume_refresh_path = None
+
     @work(thread=True)
     def _load_sessions(self) -> None:
-        from ...integrations.tmux import list_all_gd_sessions
+        from ...integrations.tmux import list_all_gd_sessions, get_all_session_statuses
 
         self.call_from_thread(self._update_status, "Loading sessions…")
         entries = list_all_gd_sessions()
+        statuses = get_all_session_statuses()
+        for session_name, info in statuses.items():
+            if info["bell"]:
+                self._bell_seen.add(session_name)
+        existing = set(statuses.keys())
+        self._bell_seen &= existing
+        self._session_statuses = statuses
         self.call_from_thread(self._populate_sessions_table, entries)
 
     def _populate_sessions_table(self, entries: list[dict[str, str]]) -> None:
@@ -314,10 +387,14 @@ class GitDirectorConsole(App):
                 or q in e["purpose"].lower()
             ]
 
+        for entry in entries:
+            entry["status"] = self._resolve_session_status(entry)
+
         sort_keys = {
-            0: lambda e: e["purpose"].lower(),
-            1: lambda e: e["repo"].lower(),
-            2: lambda e: e["session_name"].lower(),
+            0: lambda e: _SESSION_STATUS_ORDER.get(e.get("status", "running"), 99),
+            1: lambda e: e["purpose"].lower(),
+            2: lambda e: e["repo"].lower(),
+            3: lambda e: e["session_name"].lower(),
         }
         key_func = sort_keys.get(self._sessions_sort_column, sort_keys[0])
         entries.sort(key=key_func, reverse=self._sessions_sort_reverse)
@@ -329,7 +406,9 @@ class GitDirectorConsole(App):
             table.display = True
             no_msg.display = False
             for entry in entries:
+                status = entry.get("status", "running")
                 table.add_row(
+                    _SESSION_STATUS_LABEL.get(status, "● running"),
                     entry["purpose"],
                     entry["repo"],
                     entry["session_name"],
@@ -366,6 +445,69 @@ class GitDirectorConsole(App):
         if self._search_query:
             msg += "  [esc] clear search"
         return msg
+
+    # -- Session status polling -----------------------------------------------
+
+    def _trigger_status_poll(self) -> None:
+        self._poll_session_statuses()
+
+    @work(thread=True, exclusive=True, group="status_poll")
+    def _poll_session_statuses(self) -> None:
+        from ...integrations.tmux import get_all_session_statuses
+
+        statuses = get_all_session_statuses()
+        for session_name, info in statuses.items():
+            if info["bell"]:
+                self._bell_seen.add(session_name)
+        existing = set(statuses.keys())
+        self._bell_seen &= existing
+        self._session_statuses = statuses
+        self.call_from_thread(self._on_statuses_updated)
+
+    def _on_statuses_updated(self) -> None:
+        waiting = 0
+        for entry in self._sessions_entries:
+            if self._resolve_session_status(entry) == "waiting":
+                waiting += 1
+        changed = waiting != self._waiting_count
+        self._waiting_count = waiting
+
+        if self._active_tab == "sessions" and self._sessions_entries:
+            self._update_session_status_cells()
+        elif changed:
+            total = len(self._results)
+            shown = self.query_one("#repo-table", DataTable).row_count
+            self._update_status(self._build_loaded_status(shown, total))
+
+    def _resolve_session_status(self, entry: dict[str, str]) -> str:
+        from ...integrations.tmux import resolve_pane_status
+
+        session_name = entry["session_name"]
+        if session_name in self._bell_seen:
+            return "waiting"
+        tmux_info = self._session_statuses.get(session_name)
+        if tmux_info is None:
+            return "running"
+        return resolve_pane_status(
+            entry["purpose"],
+            str(tmux_info["command"]),
+            bool(tmux_info["dead"]),
+            int(tmux_info.get("activity", 0)),
+        )
+
+    def _update_session_status_cells(self) -> None:
+        table = self.query_one("#sessions-table", DataTable)
+        for entry in self._sessions_entries:
+            status = self._resolve_session_status(entry)
+            entry["status"] = status
+            try:
+                table.update_cell(
+                    entry["session_name"],
+                    self._sess_col_keys[0],
+                    _SESSION_STATUS_LABEL.get(status, "● running"),
+                )
+            except Exception:
+                pass
 
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
@@ -560,6 +702,10 @@ class GitDirectorConsole(App):
         msg += "   ↑↓/jk navigate  [enter] open  / search  s sort  r refresh  q quit"
         if self._search_query:
             msg += "  [esc] clear search"
+        if self._waiting_count > 0:
+            w = self._waiting_count
+            label = "session" if w == 1 else "sessions"
+            msg += f"  ⟐ {w} {label} waiting"
         return msg
 
     def action_select_row(self) -> None:
@@ -608,8 +754,14 @@ class GitDirectorConsole(App):
     def _suspend_and_attach(self, session_name: str, path: Path | None = None) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
+        import termios
 
         from ...integrations.tmux import attach_tmux_session
+
+        self._bell_seen.discard(session_name)
+        restore_tab = self._active_tab
+        self._resume_target_tab = restore_tab
+        self._resume_refresh_path = path
 
         with self.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
@@ -617,12 +769,13 @@ class GitDirectorConsole(App):
             attach_tmux_session(session_name)
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()
+            try:
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            except (AttributeError, OSError):
+                pass
 
         self._repos_stale = True
-        if path is not None:
-            self.set_timer(0.2, lambda: self._refresh_repo_for_path(path))
-        if self._active_tab == "sessions":
-            self.set_timer(0.3, lambda: self._load_sessions())
+        self._active_tab = restore_tab
 
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:

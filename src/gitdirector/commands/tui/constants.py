@@ -44,9 +44,22 @@ _STATUS_ORDER = {
 }
 
 _SESSIONS_SORT_COLUMN_NAMES = {
-    0: "Session",
-    1: "Repository",
-    2: "Session Name",
+    0: "Status",
+    1: "Session",
+    2: "Repository",
+    3: "Session Name",
+}
+
+_SESSION_STATUS_LABEL = {
+    "waiting": "[bold yellow]● waiting[/bold yellow]",
+    "running": "[green]● running[/green]",
+    "idle": "[dim]○ idle[/dim]",
+}
+
+_SESSION_STATUS_ORDER = {
+    "waiting": 0,
+    "running": 1,
+    "idle": 2,
 }
 
 

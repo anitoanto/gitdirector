@@ -304,6 +304,7 @@ class AgentLoadingScreen(ModalScreen[None]):
     def _do_dismiss(self) -> None:
         import subprocess
         import sys
+        import termios
 
         from ...integrations.tmux import attach_tmux_session
 
@@ -317,5 +318,9 @@ class AgentLoadingScreen(ModalScreen[None]):
             attach_tmux_session(session_name)
             sys.stdout.write("\033[?25h")
             sys.stdout.flush()
+            try:
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            except (AttributeError, OSError):
+                pass
 
         self.dismiss(None)

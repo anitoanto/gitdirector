@@ -24,7 +24,7 @@ class TestSessionsTab:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as _:
             table = app.query_one("#sessions-table", DataTable)
-            assert len(table.columns) == 3
+            assert len(table.columns) == 4
 
     async def test_tab_switching_via_action(self):
         app = GitDirectorConsole()
@@ -217,9 +217,9 @@ class TestSessionsTab:
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
             row_key = "gd/alpha/shell/1"
-            assert table.get_cell(row_key, ck[0]) == "shell"
-            assert table.get_cell(row_key, ck[1]) == "alpha"
-            assert table.get_cell(row_key, ck[2]) == "gd/alpha/shell/1"
+            assert table.get_cell(row_key, ck[1]) == "shell"
+            assert table.get_cell(row_key, ck[2]) == "alpha"
+            assert table.get_cell(row_key, ck[3]) == "gd/alpha/shell/1"
 
 
 class TestSessionsSearchAndSort:
@@ -284,12 +284,12 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = False
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
-            assert table.get_cell("gd/alpha/shell/1", ck[1]) == "alpha"
+            assert table.get_cell("gd/alpha/shell/1", ck[2]) == "alpha"
             table.move_cursor(row=0)
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/alpha/shell/1"
@@ -302,7 +302,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
@@ -318,7 +318,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 2
+            app._sessions_sort_column = 3
             app._sessions_sort_reverse = False
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
@@ -335,7 +335,7 @@ class TestSessionsSearchAndSort:
             await app.workers.wait_for_complete()
             await pilot.pause()
             app._search_query = "gd/"
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
@@ -366,7 +366,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
             status_text = app.query_one("#status-bar", Static).content
@@ -386,7 +386,7 @@ class TestSessionsSearchAndSort:
             await pilot.pause()
             assert isinstance(app.screen, SortMenuScreen)
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 3
+            assert menu.option_count == 4
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_search_on_sessions_tab_via_input(self, _mock):
@@ -453,17 +453,155 @@ class TestBuildSessionsLoadedStatus:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)):
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             msg = app._build_sessions_loaded_status(3, 3)
             assert "sort: Repository \u25bc" in msg
+
+
+class TestTabRestorationAfterSuspend:
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_spurious_tab_reset_redirected_back_to_sessions(self, _mock):
+        """When TabbedContent resets to repos after suspend, the guard redirects back."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._active_tab == "sessions"
+
+            app._resume_target_tab = "sessions"
+            app._active_tab = "sessions"
+            app._repos_stale = True
+
+            app.query_one("#tabs", TabbedContent).active = "repos"
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "sessions"
+            assert app._active_tab == "sessions"
+            assert app._resume_target_tab == "sessions"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_guard_persists_when_no_spurious_event(self, _mock):
+        """If no spurious tab reset happens, guard persists harmlessly."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._resume_target_tab = "sessions"
+            await pilot.pause()
+
+            assert app._active_tab == "sessions"
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "sessions"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_mismatched_tab_action_is_ignored_while_restore_pending(self, _mock):
+        """A tab action for the wrong tab must not break the pending restore."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._resume_target_tab = "sessions"
+
+            await pilot.press("1")
+            await pilot.pause()
+
+            assert app._resume_target_tab == "sessions"
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "sessions"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_resume_hook_restores_target_tab_and_clears_guard(self, _mock):
+        """The app resume hook restores the target tab and then clears the guard."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._load_sessions = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._load_sessions.reset_mock()
+
+            tabs = app.query_one("#tabs", TabbedContent)
+            tabs.active = "repos"
+            await pilot.pause()
+
+            app._resume_target_tab = "sessions"
+            app._active_tab = "sessions"
+            app._handle_app_resume(app)
+            await pilot.pause()
+            await pilot.pause()
+
+            assert tabs.active == "sessions"
+            assert app._active_tab == "sessions"
+            assert app._resume_target_tab is None
+            app._load_sessions.assert_called_once()
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_repos_tab_guard_redirects_wrong_tab(self, _mock):
+        """Guard for repos tab redirects a spurious sessions switch back."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app._resume_target_tab = "repos"
+            app._repos_stale = True
+
+            app.query_one("#tabs", TabbedContent).active = "sessions"
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "repos"
+            assert app._active_tab == "repos"
+            assert app._resume_target_tab == "repos"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_guard_survives_multiple_spurious_resets(self, _mock):
+        """Guard keeps redirecting even after multiple spurious tab resets."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._resume_target_tab = "sessions"
+            app._active_tab = "sessions"
+
+            app.query_one("#tabs", TabbedContent).active = "repos"
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert app.query_one("#tabs", TabbedContent).active == "sessions"
+
+            app.query_one("#tabs", TabbedContent).active = "repos"
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "sessions"
+            assert app._resume_target_tab == "sessions"
 
     async def test_with_filter_and_sort(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)):
             app._search_query = "test"
-            app._sessions_sort_column = 2
+            app._sessions_sort_column = 3
             app._sessions_sort_reverse = False
             msg = app._build_sessions_loaded_status(2, 5)
             assert "2 of 5" in msg
