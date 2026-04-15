@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "gitdirector"
-version = "1.2.3"
+version = "1.2.4"
 description = "A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place."
 readme = "README.md"
 license = { text = "MIT" }
