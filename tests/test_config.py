@@ -16,6 +16,7 @@ class TestConfigInit:
     def test_empty_config_defaults(self, config):
         assert config.repositories == []
         assert config.max_workers == Config.DEFAULT_MAX_WORKERS
+        assert config.theme == Config.DEFAULT_THEME
 
     def test_loads_existing_config(self, config_dir, monkeypatch):
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +98,42 @@ class TestConfigClear:
         config.clear()
         data = yaml.safe_load(config.config_file.read_text())
         assert data["repositories"] == []
+
+
+class TestConfigTheme:
+    def test_default_theme(self, config):
+        assert config.theme == "rose-pine"
+
+    def test_loads_custom_theme(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.yaml"
+        data = {"repositories": [], "theme": "dracula"}
+        config_file.write_text(yaml.dump(data))
+
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+        cfg = Config()
+        assert cfg.theme == "dracula"
+
+    def test_saves_custom_theme(self, config):
+        config.theme = "nord"
+        config.save()
+        data = yaml.safe_load(config.config_file.read_text())
+        assert data["theme"] == "nord"
+
+    def test_default_theme_not_saved(self, config):
+        config.save()
+        data = yaml.safe_load(config.config_file.read_text())
+        assert "theme" not in data
+
+    def test_missing_theme_uses_default(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.yaml"
+        data = {"repositories": []}
+        config_file.write_text(yaml.dump(data))
+
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+        cfg = Config()
+        assert cfg.theme == Config.DEFAULT_THEME
 
 
 class TestConfigSaveRoundtrip:

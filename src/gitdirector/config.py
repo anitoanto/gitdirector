@@ -14,6 +14,7 @@ class Config:
         self.config_dir.mkdir(exist_ok=True)
 
     DEFAULT_MAX_WORKERS = 10
+    DEFAULT_THEME = "rose-pine"
 
     def _load(self) -> None:
         if self.config_file.exists():
@@ -22,15 +23,19 @@ class Config:
                 self.repositories = [Path(p) for p in data.get("repositories", [])]
                 self._repo_set: set[Path] = set(self.repositories)
                 self.max_workers = int(data.get("max_workers", self.DEFAULT_MAX_WORKERS))
+                self.theme = str(data.get("theme", self.DEFAULT_THEME))
         else:
             self.repositories = []
             self._repo_set: set[Path] = set()
             self.max_workers = self.DEFAULT_MAX_WORKERS
+            self.theme = self.DEFAULT_THEME
 
     def save(self) -> None:
         data: dict = {"repositories": [str(p) for p in self.repositories]}
         if self.max_workers != self.DEFAULT_MAX_WORKERS:
             data["max_workers"] = self.max_workers
+        if self.theme != self.DEFAULT_THEME:
+            data["theme"] = self.theme
         with open(self.config_file, "w") as f:
             yaml.dump(data, f, default_flow_style=False)
 
