@@ -117,7 +117,12 @@ repositories:
     - /path/to/repo1
     - /path/to/repo2
 max_workers: 10 # optional, default 10
+theme: rose-pine # optional, default rose-pine
 ```
+
+### Available Themes
+
+`textual-dark`, `textual-light`, `nord`, `gruvbox`, `catppuccin-mocha`, `textual-ansi`, `dracula`, `tokyo-night`, `monokai`, `flexoki`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `solarized-light`, `solarized-dark`, `rose-pine`, `rose-pine-moon`, `rose-pine-dawn`, `atom-one-dark`, `atom-one-light`
 
 ## Requirements
 

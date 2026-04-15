@@ -22,6 +22,7 @@ from textual.widgets import (
 
 from ...manager import RepositoryManager
 from ...repo import RepositoryInfo
+from .. import get_version
 from .constants import (
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
@@ -39,6 +40,7 @@ from .screens import (
 
 
 class GitDirectorConsole(App):
+    TITLE = f"GitDirector [v{get_version()}]"
     CSS = """
     Screen {
         background: $surface;
@@ -127,6 +129,7 @@ class GitDirectorConsole(App):
     def __init__(self) -> None:
         super().__init__()
         self.manager = RepositoryManager()
+        self.theme = self.manager.config.theme
         self._repo_paths: list[Path] = []
         self._results: dict[str, RepositoryInfo] = {}
         self._sessions_cache: dict[str, int] = {}
