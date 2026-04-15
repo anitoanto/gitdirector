@@ -276,6 +276,29 @@ class TestSessionsSearchAndSort:
             assert table.row_count == 0
             assert table.display is True
 
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/gamma/copilot/1", "repo": "gamma", "purpose": "copilot"},
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
+        ],
+    )
+    async def test_default_sessions_sort_is_session_name(self, _mock_list, _mock_status):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/alpha/shell/1"
+            status_text = app.query_one("#status-bar", Static).content
+            assert "sort:" not in status_text
+
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_sort_sessions_by_repo(self, _mock):
         app = GitDirectorConsole()
@@ -678,11 +701,11 @@ class TestTabRestorationAfterSuspend:
         async with app.run_test(size=(80, 24)):
             app._search_query = "test"
             app._sessions_sort_column = 3
-            app._sessions_sort_reverse = False
+            app._sessions_sort_reverse = True
             msg = app._build_sessions_loaded_status(2, 5)
             assert "2 of 5" in msg
             assert "filter: 'test'" in msg
-            assert "sort: Session Name \u25b2" in msg
+            assert "sort: Session Name \u25bc" in msg
 
     async def test_esc_clear_search_hint_shown(self):
         app = GitDirectorConsole()
