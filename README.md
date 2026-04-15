@@ -20,17 +20,17 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 
 ## Usage
 
-| Command | Description |
-| --- | --- |
-| `gitdirector console` | Open the interactive TUI dashboard |
-| `gitdirector link PATH [--discover]` | Link a repository or discover all under a path |
+| Command                                      | Description                                            |
+| -------------------------------------------- | ------------------------------------------------------ |
+| `gitdirector console`                        | Open the interactive TUI dashboard                     |
+| `gitdirector link PATH [--discover]`         | Link a repository or discover all under a path         |
 | `gitdirector unlink PATH\|NAME [--discover]` | Unlink a repository by path, name, or all under a path |
-| `gitdirector list` | List all tracked repositories with live status |
-| `gitdirector status` | Show dirty repositories with staged/unstaged files |
-| `gitdirector pull` | Pull latest changes for all tracked repositories |
-| `gitdirector cd NAME` | Open or switch to a tmux session for a repository |
-| `gitdirector autoclean links\|sessions` | Clean broken links or stale tmux sessions |
-| `gitdirector help` | Show help |
+| `gitdirector list`                           | List all tracked repositories with live status         |
+| `gitdirector status`                         | Show repositories with staged/unstaged files           |
+| `gitdirector pull`                           | Pull latest changes for all tracked repositories       |
+| `gitdirector cd NAME`                        | Open or switch to a tmux session for a repository      |
+| `gitdirector autoclean links\|sessions`      | Clean broken links or stale tmux sessions              |
+| `gitdirector help`                           | Show help                                              |
 
 ### link
 
@@ -50,14 +50,15 @@ Opens a full interactive TUI dashboard.
 Features:
 
 - Live table with sync state, branch, changes, last commit, and active tmux sessions
+- `j`/`k` or arrow keys to navigate
 - `/` to filter repositories by name or path
 - `s` to cycle sort by any column
 - `r` to refresh all statuses
 - Press `enter` on any repository to open an action menu:
-  - **New tmux session** — create and attach a session for the repository
-  - **Attach existing session** — switch to any already-running tmux session
-  - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, or Codex in a new tmux session
-  - **Remove session** — kill a running tmux session
+    - **New tmux session** — create and attach a session for the repository
+    - **Attach existing session** — switch to any already-running tmux session
+    - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, or Codex in a new tmux session
+    - **Remove session** — kill a running tmux session
 
 ### unlink
 
@@ -113,9 +114,9 @@ Config is stored at `~/.gitdirector/config.yaml`.
 
 ```yaml
 repositories:
-  - /path/to/repo1
-  - /path/to/repo2
-max_workers: 10   # optional, default 10
+    - /path/to/repo1
+    - /path/to/repo2
+max_workers: 10 # optional, default 10
 ```
 
 ## Requirements
