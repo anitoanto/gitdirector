@@ -9,6 +9,7 @@ from .commands import (
     cd,
     console,
     help,
+    info,
     link,
     listt,
     pull,
@@ -49,6 +50,7 @@ cd.register(cli)
 help.register(cli)
 tui.register(cli)
 autoclean.register(cli)
+info.register(cli)
 
 
 def main():

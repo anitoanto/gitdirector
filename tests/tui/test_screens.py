@@ -7,7 +7,7 @@ import termios
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from textual.widgets import OptionList, Static
+from textual.widgets import LoadingIndicator, OptionList, Static
 
 from gitdirector.commands.tui import (
     _SESSIONS_SORT_COLUMN_NAMES,
@@ -15,9 +15,11 @@ from gitdirector.commands.tui import (
     AgentLoadingScreen,
     ConfirmScreen,
     GitDirectorConsole,
+    RepoInfoScreen,
     RemoveSessionScreen,
     SortMenuScreen,
 )
+from gitdirector.info import FileTypeInfo, RepoInfoResult
 
 from .conftest import _make_info, _mock_manager
 
@@ -404,6 +406,83 @@ class TestRemoveSessionScreen:
             assert menu.highlighted != initial
             await pilot.press("k")
             assert menu.highlighted == initial
+
+
+class TestRepoInfoScreen:
+    async def test_compose_shows_loading_state(self):
+        screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            title = app.screen.query_one("#info-title", Static)
+            path_label = app.screen.query_one("#info-path", Static)
+            loading = app.screen.query_one("#info-loading", LoadingIndicator)
+            hint = app.screen.query_one("#info-hint", Static)
+            assert "my-repo" in title.content
+            assert "/tmp/my-repo" in path_label.content
+            assert loading is not None
+            assert hint.content == ""
+
+    async def test_populate_renders_stats_and_table(self):
+        screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"))
+        result = RepoInfoResult(
+            total_files=3,
+            file_types=[
+                FileTypeInfo(".py", 2, 10, 20),
+                FileTypeInfo(".txt", 1, None, None),
+            ],
+            total_lines=10,
+            total_tokens=20,
+            max_depth=2,
+        )
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            screen.populate(result)
+            await pilot.pause()
+            assert len(app.screen.query("#info-loading")) == 0
+            stats = app.screen.query_one("#info-stats", Static)
+            table = app.screen.query_one("#info-table", Static)
+            hint = app.screen.query_one("#info-hint", Static)
+            assert "Files" in stats.content
+            assert "EXTENSION" in table.content
+            assert ".py" in table.content
+            assert "close" in hint.content
+
+    async def test_populate_without_file_types_skips_table(self):
+        screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"))
+        result = RepoInfoResult(
+            total_files=0,
+            file_types=[],
+            total_lines=0,
+            total_tokens=0,
+            max_depth=0,
+        )
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            screen.populate(result)
+            await pilot.pause()
+            assert len(app.screen.query("#info-table")) == 0
+            assert len(app.screen.query("#info-stats")) == 1
+
+    async def test_escape_dismisses(self):
+        results: list[None] = []
+        screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen, callback=lambda v: results.append(v))
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [None]
 
 
 class TestAgentLoadingScreen:

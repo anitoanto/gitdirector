@@ -40,6 +40,7 @@ from .screens import (
     AgentLoadingScreen,
     ConfirmScreen,
     RemoveSessionScreen,
+    RepoInfoScreen,
     SortMenuScreen,
 )
 
@@ -126,6 +127,7 @@ class GitDirectorConsole(App):
         Binding("l", "cursor_right", "Right", show=False),
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
+        Binding("i", "show_info", "Info", show=True),
         Binding("escape", "close_search", show=False),
         Binding("1", "tab_repos", "Repos", show=True),
         Binding("2", "tab_sessions", "Sessions", show=True),
@@ -881,6 +883,29 @@ class GitDirectorConsole(App):
             ActionMenuScreen(path.name, path, branch),
             callback=self._handle_menu_action,
         )
+
+    def action_show_info(self) -> None:
+        if self._active_tab != "repos":
+            return
+        path = self._get_selected_path()
+        if path is None:
+            return
+        screen = RepoInfoScreen(path.name, path)
+        self.push_screen(screen)
+        self._gather_and_show_info(path, screen)
+
+    @work(thread=True)
+    def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
+        from ...info import gather_repo_info
+
+        result = gather_repo_info(path)
+        self.call_from_thread(screen.populate, result)
+
+    def _push_info_screen(self, name: str, path: Path, result) -> None:
+        self.push_screen(RepoInfoScreen(name, path))
+        total = len(self._results)
+        shown = self.query_one("#repo-table", DataTable).row_count
+        self._update_status(self._build_loaded_status(shown, total))
 
     _AGENT_COMMANDS = {
         "agent:opencode": "opencode",

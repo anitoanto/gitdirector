@@ -30,6 +30,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector pull`                           | Pull latest changes for all tracked repositories       |
 | `gitdirector cd NAME`                        | Open or switch to a tmux session for a repository      |
 | `gitdirector autoclean links\|sessions`      | Clean broken links or stale tmux sessions              |
+| `gitdirector info PATH\|NAME [--full]`       | Show file statistics for a repository                  |
 | `gitdirector help`                           | Show help                                              |
 
 ### link
@@ -53,6 +54,7 @@ Features:
 - `j`/`k` or arrow keys to navigate
 - `/` to filter repositories by name or path
 - `s` to cycle sort by any column
+- `i` to show repository info (file count, lines, tokens, max depth, top file types)
 - `r` to refresh all statuses
 - Press `enter` on any repository to open an action menu:
     - **New tmux session** — create and attach a session for the repository
@@ -69,6 +71,25 @@ gitdirector unlink /path/to/folder --discover  # unlink all repos under a path
 ```
 
 If multiple tracked repositories share the same name, `gitdirector` will refuse and list the conflicting paths so you can use the full path instead.
+
+### info
+
+```bash
+gitdirector info /path/to/repo        # by path
+gitdirector info my-repo               # by name
+gitdirector info my-repo --full        # show all file extensions
+```
+
+Shows file statistics for a repository:
+
+- Total file count, line count, token count, and max directory depth
+- Top 10 file types by count with line and token breakdowns (use `--full` to show all)
+- Files without extensions grouped as `(no ext)`
+- Remaining types grouped as `others`
+- Binary files show `-` for lines and tokens
+- All operations respect `.gitignore` at every level
+
+Also available in the TUI console by pressing `i` on a selected repository.
 
 ### list
 
