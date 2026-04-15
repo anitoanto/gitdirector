@@ -345,6 +345,23 @@ class TestPullCommand:
         assert result.exit_code == 1
         assert "failed" in result.output.lower()
 
+    def test_abort_confirmation(self, runner, fake_git_repo):
+        mgr = _mock_manager()
+        mgr.config.repositories = [fake_git_repo]
+        mgr.config.max_workers = 2
+
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["pull"], input="n\n")
+        assert result.exit_code == 0
+        assert "Aborted" in result.output
+
+
+class TestMainEntry:
+    def test_main_exception_handler(self, runner):
+        with patch("gitdirector.cli.cli", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit):
+                main()
+
 
 class TestHelpCommand:
     def test_help(self, runner):

@@ -377,6 +377,21 @@ class TestRemoveSessionScreen:
             await pilot.press("enter")
             assert results
 
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
+    async def test_j_k_navigation(self, _mock_sessions):
+        screen = RemoveSessionScreen("repo")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            menu = app.screen.query_one("#action-menu", OptionList)
+            initial = menu.highlighted
+            await pilot.press("j")
+            assert menu.highlighted != initial
+            await pilot.press("k")
+            assert menu.highlighted == initial
+
 
 class TestRemoveFlow:
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
@@ -394,6 +409,37 @@ class TestRemoveFlow:
         async with app.run_test(size=(80, 24)) as _:
             app._do_remove(False, "gd/my-repo/shell/1")
             mock_kill.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux._sanitize_repo_name", side_effect=lambda x: x)
+    async def test_do_remove_updates_repo_row(self, _mock_sanitize, mock_kill):
+        repos = [_make_info("my-repo", Path("/tmp/my-repo"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_cache[str(Path("/tmp/my-repo"))] = 2
+            app._sessions_entries = [
+                {"session_name": "gd/my-repo/shell/1", "repo": "my-repo", "purpose": "shell"},
+                {"session_name": "gd/my-repo/shell/2", "repo": "my-repo", "purpose": "shell"},
+            ]
+            app._do_remove(True, "gd/my-repo/shell/1")
+            mock_kill.assert_called_once_with("gd/my-repo/shell/1")
+            assert app._sessions_cache[str(Path("/tmp/my-repo"))] == 1
+            assert len(app._sessions_entries) == 1
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_handle_menu_action_remove_session(self, _mock_sessions):
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        app.push_screen = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._handle_menu_action("remove_session")
+            app.push_screen.assert_called_once()
 
     async def test_get_selected_path_empty_table(self):
         app = GitDirectorConsole()

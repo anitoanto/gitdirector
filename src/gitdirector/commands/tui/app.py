@@ -686,7 +686,23 @@ class GitDirectorConsole(App):
             from ...integrations.tmux import kill_tmux_session
 
             kill_tmux_session(session_name)
-            self._update_status(f"Session '{session_name}' removed")
+
+            self._sessions_entries = [
+                e for e in self._sessions_entries if e["session_name"] != session_name
+            ]
+            self._apply_sessions_filter_and_sort()
+
+            parts = session_name.split("/")
+            if len(parts) >= 2:
+                repo_name = parts[1]
+                for path_str, info in self._results.items():
+                    from ...integrations.tmux import _sanitize_repo_name
+
+                    if _sanitize_repo_name(info.path.name) == repo_name:
+                        count = max(self._sessions_cache.get(path_str, 1) - 1, 0)
+                        self._sessions_cache[path_str] = count
+                        self._update_row(info, count)
+                        break
 
     def action_refresh(self) -> None:
         self._results.clear()
