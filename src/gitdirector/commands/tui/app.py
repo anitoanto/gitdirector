@@ -363,7 +363,7 @@ class GitDirectorConsole(App):
 
     @work(thread=True)
     def _load_sessions(self) -> None:
-        from ...integrations.tmux import list_all_gd_sessions, get_all_session_statuses
+        from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
 
         self.call_from_thread(self._update_status, "Loading sessions…")
         entries = list_all_gd_sessions()

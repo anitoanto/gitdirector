@@ -16,4 +16,4 @@ wheels/
 .pytest_cache
 .coverage
 .coverage.*
-**/.DS_Store
+.DS_Store

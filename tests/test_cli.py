@@ -417,8 +417,9 @@ class TestMainEntry:
                 main()
 
     def test_cli_module_runs_main_from_dunder_main(self, monkeypatch):
-        import click
         import sys
+
+        import click
 
         calls = []
 
@@ -432,7 +433,10 @@ class TestMainEntry:
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
-                message=r"'gitdirector\.cli' found in sys\.modules after import of package 'gitdirector'",
+                message=(
+                    r"'gitdirector\.cli' found in sys\.modules after import of "
+                    r"package 'gitdirector'"
+                ),
                 category=RuntimeWarning,
             )
             runpy.run_module("gitdirector.cli", run_name="__main__")
