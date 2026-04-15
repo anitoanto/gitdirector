@@ -2,6 +2,8 @@
 
 from .app import GitDirectorConsole, register
 from .constants import (
+    _SESSION_STATUS_LABEL,
+    _SESSION_STATUS_ORDER,
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
@@ -23,6 +25,8 @@ __all__ = [
     "GitDirectorConsole",
     "RemoveSessionScreen",
     "SortMenuScreen",
+    "_SESSION_STATUS_LABEL",
+    "_SESSION_STATUS_ORDER",
     "_SESSIONS_SORT_COLUMN_NAMES",
     "_SORT_COLUMN_NAMES",
     "_STATUS_LABEL",

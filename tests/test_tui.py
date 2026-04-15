@@ -705,12 +705,12 @@ class TestSessionsTab:
             assert app.query_one("#sessions-table", DataTable)
 
     async def test_sessions_table_has_columns(self):
-        """Sessions table should have 3 columns."""
+        """Sessions table should have 4 columns."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as _:
             table = app.query_one("#sessions-table", DataTable)
-            assert len(table.columns) == 3
+            assert len(table.columns) == 4
 
     async def test_tab_switching_via_action(self):
         """action_tab_sessions switches to the sessions tab."""
@@ -917,9 +917,9 @@ class TestSessionsTab:
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
             row_key = "gd/alpha/shell/1"
-            assert table.get_cell(row_key, ck[0]) == "shell"
-            assert table.get_cell(row_key, ck[1]) == "alpha"
-            assert table.get_cell(row_key, ck[2]) == "gd/alpha/shell/1"
+            assert table.get_cell(row_key, ck[1]) == "shell"
+            assert table.get_cell(row_key, ck[2]) == "alpha"
+            assert table.get_cell(row_key, ck[3]) == "gd/alpha/shell/1"
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
@@ -1790,12 +1790,12 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = False
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
-            assert table.get_cell("gd/alpha/shell/1", ck[1]) == "alpha"
+            assert table.get_cell("gd/alpha/shell/1", ck[2]) == "alpha"
             table.move_cursor(row=0)
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/alpha/shell/1"
@@ -1808,7 +1808,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
@@ -1824,7 +1824,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 2
+            app._sessions_sort_column = 3
             app._sessions_sort_reverse = False
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
@@ -1841,7 +1841,7 @@ class TestSessionsSearchAndSort:
             await app.workers.wait_for_complete()
             await pilot.pause()
             app._search_query = "gd/"
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
@@ -1872,7 +1872,7 @@ class TestSessionsSearchAndSort:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             app._apply_sessions_filter_and_sort()
             status_text = app.query_one("#status-bar", Static).content
@@ -1893,7 +1893,7 @@ class TestSessionsSearchAndSort:
             await pilot.pause()
             assert isinstance(app.screen, SortMenuScreen)
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 3
+            assert menu.option_count == 4
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_SAMPLE_SESSIONS)
     async def test_search_on_sessions_tab_via_input(self, _mock):
@@ -2030,7 +2030,7 @@ class TestBuildSessionsLoadedStatus:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)):
-            app._sessions_sort_column = 1
+            app._sessions_sort_column = 2
             app._sessions_sort_reverse = True
             msg = app._build_sessions_loaded_status(3, 3)
             assert "sort: Repository \u25bc" in msg
@@ -2040,7 +2040,7 @@ class TestBuildSessionsLoadedStatus:
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)):
             app._search_query = "test"
-            app._sessions_sort_column = 2
+            app._sessions_sort_column = 3
             app._sessions_sort_reverse = False
             msg = app._build_sessions_loaded_status(2, 5)
             assert "2 of 5" in msg
@@ -2070,7 +2070,7 @@ class TestBuildSessionsLoadedStatus:
 
 class TestSortMenuScreenCustomColumns:
     async def test_custom_column_names(self):
-        """SortMenuScreen with session column names shows 3 options."""
+        """SortMenuScreen with session column names shows 4 options."""
         screen = SortMenuScreen(0, False, _SESSIONS_SORT_COLUMN_NAMES)
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -2078,7 +2078,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 3
+            assert menu.option_count == 4
 
     async def test_default_column_names(self):
         """SortMenuScreen without explicit column names defaults to 7 repo columns."""
@@ -2163,7 +2163,8 @@ class TestSessionsRefreshOnReturn:
         )
         with patch("gitdirector.integrations.tmux.attach_tmux_session"):
             with patch("sys.stdout"):
-                app._suspend_and_attach("gd-test-session")
+                with patch("termios.tcflush"):
+                    app._suspend_and_attach("gd-test-session")
         # set_timer will have been called; we verify _load_sessions was set up
         # by checking that the app's timer mechanism was invoked
         # Since we can't easily test set_timer in unit tests, check that
@@ -2179,7 +2180,8 @@ class TestSessionsRefreshOnReturn:
         )
         with patch("gitdirector.integrations.tmux.attach_tmux_session"):
             with patch("sys.stdout"):
-                app._suspend_and_attach("gd-test-session")
+                with patch("termios.tcflush"):
+                    app._suspend_and_attach("gd-test-session")
         assert app._repos_stale is True
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -2232,7 +2234,8 @@ class TestSessionsRefreshOnReturn:
         )
         with patch("gitdirector.integrations.tmux.attach_tmux_session"):
             with patch("sys.stdout"):
-                app._suspend_and_attach("gd-test", Path("/tmp/alpha"))
+                with patch("termios.tcflush"):
+                    app._suspend_and_attach("gd-test", Path("/tmp/alpha"))
         # set_timer schedules _refresh_repo_for_path; verify via the mock
         # Although set_timer defers execution, the lambda was constructed
 
