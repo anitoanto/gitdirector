@@ -327,7 +327,7 @@ class TestPullCommand:
                 "gitdirector.commands.pull._pull_one",
                 return_value=(fake_git_repo.name, True, "Already up to date."),
             ):
-                result = runner.invoke(cli, ["pull"])
+                result = runner.invoke(cli, ["pull", "-y"])
         assert result.exit_code == 0
         assert "1 repository" in result.output
 
@@ -341,7 +341,7 @@ class TestPullCommand:
                 "gitdirector.commands.pull._pull_one",
                 return_value=(fake_git_repo.name, False, "Cannot fast-forward"),
             ):
-                result = runner.invoke(cli, ["pull"])
+                result = runner.invoke(cli, ["pull", "-y"])
         assert result.exit_code == 1
         assert "failed" in result.output.lower()
 

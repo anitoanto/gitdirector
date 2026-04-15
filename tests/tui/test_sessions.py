@@ -1,0 +1,584 @@
+"""Tests for TUI sessions tab, search/sort, and refresh behaviour."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent
+
+from gitdirector.commands.tui import GitDirectorConsole, SortMenuScreen
+
+from .conftest import SAMPLE_SESSIONS, _make_info, _mock_manager
+
+
+class TestSessionsTab:
+    async def test_sessions_table_exists(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as _:
+            assert app.query_one("#sessions-table", DataTable)
+
+    async def test_sessions_table_has_columns(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as _:
+            table = app.query_one("#sessions-table", DataTable)
+            assert len(table.columns) == 3
+
+    async def test_tab_switching_via_action(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await pilot.pause()
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "sessions"
+
+    async def test_tab_switching_back_to_repos(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await pilot.pause()
+            app.action_tab_repos()
+            await pilot.pause()
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "repos"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_no_sessions_shows_message(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            no_msg = app.query_one("#no-sessions-message", Static)
+            assert no_msg.display is True
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
+        ],
+    )
+    async def test_sessions_populated(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 2
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+        ],
+    )
+    async def test_sessions_status_bar_singular(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status_text = app.query_one("#status-bar", Static).content
+            assert "1 active session" in status_text
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
+            {"session_name": "gd/gamma/copilot/1", "repo": "gamma", "purpose": "copilot"},
+        ],
+    )
+    async def test_sessions_status_bar_plural(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status_text = app.query_one("#status-bar", Static).content
+            assert "3 active sessions" in status_text
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+        ],
+    )
+    async def test_session_row_select_attaches(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._suspend_and_attach = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            table.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1")
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_sessions_no_sessions_status(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status_text = app.query_one("#status-bar", Static).content
+            assert "No active sessions" in status_text
+
+    async def test_get_active_table_repos(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as _:
+            table = app._get_active_table()
+            assert table.id == "repo-table"
+
+    async def test_get_active_table_sessions(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)):
+            app._active_tab = "sessions"
+            table = app._get_active_table()
+            assert table.id == "sessions-table"
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_key_1_switches_to_repos(self, _mock_sessions):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await pilot.pause()
+            await pilot.press("1")
+            await pilot.pause()
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "repos"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_key_2_switches_to_sessions(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.press("2")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "sessions"
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
+        ],
+    )
+    async def test_cursor_navigation_on_sessions_tab(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            table.focus()
+            await pilot.pause()
+            initial_row = table.cursor_coordinate.row
+            await pilot.press("j")
+            assert table.cursor_coordinate.row == initial_row + 1
+            await pilot.press("k")
+            assert table.cursor_coordinate.row == initial_row
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+        ],
+    )
+    async def test_sessions_table_cell_values(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            ck = app._sess_col_keys
+            row_key = "gd/alpha/shell/1"
+            assert table.get_cell(row_key, ck[0]) == "shell"
+            assert table.get_cell(row_key, ck[1]) == "alpha"
+            assert table.get_cell(row_key, ck[2]) == "gd/alpha/shell/1"
+
+
+class TestSessionsSearchAndSort:
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_filters_sessions_by_repo(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "alpha"
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 1
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_filters_sessions_by_purpose(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "claude"
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 1
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_filters_sessions_by_session_name(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "gd/gamma"
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 1
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_no_match_sessions(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "zzz_no_match"
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 0
+            assert table.display is True
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sort_sessions_by_repo(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_sort_column = 1
+            app._sessions_sort_reverse = False
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            ck = app._sess_col_keys
+            assert table.get_cell("gd/alpha/shell/1", ck[1]) == "alpha"
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/alpha/shell/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sort_sessions_by_repo_descending(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_sort_column = 1
+            app._sessions_sort_reverse = True
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/gamma/copilot/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sort_sessions_by_session_name(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_sort_column = 2
+            app._sessions_sort_reverse = False
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/alpha/shell/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sort_sessions_combined_with_search(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "gd/"
+            app._sessions_sort_column = 1
+            app._sessions_sort_reverse = True
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 3
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/gamma/copilot/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sessions_status_bar_with_filter(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "alpha"
+            app._apply_sessions_filter_and_sort()
+            status_text = app.query_one("#status-bar", Static).content
+            assert "1 of 3" in status_text
+            assert "filter:" in status_text
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sessions_status_bar_with_sort(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_sort_column = 1
+            app._sessions_sort_reverse = True
+            app._apply_sessions_filter_and_sort()
+            status_text = app.query_one("#status-bar", Static).content
+            assert "sort:" in status_text
+            assert "Repository" in status_text
+            assert "\u25bc" in status_text
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sort_action_on_sessions_tab(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen, SortMenuScreen)
+            menu = app.screen.query_one("#action-menu", OptionList)
+            assert menu.option_count == 3
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_on_sessions_tab_via_input(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.press("slash")
+            search_bar = app.query_one("#search-bar", Input)
+            search_bar.value = "beta"
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 1
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_handle_sessions_sort_selection_none(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            original_col = app._sessions_sort_column
+            original_rev = app._sessions_sort_reverse
+            app._handle_sessions_sort_selection(None)
+            assert app._sessions_sort_column == original_col
+            assert app._sessions_sort_reverse == original_rev
+
+
+class TestBuildSessionsLoadedStatus:
+    async def test_no_sessions_no_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            assert app._build_sessions_loaded_status(0, 0) == "No active sessions"
+
+    async def test_single_session(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            msg = app._build_sessions_loaded_status(1, 1)
+            assert "1 active session" in msg
+            assert "sessions" not in msg.split("1 active ")[1].split(" ")[0]
+
+    async def test_multiple_sessions(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            msg = app._build_sessions_loaded_status(3, 3)
+            assert "3 active sessions" in msg
+
+    async def test_with_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            app._search_query = "alpha"
+            msg = app._build_sessions_loaded_status(1, 3)
+            assert "1 of 3" in msg
+            assert "filter: 'alpha'" in msg
+
+    async def test_with_sort(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            app._sessions_sort_column = 1
+            app._sessions_sort_reverse = True
+            msg = app._build_sessions_loaded_status(3, 3)
+            assert "sort: Repository \u25bc" in msg
+
+    async def test_with_filter_and_sort(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            app._search_query = "test"
+            app._sessions_sort_column = 2
+            app._sessions_sort_reverse = False
+            msg = app._build_sessions_loaded_status(2, 5)
+            assert "2 of 5" in msg
+            assert "filter: 'test'" in msg
+            assert "sort: Session Name \u25b2" in msg
+
+    async def test_esc_clear_search_hint_shown(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            app._search_query = "test"
+            msg = app._build_sessions_loaded_status(1, 3)
+            assert "[esc] clear search" in msg
+
+    async def test_esc_clear_search_hint_not_shown_without_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)):
+            msg = app._build_sessions_loaded_status(3, 3)
+            assert "[esc] clear search" not in msg
+
+
+class TestSessionsRefreshOnReturn:
+    async def test_suspend_and_attach_refreshes_sessions_tab(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout"):
+                app._suspend_and_attach("gd-test-session")
+        assert app._active_tab == "sessions"
+
+    async def test_suspend_sets_repos_stale(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout"):
+                app._suspend_and_attach("gd-test-session")
+        assert app._repos_stale is True
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_switching_to_repos_reloads_when_stale(self, _mock_sessions):
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.manager.get_repository_status.reset_mock()
+            app._repos_stale = True
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.action_tab_repos()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._repos_stale is False
+            app.manager.get_repository_status.assert_called_once()
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_switching_to_repos_no_reload_when_not_stale(self, _mock_sessions):
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.manager.get_repository_status.reset_mock()
+            app._repos_stale = False
+            app.action_tab_sessions()
+            await pilot.pause()
+            app.action_tab_repos()
+            await pilot.pause()
+            app.manager.get_repository_status.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_suspend_and_attach_refreshes_repo(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        app._refresh_repo_for_path = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout"):
+                app._suspend_and_attach("gd-test", Path("/tmp/alpha"))
+
+    async def test_input_changed_routes_to_sessions_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._sessions_entries = list(SAMPLE_SESSIONS)
+        app._apply_sessions_filter_and_sort = MagicMock()
+        event = MagicMock()
+        event.input.id = "search-bar"
+        event.value = "test"
+        app.on_input_changed(event)
+        assert app._search_query == "test"
+        app._apply_sessions_filter_and_sort.assert_called_once()
+
+    async def test_input_changed_routes_to_repos_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "repos"
+        app._apply_filter_and_sort = MagicMock()
+        event = MagicMock()
+        event.input.id = "search-bar"
+        event.value = "test"
+        app.on_input_changed(event)
+        assert app._search_query == "test"
+        app._apply_filter_and_sort.assert_called_once()

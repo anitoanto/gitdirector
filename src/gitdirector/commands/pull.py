@@ -55,7 +55,8 @@ def _pull_one(path: Path) -> tuple[str, bool, str]:
 
 def register(cli: click.Group):
     @cli.command()
-    def pull():
+    @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt.")
+    def pull(yes):
         manager = RepositoryManager()
         paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
@@ -63,6 +64,18 @@ def register(cli: click.Group):
         if not paths:
             console.print("  [dim]No repositories linked[/dim]\n")
             return
+
+        console.print("  [bold]Command:[/bold] git pull --ff-only")
+        console.print(f"  [bold]Repositories ({len(paths)}):[/bold]")
+        for p in paths:
+            console.print(f"    [dim]•[/dim] {p.name}")
+        console.print()
+
+        if not yes:
+            if not click.confirm("  Proceed?", default=True):
+                console.print("  [dim]Aborted[/dim]\n")
+                return
+            console.print()
 
         results = []
         with Live(

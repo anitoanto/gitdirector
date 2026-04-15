@@ -6,6 +6,18 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+_NETWORK_ERROR_RE = re.compile(
+    r"connection reset"
+    r"|connection refused"
+    r"|connection timed out"
+    r"|network is unreachable"
+    r"|name or service not known"
+    r"|could not resolve"
+    r"|kex_exchange_identification"
+    r"|ssh_exchange_identification",
+    re.IGNORECASE,
+)
+
 _AUTH_ERROR_RE = re.compile(
     r"could not read username"
     r"|authentication failed"
@@ -20,8 +32,16 @@ _AUTH_ERROR_RE = re.compile(
 )
 
 
-def _is_auth_error(stderr: str) -> bool:
-    return _AUTH_ERROR_RE.search(stderr) is not None
+def _is_network_error(stderr: str) -> bool:
+    return _NETWORK_ERROR_RE.search(stderr) is not None
+
+
+def _classify_remote_error(stderr: str) -> str | None:
+    if _is_network_error(stderr):
+        return "network error \u2014 could not reach remote"
+    if _AUTH_ERROR_RE.search(stderr):
+        return "authentication failed \u2014 configure git credentials for this remote"
+    return None
 
 
 class RepoStatus(Enum):
@@ -62,28 +82,26 @@ class Repository:
     def _is_git_repo(path: Path) -> bool:
         return (path / ".git").is_dir()
 
-    def _run_git(self, *args: str, _strip: bool = True) -> tuple[int, str, str]:
+    def _run_git(self, *args: str, _strip: bool = True, _timeout: int = 30) -> tuple[int, str, str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
-        env["GIT_ASKPASS"] = ""
-        env["SSH_ASKPASS"] = ""
+        if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
+            env["GIT_SSH_COMMAND"] = "ssh -o ConnectTimeout=10"
         try:
             result = subprocess.run(
                 ["git", "-C", str(self.path)] + list(args),
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_timeout,
                 env=env,
                 stdin=subprocess.DEVNULL,
             )
             stdout = result.stdout.strip() if _strip else result.stdout
             stderr = result.stderr.strip()
-            if result.returncode != 0 and _is_auth_error(stderr):
-                return (
-                    result.returncode,
-                    stdout,
-                    "authentication failed \u2014 configure git credentials for this remote",
-                )
+            if result.returncode != 0:
+                classified = _classify_remote_error(stderr)
+                if classified:
+                    return result.returncode, stdout, classified
             return result.returncode, stdout, stderr
         except subprocess.TimeoutExpired:
             return 1, "", "git command timed out"
@@ -217,8 +235,12 @@ class Repository:
             size,
         )
 
-    def pull(self) -> tuple[bool, str]:
-        code, out, err = self._run_git("pull", "--ff-only")
-        if code == 0:
-            return True, out
+    def pull(self, *, retries: int = 1) -> tuple[bool, str]:
+        for attempt in range(1 + retries):
+            code, out, err = self._run_git("pull", "--ff-only")
+            if code == 0:
+                return True, out
+            if attempt < retries and "network error" in err:
+                continue
+            return False, err
         return False, err

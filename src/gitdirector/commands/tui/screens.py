@@ -58,10 +58,11 @@ class ActionMenuScreen(ModalScreen[str]):
                     Option(f"[dim]{count} active {label}[/dim]", disabled=True),
                 )
                 for s in sessions:
-                    slug = s.rsplit("-", 1)[-1] if "-" in s else s
+                    parts = s.split("/")
+                    label = f"{parts[2]}/{parts[3]}" if len(parts) >= 4 else s
                     items.append(
                         Option(
-                            f"[white]●[/white] [bold]{slug}[/bold] [dim]{s}[/dim]",
+                            f"[white]●[/white] [bold]{label}[/bold] [dim]{s}[/dim]",
                             id=f"attach:{s}",
                         )
                     )
@@ -129,7 +130,9 @@ class RemoveSessionScreen(ModalScreen[str | None]):
             if sessions:
                 options = [
                     Option(
-                        f"[red]●[/red] [bold]{s.rsplit('-', 1)[-1]}[/bold] [dim]{s}[/dim]",
+                        f"[red]●[/red] [bold]"
+                        f"{'/'.join(s.split('/')[2:]) if '/' in s else s}"
+                        f"[/bold] [dim]{s}[/dim]",
                         id=s,
                     )
                     for s in sessions
