@@ -548,6 +548,82 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_target_tab is None
             app._load_sessions.assert_called_once()
 
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_resume_restores_selected_session_row(self, _mock_list, _mock_status):
+        """Returning from a session keeps the same session row selected."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=1)
+            await pilot.pause()
+
+            with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+                with patch("sys.stdout"):
+                    with patch("termios.tcflush"):
+                        app._suspend_and_attach("gd/beta/claude/1")
+
+            table.move_cursor(row=0)
+            await pilot.pause()
+
+            with patch("termios.tcflush"):
+                app._handle_app_resume(app)
+
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/beta/claude/1"
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_resume_restores_selected_repo_row(self, _mock_sessions, _mock_all):
+        """Returning from a repo-opened session keeps the same repo row selected."""
+        repos = [
+            _make_info("alpha", Path("/tmp/alpha")),
+            _make_info("beta", Path("/tmp/beta")),
+            _make_info("gamma", Path("/tmp/gamma")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=1)
+            await pilot.pause()
+
+            with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+                with patch("sys.stdout"):
+                    with patch("termios.tcflush"):
+                        app._suspend_and_attach("gd/beta/shell/1", Path("/tmp/beta"))
+
+            table.move_cursor(row=0)
+            await pilot.pause()
+
+            with patch("termios.tcflush"):
+                app._handle_app_resume(app)
+
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "/tmp/beta"
+
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_repos_tab_guard_redirects_wrong_tab(self, _mock):
         """Guard for repos tab redirects a spurious sessions switch back."""

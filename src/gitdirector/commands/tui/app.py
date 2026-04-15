@@ -19,6 +19,7 @@ from textual.widgets import (
     TabbedContent,
     TabPane,
 )
+from textual.widgets.data_table import RowDoesNotExist
 
 from ...manager import RepositoryManager
 from ...repo import RepositoryInfo
@@ -148,6 +149,9 @@ class GitDirectorConsole(App):
         self._waiting_count: int = 0
         self._resume_target_tab: str | None = None
         self._resume_refresh_path: Path | None = None
+        self._resume_selection_tab: str | None = None
+        self._resume_selection_key: str | None = None
+        self._resume_selection_row: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -251,6 +255,7 @@ class GitDirectorConsole(App):
                 str(path),
                 key=str(path),
             )
+            self._restore_resume_selection("repos")
 
     def _update_row(self, info: RepositoryInfo, sessions: int = 0) -> None:
         self._sessions_cache[str(info.path)] = sessions
@@ -338,6 +343,7 @@ class GitDirectorConsole(App):
             self.query_one("#sessions-table", DataTable).focus()
         else:
             self.query_one("#repo-table", DataTable).focus()
+            self._restore_resume_selection("repos")
 
         if restore_path is not None:
             self._refresh_repo_for_path(restore_path)
@@ -415,6 +421,7 @@ class GitDirectorConsole(App):
                     key=entry["session_name"],
                 )
 
+        self._restore_resume_selection("sessions")
         self._update_status(self._build_sessions_loaded_status(len(entries), total))
 
     def _build_sessions_loaded_status(self, shown: int, total: int) -> str:
@@ -530,10 +537,81 @@ class GitDirectorConsole(App):
 
     def _get_selected_path(self) -> Path | None:
         table = self.query_one("#repo-table", DataTable)
+        row_key = self._get_selected_row_key(table)
+        if row_key is None:
+            return None
+        return Path(row_key)
+
+    def _get_selected_row_key(self, table: DataTable) -> str | None:
         if table.row_count == 0:
             return None
         row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        return Path(str(row_key.value))
+        return str(row_key.value)
+
+    def _capture_resume_selection(
+        self,
+        tab_id: str,
+        *,
+        session_name: str | None = None,
+        path: Path | None = None,
+    ) -> None:
+        self._resume_selection_tab = tab_id
+        if not self.is_running:
+            self._resume_selection_row = None
+            if tab_id == "sessions":
+                self._resume_selection_key = session_name
+            else:
+                self._resume_selection_key = str(path) if path is not None else None
+            return
+
+        table = self.query_one(
+            "#sessions-table" if tab_id == "sessions" else "#repo-table",
+            DataTable,
+        )
+        self._resume_selection_row = table.cursor_coordinate.row if table.row_count > 0 else None
+        if tab_id == "sessions":
+            self._resume_selection_key = session_name or self._get_selected_row_key(table)
+        else:
+            self._resume_selection_key = (
+                str(path) if path is not None else self._get_selected_row_key(table)
+            )
+
+    def _clear_resume_selection(self) -> None:
+        self._resume_selection_tab = None
+        self._resume_selection_key = None
+        self._resume_selection_row = None
+
+    def _restore_resume_selection(self, tab_id: str) -> None:
+        if self._resume_selection_tab != tab_id:
+            return
+
+        table = self.query_one(
+            "#sessions-table" if tab_id == "sessions" else "#repo-table",
+            DataTable,
+        )
+        if table.row_count == 0:
+            self._clear_resume_selection()
+            return
+
+        restored = False
+        if self._resume_selection_key is not None:
+            try:
+                target_row = table.get_row_index(self._resume_selection_key)
+            except RowDoesNotExist:
+                pass
+            else:
+                table.move_cursor(row=target_row)
+                restored = True
+
+        if not restored and self._resume_selection_row is not None:
+            target_row = min(self._resume_selection_row, table.row_count - 1)
+            if target_row >= 0:
+                table.move_cursor(row=target_row)
+                restored = True
+
+        if restored:
+            table.focus()
+        self._clear_resume_selection()
 
     def _get_active_table(self) -> DataTable:
         if self._active_tab == "sessions":
@@ -676,6 +754,7 @@ class GitDirectorConsole(App):
                 key=str(info.path),
             )
 
+        self._restore_resume_selection("repos")
         self._update_status(self._build_loaded_status(len(infos), total))
 
     def _build_loaded_status(self, shown: int, total: int) -> str:
@@ -762,6 +841,7 @@ class GitDirectorConsole(App):
         restore_tab = self._active_tab
         self._resume_target_tab = restore_tab
         self._resume_refresh_path = path
+        self._capture_resume_selection(restore_tab, session_name=session_name, path=path)
 
         with self.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
