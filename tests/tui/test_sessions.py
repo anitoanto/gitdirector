@@ -488,9 +488,7 @@ class TestSessionsSearchAndSort:
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
-    async def test_search_escape_on_sessions_tab_clears_live_search(
-        self, _mock_list, _mock_status
-    ):
+    async def test_search_escape_on_sessions_tab_clears_live_search(self, _mock_list, _mock_status):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
