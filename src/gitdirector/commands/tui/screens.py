@@ -448,7 +448,10 @@ class RepoInfoScreen(ModalScreen[None]):
         hint = self.query_one("#info-hint", Static)
         hint.mount(stats, before=hint)
         if r.file_types:
-            rows = f"[dim]{'':>2}{'EXTENSION':<12} {'FILES':>6}   {'LINES':>8}   {'TOKENS':>10}[/dim]\n"
+            rows = (
+                f"[dim]{'':>2}{'EXTENSION':<12} {'FILES':>6}   {'LINES':>8}"
+                f"   {'TOKENS':>10}[/dim]\n"
+            )
             for ft in r.file_types:
                 lines_str = f"{ft.line_count:,}" if ft.line_count is not None else "-"
                 tokens_str = f"{ft.token_count:,}" if ft.token_count is not None else "-"

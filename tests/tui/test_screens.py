@@ -15,8 +15,8 @@ from gitdirector.commands.tui import (
     AgentLoadingScreen,
     ConfirmScreen,
     GitDirectorConsole,
-    RepoInfoScreen,
     RemoveSessionScreen,
+    RepoInfoScreen,
     SortMenuScreen,
 )
 from gitdirector.info import FileTypeInfo, RepoInfoResult
