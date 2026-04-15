@@ -25,6 +25,8 @@ from ...manager import RepositoryManager
 from ...repo import RepositoryInfo
 from .. import get_version
 from .constants import (
+    _DEFAULT_SESSIONS_SORT_COLUMN,
+    _DEFAULT_SORT_COLUMN,
     _SESSION_STATUS_LABEL,
     _SESSION_STATUS_ORDER,
     _SESSIONS_SORT_COLUMN_NAMES,
@@ -137,11 +139,11 @@ class GitDirectorConsole(App):
         self._results: dict[str, RepositoryInfo] = {}
         self._sessions_cache: dict[str, int] = {}
         self._search_query: str = ""
-        self._sort_column: int = 0
+        self._sort_column: int = _DEFAULT_SORT_COLUMN
         self._sort_reverse: bool = False
         self._active_tab: str = "repos"
         self._sessions_entries: list[dict[str, str]] = []
-        self._sessions_sort_column: int = 0
+        self._sessions_sort_column: int = _DEFAULT_SESSIONS_SORT_COLUMN
         self._sessions_sort_reverse: bool = False
         self._repos_stale: bool = False
         self._bell_seen: set[str] = set()
@@ -233,7 +235,7 @@ class GitDirectorConsole(App):
                         f"{done} done, {remaining} remaining…",
                     )
 
-        if self._search_query or self._sort_column != 0 or self._sort_reverse:
+        if self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse:
             self.call_from_thread(self._apply_filter_and_sort)
         else:
             self.call_from_thread(
@@ -402,7 +404,10 @@ class GitDirectorConsole(App):
             2: lambda e: e["repo"].lower(),
             3: lambda e: e["session_name"].lower(),
         }
-        key_func = sort_keys.get(self._sessions_sort_column, sort_keys[0])
+        key_func = sort_keys.get(
+            self._sessions_sort_column,
+            sort_keys[_DEFAULT_SESSIONS_SORT_COLUMN],
+        )
         entries.sort(key=key_func, reverse=self._sessions_sort_reverse)
 
         if not entries and total == 0 and not self._search_query:
@@ -440,7 +445,10 @@ class GitDirectorConsole(App):
         indicators: list[str] = []
         if self._search_query:
             indicators.append(f"filter: '{self._search_query}'")
-        if self._sessions_sort_column != 0 or self._sessions_sort_reverse:
+        if (
+            self._sessions_sort_column != _DEFAULT_SESSIONS_SORT_COLUMN
+            or self._sessions_sort_reverse
+        ):
             direction = "▼" if self._sessions_sort_reverse else "▲"
             indicators.append(
                 f"sort: {_SESSIONS_SORT_COLUMN_NAMES[self._sessions_sort_column]} {direction}"
@@ -772,7 +780,7 @@ class GitDirectorConsole(App):
         indicators: list[str] = []
         if self._search_query:
             indicators.append(f"filter: '{self._search_query}'")
-        if self._sort_column != 0 or self._sort_reverse:
+        if self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse:
             direction = "▼" if self._sort_reverse else "▲"
             indicators.append(f"sort: {_SORT_COLUMN_NAMES[self._sort_column]} {direction}")
         if indicators:
@@ -811,20 +819,15 @@ class GitDirectorConsole(App):
         if path is None:
             return
 
-        import subprocess
-
-        from ...integrations.tmux import create_tmux_session
+        from ...integrations.tmux import create_tmux_session, launch_agent_in_tmux_session
 
         purpose = agent_cmd if agent_cmd else "shell"
         session_name = create_tmux_session(path.name, path, purpose=purpose)
 
         if agent_cmd:
-            subprocess.run(
-                ["tmux", "send-keys", "-t", session_name, f"clear && {agent_cmd}", "Enter"],
-                check=False,
-            )
+            ready_marker = launch_agent_in_tmux_session(session_name, agent_cmd)
             self.push_screen(
-                AgentLoadingScreen(agent_cmd, session_name),
+                AgentLoadingScreen(agent_cmd, session_name, ready_marker),
                 callback=lambda _: self.set_timer(0.2, lambda: self._refresh_repo_for_path(path)),
             )
         else:

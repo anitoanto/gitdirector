@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -262,17 +263,22 @@ class SortMenuScreen(ModalScreen[tuple | None]):
 class AgentLoadingScreen(ModalScreen[None]):
     """Full-screen loading overlay shown while an agent initialises."""
 
+    _POLL_INTERVAL = 0.1
+    _MIN_WAIT = 1.0
+    _MAX_WAIT = 15.0
+
     DEFAULT_CSS = """
     AgentLoadingScreen {
         align: center middle;
-        background: $panel 90%;
+        background: $panel 80%;
+        hatch: right $primary 30%;
     }
     #loading-container {
-        width: 50;
+        width: 50%;
         height: auto;
+        border: round $primary;
         background: $panel;
-        padding: 2 4;
-        border: panel $primary;
+        padding: 1 2;
     }
     #loading-container LoadingIndicator {
         height: 3;
@@ -283,23 +289,54 @@ class AgentLoadingScreen(ModalScreen[None]):
         color: white;
         padding: 1 0 0 0;
     }
+    #loading-hint {
+        text-align: center;
+        padding: 1 1 1 1;
+        color: $text-muted;
+    }
     """
 
-    def __init__(self, agent_cmd: str, session_name: str) -> None:
+    def __init__(self, agent_cmd: str, session_name: str, ready_marker: Path) -> None:
         super().__init__()
         self._agent_cmd = agent_cmd
         self._session_name = session_name
+        self._ready_marker = ready_marker
+        self._dismissed = False
+        self._start_time = 0.0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="loading-container"):
             yield LoadingIndicator()
             yield Static(
-                f"Waiting for [bold]{self._agent_cmd}[/bold] to initialize",
+                f"Launching [bold]{self._agent_cmd}[/bold]",
                 id="loading-text",
             )
+            yield Static("waiting for agent to initialize\u2026", id="loading-hint")
 
     def on_mount(self) -> None:
-        self.set_timer(4, self._do_dismiss)
+        self._start_time = time.monotonic()
+        self._poll_timer = self.set_interval(self._POLL_INTERVAL, self._check_ready)
+        self._timeout_timer = self.set_timer(self._MAX_WAIT, self._force_dismiss)
+        self.call_after_refresh(self._check_ready)
+
+    def _check_ready(self) -> None:
+        if self._dismissed:
+            return
+        if time.monotonic() - self._start_time < self._MIN_WAIT:
+            return
+        if not self._ready_marker.exists():
+            return
+        self._dismissed = True
+        self._poll_timer.stop()
+        self._timeout_timer.stop()
+        self._do_dismiss()
+
+    def _force_dismiss(self) -> None:
+        if self._dismissed:
+            return
+        self._dismissed = True
+        self._poll_timer.stop()
+        self._do_dismiss()
 
     def _do_dismiss(self) -> None:
         import subprocess
@@ -309,6 +346,10 @@ class AgentLoadingScreen(ModalScreen[None]):
         from ...integrations.tmux import attach_tmux_session
 
         session_name = self._session_name
+        try:
+            self._ready_marker.unlink()
+        except FileNotFoundError:
+            pass
 
         with self.app.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")

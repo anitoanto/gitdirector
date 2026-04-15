@@ -3,19 +3,13 @@ import subprocess
 import click
 
 from ..config import Config
+from ..integrations.tmux import list_all_gd_sessions
 from . import console
 
 
 def _list_gd_sessions() -> list[str]:
-    """List all tmux sessions whose names start with 'gd-'."""
-    result = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-    return sorted(s for s in result.stdout.strip().split("\n") if s.startswith("gd-"))
+    """List all tmux sessions using the shared GitDirector session parser."""
+    return [entry["session_name"] for entry in list_all_gd_sessions()]
 
 
 def _kill_session(name: str) -> bool:

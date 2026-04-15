@@ -1,9 +1,11 @@
 """Tests for gitdirector.integrations.tmux – all subprocess calls are mocked."""
 
+import shlex
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from gitdirector.integrations.tmux import (
+    _AGENT_PURPOSES,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
     _make_session_name,
@@ -13,6 +15,7 @@ from gitdirector.integrations.tmux import (
     create_tmux_session,
     get_all_session_statuses,
     kill_tmux_session,
+    launch_agent_in_tmux_session,
     list_repo_sessions,
     open_in_tmux,
     resolve_pane_status,
@@ -222,17 +225,54 @@ class TestOpenInTmux:
         mock_attach.assert_called_once_with("gd/my-repo/shell/1")
 
 
+class TestLaunchAgentInTmuxSession:
+    @patch(
+        "gitdirector.integrations.tmux._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_queues_cleanup_script(self, mock_run, _mock_marker):
+        ready_marker = launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        cleanup_script = (
+            "touch /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
+            "clear; copilot; status=$?; "
+            "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
+            "tmux detach-client >/dev/null 2>&1 || true; "
+            f"tmux kill-session -t {shlex.quote('gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
+            "exit $status"
+        )
+        expected_command = f"sh -lc {shlex.quote(cleanup_script)}"
+        assert ready_marker == Path("/tmp/gitdirector-agent.ready")
+        mock_run.assert_called_once_with(
+            [
+                "tmux",
+                "send-keys",
+                "-t",
+                "gd/my-repo/copilot/1",
+                expected_command,
+                "Enter",
+            ],
+            check=False,
+        )
+
+
 class TestGetAllSessionStatuses:
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_parses_output(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=(
-                "gd/alpha/shell/1|0|zsh|0|1700000000\n"
-                "gd/beta/claude/1|1|claude|0|1700000010\n"
-                "other-session|0|bash|0|1700000000\n"
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=(
+                    "gd/alpha/shell/1|0|zsh|0|1700000000|101\n"
+                    "gd/beta/claude/1|1|bash|0|1700000010|201\n"
+                    "other-session|0|bash|0|1700000000|301\n"
+                ),
             ),
-        )
+            MagicMock(
+                returncode=0,
+                stdout=("201 1 -zsh\n202 201 sh -lc claude\n203 202 claude\n"),
+            ),
+        ]
         result = get_all_session_statuses()
         assert result == {
             "gd/alpha/shell/1": {
@@ -256,31 +296,62 @@ class TestGetAllSessionStatuses:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_dead_pane(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="gd/repo/shell/1|0|zsh|1|1700000000\n",
-        )
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="gd/repo/shell/1|0|zsh|1|1700000000|101\n",
+            ),
+            MagicMock(returncode=0, stdout=""),
+        ]
         result = get_all_session_statuses()
         assert result["gd/repo/shell/1"]["dead"] is True
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_skips_malformed_lines(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="gd/repo/bad\ngd/repo/shell/1|0|zsh|0|1700000000\n",
-        )
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="gd/repo/bad\ngd/repo/shell/1|0|zsh|0|1700000000|101\n",
+            ),
+            MagicMock(returncode=0, stdout=""),
+        ]
         result = get_all_session_statuses()
         assert len(result) == 1
         assert "gd/repo/shell/1" in result
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_invalid_activity_defaults_to_zero(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="gd/repo/shell/1|0|zsh|0|badnum\n",
-        )
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="gd/repo/shell/1|0|zsh|0|badnum|101\n",
+            ),
+            MagicMock(returncode=0, stdout=""),
+        ]
         result = get_all_session_statuses()
         assert result["gd/repo/shell/1"]["activity"] == 0
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_prefers_descendant_command_over_shell_wrapper(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="gd/repo/copilot/1|0|bash|0|1700000000|70539\n",
+            ),
+            MagicMock(
+                returncode=0,
+                stdout=(
+                    "70539 1 -zsh\n"
+                    "70619 70539 sh -lc copilot\n"
+                    "70624 70619 copilot\n"
+                    "70625 70624 git status\n"
+                ),
+            ),
+        ]
+
+        result = get_all_session_statuses()
+
+        assert result["gd/repo/copilot/1"]["command"] == "git"
 
 
 class TestResolvePaneStatus:
@@ -310,12 +381,12 @@ class TestResolvePaneStatus:
             assert resolve_pane_status("shell", shell, dead=False) == "idle"
 
     @patch("gitdirector.integrations.tmux.time")
-    def test_agent_silent_returns_waiting(self, mock_time):
+    def test_agent_silent_returns_idle(self, mock_time):
         mock_time.time.return_value = 1700000020.0
         old_activity = 1700000020 - _SILENCE_THRESHOLD_SECS
         assert (
             resolve_pane_status("opencode", "opencode", dead=False, last_activity=old_activity)
-            == "waiting"
+            == "idle"
         )
 
     @patch("gitdirector.integrations.tmux.time")
@@ -327,7 +398,25 @@ class TestResolvePaneStatus:
         )
 
     @patch("gitdirector.integrations.tmux.time")
-    def test_shell_purpose_never_silence_waiting(self, mock_time):
+    def test_agent_child_command_ignores_silence_threshold(self, mock_time):
+        mock_time.time.return_value = 1700000100.0
+        assert (
+            resolve_pane_status("copilot", "git", dead=False, last_activity=1700000000) == "running"
+        )
+
+    @patch("gitdirector.integrations.tmux.time")
+    def test_non_agent_purpose_ignores_silence_threshold(self, mock_time):
+        mock_time.time.return_value = 1700000100.0
+        assert (
+            resolve_pane_status("lazygit", "lazygit", dead=False, last_activity=1700000000)
+            == "running"
+        )
+
+    def test_known_agent_purposes(self):
+        assert _AGENT_PURPOSES == {"opencode", "claude", "copilot", "codex"}
+
+    @patch("gitdirector.integrations.tmux.time")
+    def test_shell_purpose_ignores_silence_threshold(self, mock_time):
         mock_time.time.return_value = 1700000100.0
         assert (
             resolve_pane_status("shell", "python", dead=False, last_activity=1700000000)
@@ -338,10 +427,10 @@ class TestResolvePaneStatus:
         assert resolve_pane_status("opencode", "opencode", dead=False, last_activity=0) == "running"
 
     @patch("gitdirector.integrations.tmux.time")
-    def test_exactly_at_threshold(self, mock_time):
+    def test_exactly_at_threshold_returns_idle(self, mock_time):
         mock_time.time.return_value = 1700000010.0
         activity = 1700000010 - _SILENCE_THRESHOLD_SECS
         assert (
             resolve_pane_status("opencode", "opencode", dead=False, last_activity=activity)
-            == "waiting"
+            == "idle"
         )

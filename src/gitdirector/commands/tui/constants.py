@@ -35,6 +35,8 @@ _SORT_COLUMN_NAMES = {
     6: "Path",
 }
 
+_DEFAULT_SORT_COLUMN = 0
+
 _STATUS_ORDER = {
     RepoStatus.UP_TO_DATE: 0,
     RepoStatus.AHEAD: 1,
@@ -49,6 +51,8 @@ _SESSIONS_SORT_COLUMN_NAMES = {
     2: "Repository",
     3: "Session Name",
 }
+
+_DEFAULT_SESSIONS_SORT_COLUMN = 3
 
 _SESSION_STATUS_LABEL = {
     "waiting": "[bold yellow]● waiting[/bold yellow]",

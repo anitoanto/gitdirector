@@ -2,7 +2,9 @@
 
 import os
 import re
+import shlex
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -123,6 +125,47 @@ def open_in_tmux(repo_name: str, path: Path) -> None:
     attach_tmux_session(session_name)
 
 
+def _make_agent_ready_marker() -> Path:
+    """Create a unique marker path used to signal agent startup."""
+    fd, raw_path = tempfile.mkstemp(prefix="gitdirector-agent-", suffix=".ready")
+    os.close(fd)
+    marker_path = Path(raw_path)
+    try:
+        marker_path.unlink()
+    except FileNotFoundError:
+        pass
+    return marker_path
+
+
+def launch_agent_in_tmux_session(session_name: str, agent_cmd: str) -> Path:
+    """Launch an agent in *session_name* and return a startup marker path."""
+    normalized_agent_cmd = shlex.join(shlex.split(agent_cmd))
+    ready_marker = _make_agent_ready_marker()
+    ready_marker_quoted = shlex.quote(str(ready_marker))
+    cleanup_script = (
+        f"touch {ready_marker_quoted} >/dev/null 2>&1 || true; "
+        "clear; "
+        f"{normalized_agent_cmd}; "
+        "status=$?; "
+        f"rm -f {ready_marker_quoted} >/dev/null 2>&1 || true; "
+        "tmux detach-client >/dev/null 2>&1 || true; "
+        f"tmux kill-session -t {shlex.quote(session_name)} >/dev/null 2>&1 || true; "
+        "exit $status"
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "send-keys",
+            "-t",
+            session_name,
+            f"sh -lc {shlex.quote(cleanup_script)}",
+            "Enter",
+        ],
+        check=False,
+    )
+    return ready_marker
+
+
 _SHELL_COMMANDS = frozenset(
     {
         "zsh",
@@ -136,7 +179,70 @@ _SHELL_COMMANDS = frozenset(
     }
 )
 
+_AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex"})
+
 _SILENCE_THRESHOLD_SECS = 10
+
+
+def _normalize_process_command(raw_args: str) -> str:
+    token = raw_args.strip().split(" ", 1)[0]
+    if not token:
+        return ""
+    return Path(token).name
+
+
+def _get_process_snapshot() -> tuple[dict[int, list[int]], dict[int, str]]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,args="],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}, {}
+
+    children_by_parent: dict[int, list[int]] = {}
+    commands_by_pid: dict[int, str] = {}
+    for line in result.stdout.splitlines():
+        match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)", line)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        ppid = int(match.group(2))
+        commands_by_pid[pid] = _normalize_process_command(match.group(3))
+        children_by_parent.setdefault(ppid, []).append(pid)
+
+    return children_by_parent, commands_by_pid
+
+
+def _resolve_pane_command(
+    pane_pid: int,
+    fallback_command: str,
+    children_by_parent: dict[int, list[int]],
+    commands_by_pid: dict[int, str],
+) -> str:
+    descendants: list[tuple[int, int, str]] = []
+    stack: list[tuple[int, int]] = [(pane_pid, 0)]
+    seen: set[int] = set()
+    while stack:
+        pid, depth = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        for child in children_by_parent.get(pid, []):
+            child_depth = depth + 1
+            stack.append((child, child_depth))
+            command = commands_by_pid.get(child, "")
+            if command:
+                descendants.append((child_depth, child, command))
+
+    if not descendants:
+        return fallback_command
+
+    non_shell_descendants = [
+        descendant for descendant in descendants if descendant[2].lstrip("-") not in _SHELL_COMMANDS
+    ]
+    candidates = non_shell_descendants or descendants
+    return max(candidates, key=lambda descendant: (descendant[0], descendant[1]))[2]
 
 
 def get_all_session_statuses() -> dict[str, dict[str, object]]:
@@ -153,7 +259,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}|#{window_bell_flag}|#{pane_current_command}|#{pane_dead}|#{window_activity}",
+            "#{session_name}|#{window_bell_flag}|#{pane_current_command}|#{pane_dead}|#{window_activity}|#{pane_pid}",
         ],
         capture_output=True,
         text=True,
@@ -161,21 +267,50 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
     if result.returncode != 0:
         return {}
 
-    statuses: dict[str, dict[str, object]] = {}
+    pane_rows: list[tuple[str, bool, str, bool, int, int]] = []
     for line in result.stdout.strip().split("\n"):
         if not line or not line.startswith("gd/"):
             continue
-        parts = line.split("|", 4)
-        if len(parts) < 5:
+        parts = line.split("|", 5)
+        if len(parts) < 6:
             continue
         try:
             activity = int(parts[4])
         except (ValueError, IndexError):
             activity = 0
-        statuses[parts[0]] = {
-            "bell": parts[1] == "1",
-            "command": parts[2],
-            "dead": parts[3] == "1",
+        try:
+            pane_pid = int(parts[5])
+        except (ValueError, IndexError):
+            pane_pid = 0
+        pane_rows.append(
+            (
+                parts[0],
+                parts[1] == "1",
+                parts[2],
+                parts[3] == "1",
+                activity,
+                pane_pid,
+            )
+        )
+
+    if not pane_rows:
+        return {}
+
+    children_by_parent, commands_by_pid = _get_process_snapshot()
+    statuses: dict[str, dict[str, object]] = {}
+    for session_name, bell, command, dead, activity, pane_pid in pane_rows:
+        effective_command = command
+        if pane_pid > 0:
+            effective_command = _resolve_pane_command(
+                pane_pid,
+                command,
+                children_by_parent,
+                commands_by_pid,
+            )
+        statuses[session_name] = {
+            "bell": bell,
+            "command": effective_command,
+            "dead": dead,
             "activity": activity,
         }
     return statuses
@@ -184,7 +319,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
 def resolve_pane_status(purpose: str, command: str, dead: bool, last_activity: int = 0) -> str:
     """Determine pane status from tmux info (without considering bell state).
 
-    Returns one of: "running", "waiting", "idle".
+    Returns either "running" or "idle".
     """
     if dead:
         return "idle"
@@ -192,8 +327,8 @@ def resolve_pane_status(purpose: str, command: str, dead: bool, last_activity: i
     is_shell = clean_cmd in _SHELL_COMMANDS
     if is_shell:
         return "idle"
-    if purpose != "shell" and last_activity > 0:
+    if purpose in _AGENT_PURPOSES and clean_cmd in _AGENT_PURPOSES and last_activity > 0:
         elapsed = int(time.time()) - last_activity
         if elapsed >= _SILENCE_THRESHOLD_SECS:
-            return "waiting"
+            return "idle"
     return "running"
