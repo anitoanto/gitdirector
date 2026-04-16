@@ -383,7 +383,10 @@ class GitDirectorConsole(App):
         self._apply_sessions_filter_and_sort()
 
     def _apply_sessions_filter_and_sort(self) -> None:
-        table = self.query_one("#sessions-table", DataTable)
+        try:
+            table = self.query_one("#sessions-table", DataTable)
+        except NoMatches:
+            return
         table.clear()
         no_msg = self.query_one("#no-sessions-message", Static)
 
