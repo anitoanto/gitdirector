@@ -10,6 +10,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import (
     DataTable,
     Footer,
@@ -497,7 +498,10 @@ class GitDirectorConsole(App):
 
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)
-            shown = self.query_one("#repo-table", DataTable).row_count
+            try:
+                shown = self.query_one("#repo-table", DataTable).row_count
+            except NoMatches:
+                return
             self._update_status(self._build_loaded_status(shown, total))
 
     def _resolve_session_status(self, entry: dict[str, str]) -> str:
@@ -518,7 +522,10 @@ class GitDirectorConsole(App):
         )
 
     def _update_session_status_cells(self) -> None:
-        table = self.query_one("#sessions-table", DataTable)
+        try:
+            table = self.query_one("#sessions-table", DataTable)
+        except NoMatches:
+            return
         for entry in self._sessions_entries:
             status = self._resolve_session_status(entry)
             entry["status"] = status

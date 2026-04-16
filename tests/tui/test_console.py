@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
 from gitdirector.commands.tui import GitDirectorConsole
@@ -544,6 +545,23 @@ class TestGitDirectorConsoleDirectBranches:
         app._update_session_status_cells()
 
         assert app._sessions_entries[0]["status"] == "waiting"
+
+    def test_update_session_status_cells_ignores_missing_table(self):
+        app = GitDirectorConsole()
+        app._sessions_entries = [
+            {
+                "session_name": "gd/alpha/shell/1",
+                "purpose": "shell",
+                "status": "running",
+            }
+        ]
+        app._resolve_session_status = MagicMock(return_value="waiting")
+        app.query_one = MagicMock(side_effect=NoMatches("#sessions-table"))
+
+        app._update_session_status_cells()
+
+        assert app._sessions_entries[0]["status"] == "running"
+        app._resolve_session_status.assert_not_called()
 
     def test_build_loaded_status_includes_waiting_count(self):
         app = GitDirectorConsole()
