@@ -533,6 +533,24 @@ class TestGitDirectorConsoleDirectBranches:
         assert app._waiting_count == 1
         app._update_status.assert_called_once_with("1 repository loaded")
 
+    def test_on_statuses_updated_ignores_missing_repo_table(self):
+        app = GitDirectorConsole()
+        app._sessions_entries = [{"session_name": "gd/alpha/shell/1", "purpose": "shell"}]
+        app._resolve_session_status = MagicMock(return_value="waiting")
+        app._waiting_count = 0
+        app._active_tab = "repos"
+        app._results = {"/tmp/alpha": object()}
+        app.query_one = MagicMock(side_effect=NoMatches("#repo-table"))
+        app._build_loaded_status = MagicMock()
+        app._update_status = MagicMock()
+
+        app._on_statuses_updated()
+
+        assert app._sessions_entries[0]["status"] == "waiting"
+        assert app._waiting_count == 1
+        app._build_loaded_status.assert_not_called()
+        app._update_status.assert_not_called()
+
     def test_update_session_status_cells_ignores_table_errors(self):
         app = GitDirectorConsole()
         app._sessions_entries = [{"session_name": "gd/alpha/shell/1", "purpose": "shell"}]

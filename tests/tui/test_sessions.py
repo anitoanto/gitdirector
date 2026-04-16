@@ -214,6 +214,7 @@ class TestSessionsTab:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
+            await pilot.pause()
             table = app.query_one("#sessions-table", DataTable)
             ck = app._sess_col_keys
             row_key = "gd/alpha/shell/1"
