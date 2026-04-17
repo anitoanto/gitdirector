@@ -36,7 +36,7 @@ from .constants import (
     _STATUS_ORDER,
     _changes_label,
 )
-from .panels import PanelStore
+from .panels import Panel, PanelStore
 from .screens import (
     ActionMenuScreen,
     AgentLoadingScreen,
@@ -48,6 +48,37 @@ from .screens import (
     RepoInfoScreen,
     SortMenuScreen,
 )
+
+_PANEL_PREVIEW_FILLED = "■"
+_PANEL_PREVIEW_OPEN = "□"
+_PANEL_PREVIEW_INACTIVE = "·"
+
+
+def _panel_preview_marker(panel: Panel, row_index: int, col_index: int) -> str:
+    if row_index >= panel.rows or col_index >= panel.cols:
+        return _PANEL_PREVIEW_INACTIVE
+    pane_index = (row_index * panel.cols) + col_index + 1
+    return _PANEL_PREVIEW_FILLED if panel.panes.get(pane_index) else _PANEL_PREVIEW_OPEN
+
+
+def _render_panel_preview(panel: Panel) -> str:
+    rows: list[str] = []
+    for row_index in range(3):
+        row_cells = " ".join(
+            _panel_preview_marker(panel, row_index, col_index) for col_index in range(3)
+        )
+        if row_index == 0:
+            rows.append(f"┌{row_cells}┐")
+        elif row_index == 2:
+            rows.append(f"└{row_cells}┘")
+        else:
+            rows.append(f"│{row_cells}│")
+
+    return "\n".join(rows)
+
+
+def _panel_row_cell(value: str) -> str:
+    return f"\n{value}"
 
 
 class GitDirectorConsole(App):
@@ -152,11 +183,10 @@ class GitDirectorConsole(App):
         Binding("s", "sort", "Sort", show=True),
         Binding("i", "show_info", "Info", show=True),
         Binding("escape", "close_search", show=False),
-        Binding("1", "tab_repos", "Repos", show=True),
-        Binding("2", "tab_sessions", "Sessions", show=True),
-        Binding("3", "tab_panels", "Panels", show=True),
+        Binding("1", "tab_repos", "Repos", show=False),
+        Binding("2", "tab_sessions", "Sessions", show=False),
+        Binding("3", "tab_panels", "Panels", show=False),
         Binding("n", "new_panel", "New Panel", show=False),
-        Binding("d", "delete_panel", "Delete", show=False),
     ]
 
     def __init__(self) -> None:
@@ -227,7 +257,7 @@ class GitDirectorConsole(App):
             "Status", "Session", "Repository", "Session Name"
         )
         panels_table = self.query_one("#panels-table", DataTable)
-        self._panels_col_keys = panels_table.add_columns("Name", "Layout", "Panes")
+        self._panels_col_keys = panels_table.add_columns("Map", "Name", "Layout", "Panes")
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
@@ -1114,17 +1144,17 @@ class GitDirectorConsole(App):
             total = panel.total_panes
             panes_label = f"{filled}/{total}" if filled else f"0/{total}"
             table.add_row(
-                panel.name,
-                panel.layout_label,
-                panes_label,
+                _panel_row_cell(_render_panel_preview(panel)),
+                _panel_row_cell(panel.name),
+                _panel_row_cell(panel.layout_label),
+                _panel_row_cell(panes_label),
+                height=5,
                 key=panel.name,
             )
         self._restore_resume_selection("panels")
         count = len(panels)
         label = "panel" if count == 1 else "panels"
-        self._update_status(
-            f"{count} {label}   ↑↓/jk navigate  [enter] actions  n create  d delete  q quit"
-        )
+        self._update_status(f"{count} {label}   ↑↓/jk navigate  [enter] actions  n create  q quit")
 
     def _selected_panel_name(self) -> str | None:
         table = self.query_one("#panels-table", DataTable)
@@ -1137,8 +1167,11 @@ class GitDirectorConsole(App):
         panel_name = self._selected_panel_name()
         if not panel_name:
             return
+        panel = self._panel_store.get(panel_name)
+        if not panel:
+            return
         self.push_screen(
-            PanelActionMenuScreen(panel_name),
+            PanelActionMenuScreen(panel),
             callback=lambda action: self._handle_panel_action(action, panel_name),
         )
 
@@ -1229,11 +1262,9 @@ class GitDirectorConsole(App):
     def action_delete_panel(self) -> None:
         if self._active_tab != "panels":
             return
-        table = self.query_one("#panels-table", DataTable)
-        if table.row_count == 0:
+        panel_name = self._selected_panel_name()
+        if not panel_name:
             return
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        panel_name = str(row_key.value)
         self.push_screen(
             ConfirmScreen(f"Delete panel '{panel_name}'?"),
             callback=lambda confirmed: self._do_delete_panel(confirmed, panel_name),
