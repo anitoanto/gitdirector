@@ -25,7 +25,7 @@ from gitdirector.commands.tui import (
     SortMenuScreen,
     _changes_label,
 )
-from gitdirector.commands.tui.app import _render_panel_preview
+from gitdirector.commands.tui.app import _panel_row_height, _render_panel_preview
 from gitdirector.commands.tui.screens import RenamePanelScreen
 from gitdirector.repo import RepositoryInfo, RepoStatus
 from gitdirector.ui_theme import resolve_panel_theme
@@ -65,7 +65,7 @@ def _mock_manager(repos: list[RepositoryInfo] | None = None):
     mgr.config.repositories = [r.path for r in repos]
     mgr.config.max_workers = 2
 
-    def fake_status(path):
+    def fake_status(path, fetch=False):
         for r in repos:
             if r.path == path:
                 return r
@@ -160,7 +160,7 @@ class TestTabStyling:
 
 
 class TestGitDirectorConsole:
-    def test_render_panel_preview_uses_fixed_three_by_three_map(self):
+    def test_render_panel_preview_matches_panel_layout(self):
         panel = Panel(
             name="Main",
             rows=2,
@@ -172,10 +172,25 @@ class TestGitDirectorConsole:
 
         assert preview == "\n".join(
             [
-                "┌■ □ ·┐",
-                "│□ ■ ·│",
-                "└· · ·┘",
+                "┌■ □┐",
+                "└□ ■┘",
             ]
+        )
+
+    def test_panel_row_height_tracks_preview_rows(self):
+        assert (
+            _panel_row_height(Panel(name="Solo", rows=1, cols=3, panes={1: None, 2: None, 3: None}))
+            == 3
+        )
+        assert (
+            _panel_row_height(
+                Panel(name="Main", rows=2, cols=2, panes={1: None, 2: None, 3: None, 4: None})
+            )
+            == 4
+        )
+        assert (
+            _panel_row_height(Panel(name="Grid", rows=3, cols=1, panes={1: None, 2: None, 3: None}))
+            == 5
         )
 
     def test_panel_delete_hotkey_removed(self):
@@ -244,32 +259,31 @@ class TestGitDirectorConsole:
             app._load_panels()
             table = app.query_one("#panels-table", DataTable)
 
-            assert len(table.columns) == 4
+            assert len(table.columns) == 5
             assert table.row_count == 2
             assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
                 [
                     "",
-                    "┌■ □ ·┐",
-                    "│□ ■ ·│",
-                    "└· · ·┘",
+                    "┌■ □┐",
+                    "└□ ■┘",
                 ]
             )
             assert table.get_cell("Main", app._panels_col_keys[1]) == "\nMain"
-            assert table.get_cell("Main", app._panels_col_keys[2]) == "\n2×2"
-            assert table.get_cell("Main", app._panels_col_keys[3]) == "\n2/4"
-            assert table.get_row_height("Main") == 5
+            assert table.get_cell("Main", app._panels_col_keys[2]) == "\ngd/panel/main"
+            assert table.get_cell("Main", app._panels_col_keys[3]) == "\n2×2"
+            assert table.get_cell("Main", app._panels_col_keys[4]) == "\n2/4"
+            assert table.get_row_height("Main") == 4
             assert table.get_cell("Ops", app._panels_col_keys[0]) == "\n".join(
                 [
                     "",
                     "┌□ ■ □┐",
-                    "│· · ·│",
-                    "└· · ·┘",
                 ]
             )
             assert table.get_cell("Ops", app._panels_col_keys[1]) == "\nOps"
-            assert table.get_cell("Ops", app._panels_col_keys[2]) == "\n1×3"
-            assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1/3"
-            assert table.get_row_height("Ops") == 5
+            assert table.get_cell("Ops", app._panels_col_keys[2]) == "\ngd/panel/ops"
+            assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1×3"
+            assert table.get_cell("Ops", app._panels_col_keys[4]) == "\n1/3"
+            assert table.get_row_height("Ops") == 3
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     async def test_on_mount_syncs_tmux_theme_config(self, mock_sync):
@@ -2339,7 +2353,7 @@ class TestRefreshRepoForPath:
         )
         mgr = _mock_manager(repos)
         # After initial load, change the status returned
-        mgr.get_repository_status.side_effect = lambda p: updated_info
+        mgr.get_repository_status.side_effect = lambda p, fetch=False: updated_info
 
         app = GitDirectorConsole()
         app.manager = mgr
@@ -2358,6 +2372,7 @@ class TestRefreshRepoForPath:
             assert table.get_cell(row_key, ck[3]) == "staged"
             assert table.get_cell(row_key, ck[5]) == "1"
             assert app._results[row_key].status == RepoStatus.BEHIND
+            app.manager.get_repository_status.assert_any_call(Path("/tmp/alpha"), fetch=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2417,7 +2432,9 @@ class TestSessionsRefreshOnReturn:
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app._repos_stale is False
-            app.manager.get_repository_status.assert_called_once()
+            app.manager.get_repository_status.assert_called_once_with(
+                Path("/tmp/alpha"), fetch=True
+            )
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_switching_to_repos_no_reload_when_not_stale(self, _mock_sessions):

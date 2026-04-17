@@ -38,7 +38,7 @@ def _mock_manager(repos: list[RepositoryInfo] | None = None):
     mgr.config.repositories = [r.path for r in repos]
     mgr.config.max_workers = 2
 
-    def fake_status(path):
+    def fake_status(path, fetch=False):
         for r in repos:
             if r.path == path:
                 return r

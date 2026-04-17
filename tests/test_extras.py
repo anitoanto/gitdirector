@@ -165,11 +165,14 @@ class TestRepoPullErrors:
         """Pull returns auth error message when git pull fails with auth error."""
         mocker.patch(
             "subprocess.run",
-            return_value=MagicMock(
-                returncode=128,
-                stdout="",
-                stderr="fatal: Authentication failed\n",
-            ),
+            side_effect=[
+                MagicMock(returncode=0, stdout="main\n", stderr=""),
+                MagicMock(
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: Authentication failed\n",
+                ),
+            ],
         )
         repo = Repository(fake_git_repo)
         ok, msg = repo.pull()
@@ -180,11 +183,14 @@ class TestRepoPullErrors:
         """Pull returns generic error when git pull fails."""
         mocker.patch(
             "subprocess.run",
-            return_value=MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="fatal: some error\n",
-            ),
+            side_effect=[
+                MagicMock(returncode=0, stdout="main\n", stderr=""),
+                MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="fatal: some error\n",
+                ),
+            ],
         )
         repo = Repository(fake_git_repo)
         ok, msg = repo.pull()
@@ -272,7 +278,7 @@ class TestRepoGetStatusParsingErrors:
     """Test error paths when parsing git status output."""
 
     def test_get_status_invalid_ahead_behind_format(self, fake_git_repo, mocker):
-        """When branch.ab line has invalid format, ahead/behind default to 0."""
+        """Sync status comes from origin/main even if branch.ab metadata is malformed."""
 
         def mock_run(*args, **kwargs):
             git_cmd = args[0]
@@ -281,6 +287,10 @@ class TestRepoGetStatusParsingErrors:
                 v2 += "# branch.upstream origin/main\n"
                 v2 += "# branch.ab invalid format\n"
                 return MagicMock(returncode=0, stdout=v2, stderr="")
+            if "show-ref" in git_cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "rev-list" in git_cmd:
+                return MagicMock(returncode=0, stdout="0\t0\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mocker.patch("subprocess.run", side_effect=mock_run)
@@ -289,20 +299,22 @@ class TestRepoGetStatusParsingErrors:
         assert status.status == RepoStatus.UP_TO_DATE
 
     def test_get_status_no_tracking_branch(self, fake_git_repo, mocker):
-        """When no tracking branch exists, returns UNKNOWN."""
+        """When origin/main does not exist, sync status is UNKNOWN."""
 
         def mock_run(*args, **kwargs):
             git_cmd = args[0]
             if "status" in git_cmd:
                 v2 = "# branch.oid abc\n# branch.head main\n"
                 return MagicMock(returncode=0, stdout=v2, stderr="")
+            if "show-ref" in git_cmd:
+                return MagicMock(returncode=1, stdout="", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mocker.patch("subprocess.run", side_effect=mock_run)
         repo = Repository(fake_git_repo)
         status = repo.get_status()
         assert status.status == RepoStatus.UNKNOWN
-        assert "tracking" in status.message.lower()
+        assert status.message == "No origin/main branch"
 
 
 # ---------------------------------------------------------------------------

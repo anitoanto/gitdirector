@@ -110,7 +110,51 @@ class Repository:
 
     def get_current_branch(self) -> Optional[str]:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
-        return out if code == 0 else None
+        return out if code == 0 and out not in {"", "HEAD"} else None
+
+    @staticmethod
+    def _origin_branch_ref(branch: str) -> str:
+        return f"refs/remotes/origin/{branch}"
+
+    def _fetch_origin_branch(self, branch: Optional[str]) -> tuple[int, str]:
+        args = ["fetch", "origin"]
+        if branch:
+            args.append(branch)
+        code, _, err = self._run_git(*args)
+        return code, err
+
+    def _get_origin_sync_status(self, branch: Optional[str]) -> tuple[RepoStatus, str]:
+        if branch is None:
+            return RepoStatus.UNKNOWN, "Detached HEAD"
+
+        remote_ref = self._origin_branch_ref(branch)
+        code, _, _ = self._run_git("show-ref", "--verify", "--quiet", remote_ref)
+        if code != 0:
+            return RepoStatus.UNKNOWN, f"No origin/{branch} branch"
+
+        code, out, err = self._run_git(
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"HEAD...{remote_ref}",
+        )
+        if code != 0:
+            return RepoStatus.UNKNOWN, err or f"Could not compare HEAD with origin/{branch}"
+
+        parts = out.split()
+        try:
+            ahead = int(parts[0])
+            behind = int(parts[1])
+        except (IndexError, ValueError):
+            return RepoStatus.UNKNOWN, "Could not determine sync status"
+
+        if ahead > 0 and behind > 0:
+            return RepoStatus.DIVERGED, f"ahead {ahead}, behind {behind}"
+        if ahead > 0:
+            return RepoStatus.AHEAD, f"ahead {ahead}"
+        if behind > 0:
+            return RepoStatus.BEHIND, f"behind {behind}"
+        return RepoStatus.UP_TO_DATE, ""
 
     def get_last_commit_info(self) -> tuple[Optional[str], Optional[int]]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd%n%ct", "--date=relative")
@@ -144,12 +188,6 @@ class Repository:
         return total
 
     def get_status(self, *, fetch: bool = False) -> RepositoryInfo:
-        if fetch:
-            code, _, err = self._run_git("fetch")
-            if code != 0:
-                branch = self.get_current_branch()
-                return RepositoryInfo(self.path, self.name, RepoStatus.UNKNOWN, branch, err)
-
         code, out, _ = self._run_git("status", "--porcelain=v2", "--branch", _strip=False)
         if code != 0:
             return RepositoryInfo(
@@ -157,9 +195,6 @@ class Repository:
             )
 
         branch = None
-        has_upstream = False
-        ahead = 0
-        behind = 0
         staged = False
         unstaged = False
         staged_files: list[str] = []
@@ -170,14 +205,6 @@ class Repository:
                 branch = line[14:]
                 if branch == "(detached)":
                     branch = None
-            elif line.startswith("# branch.ab "):
-                has_upstream = True
-                parts = line.split()
-                try:
-                    ahead = int(parts[2].lstrip("+"))
-                    behind = abs(int(parts[3]))
-                except (IndexError, ValueError):
-                    pass
             elif line.startswith("1 ") or line.startswith("2 "):
                 xy = line[2:4]
                 x, y = xy[0], xy[1]
@@ -201,21 +228,15 @@ class Repository:
                 staged_files.append(filename)
                 unstaged_files.append(filename)
 
-        if not has_upstream:
-            status = RepoStatus.UNKNOWN
-            msg = "No tracking branch"
-        elif ahead > 0 and behind > 0:
-            status = RepoStatus.DIVERGED
-            msg = f"ahead {ahead}, behind {behind}"
-        elif ahead > 0:
-            status = RepoStatus.AHEAD
-            msg = f"ahead {ahead}"
-        elif behind > 0:
-            status = RepoStatus.BEHIND
-            msg = f"behind {behind}"
+        if fetch and branch is not None:
+            code, err = self._fetch_origin_branch(branch)
+            if code != 0:
+                status = RepoStatus.UNKNOWN
+                msg = err
+            else:
+                status, msg = self._get_origin_sync_status(branch)
         else:
-            status = RepoStatus.UP_TO_DATE
-            msg = ""
+            status, msg = self._get_origin_sync_status(branch)
 
         last_updated, last_commit_ts = self.get_last_commit_info()
         size = self.get_tracked_size()
@@ -236,9 +257,15 @@ class Repository:
         )
 
     def pull(self, *, retries: int = 1) -> tuple[bool, str]:
+        code, branch, err = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
+        if code != 0:
+            return False, err or "Could not determine current branch"
+        if branch in {"", "HEAD"}:
+            return False, "Cannot pull in detached HEAD"
+
         attempts = max(1, 1 + retries)
         for attempt in range(attempts):
-            code, out, err = self._run_git("pull", "--ff-only")
+            code, out, err = self._run_git("pull", "--ff-only", "origin", branch)
             if code == 0:
                 return True, out
             if attempt < attempts - 1 and "network error" in err:
