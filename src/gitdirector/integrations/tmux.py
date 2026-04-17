@@ -10,6 +10,9 @@ import threading
 import time
 from pathlib import Path
 
+from ..config import Config
+from ..ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
+
 
 def _sanitize_repo_name(name: str) -> str:
     """Sanitize a repository name for use in tmux session names.
@@ -101,6 +104,7 @@ def create_tmux_session(repo_name: str, path: Path, purpose: str = "shell") -> s
         ["tmux", "new-session", "-d", "-s", session_name, "-c", str(path)],
         check=True,
     )
+    sync_panel_tmux_config()
     return session_name
 
 
@@ -115,6 +119,8 @@ def kill_tmux_session(session_name: str) -> bool:
 
 def attach_tmux_session(session_name: str) -> None:
     """Attach to an existing tmux session, blocking until detach/exit."""
+    if session_name.startswith("gd/"):
+        sync_panel_tmux_config()
     if os.environ.get("TMUX"):
         subprocess.run(["tmux", "switch-client", "-t", session_name])
     else:
@@ -137,6 +143,210 @@ def _sanitize_panel_name(name: str) -> str:
 
 def make_panel_session_name(panel_name: str) -> str:
     return f"gd/panel/{_sanitize_panel_name(panel_name)}"
+
+
+def _session_slug(session_name: str | None) -> str | None:
+    if not session_name:
+        return None
+    if session_name.startswith("gd/"):
+        return session_name[3:]
+    return session_name
+
+
+def _panel_pane_title(pane_index: int, session_name: str | None) -> str:
+    slug = _session_slug(session_name)
+    if slug:
+        return slug
+    return "empty"
+
+
+def _resolved_panel_theme_name(theme_name: str | None = None) -> str:
+    if theme_name:
+        return theme_name
+    configured_theme = Config().theme
+    if configured_theme:
+        return configured_theme
+    return DEFAULT_THEME_NAME
+
+
+def _panel_border_format(theme_name: str | None = None) -> str:
+    theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
+    badge = (
+        "#{?pane_active,"
+        f"#[bold fg={theme.badge_active_fg} bg={theme.badge_active_bg}],"
+        f"#[bold fg={theme.badge_inactive_fg} bg={theme.badge_inactive_bg}]"
+        "} PANE #{pane_index} #[default]"
+    )
+    title = (
+        "#{?pane_active,"
+        f"#[fg={theme.label_active_fg} bg={theme.label_active_bg}],"
+        f"#[fg={theme.label_inactive_fg} bg={theme.label_inactive_bg}]"
+        "} #{pane_title} #[default]"
+    )
+    return f"{badge}{title}"
+
+
+def _gd_tmux_config_path() -> Path:
+    return Path.home() / ".gitdirector" / "gd-tmux.conf"
+
+
+def _session_badge_text(session_name: str) -> str:
+    parts = session_name.split("/")
+    if len(parts) >= 4 and parts[0] == "gd" and parts[1] != "panel":
+        return parts[2].upper()
+    return "SESSION"
+
+
+def _current_window_target(session_name: str) -> str:
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", session_name, "#{session_name}:#{window_index}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        target = result.stdout.strip()
+        if target:
+            return target
+    return f"{session_name}:0"
+
+
+def _tmux_theme_config(
+    badge_text: str,
+    label_text: str,
+    session_name: str,
+    theme_name: str | None = None,
+    *,
+    window_target: str | None = None,
+    pane_border_status: str | None = None,
+    pane_border_format: str | None = None,
+) -> str:
+    theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
+    window_target = window_target or f"{session_name}:0"
+    status_left = (
+        f"#[bold fg={theme.badge_active_fg},bg={theme.badge_active_bg}] {badge_text} #[default]"
+        f"#[fg={theme.label_active_fg},bg={theme.label_active_bg}] {label_text} #[default]"
+    )
+    status_right = (
+        f"#[fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}] %H:%M %d %b #[default]"
+    )
+    lines = [
+        f'set-option -t {shlex.quote(session_name)} status-position bottom',
+        f'set-option -t {shlex.quote(session_name)} status-style "fg={theme.foreground},bg={theme.panel}"',
+        f'set-option -t {shlex.quote(session_name)} status-left-length 40',
+        f'set-option -t {shlex.quote(session_name)} status-right-length 24',
+        f'set-option -t {shlex.quote(session_name)} status-left {shlex.quote(status_left)}',
+        f'set-option -t {shlex.quote(session_name)} status-right {shlex.quote(status_right)}',
+        f'set-option -t {shlex.quote(session_name)} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
+        f'set-option -t {shlex.quote(session_name)} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
+        f'set-window-option -t {shlex.quote(window_target)} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',
+        f'set-window-option -t {shlex.quote(window_target)} window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"',
+        f'set-window-option -t {shlex.quote(window_target)} window-status-format {shlex.quote(" #I:#W ")}',
+        f'set-window-option -t {shlex.quote(window_target)} window-status-current-format {shlex.quote(" #I:#W ")}',
+        f'set-window-option -t {shlex.quote(window_target)} window-status-separator {shlex.quote("")}',
+        f'set-window-option -t {shlex.quote(window_target)} pane-border-style "fg={theme.border_inactive}"',
+        f'set-window-option -t {shlex.quote(window_target)} pane-active-border-style "fg={theme.border_active}"',
+    ]
+    if pane_border_status:
+        lines.append(
+            f'set-window-option -t {shlex.quote(window_target)} pane-border-status {shlex.quote(pane_border_status)}'
+        )
+    if pane_border_format:
+        lines.append(
+            f'set-window-option -t {shlex.quote(window_target)} pane-border-format {shlex.quote(pane_border_format)}'
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _panel_tmux_config(
+    panel_name: str,
+    session_name: str,
+    theme_name: str | None = None,
+) -> str:
+    return _tmux_theme_config(
+        "PANEL",
+        panel_name,
+        session_name,
+        theme_name,
+        window_target=f"{session_name}:0",
+        pane_border_status="top",
+        pane_border_format=_panel_border_format(theme_name),
+    )
+
+
+def _session_tmux_config(session_name: str, theme_name: str | None = None) -> str:
+    return _tmux_theme_config(
+        _session_badge_text(session_name),
+        _session_slug(session_name) or session_name,
+        session_name,
+        theme_name,
+        window_target=_current_window_target(session_name),
+    )
+
+
+def _load_panel_tmux_config(
+    panel_name: str,
+    session_name: str,
+    theme_name: str | None = None,
+) -> Path:
+    config_path = _gd_tmux_config_path()
+    config_path.parent.mkdir(exist_ok=True)
+    config_path.write_text(_panel_tmux_config(panel_name, session_name, theme_name))
+    subprocess.run(["tmux", "source-file", str(config_path)], check=True)
+    return config_path
+
+
+def _live_panel_sessions() -> list[tuple[str, str]]:
+    from ..commands.tui.panels import PanelStore
+
+    sessions: list[tuple[str, str]] = []
+    for panel in PanelStore().panels:
+        session_name = make_panel_session_name(panel.name)
+        if _session_exists(session_name):
+            sessions.append((panel.name, session_name))
+    return sessions
+
+
+def _live_repo_tmux_sessions() -> list[str]:
+    try:
+        entries = list_all_gd_sessions()
+    except Exception:
+        return []
+
+    sessions: list[str] = []
+    for entry in entries:
+        session_name = entry["session_name"]
+        if _session_exists(session_name):
+            sessions.append(session_name)
+    return sessions
+
+
+def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
+    resolved_theme = _resolved_panel_theme_name(theme_name)
+    config_path = _gd_tmux_config_path()
+    config_path.parent.mkdir(exist_ok=True)
+    live_panel_sessions = _live_panel_sessions()
+    live_repo_sessions = _live_repo_tmux_sessions()
+
+    lines = [
+        "# Generated by GitDirector",
+        f"# theme: {resolved_theme}",
+        "",
+    ]
+    for panel_name, session_name in live_panel_sessions:
+        lines.append(_panel_tmux_config(panel_name, session_name, resolved_theme))
+    for session_name in live_repo_sessions:
+        lines.append(_session_tmux_config(session_name, resolved_theme))
+
+    config_path.write_text("\n".join(lines))
+
+    if live_panel_sessions or live_repo_sessions:
+        try:
+            subprocess.run(["tmux", "source-file", str(config_path)], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            return config_path
+
+    return config_path
 
 
 def kill_panel_tmux_session(panel_name: str) -> bool:
@@ -237,8 +447,14 @@ def _ensure_panel_prefix_bindings() -> None:
         )
 
 
-def _configure_panel_window(session_name: str, pane_ids: list[str]) -> None:
+def _configure_panel_window(
+    session_name: str,
+    pane_ids: list[str],
+    panes: dict[int, str | None],
+    theme_name: str | None = None,
+) -> None:
     window_target = f"{session_name}:0"
+    theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
     subprocess.run(
         ["tmux", "set-window-option", "-t", window_target, "pane-base-index", "1"],
         check=True,
@@ -253,15 +469,44 @@ def _configure_panel_window(session_name: str, pane_ids: list[str]) -> None:
             "set-window-option",
             "-t",
             window_target,
+            "pane-border-style",
+            f"fg={theme.border_inactive}",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "set-window-option",
+            "-t",
+            window_target,
+            "pane-active-border-style",
+            f"fg={theme.border_active}",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "set-window-option",
+            "-t",
+            window_target,
             "pane-border-format",
-            "#{?pane_active,#[bold fg=black bg=cyan],#[fg=colour250 bg=colour236]} Pane #{pane_title} #[default]",
+            _panel_border_format(theme_name),
         ],
         check=True,
     )
 
     for pane_number, pane_id in enumerate(pane_ids, start=1):
         subprocess.run(
-            ["tmux", "select-pane", "-t", pane_id, "-T", str(pane_number)],
+            [
+                "tmux",
+                "select-pane",
+                "-t",
+                pane_id,
+                "-T",
+                _panel_pane_title(pane_number, panes.get(pane_number)),
+            ],
             check=True,
         )
 
@@ -307,8 +552,10 @@ def rebuild_panel_tmux_session(
     rows: int,
     cols: int,
     panes: dict[int, str | None],
+    theme_name: str | None = None,
 ) -> str:
     session_name = make_panel_session_name(panel_name)
+    theme_name = _resolved_panel_theme_name(theme_name)
     if _session_exists(session_name):
         subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
 
@@ -329,7 +576,9 @@ def rebuild_panel_tmux_session(
     )
 
     pane_ids = _build_panel_grid(session_name, rows, cols)
-    _configure_panel_window(session_name, pane_ids)
+    _configure_panel_window(session_name, pane_ids, panes, theme_name)
+    _load_panel_tmux_config(panel_name, session_name, theme_name)
+    sync_panel_tmux_config(theme_name)
     _ensure_panel_prefix_bindings()
     total_panes = rows * cols
     for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):

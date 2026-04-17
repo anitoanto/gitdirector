@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Footer, Static
 
+from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .panels import Panel, PanelStore
 from .terminal_widget import TerminalWidget
 
@@ -58,11 +59,13 @@ class PaneWidget(Widget):
         self,
         pane_index: int,
         session_name: str | None = None,
+        theme_name: str = DEFAULT_THEME_NAME,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.pane_index = pane_index
         self.session_name = session_name
+        self._panel_theme = resolve_panel_theme(theme_name)
         self._terminal: TerminalWidget | None = None
 
     def compose(self) -> ComposeResult:
@@ -89,16 +92,26 @@ class PaneWidget(Widget):
         if self._terminal:
             self._terminal.start()
 
+    @property
+    def session_slug(self) -> str | None:
+        if not self.session_name:
+            return None
+        if self.session_name.startswith("gd/"):
+            return self.session_name[3:]
+        return self.session_name
+
     def _build_header_text(self) -> str:
-        num = f"[bold]{self.pane_index}[/bold]"
-        if self.session_name:
-            parts = self.session_name.split("/")
-            if len(parts) >= 4:
-                label = f"{parts[2]}/{parts[3]}"
-            else:
-                label = self.session_name
-            return f" {num}  {label}  [dim]{self.pane_index}[/dim]"
-        return f" {num}  [dim]empty · {self.pane_index}[/dim]"
+        badge_style = (
+            f"bold {self._panel_theme.badge_active_fg} on {self._panel_theme.badge_active_bg}"
+        )
+        label_style = (
+            f"{self._panel_theme.label_active_fg} on {self._panel_theme.label_active_bg}"
+        )
+        empty_style = f"{self._panel_theme.empty_fg} on {self._panel_theme.empty_bg}"
+        slug = self.session_slug
+        if slug:
+            return f" [{badge_style}] PANE {self.pane_index} [/] [{label_style}] {slug} [/]"
+        return f" [{badge_style}] PANE {self.pane_index} [/] [{empty_style}] empty [/]"
 
     def _empty_body_text(self) -> str:
         return "[dim]No session assigned[/dim]\n\n[dim]ctrl+a[/dim] assign session"
@@ -207,12 +220,29 @@ class PanelViewScreen(Screen[None]):
     }
     """
 
-    def __init__(self, panel: Panel, store: PanelStore) -> None:
+    def __init__(
+        self,
+        panel: Panel,
+        store: PanelStore,
+        theme_name: str | None = None,
+    ) -> None:
         super().__init__()
         self._panel = panel
         self._store = store
+        self._theme_name = theme_name
         self._focused_pane: int = 1
         self._pane_widgets: dict[int, PaneWidget] = {}
+
+    def _resolved_theme_name(self) -> str:
+        if self._theme_name:
+            return self._theme_name
+        app_theme = getattr(self.app, "theme", None)
+        if isinstance(app_theme, str) and app_theme:
+            return app_theme
+        return DEFAULT_THEME_NAME
+
+    def _panel_theme(self):
+        return resolve_panel_theme(self._resolved_theme_name())
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -236,6 +266,7 @@ class PanelViewScreen(Screen[None]):
             pane = PaneWidget(
                 pane_index=i,
                 session_name=session_name,
+                theme_name=self._resolved_theme_name(),
                 id=f"pane-{i}",
             )
             self._pane_widgets[i] = pane
@@ -340,18 +371,31 @@ class PanelViewScreen(Screen[None]):
             pane.stop_terminal()
         self.dismiss(None)
 
-    def _update_status(self) -> None:
+    def _build_status_text(self) -> str:
+        theme = self._panel_theme()
+        badge_style = f"bold {theme.badge_active_fg} on {theme.badge_active_bg}"
+        label_style = f"{theme.label_active_fg} on {theme.label_active_bg}"
+        empty_style = f"{theme.empty_fg} on {theme.empty_bg}"
         filled = self._panel.filled_panes
         total = self._panel.total_panes
         pane = self._pane_widgets.get(self._focused_pane)
-        session_info = ""
-        if pane and pane.session_name:
-            session_info = f"  │  {pane.session_name}"
+        pane_label = f"PANE {self._focused_pane}/{total}"
+
+        if pane and pane.session_slug:
+            summary = f"[{badge_style}] {pane_label} [/] [{label_style}] {pane.session_slug} [/]"
+        else:
+            summary = f"[{badge_style}] {pane_label} [/] [{empty_style}] empty [/]"
+
+        return (
+            f"{summary}  [dim]({filled} assigned)[/dim]"
+            f"   [dim]ctrl+1-{total}[/dim] focus"
+            f"  [dim]ctrl+a[/dim] assign"
+            f"  [dim]ctrl+x[/dim] clear"
+            f"  [dim]esc[/dim] detach"
+        )
+
+    def _update_status(self) -> None:
         try:
-            self.query_one("#panel-status-bar", Static).update(
-                f"Pane {self._focused_pane}/{total}  "
-                f"({filled} assigned){session_info}"
-                f"   ctrl+1-{total} focus  ctrl+a assign  ctrl+x clear  esc detach"
-            )
+            self.query_one("#panel-status-bar", Static).update(self._build_status_text())
         except NoMatches:
             pass

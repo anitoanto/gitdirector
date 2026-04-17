@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from textual.app import App
 from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent
 from textual.worker import WorkerFailed
 
@@ -17,11 +18,16 @@ from gitdirector.commands.tui import (
     ActionMenuScreen,
     ConfirmScreen,
     GitDirectorConsole,
+    Panel,
+    PanelViewScreen,
+    PaneWidget,
     RemoveSessionScreen,
     SortMenuScreen,
     _changes_label,
 )
+from gitdirector.commands.tui.screens import RenamePanelScreen
 from gitdirector.repo import RepositoryInfo, RepoStatus
+from gitdirector.ui_theme import resolve_panel_theme
 
 # ---------------------------------------------------------------------------
 # Helper factories
@@ -104,12 +110,119 @@ class TestStatusLabel:
         assert _STATUS_LABEL[RepoStatus.UNKNOWN] == "unknown"
 
 
+class TestPaneWidget:
+    def test_build_header_text_shows_session_slug(self):
+        theme = resolve_panel_theme("rose-pine")
+        pane = PaneWidget(2, "gd/my-repo/copilot/3", theme_name="rose-pine")
+
+        header = pane._build_header_text()
+
+        assert "PANE 2" in header
+        assert "my-repo/copilot/3" in header
+        assert f"on {theme.badge_active_bg.lower()}" in header.lower()
+        assert f"on {theme.label_active_bg.lower()}" in header.lower()
+
+
+class TestPanelViewScreen:
+    def test_build_status_text_shows_session_slug(self):
+        theme = resolve_panel_theme("rose-pine")
+        panel = Panel(
+            name="Main",
+            rows=1,
+            cols=2,
+            panes={1: "gd/my-repo/copilot/3", 2: None},
+        )
+        screen = PanelViewScreen(panel, MagicMock(), theme_name="rose-pine")
+        screen._focused_pane = 1
+        screen._pane_widgets = {
+            1: PaneWidget(1, "gd/my-repo/copilot/3", theme_name="rose-pine"),
+            2: PaneWidget(2, None, theme_name="rose-pine"),
+        }
+
+        status = screen._build_status_text()
+
+        assert "PANE 1/2" in status
+        assert "my-repo/copilot/3" in status
+        assert f"on {theme.badge_active_bg.lower()}" in status.lower()
+        assert f"on {theme.label_active_bg.lower()}" in status.lower()
+
+
+class TestTabStyling:
+    def test_active_tab_uses_filled_style(self):
+        assert "#tabs Tab.-active" in GitDirectorConsole.CSS
+        assert "background: $accent;" in GitDirectorConsole.CSS
+
+
 # ---------------------------------------------------------------------------
 # GitDirectorConsole – app-level tests
 # ---------------------------------------------------------------------------
 
 
 class TestGitDirectorConsole:
+    def test_action_select_row_on_panels_opens_action_menu(self):
+        app = GitDirectorConsole()
+        app._active_tab = "panels"
+        app._open_selected_panel_menu = MagicMock()
+
+        app.action_select_row()
+
+        app._open_selected_panel_menu.assert_called_once_with()
+
+    def test_panel_row_selected_opens_action_menu(self):
+        app = GitDirectorConsole()
+        app._open_selected_panel_menu = MagicMock()
+        event = MagicMock()
+        event.data_table.id = "panels-table"
+
+        app.on_data_table_row_selected(event)
+
+        app._open_selected_panel_menu.assert_called_once_with()
+
+    def test_handle_panel_action_rename_pushes_rename_screen(self):
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+
+        app._handle_panel_action("rename", "Main")
+
+        assert isinstance(app.push_screen.call_args.args[0], RenamePanelScreen)
+
+    def test_handle_panel_action_delete_pushes_confirmation(self):
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+
+        app._handle_panel_action("delete", "Main")
+
+        assert isinstance(app.push_screen.call_args.args[0], ConfirmScreen)
+
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    async def test_on_mount_syncs_tmux_theme_config(self, mock_sync):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app.manager.config.theme = "nord"
+        app.theme = "nord"
+        mock_sync.reset_mock()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+
+        assert mock_sync.call_args_list
+        assert mock_sync.call_args_list[-1].args == ("nord",)
+
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    def test_theme_change_persists_and_syncs_tmux_config(self, mock_sync):
+        app = GitDirectorConsole()
+        app.manager = MagicMock()
+        app.manager.config.theme = "rose-pine"
+        app.manager.config.save = MagicMock()
+        mock_sync.reset_mock()
+
+        with patch.object(App, "_watch_theme", return_value=None):
+            app._watch_theme("nord")
+
+        assert app.manager.config.theme == "nord"
+        app.manager.config.save.assert_called_once_with()
+        mock_sync.assert_called_once_with("nord")
+
     async def test_compose_widgets(self):
         """App renders Header, DataTable, Footer and status bar."""
         app = GitDirectorConsole()
