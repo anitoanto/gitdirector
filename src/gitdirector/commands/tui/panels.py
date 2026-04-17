@@ -430,7 +430,7 @@ class Panel:
 
     @property
     def layout_display_label(self) -> str:
-        return self.layout.display_label
+        return self.layout.layout_label
 
     @property
     def pane_placements(self) -> tuple[PanePlacement, ...]:
@@ -559,6 +559,7 @@ class PanelStore:
             if p.name == name:
                 self._panels.pop(i)
                 self._save()
+                self._kill_panel_sessions([name])
                 return True
         return False
 

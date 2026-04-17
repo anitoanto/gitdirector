@@ -441,6 +441,100 @@ class TestCreatePanelScreen:
             assert screen._pane_is_active(6) is True
             assert screen._pane_is_active(7) is False
 
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_create_panel_hints_include_arrow_and_jk_navigation(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            hint = app.screen.query_one("#create-panel-hint", Static)
+            assert "↑↓/jk navigate" in str(hint.content)
+
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            name_input.value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            hint = app.screen.query_one("#create-panel-hint", Static)
+            hint_text = str(hint.content)
+
+            assert "↑↓/jk navigate" in hint_text
+            assert "[tab] switch lists" in hint_text
+            assert "[ctrl+b] back" not in hint_text
+
+    def test_step_two_subtitle_markup_separates_name_and_layout(self):
+        assert CreatePanelScreen._step2_subtitle_markup("Ops", "1×2") == (
+            '[bold white]"Ops"[/bold white]    [dim]1×2[/dim]'
+        )
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
+    async def test_auto_slot_action_assigns_available_sessions_without_repetition(
+        self, mock_sessions
+    ):
+        mock_sessions.return_value = [
+            {
+                "session_name": f"gd/repo/shell/{index}",
+                "repo": "repo",
+                "purpose": f"shell{index}",
+            }
+            for index in range(1, 5)
+        ]
+
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("tall_left")
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            name_input.value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
+            assert "Auto" in str(slot_menu.get_option_at_index(0).prompt)
+
+            await pilot.press("up", "enter")
+            await pilot.pause()
+
+            assert screen._pane_assignments[1] == "gd/repo/shell/1"
+            assert screen._pane_assignments[2] == "gd/repo/shell/2"
+            assert screen._pane_assignments[3] == "gd/repo/shell/3"
+            assert len({screen._pane_assignments[i] for i in range(1, 4)}) == 3
+            assert screen._pane_assignments[4] is None
+            assert slot_menu.highlighted == 1
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_auto_slot_action_leaves_panes_unassigned_without_sessions(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            name_input.value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
+
+            await pilot.press("up", "enter")
+            await pilot.pause()
+
+            assert screen._pane_assignments[1] is None
+            assert screen._pane_assignments[2] is None
+            assert "unassigned" in str(slot_menu.get_option_at_index(1).prompt)
+
 
 class TestSortMenuScreen:
     async def test_compose_shows_all_columns(self):

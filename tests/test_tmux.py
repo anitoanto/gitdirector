@@ -776,7 +776,7 @@ class TestKillTmuxSession:
 class TestKillPanelTmuxSession:
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
-        return_value=["gitdirector-panel-main-1", "gitdirector-panel-main-2", "gd/alpha/shell/1"],
+        return_value=["gd-proxy/panel/main/1", "gd-proxy/panel/main/2", "gd/alpha/shell/1"],
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_kills_panel_proxy_sessions(self, mock_run, _mock_list):
@@ -787,11 +787,11 @@ class TestKillPanelTmuxSession:
         assert mock_run.call_args_list[0].args == (["tmux", "kill-session", "-t", "gd/panel/main"],)
         assert mock_run.call_args_list[0].kwargs == {"capture_output": True}
         assert mock_run.call_args_list[1].args == (
-            ["tmux", "kill-session", "-t", "gitdirector-panel-main-1"],
+            ["tmux", "kill-session", "-t", "gd-proxy/panel/main/1"],
         )
         assert mock_run.call_args_list[1].kwargs == {"check": False}
         assert mock_run.call_args_list[2].args == (
-            ["tmux", "kill-session", "-t", "gitdirector-panel-main-2"],
+            ["tmux", "kill-session", "-t", "gd-proxy/panel/main/2"],
         )
         assert mock_run.call_args_list[2].kwargs == {"check": False}
 

@@ -492,12 +492,13 @@ def _render_grid_preview(rows: int, cols: int, layout_key: str | None = None) ->
 class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | None]):
     """Two-step modal: 1) name + layout, 2) assign sessions with preview."""
 
+    AUTO_ASSIGN_OPTION_ID = "__auto_assign__"
+
     BINDINGS = [
         *_MODAL_BINDINGS,
         ("tab", "focus_next_field", "Tab next"),
         ("shift+tab", "focus_prev_field", "Tab prev"),
         ("ctrl+o", "submit", "Create panel"),
-        ("ctrl+b", "go_back", "Back"),
     ]
 
     CSS = (
@@ -548,7 +549,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     #step-2 { height: auto; padding: 0; display: none; }
     #step-2-subtitle {
         text-align: center;
-        padding: 0 1 0 1;
+        padding: 0 1 1 1;
         color: $text-muted;
     }
     #step-2-columns { height: auto; padding: 0; }
@@ -689,7 +690,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             for index, layout in enumerate(get_create_panel_layouts())
             if layout.key == self._selected_layout_key
         )
-        self.query_one("#pane-slot-menu", OptionList).highlighted = 0
+        self.query_one("#pane-slot-menu", OptionList).highlighted = 1
         self._sync_session_menu_highlight()
         self._show_step(1)
         self.query_one("#panel-name-input", Input).focus()
@@ -700,21 +701,28 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         self.query_one("#step-2").display = step == 2
         if step == 1:
             title = "[bold white]Create Panel[/bold white]"
-            hint = "\\[tab] switch fields    \\[enter] next: assign sessions    \\[esc] cancel"
+            hint = (
+                "↑↓/jk navigate"
+                "    \\[tab] switch fields"
+                "    \\[enter] next: assign sessions"
+                "    \\[esc] cancel"
+            )
         else:
             name = self.query_one("#panel-name-input", Input).value.strip() or "unnamed"
             layout = resolve_panel_layout(self._selected_layout_key)
             title = "[bold white]Configure Panes[/bold white]"
             self.query_one("#step-2-subtitle", Static).update(
-                f'[dim]"{name}" — {layout.layout_label}[/dim]'
+                self._step2_subtitle_markup(name, layout.layout_label)
             )
             self._update_step2_preview()
             self._update_slot_markers()
             self._update_session_markers()
             self._update_session_visibility()
             hint = (
-                "\\[tab] switch fields    \\[ctrl+b] back"
-                "    \\[ctrl+o] create and open    \\[esc] back"
+                "↑↓/jk navigate"
+                "    \\[tab] switch lists"
+                "    \\[ctrl+o] create and open"
+                "    \\[esc] back"
             )
         self.query_one("#create-panel-title", Static).update(title)
         self.query_one("#create-panel-hint", Static).update(hint)
@@ -747,6 +755,39 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         self._sync_session_menu_highlight()
         self._update_session_visibility()
 
+    @staticmethod
+    def _step2_subtitle_markup(name: str, layout_label: str) -> str:
+        return f'[bold white]"{name}"[/bold white]    [dim]{layout_label}[/dim]'
+
+    def _available_session_names(self) -> list[str]:
+        available_sessions: list[str] = []
+        seen: set[str] = set()
+        for entry in self._session_entries:
+            session_name = entry["session_name"]
+            if session_name in seen:
+                continue
+            seen.add(session_name)
+            available_sessions.append(session_name)
+        return available_sessions
+
+    def _auto_assign_panes(self) -> None:
+        active = self._active_pane_count()
+        available_sessions = self._available_session_names()
+        for pane_index in range(1, 10):
+            if pane_index <= active and pane_index <= len(available_sessions):
+                self._pane_assignments[pane_index] = available_sessions[pane_index - 1]
+            else:
+                self._pane_assignments[pane_index] = None
+        self._selected_pane_index = 1
+        self._current_step2_field = "panes"
+        self._update_slot_markers()
+        self._update_session_markers()
+        self._sync_session_menu_highlight()
+        self._update_session_visibility()
+        slot_menu = self.query_one("#pane-slot-menu", OptionList)
+        slot_menu.highlighted = 1
+        self._focus_step2_field()
+
     def _session_summary(self, session_name: str | None) -> str:
         if not session_name:
             return "[dim]unassigned[/dim]"
@@ -756,7 +797,12 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         return session_name
 
     def _slot_options(self) -> list[Option]:
-        options: list[Option] = []
+        options: list[Option] = [
+            Option(
+                "[bold]Auto[/bold]  [dim]assign available sessions[/dim]",
+                id=self.AUTO_ASSIGN_OPTION_ID,
+            )
+        ]
         active = self._active_pane_count()
         for pane_index in range(1, 10):
             marker = "[cyan]● [/cyan]" if pane_index == self._selected_pane_index else "  "
@@ -806,6 +852,8 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         if event.option_list.id == "layout-menu":
             self._apply_layout(event.option.id.split(":", 1)[1])
         elif event.option_list.id == "pane-slot-menu":
+            if event.option.id == self.AUTO_ASSIGN_OPTION_ID:
+                return
             pane_index = int(event.option.id.split(":", 1)[1])
             self._select_pane(pane_index)
 
@@ -815,6 +863,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             return
 
         if event.option_list.id == "pane-slot-menu":
+            if event.option.id == self.AUTO_ASSIGN_OPTION_ID:
+                self._auto_assign_panes()
+                return
             pane_index = int(event.option.id.split(":", 1)[1])
             self._select_pane(pane_index)
             if self._pane_is_active():
