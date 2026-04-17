@@ -167,6 +167,7 @@ def _split_panel_row(start_target: str, cols: int) -> None:
             "#{pane_id}",
             "-t",
             current_target,
+            "cat",
         )
 
 
@@ -203,6 +204,7 @@ def _build_panel_grid(session_name: str, rows: int, cols: int) -> list[str]:
             "#{pane_id}",
             "-t",
             root_target,
+            "cat",
         )
         _split_panel_row(row_target, cols)
 
@@ -321,6 +323,7 @@ def rebuild_panel_tmux_session(
             panel_name,
             "-c",
             str(Path.home()),
+            "cat",
         ],
         check=True,
     )

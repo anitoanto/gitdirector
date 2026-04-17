@@ -354,7 +354,12 @@ class AgentLoadingScreen(ModalScreen[None]):
         except FileNotFoundError:
             pass
 
-        with self.app.suspend():
+        app = self.app
+        if hasattr(app, "_poll_timer"):
+            app._poll_timer.pause()
+        app._monitor.stop()
+
+        with app.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
             sys.stdout.flush()
             subprocess.run(["tmux", "send-keys", "-t", session_name, "C-l", ""], check=False)
@@ -367,6 +372,9 @@ class AgentLoadingScreen(ModalScreen[None]):
             except (AttributeError, OSError):
                 pass
 
+        app._monitor.start()
+        if hasattr(app, "_poll_timer"):
+            app._poll_timer.resume()
         self.dismiss(None)
 
 
@@ -989,6 +997,90 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
                 self.query_one("#pane-slot-menu", OptionList).action_cursor_up()
             elif self._current_step2_field == "sessions":
                 self.query_one("#pane-session-menu", OptionList).action_cursor_up()
+
+
+class PanelActionMenuScreen(ModalScreen[str]):
+    """Modal popup with actions for the selected panel."""
+
+    BINDINGS = _MODAL_BINDINGS
+
+    CSS = (
+        "PanelActionMenuScreen {"
+        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
+        " }" + _MODAL_CSS
+    )
+
+    def __init__(self, panel_name: str) -> None:
+        super().__init__()
+        self.panel_name = panel_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-container"):
+            yield Static(f"[bold white]{self.panel_name}[/bold white]", id="menu-title")
+            yield OptionList(
+                Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
+                Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
+                Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),
+                id="action-menu",
+            )
+            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#action-menu", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#action-menu", OptionList).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#action-menu", OptionList).action_cursor_up()
+
+
+class RenamePanelScreen(ModalScreen[str | None]):
+    """Modal for renaming a panel."""
+
+    BINDINGS = _MODAL_BINDINGS
+
+    CSS = (
+        "RenamePanelScreen {"
+        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
+        " }" + _MODAL_CSS
+    )
+
+    def __init__(self, current_name: str) -> None:
+        super().__init__()
+        self.current_name = current_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-container"):
+            yield Static("[bold white]Rename Panel[/bold white]", id="menu-title")
+            yield Static(f"[dim]Current: {self.current_name}[/dim]", id="menu-branch")
+            yield Input(value=self.current_name, id="rename-input")
+            yield Static("\\[enter] confirm    \\[esc] cancel", id="menu-hint")
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#rename-input", Input)
+        inp.focus()
+        inp.action_end()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        new_name = event.value.strip()
+        if new_name:
+            self.dismiss(new_name)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        pass
+
+    def action_cursor_up(self) -> None:
+        pass
 
 
 class SelectSessionScreen(ModalScreen[str | None]):

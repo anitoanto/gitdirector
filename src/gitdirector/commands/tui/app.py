@@ -42,7 +42,9 @@ from .screens import (
     AgentLoadingScreen,
     ConfirmScreen,
     CreatePanelScreen,
+    PanelActionMenuScreen,
     RemoveSessionScreen,
+    RenamePanelScreen,
     RepoInfoScreen,
     SortMenuScreen,
 )
@@ -140,11 +142,10 @@ class GitDirectorConsole(App):
         Binding("s", "sort", "Sort", show=True),
         Binding("i", "show_info", "Info", show=True),
         Binding("escape", "close_search", show=False),
-        Binding("1", "tab_repos", "Repos", show=True),
-        Binding("2", "tab_sessions", "Sessions", show=True),
-        Binding("3", "tab_panels", "Panels", show=True),
+        Binding("1", "tab_repos", "Repos", show=False),
+        Binding("2", "tab_sessions", "Sessions", show=False),
+        Binding("3", "tab_panels", "Panels", show=False),
         Binding("n", "new_panel", "New Panel", show=False),
-        Binding("d", "delete_panel", "Delete", show=False),
     ]
 
     def __init__(self) -> None:
@@ -177,7 +178,7 @@ class GitDirectorConsole(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with TabbedContent(id="tabs"):
-            with TabPane("Repositories", id="repos"):
+            with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
                 yield DataTable(id="repo-table", cursor_type="row")
                 yield Static(
@@ -185,7 +186,7 @@ class GitDirectorConsole(App):
                     " [bold]gitdirector link <path>[/bold] to get started.",
                     id="no-repos-message",
                 )
-            with TabPane("Sessions", id="sessions"):
+            with TabPane("[2] Sessions", id="sessions"):
                 yield Static("", id="sessions-search-indicator", classes="search-indicator")
                 yield DataTable(id="sessions-table", cursor_type="row")
                 yield Static(
@@ -193,7 +194,7 @@ class GitDirectorConsole(App):
                     " to see it here.",
                     id="no-sessions-message",
                 )
-            with TabPane("Panels", id="panels"):
+            with TabPane("[3] Panels", id="panels"):
                 yield DataTable(id="panels-table", cursor_type="row")
                 yield Static(
                     "No panels created.  Press [bold]n[/bold] to create a new panel.",
@@ -497,7 +498,7 @@ class GitDirectorConsole(App):
         if indicators:
             msg += f"  ({', '.join(indicators)})"
 
-        msg += "   ↑↓/jk navigate  [enter] attach  1 repos  2 sessions  r refresh  q quit"
+        msg += "   ↑↓/jk navigate  [enter] attach  r refresh  q quit"
         if self._search_query:
             msg += "  [esc] clear search"
         return msg
@@ -923,6 +924,10 @@ class GitDirectorConsole(App):
             row_key=row_key,
         )
 
+        if hasattr(self, "_poll_timer"):
+            self._poll_timer.pause()
+        self._monitor.stop()
+
         with self.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
             sys.stdout.flush()
@@ -934,6 +939,9 @@ class GitDirectorConsole(App):
             except (AttributeError, OSError):
                 pass
 
+        self._monitor.start()
+        if hasattr(self, "_poll_timer"):
+            self._poll_timer.resume()
         self._repos_stale = True
         self._active_tab = restore_tab
 
@@ -1068,7 +1076,7 @@ class GitDirectorConsole(App):
         if not panels:
             table.display = False
             no_msg.display = True
-            self._update_status("No panels   n create   1 repos  2 sessions  3 panels  q quit")
+            self._update_status("No panels   n create  q quit")
             return
 
         table.display = True
@@ -1086,9 +1094,7 @@ class GitDirectorConsole(App):
         self._restore_resume_selection("panels")
         count = len(panels)
         label = "panel" if count == 1 else "panels"
-        self._update_status(
-            f"{count} {label}   ↑↓/jk navigate  [enter] open  n create  d delete  q quit"
-        )
+        self._update_status(f"{count} {label}   ↑↓/jk navigate  [enter] select  n create  q quit")
 
     def _open_selected_panel(self) -> None:
         table = self.query_one("#panels-table", DataTable)
@@ -1099,7 +1105,10 @@ class GitDirectorConsole(App):
         panel = self._panel_store.get(panel_name)
         if not panel:
             return
-        self._open_panel(panel_name)
+        self.push_screen(
+            PanelActionMenuScreen(panel_name),
+            callback=lambda action: self._handle_panel_action(action, panel_name),
+        )
 
     def _open_panel(self, panel_name: str) -> None:
         from ...integrations.tmux import rebuild_panel_tmux_session
@@ -1115,6 +1124,32 @@ class GitDirectorConsole(App):
             panel.panes,
         )
         self._suspend_and_attach(session_name, row_key=panel.name)
+
+    def _handle_panel_action(self, action: str | None, panel_name: str) -> None:
+        if action is None:
+            return
+        if action == "open":
+            self._open_panel(panel_name)
+        elif action == "rename":
+            self.push_screen(
+                RenamePanelScreen(panel_name),
+                callback=lambda new_name: self._do_rename_panel(panel_name, new_name),
+            )
+        elif action == "delete":
+            self.push_screen(
+                ConfirmScreen(f"Delete panel '{panel_name}'?"),
+                callback=lambda confirmed: self._do_delete_panel(confirmed, panel_name),
+            )
+
+    def _do_rename_panel(self, old_name: str, new_name: str | None) -> None:
+        if new_name is None or new_name == old_name:
+            return
+        existing = self._panel_store.get(new_name)
+        if existing:
+            self._update_status(f"Panel '{new_name}' already exists")
+            return
+        self._panel_store.rename(old_name, new_name)
+        self._load_panels()
 
     def action_new_panel(self) -> None:
         if self._active_tab != "panels":
@@ -1149,19 +1184,6 @@ class GitDirectorConsole(App):
         self._panel_store.create(name, rows, cols, panes)
         self._load_panels()
         self._open_panel(name)
-
-    def action_delete_panel(self) -> None:
-        if self._active_tab != "panels":
-            return
-        table = self.query_one("#panels-table", DataTable)
-        if table.row_count == 0:
-            return
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        panel_name = str(row_key.value)
-        self.push_screen(
-            ConfirmScreen(f"Delete panel '{panel_name}'?"),
-            callback=lambda confirmed: self._do_delete_panel(confirmed, panel_name),
-        )
 
     def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
         if confirmed:
