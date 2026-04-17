@@ -38,7 +38,7 @@ from .constants import (
     _STATUS_ORDER,
     _changes_label,
 )
-from .panels import Panel, PanelStore
+from .panels import Panel, PanelStore, render_panel_layout_preview
 from .screens import (
     ActionMenuScreen,
     AgentLoadingScreen,
@@ -55,16 +55,16 @@ _PANEL_PREVIEW_FILLED = "■"
 _PANEL_PREVIEW_OPEN = "□"
 
 
-def _panel_preview_marker(panel: Panel, row_index: int, col_index: int) -> str:
-    pane_index = (row_index * panel.cols) + col_index + 1
+def _panel_preview_marker(panel: Panel, pane_index: int) -> str:
     return _PANEL_PREVIEW_FILLED if panel.panes.get(pane_index) else _PANEL_PREVIEW_OPEN
 
 
-def _render_panel_preview(panel: Panel) -> str:
+def _render_grid_panel_preview(panel: Panel) -> str:
     rows: list[str] = []
     for row_index in range(panel.rows):
         row_cells = " ".join(
-            _panel_preview_marker(panel, row_index, col_index) for col_index in range(panel.cols)
+            _panel_preview_marker(panel, (row_index * panel.cols) + col_index + 1)
+            for col_index in range(panel.cols)
         )
         if row_index == 0:
             rows.append(f"┌{row_cells}┐")
@@ -76,8 +76,54 @@ def _render_panel_preview(panel: Panel) -> str:
     return "\n".join(rows)
 
 
+def _render_asymmetric_panel_preview(panel: Panel) -> str:
+    marker = lambda pane_index: _panel_preview_marker(panel, pane_index)
+    if panel.layout.key == "tall_left":
+        return "\n".join(
+            [
+                f"┌─┬{marker(2)}┐",
+                f"│{marker(1)}├─┤",
+                f"└─┴{marker(3)}┘",
+            ]
+        )
+    if panel.layout.key == "tall_right":
+        return "\n".join(
+            [
+                f"┌{marker(1)}┬─┐",
+                f"├─┤{marker(2)}│",
+                f"└{marker(3)}┴─┘",
+            ]
+        )
+    if panel.layout.key == "wide_top":
+        return "\n".join(
+            [
+                f"┌─{marker(1)}─┐",
+                "├─┬─┤",
+                f"└{marker(2)}┴{marker(3)}┘",
+            ]
+        )
+    if panel.layout.key == "wide_bottom":
+        return "\n".join(
+            [
+                f"┌{marker(1)}┬{marker(2)}┐",
+                "├─┴─┤",
+                f"└─{marker(3)}─┘",
+            ]
+        )
+    labels = {
+        placement.pane_index: marker(placement.pane_index) for placement in panel.pane_placements
+    }
+    return render_panel_layout_preview(panel.layout, labels=labels, cell_width=1, cell_height=1)
+
+
+def _render_panel_preview(panel: Panel) -> str:
+    if panel.layout.key.startswith("grid_"):
+        return _render_grid_panel_preview(panel)
+    return _render_asymmetric_panel_preview(panel)
+
+
 def _panel_row_height(panel: Panel) -> int:
-    return panel.rows + 2
+    return len(_render_panel_preview(panel).splitlines()) + 2
 
 
 def _panel_row_cell(value: str) -> str:
@@ -989,7 +1035,11 @@ class GitDirectorConsole(App):
         if col == 1:
             return lambda panel: (make_panel_session_name(panel.name).lower(), panel.name.lower())
         if col == 2:
-            return lambda panel: (panel.rows, panel.cols, panel.name.lower())
+            return lambda panel: (
+                panel.layout.sort_rank,
+                panel.layout_label.lower(),
+                panel.name.lower(),
+            )
         if col == 3:
             return lambda panel: (panel.filled_panes, panel.total_panes, panel.name.lower())
         return lambda panel: panel.name.lower()
@@ -1027,7 +1077,7 @@ class GitDirectorConsole(App):
                     _panel_row_cell(_render_panel_preview(panel)),
                     _panel_row_cell(panel.name),
                     _panel_row_cell(make_panel_session_name(panel.name)),
-                    _panel_row_cell(panel.layout_label),
+                    _panel_row_cell(panel.layout_display_label),
                     _panel_row_cell(panes_label),
                     height=_panel_row_height(panel),
                     key=panel.name,
@@ -1347,6 +1397,8 @@ class GitDirectorConsole(App):
             panel.rows,
             panel.cols,
             panel.panes,
+            closed_panes=panel.closed_panes,
+            layout_key=panel.layout.key,
         )
         self._suspend_and_attach(session_name, row_key=panel.name)
 
@@ -1360,13 +1412,13 @@ class GitDirectorConsole(App):
 
     def _handle_create_panel(
         self,
-        result: tuple[str, int, int, dict[int, str | None]] | None,
+        result: tuple[str, str, dict[int, str | None]] | None,
     ) -> None:
         if result is None:
             return
         from ...integrations.tmux import make_panel_session_name
 
-        name, rows, cols, panes = result
+        name, layout_key, panes = result
         existing = self._panel_store.get(name)
         if existing:
             self._update_status(f"Panel '{name}' already exists")
@@ -1380,8 +1432,11 @@ class GitDirectorConsole(App):
             self._update_status(f"Panel '{name}' conflicts with an existing panel session name")
             return
 
-        self._panel_store.create(name, rows, cols, panes)
+        created_panel = self._panel_store.create(name, panes=panes, layout_key=layout_key)
         self._load_panels()
+        if created_panel is None:
+            self._update_status(f"Panel '{name}' was not created because all panes are empty")
+            return
         self._open_panel(name)
 
     def action_delete_panel(self) -> None:

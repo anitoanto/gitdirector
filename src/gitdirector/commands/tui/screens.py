@@ -19,6 +19,13 @@ from textual.widgets.option_list import Option
 
 from ...info import RepoInfoResult
 from .constants import _MODAL_BINDINGS, _MODAL_CSS, _SORT_COLUMN_NAMES
+from .panels import (
+    DEFAULT_PANEL_LAYOUT_KEY,
+    Panel,
+    get_create_panel_layouts,
+    render_panel_layout_preview,
+    resolve_panel_layout,
+)
 
 
 class ActionMenuScreen(ModalScreen[str]):
@@ -477,42 +484,12 @@ class RepoInfoScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-_LAYOUT_PRESETS = [
-    (1, 1, "1×1  Single"),
-    (1, 2, "1×2  Two columns"),
-    (1, 3, "1×3  Three columns"),
-    (2, 1, "2×1  Two rows"),
-    (2, 2, "2×2  Four panes"),
-    (2, 3, "2×3  Six panes"),
-    (3, 1, "3×1  Three rows"),
-    (3, 2, "3×2  Six panes"),
-    (3, 3, "3×3  Nine panes"),
-]
+def _render_grid_preview(rows: int, cols: int, layout_key: str | None = None) -> str:
+    layout = resolve_panel_layout(layout_key, rows, cols)
+    return render_panel_layout_preview(layout, cell_width=7, cell_height=1)
 
 
-def _render_grid_preview(rows: int, cols: int) -> str:
-    cell_w = 7
-    top = "┌" + "┬".join(["─" * cell_w] * cols) + "┐"
-    mid = "├" + "┼".join(["─" * cell_w] * cols) + "┤"
-    bot = "└" + "┴".join(["─" * cell_w] * cols) + "┘"
-    lines = [top]
-    for r in range(rows):
-        cells = []
-        for c in range(cols):
-            n = r * cols + c + 1
-            cells.append(f"   {n}   ")
-        lines.append("│" + "│".join(cells) + "│")
-        cells_empty = []
-        for _ in range(cols):
-            cells_empty.append(" " * cell_w)
-        lines.append("│" + "│".join(cells_empty) + "│")
-        if r < rows - 1:
-            lines.append(mid)
-    lines.append(bot)
-    return "\n".join(lines)
-
-
-class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] | None]):
+class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | None]):
     """Two-step modal: 1) name + layout, 2) assign sessions with preview."""
 
     BINDINGS = [
@@ -529,7 +506,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
         " }"
         """
     #create-panel-container {
-        width: 90;
+        width: 108;
         height: auto;
         border: round $primary;
         background: $panel;
@@ -557,7 +534,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
         padding: 0;
     }
     #step-1-left {
-        width: 38;
+        width: 56;
         height: auto;
         padding: 0 1 0 0;
     }
@@ -635,8 +612,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
         from ...integrations.tmux import list_all_gd_sessions
 
         self._step = 1
-        self._selected_rows = 2
-        self._selected_cols = 2
+        self._selected_layout_key = DEFAULT_PANEL_LAYOUT_KEY
         self._selected_pane_index = 1
         self._current_step2_field = "panes"
         self._session_entries = list_all_gd_sessions()
@@ -655,20 +631,45 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
                     with Vertical(id="step-1-left"):
                         yield Static("[dim]Layout[/dim]", classes="section-label")
                         items = []
-                        for r, c, label in _LAYOUT_PRESETS:
-                            marker = "[cyan]● [/cyan]" if r == 2 and c == 2 else "  "
-                            items.append(Option(f"{marker}{label}", id=f"layout:{r}:{c}"))
+                        for layout in get_create_panel_layouts():
+                            marker = (
+                                "[cyan]● [/cyan]"
+                                if layout.key == DEFAULT_PANEL_LAYOUT_KEY
+                                else "  "
+                            )
+                            items.append(
+                                Option(
+                                    f"{marker}{layout.menu_display_label}",
+                                    id=f"layout:{layout.key}",
+                                )
+                            )
                         yield OptionList(*items, id="layout-menu")
                     with Vertical(id="step-1-right"):
                         yield Static("[dim]Preview[/dim]", classes="section-label")
-                        yield Static(_render_grid_preview(2, 2), id="grid-preview")
+                        default_layout = resolve_panel_layout(DEFAULT_PANEL_LAYOUT_KEY)
+                        yield Static(
+                            _render_grid_preview(
+                                default_layout.rows,
+                                default_layout.cols,
+                                default_layout.key,
+                            ),
+                            id="grid-preview",
+                        )
             with Vertical(id="step-2"):
                 yield Static("", id="step-2-subtitle")
                 with Horizontal(id="step-2-columns"):
                     with Vertical(id="step-2-left"):
                         yield Static("[dim]Pane slots[/dim]", classes="section-label")
                         yield OptionList(*self._slot_options(), id="pane-slot-menu")
-                        yield Static(_render_grid_preview(2, 2), id="grid-preview-2")
+                        default_layout = resolve_panel_layout(DEFAULT_PANEL_LAYOUT_KEY)
+                        yield Static(
+                            _render_grid_preview(
+                                default_layout.rows,
+                                default_layout.cols,
+                                default_layout.key,
+                            ),
+                            id="grid-preview-2",
+                        )
                     with Vertical(id="step-2-right"):
                         yield Static(
                             "[dim]Session for selected pane[/dim]",
@@ -683,7 +684,11 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
 
     def on_mount(self) -> None:
         layout_menu = self.query_one("#layout-menu", OptionList)
-        layout_menu.highlighted = 4
+        layout_menu.highlighted = next(
+            index
+            for index, layout in enumerate(get_create_panel_layouts())
+            if layout.key == self._selected_layout_key
+        )
         self.query_one("#pane-slot-menu", OptionList).highlighted = 0
         self._sync_session_menu_highlight()
         self._show_step(1)
@@ -698,9 +703,11 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
             hint = "\\[tab] switch fields    \\[enter] next: assign sessions    \\[esc] cancel"
         else:
             name = self.query_one("#panel-name-input", Input).value.strip() or "unnamed"
-            r, c = self._selected_rows, self._selected_cols
+            layout = resolve_panel_layout(self._selected_layout_key)
             title = "[bold white]Configure Panes[/bold white]"
-            self.query_one("#step-2-subtitle", Static).update(f'[dim]"{name}" — {r}×{c}[/dim]')
+            self.query_one("#step-2-subtitle", Static).update(
+                f'[dim]"{name}" — {layout.layout_label}[/dim]'
+            )
             self._update_step2_preview()
             self._update_slot_markers()
             self._update_session_markers()
@@ -721,7 +728,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
         self.query_one("#pane-slot-menu", OptionList).focus()
 
     def _active_pane_count(self) -> int:
-        return self._selected_rows * self._selected_cols
+        return resolve_panel_layout(self._selected_layout_key).total_panes
 
     def _pane_is_active(self, pane_index: int | None = None) -> bool:
         idx = self._selected_pane_index if pane_index is None else pane_index
@@ -797,9 +804,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id == "layout-menu":
-            parts = event.option.id.split(":")
-            rows, cols = int(parts[1]), int(parts[2])
-            self._apply_layout(rows, cols)
+            self._apply_layout(event.option.id.split(":", 1)[1])
         elif event.option_list.id == "pane-slot-menu":
             pane_index = int(event.option.id.split(":", 1)[1])
             self._select_pane(pane_index)
@@ -828,31 +833,38 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
             self._current_step2_field = "panes"
             self._focus_step2_field()
 
-    def _apply_layout(self, rows: int, cols: int) -> None:
-        self._selected_rows = rows
-        self._selected_cols = cols
+    def _apply_layout(self, layout_key: str | int, cols: int | None = None) -> None:
+        if isinstance(layout_key, int):
+            layout = resolve_panel_layout(rows=layout_key, cols=cols)
+        else:
+            layout = resolve_panel_layout(layout_key)
+        self._selected_layout_key = layout.key
         active = self._active_pane_count()
         for pane_index in range(active + 1, 10):
             self._pane_assignments[pane_index] = None
+        if self._selected_pane_index > active:
+            self._selected_pane_index = active
         self._update_preview()
         self._update_layout_markers()
 
     def _update_preview(self) -> None:
-        preview = _render_grid_preview(self._selected_rows, self._selected_cols)
+        layout = resolve_panel_layout(self._selected_layout_key)
+        preview = _render_grid_preview(layout.rows, layout.cols, layout.key)
         self.query_one("#grid-preview", Static).update(preview)
 
     def _update_step2_preview(self) -> None:
-        preview = _render_grid_preview(self._selected_rows, self._selected_cols)
+        layout = resolve_panel_layout(self._selected_layout_key)
+        preview = _render_grid_preview(layout.rows, layout.cols, layout.key)
         self.query_one("#grid-preview-2", Static).update(preview)
 
     def _update_layout_markers(self) -> None:
         menu = self.query_one("#layout-menu", OptionList)
-        for rows, cols, label in _LAYOUT_PRESETS:
-            oid = f"layout:{rows}:{cols}"
-            if rows == self._selected_rows and cols == self._selected_cols:
-                menu.replace_option_prompt(oid, f"[cyan]● [/cyan]{label}")
+        for layout in get_create_panel_layouts():
+            oid = f"layout:{layout.key}"
+            if layout.key == self._selected_layout_key:
+                menu.replace_option_prompt(oid, f"[cyan]● [/cyan]{layout.menu_display_label}")
             else:
-                menu.replace_option_prompt(oid, f"  {label}")
+                menu.replace_option_prompt(oid, f"  {layout.menu_display_label}")
 
     def _update_slot_markers(self) -> None:
         menu = self.query_one("#pane-slot-menu", OptionList)
@@ -966,7 +978,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
             pane_index: self._pane_assignments[pane_index]
             for pane_index in range(1, total_panes + 1)
         }
-        self.dismiss((name, self._selected_rows, self._selected_cols, panes))
+        self.dismiss((name, self._selected_layout_key, panes))
 
     def action_cancel(self) -> None:
         if self._step == 2:
@@ -1078,7 +1090,11 @@ class PanelActionMenuScreen(ModalScreen[str]):
                     )
                 with Vertical(id="panel-preview-pane"):
                     yield Static(
-                        _render_grid_preview(self.panel.rows, self.panel.cols),
+                        _render_grid_preview(
+                            self.panel.rows,
+                            self.panel.cols,
+                            self.panel.layout_key,
+                        ),
                         id="panel-layout-preview",
                     )
 

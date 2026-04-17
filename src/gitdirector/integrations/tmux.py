@@ -145,6 +145,14 @@ def make_panel_session_name(panel_name: str) -> str:
     return f"gd/panel/{_sanitize_panel_name(panel_name)}"
 
 
+def _panel_proxy_session_name(panel_name: str, pane_index: int) -> str:
+    return f"gitdirector-panel-{_sanitize_panel_name(panel_name)}-{pane_index}"
+
+
+def _panel_proxy_session_prefix(panel_name: str) -> str:
+    return f"gitdirector-panel-{_sanitize_panel_name(panel_name)}-"
+
+
 def _session_slug(session_name: str | None) -> str | None:
     if not session_name:
         return None
@@ -301,7 +309,7 @@ def _panel_tmux_config(
         window_target=f"{session_name}:0",
         pane_border_status="top",
         pane_border_format=_panel_border_format(theme_name),
-        show_status=False,
+        show_status=True,
     )
 
 
@@ -381,7 +389,12 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
 
 
 def kill_panel_tmux_session(panel_name: str) -> bool:
-    return kill_tmux_session(make_panel_session_name(panel_name))
+    killed = kill_tmux_session(make_panel_session_name(panel_name))
+    proxy_prefix = _panel_proxy_session_prefix(panel_name)
+    for session_name in _list_sessions():
+        if session_name.startswith(proxy_prefix):
+            subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
+    return killed
 
 
 def _tmux_output(*args: str) -> str:
@@ -449,6 +462,120 @@ def _build_panel_grid(session_name: str, rows: int, cols: int) -> list[str]:
         )
         _split_panel_row(row_target, cols)
 
+    return _list_window_panes_row_major(session_name)
+
+
+def _find_panel_region_split(
+    rows: int,
+    cols: int,
+    placements: tuple[tuple[int, int, int, int], ...],
+) -> (
+    tuple[
+        str,
+        int,
+        tuple[tuple[int, int, int, int], ...],
+        tuple[tuple[int, int, int, int], ...],
+    ]
+    | None
+):
+    for row_boundary in range(1, rows):
+        top: list[tuple[int, int, int, int]] = []
+        bottom: list[tuple[int, int, int, int]] = []
+        for row, col, row_span, col_span in placements:
+            if row + row_span <= row_boundary:
+                top.append((row, col, row_span, col_span))
+            elif row >= row_boundary:
+                bottom.append((row - row_boundary, col, row_span, col_span))
+            else:
+                break
+        else:
+            if top and bottom:
+                return ("rows", row_boundary, tuple(top), tuple(bottom))
+
+    for col_boundary in range(1, cols):
+        left: list[tuple[int, int, int, int]] = []
+        right: list[tuple[int, int, int, int]] = []
+        for row, col, row_span, col_span in placements:
+            if col + col_span <= col_boundary:
+                left.append((row, col, row_span, col_span))
+            elif col >= col_boundary:
+                right.append((row, col - col_boundary, row_span, col_span))
+            else:
+                break
+        else:
+            if left and right:
+                return ("cols", col_boundary, tuple(left), tuple(right))
+
+    return None
+
+
+def _split_panel_region(
+    target: str,
+    rows: int,
+    cols: int,
+    placements: tuple[tuple[int, int, int, int], ...],
+) -> None:
+    if len(placements) <= 1:
+        return
+
+    split = _find_panel_region_split(rows, cols, placements)
+    if split is None:
+        raise ValueError(f"Unsupported panel layout region {rows}x{cols}: {placements}")
+
+    axis, boundary, first_region, second_region = split
+    if axis == "rows":
+        second_size_pct = round(100 * (rows - boundary) / rows)
+        second_target = _tmux_output(
+            "split-window",
+            "-v",
+            "-l",
+            f"{second_size_pct}%",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            target,
+            "cat",
+        )
+        _split_panel_region(target, boundary, cols, first_region)
+        _split_panel_region(second_target, rows - boundary, cols, second_region)
+        return
+
+    second_size_pct = round(100 * (cols - boundary) / cols)
+    second_target = _tmux_output(
+        "split-window",
+        "-h",
+        "-l",
+        f"{second_size_pct}%",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        target,
+        "cat",
+    )
+    _split_panel_region(target, rows, boundary, first_region)
+    _split_panel_region(second_target, rows, cols - boundary, second_region)
+
+
+def _build_panel_layout(
+    session_name: str,
+    rows: int,
+    cols: int,
+    layout_key: str | None = None,
+) -> list[str]:
+    from ..commands.tui.panels import resolve_panel_layout
+
+    layout = resolve_panel_layout(layout_key, rows, cols)
+    if layout.key.startswith("grid_"):
+        return _build_panel_grid(session_name, layout.rows, layout.cols)
+
+    root_target = f"{session_name}:0.0"
+    placements = tuple(
+        (placement.row, placement.col, placement.row_span, placement.col_span)
+        for placement in layout.placements
+    )
+    _split_panel_region(root_target, layout.rows, layout.cols, placements)
     return _list_window_panes_row_major(session_name)
 
 
@@ -584,13 +711,35 @@ def _panel_attach_fragment(session_name: str) -> str:
     )
 
 
-def _embedded_tmux_attach_command(session_name: str) -> str:
+def _panel_proxy_attach_fragment(panel_name: str, pane_index: int, session_name: str) -> str:
+    quoted_session = shlex.quote(session_name)
+    proxy_session = _panel_proxy_session_name(panel_name, pane_index)
+    quoted_proxy_session = shlex.quote(proxy_session)
+    return (
+        f"tmux kill-session -t {quoted_proxy_session} >/dev/null 2>&1 || true; "
+        f"tmux new-session -d -t {quoted_session} -s {quoted_proxy_session} >/dev/null 2>&1 || true; "
+        f"tmux set-option -q -t {quoted_proxy_session} status off >/dev/null 2>&1 || true; "
+        f"env -u TMUX tmux attach-session -t {quoted_proxy_session}; "
+        f"tmux kill-session -t {quoted_proxy_session} >/dev/null 2>&1 || true; "
+    )
+
+
+def _embedded_tmux_attach_command(
+    session_name: str,
+    panel_name: str | None = None,
+    pane_index: int | None = None,
+) -> str:
     quoted_session = shlex.quote(session_name)
     missing_message = _printf_lines_command([f"Missing session: {session_name}"])
+    attach_fragment = (
+        _panel_proxy_attach_fragment(panel_name, pane_index, session_name)
+        if panel_name is not None and pane_index is not None
+        else _panel_attach_fragment(session_name)
+    )
     script = (
         "clear; "
         f"if tmux has-session -t {quoted_session} >/dev/null 2>&1; then "
-        f"{_panel_attach_fragment(session_name)}"
+        f"{attach_fragment}"
         "else "
         f"{missing_message}; "
         "fi"
@@ -598,16 +747,22 @@ def _embedded_tmux_attach_command(session_name: str) -> str:
     return f"sh -c {shlex.quote(script)}"
 
 
-def _panel_pane_command(panel_name: str, pane_index: int, session_name: str | None) -> str:
+def _panel_pane_command(
+    panel_name: str,
+    pane_index: int,
+    session_name: str | None,
+    *,
+    closed: bool = False,
+) -> str:
+    closed_message = _printf_lines_command(
+        [
+            "",
+            "\033[2mSESSION CLOSED\033[0m",
+            "\033[2mOnce all panes are closed, this panel will autodelete\033[0m",
+        ]
+    )
     if session_name:
         quoted_session = shlex.quote(session_name)
-        detached_message = _printf_lines_command(
-            [
-                f"Panel: {panel_name}",
-                f"Pane {pane_index}: detached from {session_name}",
-                "Reopen the panel from GitDirector to attach again.",
-            ]
-        )
         missing_message = _printf_lines_command(
             [
                 f"Panel: {panel_name}",
@@ -618,13 +773,15 @@ def _panel_pane_command(panel_name: str, pane_index: int, session_name: str | No
         script = (
             "clear; "
             f"if tmux has-session -t {quoted_session} >/dev/null 2>&1; then "
-            f"{_panel_attach_fragment(session_name)}"
-            f"clear; {detached_message}; "
+            f"{_panel_proxy_attach_fragment(panel_name, pane_index, session_name)}"
+            f"clear; {closed_message}; "
             "else "
             f"{missing_message}; "
             "fi; "
             "exec tail -f /dev/null"
         )
+    elif closed:
+        script = f"clear; {closed_message}; exec tail -f /dev/null"
     else:
         script = (
             "clear; "
@@ -639,12 +796,17 @@ def rebuild_panel_tmux_session(
     rows: int,
     cols: int,
     panes: dict[int, str | None],
+    closed_panes: set[int] | None = None,
+    layout_key: str | None = None,
     theme_name: str | None = None,
 ) -> str:
+    from ..commands.tui.panels import resolve_panel_layout
+
     session_name = make_panel_session_name(panel_name)
     theme_name = _resolved_panel_theme_name(theme_name)
-    if _session_exists(session_name):
-        subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
+    layout = resolve_panel_layout(layout_key, rows, cols)
+    closed_panes = closed_panes or set()
+    kill_panel_tmux_session(panel_name)
 
     subprocess.run(
         [
@@ -662,12 +824,12 @@ def rebuild_panel_tmux_session(
         check=True,
     )
 
-    pane_ids = _build_panel_grid(session_name, rows, cols)
+    pane_ids = _build_panel_layout(session_name, layout.rows, layout.cols, layout.key)
     _configure_panel_window(session_name, pane_ids, panes, theme_name)
     _load_panel_tmux_config(panel_name, session_name, theme_name)
     sync_panel_tmux_config(theme_name)
     _ensure_panel_prefix_bindings()
-    total_panes = rows * cols
+    total_panes = layout.total_panes
     for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):
         subprocess.run(
             [
@@ -676,7 +838,12 @@ def rebuild_panel_tmux_session(
                 "-k",
                 "-t",
                 pane_id,
-                _panel_pane_command(panel_name, pane_index, panes.get(pane_index)),
+                _panel_pane_command(
+                    panel_name,
+                    pane_index,
+                    panes.get(pane_index),
+                    closed=pane_index in closed_panes,
+                ),
             ],
             check=True,
         )

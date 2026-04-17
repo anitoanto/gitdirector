@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.style import Style
 from rich.text import Text
 from textual import events
+from textual.message import Message
 from textual.reactive import reactive
 from textual.strip import Strip
 from textual.widget import Widget
@@ -133,6 +134,10 @@ class _Emulator:
 class TerminalWidget(Widget, can_focus=True):
     """A terminal emulator widget that runs a command in a pseudo-terminal."""
 
+    class Disconnected(Message):
+        def __init__(self) -> None:
+            super().__init__()
+
     DEFAULT_CSS = """
     TerminalWidget {
         height: 1fr;
@@ -219,6 +224,7 @@ class TerminalWidget(Widget, can_focus=True):
                     self._render_screen()
                     self.refresh()
                 elif cmd == "disconnect":
+                    self.post_message(self.Disconnected())
                     break
         except asyncio.CancelledError:
             pass
