@@ -36,10 +36,12 @@ from .constants import (
     _STATUS_ORDER,
     _changes_label,
 )
+from .panels import PanelStore
 from .screens import (
     ActionMenuScreen,
     AgentLoadingScreen,
     ConfirmScreen,
+    CreatePanelScreen,
     RemoveSessionScreen,
     RepoInfoScreen,
     SortMenuScreen,
@@ -102,6 +104,14 @@ class GitDirectorConsole(App):
         padding: 2 4;
         content-align: center middle;
     }
+    #no-panels-message {
+        height: 1fr;
+        display: none;
+        align: center middle;
+        color: $text-muted;
+        padding: 2 4;
+        content-align: center middle;
+    }
     .search-indicator {
         dock: top;
         height: 1;
@@ -132,6 +142,9 @@ class GitDirectorConsole(App):
         Binding("escape", "close_search", show=False),
         Binding("1", "tab_repos", "Repos", show=True),
         Binding("2", "tab_sessions", "Sessions", show=True),
+        Binding("3", "tab_panels", "Panels", show=True),
+        Binding("n", "new_panel", "New Panel", show=False),
+        Binding("d", "delete_panel", "Delete", show=False),
     ]
 
     def __init__(self) -> None:
@@ -159,6 +172,7 @@ class GitDirectorConsole(App):
         self._resume_selection_tab: str | None = None
         self._resume_selection_key: str | None = None
         self._resume_selection_row: int | None = None
+        self._panel_store = PanelStore()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -179,6 +193,12 @@ class GitDirectorConsole(App):
                     " to see it here.",
                     id="no-sessions-message",
                 )
+            with TabPane("Panels", id="panels"):
+                yield DataTable(id="panels-table", cursor_type="row")
+                yield Static(
+                    "No panels created.  Press [bold]n[/bold] to create a new panel.",
+                    id="no-panels-message",
+                )
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
             yield Input(placeholder="type to filter…", id="search-bar")
@@ -194,6 +214,8 @@ class GitDirectorConsole(App):
         self._sess_col_keys = sessions_table.add_columns(
             "Status", "Session", "Repository", "Session Name"
         )
+        panels_table = self.query_one("#panels-table", DataTable)
+        self._panels_col_keys = panels_table.add_columns("Name", "Layout", "Panes")
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
         self._monitor.start()
@@ -300,6 +322,11 @@ class GitDirectorConsole(App):
             return
         self.query_one("#tabs", TabbedContent).active = "sessions"
 
+    def action_tab_panels(self) -> None:
+        if self._resume_target_tab is not None and self._resume_target_tab != "panels":
+            return
+        self.query_one("#tabs", TabbedContent).active = "panels"
+
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
         if self._resume_target_tab is not None:
@@ -311,6 +338,8 @@ class GitDirectorConsole(App):
         self._active_tab = tab_id
         if tab_id == "sessions":
             self._load_sessions()
+        elif tab_id == "panels":
+            self._load_panels()
         elif tab_id == "repos":
             if self._repos_stale:
                 self._repos_stale = False
@@ -353,6 +382,10 @@ class GitDirectorConsole(App):
         if restore_tab == "sessions":
             self._load_sessions()
             self.query_one("#sessions-table", DataTable).focus()
+        elif restore_tab == "panels":
+            self._load_panels()
+            self.query_one("#panels-table", DataTable).focus()
+            self._restore_resume_selection("panels")
         else:
             self.query_one("#repo-table", DataTable).focus()
             self._restore_resume_selection("repos")
@@ -573,32 +606,41 @@ class GitDirectorConsole(App):
         row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
         return str(row_key.value)
 
+    def _table_selector_for_tab(self, tab_id: str) -> str:
+        if tab_id == "sessions":
+            return "#sessions-table"
+        if tab_id == "panels":
+            return "#panels-table"
+        return "#repo-table"
+
     def _capture_resume_selection(
         self,
         tab_id: str,
         *,
         session_name: str | None = None,
         path: Path | None = None,
+        row_key: str | None = None,
     ) -> None:
         self._resume_selection_tab = tab_id
         if not self.is_running:
             self._resume_selection_row = None
             if tab_id == "sessions":
-                self._resume_selection_key = session_name
+                self._resume_selection_key = session_name or row_key
+            elif tab_id == "panels":
+                self._resume_selection_key = row_key
             else:
-                self._resume_selection_key = str(path) if path is not None else None
+                self._resume_selection_key = str(path) if path is not None else row_key
             return
 
-        table = self.query_one(
-            "#sessions-table" if tab_id == "sessions" else "#repo-table",
-            DataTable,
-        )
+        table = self.query_one(self._table_selector_for_tab(tab_id), DataTable)
         self._resume_selection_row = table.cursor_coordinate.row if table.row_count > 0 else None
         if tab_id == "sessions":
             self._resume_selection_key = session_name or self._get_selected_row_key(table)
+        elif tab_id == "panels":
+            self._resume_selection_key = row_key or self._get_selected_row_key(table)
         else:
             self._resume_selection_key = (
-                str(path) if path is not None else self._get_selected_row_key(table)
+                str(path) if path is not None else row_key or self._get_selected_row_key(table)
             )
 
     def _clear_resume_selection(self) -> None:
@@ -610,10 +652,7 @@ class GitDirectorConsole(App):
         if self._resume_selection_tab != tab_id:
             return
 
-        table = self.query_one(
-            "#sessions-table" if tab_id == "sessions" else "#repo-table",
-            DataTable,
-        )
+        table = self.query_one(self._table_selector_for_tab(tab_id), DataTable)
         if table.row_count == 0:
             self._clear_resume_selection()
             return
@@ -641,6 +680,8 @@ class GitDirectorConsole(App):
     def _get_active_table(self) -> DataTable:
         if self._active_tab == "sessions":
             return self.query_one("#sessions-table", DataTable)
+        if self._active_tab == "panels":
+            return self.query_one("#panels-table", DataTable)
         return self.query_one("#repo-table", DataTable)
 
     def action_cursor_down(self) -> None:
@@ -820,6 +861,8 @@ class GitDirectorConsole(App):
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             session_name = str(row_key.value)
             self._suspend_and_attach(session_name)
+        elif self._active_tab == "panels":
+            self._open_selected_panel()
         else:
             self.action_show_menu()
 
@@ -827,6 +870,8 @@ class GitDirectorConsole(App):
         if event.data_table.id == "sessions-table":
             session_name = str(event.row_key.value)
             self._suspend_and_attach(session_name)
+        elif event.data_table.id == "panels-table":
+            self._open_selected_panel()
         else:
             self.action_show_menu()
 
@@ -850,7 +895,12 @@ class GitDirectorConsole(App):
         else:
             self._suspend_and_attach(session_name, path)
 
-    def _suspend_and_attach(self, session_name: str, path: Path | None = None) -> None:
+    def _suspend_and_attach(
+        self,
+        session_name: str,
+        path: Path | None = None,
+        row_key: str | None = None,
+    ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
         import termios
@@ -861,7 +911,17 @@ class GitDirectorConsole(App):
         restore_tab = self._active_tab
         self._resume_target_tab = restore_tab
         self._resume_refresh_path = path
-        self._capture_resume_selection(restore_tab, session_name=session_name, path=path)
+        row_key = row_key or (
+            self._get_selected_row_key(self._get_active_table())
+            if restore_tab == "panels"
+            else None
+        )
+        self._capture_resume_selection(
+            restore_tab,
+            session_name=session_name,
+            path=path,
+            row_key=row_key,
+        )
 
         with self.suspend():
             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
@@ -989,6 +1049,127 @@ class GitDirectorConsole(App):
         self._load_repos()
         if self._active_tab == "sessions":
             self._load_sessions()
+        elif self._active_tab == "panels":
+            self._load_panels()
+
+    # -- Panels ---------------------------------------------------------------
+
+    def _load_panels(self) -> None:
+        self._panel_store.reload()
+        self._panel_store.cleanup_orphans()
+        try:
+            table = self.query_one("#panels-table", DataTable)
+        except NoMatches:
+            return
+        table.clear()
+        no_msg = self.query_one("#no-panels-message", Static)
+        panels = self._panel_store.panels
+
+        if not panels:
+            table.display = False
+            no_msg.display = True
+            self._update_status("No panels   n create   1 repos  2 sessions  3 panels  q quit")
+            return
+
+        table.display = True
+        no_msg.display = False
+        for panel in panels:
+            filled = panel.filled_panes
+            total = panel.total_panes
+            panes_label = f"{filled}/{total}" if filled else f"0/{total}"
+            table.add_row(
+                panel.name,
+                panel.layout_label,
+                panes_label,
+                key=panel.name,
+            )
+        self._restore_resume_selection("panels")
+        count = len(panels)
+        label = "panel" if count == 1 else "panels"
+        self._update_status(
+            f"{count} {label}   ↑↓/jk navigate  [enter] open  n create  d delete  q quit"
+        )
+
+    def _open_selected_panel(self) -> None:
+        table = self.query_one("#panels-table", DataTable)
+        if table.row_count == 0:
+            return
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        panel_name = str(row_key.value)
+        panel = self._panel_store.get(panel_name)
+        if not panel:
+            return
+        self._open_panel(panel_name)
+
+    def _open_panel(self, panel_name: str) -> None:
+        from ...integrations.tmux import rebuild_panel_tmux_session
+
+        panel = self._panel_store.get(panel_name)
+        if not panel:
+            return
+
+        session_name = rebuild_panel_tmux_session(
+            panel.name,
+            panel.rows,
+            panel.cols,
+            panel.panes,
+        )
+        self._suspend_and_attach(session_name, row_key=panel.name)
+
+    def action_new_panel(self) -> None:
+        if self._active_tab != "panels":
+            return
+        self.push_screen(
+            CreatePanelScreen(),
+            callback=self._handle_create_panel,
+        )
+
+    def _handle_create_panel(
+        self,
+        result: tuple[str, int, int, dict[int, str | None]] | None,
+    ) -> None:
+        if result is None:
+            return
+        from ...integrations.tmux import make_panel_session_name
+
+        name, rows, cols, panes = result
+        existing = self._panel_store.get(name)
+        if existing:
+            self._update_status(f"Panel '{name}' already exists")
+            return
+
+        session_name = make_panel_session_name(name)
+        if any(
+            make_panel_session_name(panel.name) == session_name
+            for panel in self._panel_store.panels
+        ):
+            self._update_status(f"Panel '{name}' conflicts with an existing panel session name")
+            return
+
+        self._panel_store.create(name, rows, cols, panes)
+        self._load_panels()
+        self._open_panel(name)
+
+    def action_delete_panel(self) -> None:
+        if self._active_tab != "panels":
+            return
+        table = self.query_one("#panels-table", DataTable)
+        if table.row_count == 0:
+            return
+        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        panel_name = str(row_key.value)
+        self.push_screen(
+            ConfirmScreen(f"Delete panel '{panel_name}'?"),
+            callback=lambda confirmed: self._do_delete_panel(confirmed, panel_name),
+        )
+
+    def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
+        if confirmed:
+            from ...integrations.tmux import kill_panel_tmux_session
+
+            kill_panel_tmux_session(panel_name)
+            self._panel_store.delete(panel_name)
+            self._load_panels()
 
 
 def _run_console() -> None:
