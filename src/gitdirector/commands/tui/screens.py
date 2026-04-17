@@ -1007,23 +1007,79 @@ class PanelActionMenuScreen(ModalScreen[str]):
     CSS = (
         "PanelActionMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
+        " }"
+        + _MODAL_CSS
+        + """
+    PanelActionMenuScreen #menu-container {
+        width: 72;
+        padding: 1 1;
+    }
+    PanelActionMenuScreen #menu-title {
+        padding: 0 1 0 1;
+    }
+    PanelActionMenuScreen #menu-branch {
+        padding: 0 1 1 1;
+    }
+    #panel-action-layout {
+        height: auto;
+        align: left top;
+    }
+    #panel-action-main {
+        width: 1fr;
+        height: auto;
+    }
+    #panel-preview-pane {
+        width: 27;
+        height: auto;
+        padding: 0 0 0 1;
+        align: center top;
+    }
+    PanelActionMenuScreen #action-menu {
+        height: 7;
+        padding: 0 1;
+        margin: 0 0 1 0;
+    }
+    PanelActionMenuScreen #menu-hint {
+        padding: 0 1 0 1;
+    }
+    #panel-layout-preview {
+        width: auto;
+        height: auto;
+        color: $text;
+    }
+    """
     )
 
-    def __init__(self, panel_name: str) -> None:
+    def __init__(self, panel: Panel) -> None:
         super().__init__()
-        self.panel_name = panel_name
+        self.panel = panel
 
     def compose(self) -> ComposeResult:
+        from ...integrations.tmux import make_panel_session_name
+
+        session_name = make_panel_session_name(self.panel.name)
+
         with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.panel_name}[/bold white]", id="menu-title")
-            yield OptionList(
-                Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
-                Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
-                Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),
-                id="action-menu",
-            )
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
+            yield Static(f"[bold white]{self.panel.name}[/bold white]", id="menu-title")
+            yield Static(f"[dim]{session_name}[/dim]", id="menu-branch")
+            with Horizontal(id="panel-action-layout"):
+                with Vertical(id="panel-action-main"):
+                    yield OptionList(
+                        Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
+                        Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
+                        Option("", disabled=True),
+                        Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),
+                        id="action-menu",
+                    )
+                    yield Static(
+                        "↑↓/jk select    \\[enter] confirm    \\[esc] close",
+                        id="menu-hint",
+                    )
+                with Vertical(id="panel-preview-pane"):
+                    yield Static(
+                        _render_grid_preview(self.panel.rows, self.panel.cols),
+                        id="panel-layout-preview",
+                    )
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()

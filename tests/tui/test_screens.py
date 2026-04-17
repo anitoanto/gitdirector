@@ -15,10 +15,12 @@ from gitdirector.commands.tui import (
     AgentLoadingScreen,
     ConfirmScreen,
     GitDirectorConsole,
+    Panel,
     RemoveSessionScreen,
     RepoInfoScreen,
     SortMenuScreen,
 )
+from gitdirector.commands.tui.screens import PanelActionMenuScreen, _render_grid_preview
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 
 from .conftest import _make_info, _mock_manager
@@ -210,6 +212,31 @@ class TestActionMenuScreen:
                 await pilot.press("down")
             await pilot.press("enter")
             assert results
+
+
+class TestPanelActionMenuScreen:
+    async def test_compose_shows_tmux_session_and_preview(self):
+        panel = Panel(name="Main", rows=2, cols=2, panes={1: None, 2: None, 3: None, 4: None})
+        screen = PanelActionMenuScreen(panel)
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            title = app.screen.query_one("#menu-title", Static)
+            session_label = app.screen.query_one("#menu-branch", Static)
+            preview = app.screen.query_one("#panel-layout-preview", Static)
+            menu = app.screen.query_one("#action-menu", OptionList)
+            preview_pane = app.screen.query_one("#panel-preview-pane")
+
+            assert "Main" in title.content
+            assert "gd/panel/main" in session_label.content
+            assert preview.content == _render_grid_preview(2, 2)
+            assert menu.option_count == 4
+            assert not list(app.screen.query("#panel-preview-title"))
+            assert preview_pane.region.x > menu.region.x
+            assert preview_pane.region.y == menu.region.y
 
 
 class TestSortMenuScreen:

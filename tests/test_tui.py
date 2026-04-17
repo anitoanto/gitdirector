@@ -25,6 +25,7 @@ from gitdirector.commands.tui import (
     SortMenuScreen,
     _changes_label,
 )
+from gitdirector.commands.tui.app import _render_panel_preview
 from gitdirector.commands.tui.screens import RenamePanelScreen
 from gitdirector.repo import RepositoryInfo, RepoStatus
 from gitdirector.ui_theme import resolve_panel_theme
@@ -159,6 +160,32 @@ class TestTabStyling:
 
 
 class TestGitDirectorConsole:
+    def test_render_panel_preview_uses_fixed_three_by_three_map(self):
+        panel = Panel(
+            name="Main",
+            rows=2,
+            cols=2,
+            panes={1: "gd/alpha/shell/1", 2: None, 3: None, 4: "gd/beta/copilot/1"},
+        )
+
+        preview = _render_panel_preview(panel)
+
+        assert preview == "\n".join(
+            [
+                "┌■ □ ·┐",
+                "│□ ■ ·│",
+                "└· · ·┘",
+            ]
+        )
+
+    def test_panel_delete_hotkey_removed(self):
+        assert all(binding.key != "d" for binding in GitDirectorConsole.BINDINGS)
+
+    def test_tab_switch_hotkeys_hidden_from_footer(self):
+        hidden_keys = {binding.key for binding in GitDirectorConsole.BINDINGS if not binding.show}
+
+        assert {"1", "2", "3"}.issubset(hidden_keys)
+
     def test_action_select_row_on_panels_opens_action_menu(self):
         app = GitDirectorConsole()
         app._active_tab = "panels"
@@ -193,6 +220,56 @@ class TestGitDirectorConsole:
         app._handle_panel_action("delete", "Main")
 
         assert isinstance(app.push_screen.call_args.args[0], ConfirmScreen)
+
+    async def test_load_panels_renders_consistent_spacing_on_each_row(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        first_panel = Panel(
+            name="Main",
+            rows=2,
+            cols=2,
+            panes={1: "gd/alpha/shell/1", 2: None, 3: None, 4: "gd/beta/copilot/1"},
+        )
+        second_panel = Panel(
+            name="Ops",
+            rows=1,
+            cols=3,
+            panes={1: None, 2: "gd/ops/shell/1", 3: None},
+        )
+        app._panel_store = MagicMock()
+        app._panel_store.panels = [first_panel, second_panel]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._load_panels()
+            table = app.query_one("#panels-table", DataTable)
+
+            assert len(table.columns) == 4
+            assert table.row_count == 2
+            assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
+                [
+                    "",
+                    "┌■ □ ·┐",
+                    "│□ ■ ·│",
+                    "└· · ·┘",
+                ]
+            )
+            assert table.get_cell("Main", app._panels_col_keys[1]) == "\nMain"
+            assert table.get_cell("Main", app._panels_col_keys[2]) == "\n2×2"
+            assert table.get_cell("Main", app._panels_col_keys[3]) == "\n2/4"
+            assert table.get_row_height("Main") == 5
+            assert table.get_cell("Ops", app._panels_col_keys[0]) == "\n".join(
+                [
+                    "",
+                    "┌□ ■ □┐",
+                    "│· · ·│",
+                    "└· · ·┘",
+                ]
+            )
+            assert table.get_cell("Ops", app._panels_col_keys[1]) == "\nOps"
+            assert table.get_cell("Ops", app._panels_col_keys[2]) == "\n1×3"
+            assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1/3"
+            assert table.get_row_height("Ops") == 5
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     async def test_on_mount_syncs_tmux_theme_config(self, mock_sync):
