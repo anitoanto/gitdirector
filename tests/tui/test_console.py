@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
@@ -273,6 +274,35 @@ class TestGitDirectorConsoleSearchAndSort:
         assert "1 of 3 repository loaded" in text
         assert "filter: 'test'" in text
         assert "sort: Branch ▼" in text
+
+
+class TestPanelSearchAndSortRouting:
+    async def test_input_changed_routes_to_panels_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "panels"
+        app._apply_panels_filter_and_sort = MagicMock()
+        event = MagicMock()
+        event.input.id = "search-bar"
+        event.value = "ops"
+
+        app.on_input_changed(event)
+
+        assert app._search_query == "ops"
+        app._apply_panels_filter_and_sort.assert_called_once_with()
+
+    async def test_build_panels_loaded_status_includes_sort_and_filter(self):
+        app = GitDirectorConsole()
+        app._panels_sort_column = 3
+        app._panels_sort_reverse = True
+        app._search_query = "ops"
+
+        text = app._build_panels_loaded_status(1, 3)
+
+        assert "1 of 3 panel" in text
+        assert "filter: 'ops'" in text
+        assert "sort: Panes ▼" in text
+        assert "[esc] clear search" in text
 
 
 class TestGitDirectorConsoleActionRouting:
@@ -619,6 +649,67 @@ class TestGitDirectorConsoleDirectBranches:
         assert app._sessions_sort_column == 1
         assert app._sessions_sort_reverse is True
         app._apply_sessions_filter_and_sort.assert_called_once_with()
+
+    def test_pause_session_status_tracking_stops_timer_and_monitor(self):
+        app = GitDirectorConsole()
+        app._poll_timer = MagicMock()
+        app._monitor = MagicMock()
+
+        app._pause_session_status_tracking()
+
+        assert app._session_status_tracking_paused is True
+        app._poll_timer.pause.assert_called_once_with()
+        app._monitor.stop.assert_called_once_with()
+
+    def test_resume_session_status_tracking_restarts_timer_and_monitor(self):
+        app = GitDirectorConsole()
+        app._session_status_tracking_paused = True
+        app._poll_timer = MagicMock()
+        app._monitor = MagicMock()
+
+        app._resume_session_status_tracking()
+
+        assert app._session_status_tracking_paused is False
+        app._monitor.start.assert_called_once_with()
+        app._poll_timer.resume.assert_called_once_with()
+
+    def test_suspend_and_attach_pauses_and_resumes_status_tracking(self):
+        app = GitDirectorConsole()
+        app._pause_session_status_tracking = MagicMock()
+        app._resume_session_status_tracking = MagicMock()
+        app._monitor = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout"):
+                with patch("termios.tcflush"):
+                    app._suspend_and_attach("gd-test-session")
+
+        app._pause_session_status_tracking.assert_called_once_with()
+        app._resume_session_status_tracking.assert_called_once_with()
+
+    def test_suspend_and_attach_resumes_status_tracking_after_attach_error(self):
+        app = GitDirectorConsole()
+        app._pause_session_status_tracking = MagicMock()
+        app._resume_session_status_tracking = MagicMock()
+        app._monitor = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+
+        with patch(
+            "gitdirector.integrations.tmux.attach_tmux_session",
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch("sys.stdout"):
+                with patch("termios.tcflush"):
+                    with pytest.raises(RuntimeError, match="boom"):
+                        app._suspend_and_attach("gd-test-session")
+
+        app._pause_session_status_tracking.assert_called_once_with()
+        app._resume_session_status_tracking.assert_called_once_with()
 
     def test_action_select_row_noops_when_sessions_table_empty(self):
         app = GitDirectorConsole()

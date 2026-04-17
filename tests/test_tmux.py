@@ -19,7 +19,9 @@ from gitdirector.integrations.tmux import (
     _make_agent_ready_marker,
     _make_session_name,
     _normalize_process_command,
+    _embedded_tmux_attach_command,
     _panel_border_format,
+    _panel_pane_command,
     _panel_tmux_config,
     _session_tmux_config,
     _configure_panel_window,
@@ -130,7 +132,7 @@ class TestMakeSessionName:
 
 class TestPanelPaneTitles:
     def test_panel_pane_title_uses_session_slug(self):
-        assert _panel_pane_title(1, "gd/my-repo/copilot/3") == "my-repo/copilot/3"
+        assert _panel_pane_title(1, "gd/my-repo/copilot/3") == "copilot my-repo/3"
 
     def test_panel_pane_title_marks_empty_slots(self):
         assert _panel_pane_title(2, None) == "empty"
@@ -139,7 +141,7 @@ class TestPanelPaneTitles:
         theme = resolve_panel_theme("rose-pine")
         border_format = _panel_border_format("rose-pine")
 
-        assert "PANE #{pane_index}" in border_format
+        assert "#{pane_index}" in border_format
         assert " #{pane_title} " in border_format
         assert f"bg={theme.badge_active_bg}" in border_format
         assert f"bg={theme.label_active_bg}" in border_format
@@ -164,21 +166,58 @@ class TestPanelPaneTitles:
         theme = resolve_panel_theme("rose-pine")
         config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
 
-        assert 'set-option -t gd/panel/main status-position bottom' in config
-        assert f'status-style "fg={theme.foreground},bg={theme.panel}"' in config
+        assert "set-option -t gd/panel/main status off" in config
         assert f'message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"' in config
-        assert f'window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"' in config
+        assert (
+            f'window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"'
+            in config
+        )
 
-    @patch("gitdirector.integrations.tmux._current_window_target", return_value="gd/my-repo/shell/1:2")
+    def test_panel_pane_command_hides_session_status_while_attached(self):
+        command = _panel_pane_command("Main", 1, "gd/my-repo/copilot/3")
+
+        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" in command
+        assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' in command
+        assert "tmux set-option -q -u -t gd/my-repo/copilot/3 @gitdirector_panel_clients" in command
+        assert (
+            "tmux set-option -q -u -t gd/my-repo/copilot/3 @gitdirector_panel_prev_pane_border_status"
+            in command
+        )
+        assert "tmux attach-session -t gd/my-repo/copilot/3" in command
+
+    def test_embedded_tmux_attach_command_hides_inner_tmux_chrome(self):
+        command = _embedded_tmux_attach_command("gd/my-repo/copilot/3")
+
+        assert command.startswith("sh -c ")
+        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" in command
+        assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' in command
+        assert "tmux attach-session -t gd/my-repo/copilot/3" in command
+
+    @patch(
+        "gitdirector.integrations.tmux._current_window_target", return_value="gd/my-repo/shell/1:2"
+    )
     def test_session_tmux_config_themes_regular_sessions(self, _mock_target):
         theme = resolve_panel_theme("rose-pine")
         config = _session_tmux_config("gd/my-repo/shell/1", "rose-pine")
 
-        assert 'set-option -t gd/my-repo/shell/1 status-left' in config
-        assert 'SHELL' in config
-        assert 'my-repo/shell/1' in config
-        assert 'set-window-option -t gd/my-repo/shell/1:2 pane-border-style' in config
+        assert "set-option -t gd/my-repo/shell/1 status-left" in config
+        assert "SHELL" in config
+        assert "my-repo/shell/1" in config
+        assert "set-window-option -t gd/my-repo/shell/1:2 pane-border-style" in config
         assert f'pane-active-border-style "fg={theme.border_active}"' in config
+        assert "pane-border-status top" not in config
+        assert "pane-border-format" not in config
+
+    @patch(
+        "gitdirector.integrations.tmux._current_window_target",
+        return_value="gd/my-repo/copilot/1:0",
+    )
+    def test_session_tmux_config_themes_agent_sessions(self, _mock_target):
+        config = _session_tmux_config("gd/my-repo/copilot/1", "rose-pine")
+
+        assert "COPILOT" in config
+        assert "my-repo/copilot/1" in config
+        assert "pane-border-status top" not in config
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_load_panel_tmux_config_writes_and_sources_file(self, mock_run, tmp_path):
@@ -190,7 +229,7 @@ class TestPanelPaneTitles:
         assert written_path == config_path
         assert config_path.exists()
         content = config_path.read_text()
-        assert 'set-option -t gd/panel/main status-left' in content
+        assert "set-option -t gd/panel/main status off" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux._session_exists", side_effect=[True, False])
@@ -211,14 +250,16 @@ class TestPanelPaneTitles:
                 "gitdirector.integrations.tmux._live_panel_sessions",
                 return_value=[("Main", "gd/panel/main"), ("Me2", "gd/panel/me2")],
             ):
-                with patch("gitdirector.integrations.tmux._live_repo_tmux_sessions", return_value=[]):
+                with patch(
+                    "gitdirector.integrations.tmux._live_repo_tmux_sessions", return_value=[]
+                ):
                     written_path = sync_panel_tmux_config("nord")
 
         assert written_path == config_path
         content = config_path.read_text()
         assert "# theme: nord" in content
-        assert 'set-option -t gd/panel/main status-left' in content
-        assert 'set-option -t gd/panel/me2 status-left' in content
+        assert "set-option -t gd/panel/main status off" in content
+        assert "set-option -t gd/panel/me2 status off" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -239,9 +280,9 @@ class TestPanelPaneTitles:
         assert written_path == config_path
         content = config_path.read_text()
         assert "# theme: nord" in content
-        assert 'set-option -t gd/my-repo/shell/1 status-left' in content
-        assert 'SHELL' in content
-        assert 'set-window-option -t gd/my-repo/shell/1:2 pane-border-style' in content
+        assert "set-option -t gd/my-repo/shell/1 status-left" in content
+        assert "SHELL" in content
+        assert "set-window-option -t gd/my-repo/shell/1:2 pane-border-style" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -249,7 +290,9 @@ class TestPanelPaneTitles:
         config_path = tmp_path / "gd-tmux.conf"
         with patch("gitdirector.integrations.tmux._gd_tmux_config_path", return_value=config_path):
             with patch("gitdirector.integrations.tmux._live_panel_sessions", return_value=[]):
-                with patch("gitdirector.integrations.tmux._live_repo_tmux_sessions", return_value=[]):
+                with patch(
+                    "gitdirector.integrations.tmux._live_repo_tmux_sessions", return_value=[]
+                ):
                     written_path = sync_panel_tmux_config("rose-pine")
 
         assert written_path == config_path
@@ -257,7 +300,9 @@ class TestPanelPaneTitles:
         assert "# theme: rose-pine" in content
         mock_run.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("tmux error"))
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("tmux error")
+    )
     def test_live_repo_tmux_sessions_handles_listing_error(self, _mock_list):
         assert _live_repo_tmux_sessions() == []
 
@@ -296,7 +341,7 @@ class TestPanelPaneTitles:
 
         commands = [call.args[0] for call in mock_run.call_args_list]
 
-        assert ["tmux", "select-pane", "-t", "%1", "-T", "my-repo/copilot/3"] in commands
+        assert ["tmux", "select-pane", "-t", "%1", "-T", "copilot my-repo/3"] in commands
         assert ["tmux", "select-pane", "-t", "%2", "-T", "empty"] in commands
         assert [
             "tmux",
@@ -992,6 +1037,17 @@ class TestTmuxMonitor:
         assert monitor._readers == {}
         reader_one.stop.assert_called_once_with()
         reader_two.stop.assert_called_once_with()
+
+    def test_stop_waits_for_sync_thread_to_exit(self):
+        monitor = TmuxMonitor()
+        sync_thread = MagicMock()
+        sync_thread.is_alive.return_value = True
+        monitor._sync_thread = sync_thread
+
+        REAL_TMUX_MONITOR_STOP(monitor)
+
+        assert monitor._sync_thread is None
+        sync_thread.join.assert_called_once_with(timeout=3)
 
     @patch("gitdirector.integrations.tmux._ControlModeReader")
     def test_add_reader_starts_control_reader(self, mock_reader_cls):

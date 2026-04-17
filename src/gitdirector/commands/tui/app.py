@@ -26,8 +26,10 @@ from ...manager import RepositoryManager
 from ...repo import RepositoryInfo
 from .. import get_version
 from .constants import (
+    _DEFAULT_PANELS_SORT_COLUMN,
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
+    _PANELS_SORT_COLUMN_NAMES,
     _SESSION_STATUS_LABEL,
     _SESSION_STATUS_ORDER,
     _SESSIONS_SORT_COLUMN_NAMES,
@@ -187,7 +189,7 @@ class GitDirectorConsole(App):
         Binding("1", "tab_repos", "Repos", show=False),
         Binding("2", "tab_sessions", "Sessions", show=False),
         Binding("3", "tab_panels", "Panels", show=False),
-        Binding("n", "new_panel", "New Panel", show=False),
+        Binding("n", "new_panel", "New Panel", show=True),
     ]
 
     def __init__(self) -> None:
@@ -206,6 +208,9 @@ class GitDirectorConsole(App):
         self._sessions_entries: list[dict[str, str]] = []
         self._sessions_sort_column: int = _DEFAULT_SESSIONS_SORT_COLUMN
         self._sessions_sort_reverse: bool = False
+        self._panels_entries: list[Panel] = []
+        self._panels_sort_column: int = _DEFAULT_PANELS_SORT_COLUMN
+        self._panels_sort_reverse: bool = False
         self._repos_stale: bool = False
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
@@ -216,6 +221,7 @@ class GitDirectorConsole(App):
         self._resume_selection_key: str | None = None
         self._resume_selection_row: int | None = None
         self._panel_store = PanelStore()
+        self._session_status_tracking_paused = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -237,6 +243,7 @@ class GitDirectorConsole(App):
                     id="no-sessions-message",
                 )
             with TabPane("[3] Panels", id="panels"):
+                yield Static("", id="panels-search-indicator", classes="search-indicator")
                 yield DataTable(id="panels-table", cursor_type="row")
                 yield Static(
                     "No panels created.  Press [bold]n[/bold] to create a new panel.",
@@ -258,9 +265,7 @@ class GitDirectorConsole(App):
             "Status", "Session", "Repository", "Session Name"
         )
         panels_table = self.query_one("#panels-table", DataTable)
-        self._panels_col_keys = panels_table.add_columns(
-            "Map", "Name", "Session", "Layout", "Panes"
-        )
+        self._panels_col_keys = panels_table.add_columns("Map", "Name", "TMUX", "Layout", "Panes")
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
@@ -392,6 +397,11 @@ class GitDirectorConsole(App):
             return
         self.query_one("#tabs", TabbedContent).active = "panels"
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "new_panel":
+            return self._active_tab == "panels"
+        return super().check_action(action, parameters)
+
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
         if self._resume_target_tab is not None:
@@ -399,8 +409,10 @@ class GitDirectorConsole(App):
                 self.query_one("#tabs", TabbedContent).active = self._resume_target_tab
                 return
             self._active_tab = tab_id
+            self.refresh_bindings()
             return
         self._active_tab = tab_id
+        self.refresh_bindings()
         if tab_id == "sessions":
             self._load_sessions()
         elif tab_id == "panels":
@@ -443,6 +455,7 @@ class GitDirectorConsole(App):
         if tabs.active != restore_tab:
             tabs.active = restore_tab
         self._active_tab = restore_tab
+        self.refresh_bindings()
 
         if restore_tab == "sessions":
             self._load_sessions()
@@ -571,6 +584,24 @@ class GitDirectorConsole(App):
             msg += "  [esc] clear search"
         return msg
 
+    def _pause_session_status_tracking(self) -> None:
+        if self._session_status_tracking_paused:
+            return
+        self._session_status_tracking_paused = True
+        poll_timer = getattr(self, "_poll_timer", None)
+        if poll_timer is not None:
+            poll_timer.pause()
+        self._monitor.stop()
+
+    def _resume_session_status_tracking(self) -> None:
+        if not self._session_status_tracking_paused:
+            return
+        self._session_status_tracking_paused = False
+        self._monitor.start()
+        poll_timer = getattr(self, "_poll_timer", None)
+        if poll_timer is not None:
+            poll_timer.resume()
+
     # -- Session status polling -----------------------------------------------
 
     def _trigger_status_poll(self) -> None:
@@ -649,6 +680,7 @@ class GitDirectorConsole(App):
     def _update_search_indicator(self) -> None:
         repo_ind = self.query_one("#repo-search-indicator", Static)
         sess_ind = self.query_one("#sessions-search-indicator", Static)
+        panel_ind = self.query_one("#panels-search-indicator", Static)
         if self._search_query:
             text = (
                 f"Search results for '[bold]{self._search_query}[/bold]'"
@@ -656,11 +688,14 @@ class GitDirectorConsole(App):
             )
             repo_ind.update(text)
             sess_ind.update(text)
+            panel_ind.update(text)
             repo_ind.display = True
             sess_ind.display = True
+            panel_ind.display = True
         else:
             repo_ind.display = False
             sess_ind.display = False
+            panel_ind.display = False
 
     def _get_selected_path(self) -> Path | None:
         table = self.query_one("#repo-table", DataTable)
@@ -771,6 +806,14 @@ class GitDirectorConsole(App):
         self.query_one("#search-container").display = True
         self.query_one("#search-bar", Input).focus()
 
+    def _apply_active_filter_and_sort(self) -> None:
+        if self._active_tab == "sessions":
+            self._apply_sessions_filter_and_sort()
+        elif self._active_tab == "panels":
+            self._apply_panels_filter_and_sort()
+        else:
+            self._apply_filter_and_sort()
+
     def action_close_search(self) -> None:
         container = self.query_one("#search-container")
         if container.display:
@@ -778,35 +821,23 @@ class GitDirectorConsole(App):
             container.display = False
             self._search_query = ""
             self._update_search_indicator()
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
+            self._apply_active_filter_and_sort()
             self._get_active_table().focus()
         elif self._search_query:
             self._search_query = ""
             self._update_search_indicator()
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
+            self._apply_active_filter_and_sort()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search-bar":
             self._search_query = event.value
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
+            self._apply_active_filter_and_sort()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-bar":
             self._search_query = event.value
             self._update_search_indicator()
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
+            self._apply_active_filter_and_sort()
             self.query_one("#search-container").display = False
             self._get_active_table().focus()
 
@@ -821,6 +852,15 @@ class GitDirectorConsole(App):
                     _SESSIONS_SORT_COLUMN_NAMES,
                 ),
                 callback=self._handle_sessions_sort_selection,
+            )
+        elif self._active_tab == "panels":
+            self.push_screen(
+                SortMenuScreen(
+                    self._panels_sort_column,
+                    self._panels_sort_reverse,
+                    _PANELS_SORT_COLUMN_NAMES,
+                ),
+                callback=self._handle_panels_sort_selection,
             )
         else:
             self.push_screen(
@@ -839,6 +879,12 @@ class GitDirectorConsole(App):
             return
         self._sessions_sort_column, self._sessions_sort_reverse = result
         self._apply_sessions_filter_and_sort()
+
+    def _handle_panels_sort_selection(self, result: tuple | None) -> None:
+        if result is None:
+            return
+        self._panels_sort_column, self._panels_sort_reverse = result
+        self._apply_panels_filter_and_sort()
 
     # -- Filter / sort helpers ------------------------------------------------
 
@@ -922,6 +968,104 @@ class GitDirectorConsole(App):
             msg += f"  ⟐ {w} {label} waiting"
         return msg
 
+    def _panel_matches_search(self, panel: Panel, query: str) -> bool:
+        from ...integrations.tmux import make_panel_session_name
+
+        normalized_query = query.replace("×", "x")
+        panes_label = f"{panel.filled_panes}/{panel.total_panes}"
+        haystacks = [
+            panel.name.lower(),
+            make_panel_session_name(panel.name).lower(),
+            panel.layout_label.lower(),
+            panes_label.lower(),
+        ]
+        haystacks.extend(session.lower() for session in panel.panes.values() if session)
+        return any(normalized_query in haystack.replace("×", "x") for haystack in haystacks)
+
+    def _panel_sort_key_func(self):
+        from ...integrations.tmux import make_panel_session_name
+
+        col = self._panels_sort_column
+        if col == 1:
+            return lambda panel: (make_panel_session_name(panel.name).lower(), panel.name.lower())
+        if col == 2:
+            return lambda panel: (panel.rows, panel.cols, panel.name.lower())
+        if col == 3:
+            return lambda panel: (panel.filled_panes, panel.total_panes, panel.name.lower())
+        return lambda panel: panel.name.lower()
+
+    def _apply_panels_filter_and_sort(self) -> None:
+        from ...integrations.tmux import make_panel_session_name
+
+        try:
+            table = self.query_one("#panels-table", DataTable)
+        except NoMatches:
+            return
+        table.clear()
+        no_msg = self.query_one("#no-panels-message", Static)
+
+        panels = list(self._panels_entries)
+        total = len(panels)
+
+        if self._search_query:
+            query = self._search_query.lower()
+            panels = [panel for panel in panels if self._panel_matches_search(panel, query)]
+
+        panels.sort(key=self._panel_sort_key_func(), reverse=self._panels_sort_reverse)
+
+        if not panels and total == 0 and not self._search_query:
+            table.display = False
+            no_msg.display = True
+        else:
+            table.display = True
+            no_msg.display = False
+            for panel in panels:
+                filled = panel.filled_panes
+                total_panes = panel.total_panes
+                panes_label = f"{filled}/{total_panes}" if filled else f"0/{total_panes}"
+                table.add_row(
+                    _panel_row_cell(_render_panel_preview(panel)),
+                    _panel_row_cell(panel.name),
+                    _panel_row_cell(make_panel_session_name(panel.name)),
+                    _panel_row_cell(panel.layout_label),
+                    _panel_row_cell(panes_label),
+                    height=_panel_row_height(panel),
+                    key=panel.name,
+                )
+
+        self._restore_resume_selection("panels")
+        self._update_status(self._build_panels_loaded_status(len(panels), total))
+
+    def _build_panels_loaded_status(self, shown: int, total: int) -> str:
+        if total == 0 and not self._search_query:
+            return "No panels   n create   1 repos  2 sessions  3 panels  q quit"
+
+        if self._search_query:
+            count_str = f"{shown} of {total}"
+        else:
+            count_str = str(total)
+
+        label_count = shown if self._search_query else total
+        label = "panel" if label_count == 1 else "panels"
+        msg = f"{count_str} {label}"
+
+        indicators: list[str] = []
+        if self._search_query:
+            indicators.append(f"filter: '{self._search_query}'")
+        if self._panels_sort_column != _DEFAULT_PANELS_SORT_COLUMN or self._panels_sort_reverse:
+            direction = "▼" if self._panels_sort_reverse else "▲"
+            indicators.append(
+                f"sort: {_PANELS_SORT_COLUMN_NAMES[self._panels_sort_column]} {direction}"
+            )
+        if indicators:
+            msg += f"  ({', '.join(indicators)})"
+
+        msg += "   ↑↓/jk navigate  [enter] actions  / search  s sort  n create"
+        msg += "  1 repos  2 sessions  3 panels  q quit"
+        if self._search_query:
+            msg += "  [esc] clear search"
+        return msg
+
     def action_select_row(self) -> None:
         if self._active_tab == "sessions":
             table = self.query_one("#sessions-table", DataTable)
@@ -992,16 +1136,20 @@ class GitDirectorConsole(App):
             row_key=row_key,
         )
 
-        with self.suspend():
-            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-            sys.stdout.flush()
-            attach_tmux_session(session_name)
-            sys.stdout.write("\033[?25h")
-            sys.stdout.flush()
-            try:
-                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-            except (AttributeError, OSError):
-                pass
+        self._pause_session_status_tracking()
+        try:
+            with self.suspend():
+                sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+                sys.stdout.flush()
+                attach_tmux_session(session_name)
+                sys.stdout.write("\033[?25h")
+                sys.stdout.flush()
+                try:
+                    termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                except (AttributeError, OSError):
+                    pass
+        finally:
+            self._resume_session_status_tracking()
 
         self._repos_stale = True
         self._active_tab = restore_tab
@@ -1124,43 +1272,14 @@ class GitDirectorConsole(App):
     # -- Panels ---------------------------------------------------------------
 
     def _load_panels(self) -> None:
-        from ...integrations.tmux import make_panel_session_name
-
         self._panel_store.reload()
         self._panel_store.cleanup_orphans()
         try:
-            table = self.query_one("#panels-table", DataTable)
+            self.query_one("#panels-table", DataTable)
         except NoMatches:
             return
-        table.clear()
-        no_msg = self.query_one("#no-panels-message", Static)
-        panels = self._panel_store.panels
-
-        if not panels:
-            table.display = False
-            no_msg.display = True
-            self._update_status("No panels   n create   1 repos  2 sessions  3 panels  q quit")
-            return
-
-        table.display = True
-        no_msg.display = False
-        for panel in panels:
-            filled = panel.filled_panes
-            total = panel.total_panes
-            panes_label = f"{filled}/{total}" if filled else f"0/{total}"
-            table.add_row(
-                _panel_row_cell(_render_panel_preview(panel)),
-                _panel_row_cell(panel.name),
-                _panel_row_cell(make_panel_session_name(panel.name)),
-                _panel_row_cell(panel.layout_label),
-                _panel_row_cell(panes_label),
-                height=_panel_row_height(panel),
-                key=panel.name,
-            )
-        self._restore_resume_selection("panels")
-        count = len(panels)
-        label = "panel" if count == 1 else "panels"
-        self._update_status(f"{count} {label}   ↑↓/jk navigate  [enter] actions  n create  q quit")
+        self._panels_entries = self._panel_store.panels
+        self._apply_panels_filter_and_sort()
 
     def _selected_panel_name(self) -> str | None:
         table = self.query_one("#panels-table", DataTable)

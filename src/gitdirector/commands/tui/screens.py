@@ -355,26 +355,24 @@ class AgentLoadingScreen(ModalScreen[None]):
             pass
 
         app = self.app
-        if hasattr(app, "_poll_timer"):
-            app._poll_timer.pause()
-        app._monitor.stop()
+        app._pause_session_status_tracking()
 
-        with app.suspend():
-            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-            sys.stdout.flush()
-            subprocess.run(["tmux", "send-keys", "-t", session_name, "C-l", ""], check=False)
-            subprocess.run(["tmux", "clear-history", "-t", session_name], check=False)
-            attach_tmux_session(session_name)
-            sys.stdout.write("\033[?25h")
-            sys.stdout.flush()
-            try:
-                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-            except (AttributeError, OSError):
-                pass
+        try:
+            with app.suspend():
+                sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+                sys.stdout.flush()
+                subprocess.run(["tmux", "send-keys", "-t", session_name, "C-l", ""], check=False)
+                subprocess.run(["tmux", "clear-history", "-t", session_name], check=False)
+                attach_tmux_session(session_name)
+                sys.stdout.write("\033[?25h")
+                sys.stdout.flush()
+                try:
+                    termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                except (AttributeError, OSError):
+                    pass
+        finally:
+            app._resume_session_status_tracking()
 
-        app._monitor.start()
-        if hasattr(app, "_poll_timer"):
-            app._poll_timer.resume()
         self.dismiss(None)
 
 
@@ -532,7 +530,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
         """
     #create-panel-container {
         width: 90;
-        height: 38;
+        height: auto;
         border: round $primary;
         background: $panel;
         padding: 1 2;
@@ -570,31 +568,31 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
         align: center top;
     }
     /* -- Step 2 -- */
-    #step-2 { height: 1fr; padding: 0; display: none; }
+    #step-2 { height: auto; padding: 0; display: none; }
     #step-2-subtitle {
         text-align: center;
-        padding: 0 1 1 1;
+        padding: 0 1 0 1;
         color: $text-muted;
     }
-    #step-2-columns { height: 1fr; padding: 0; }
+    #step-2-columns { height: auto; padding: 0; }
     #step-2-left {
         width: 34;
-        height: 1fr;
+        height: auto;
         padding: 0 1 0 0;
     }
     #step-2-right {
         width: 1fr;
-        height: 1fr;
+        height: auto;
         padding: 0 0 0 1;
     }
     #grid-preview-2 {
-        padding: 1 0 0 0;
+        padding: 0;
         text-align: center;
         color: $text-muted;
     }
     #pane-session-placeholder {
         display: none;
-        height: 1fr;
+        height: auto;
         padding: 1 1 0 0;
         color: $text-muted;
         content-align: center middle;
@@ -615,7 +613,10 @@ class CreatePanelScreen(ModalScreen[tuple[str, int, int, dict[int, str | None]] 
     }
     #layout-menu { max-height: 12; }
     #pane-slot-menu { max-height: 14; }
-    #pane-session-menu { height: 1fr; }
+    #pane-session-menu {
+        height: auto;
+        max-height: 14;
+    }
     #grid-preview {
         padding: 0;
         text-align: center;

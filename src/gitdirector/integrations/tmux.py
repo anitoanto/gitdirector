@@ -153,10 +153,28 @@ def _session_slug(session_name: str | None) -> str | None:
     return session_name
 
 
+def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | None:
+    if not session_name or not session_name.startswith("gd/"):
+        return None
+    parts = session_name.split("/", 3)
+    if len(parts) != 4 or parts[1] == "panel":
+        return None
+    _, repo, purpose, sequence = parts
+    return repo, purpose, sequence
+
+
+def _panel_session_label(session_name: str | None) -> str | None:
+    parsed = _parse_gd_session_name(session_name)
+    if parsed:
+        repo, purpose, sequence = parsed
+        return f"{purpose} {repo}/{sequence}"
+    return _session_slug(session_name)
+
+
 def _panel_pane_title(pane_index: int, session_name: str | None) -> str:
-    slug = _session_slug(session_name)
-    if slug:
-        return slug
+    label = _panel_session_label(session_name)
+    if label:
+        return label
     return "empty"
 
 
@@ -175,7 +193,7 @@ def _panel_border_format(theme_name: str | None = None) -> str:
         "#{?pane_active,"
         f"#[bold fg={theme.badge_active_fg} bg={theme.badge_active_bg}],"
         f"#[bold fg={theme.badge_inactive_fg} bg={theme.badge_inactive_bg}]"
-        "} PANE #{pane_index} #[default]"
+        "} #{pane_index} #[default]"
     )
     title = (
         "#{?pane_active,"
@@ -219,6 +237,7 @@ def _tmux_theme_config(
     window_target: str | None = None,
     pane_border_status: str | None = None,
     pane_border_format: str | None = None,
+    show_status: bool = True,
 ) -> str:
     theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
     window_target = window_target or f"{session_name}:0"
@@ -229,30 +248,41 @@ def _tmux_theme_config(
     status_right = (
         f"#[fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}] %H:%M %d %b #[default]"
     )
-    lines = [
-        f'set-option -t {shlex.quote(session_name)} status-position bottom',
-        f'set-option -t {shlex.quote(session_name)} status-style "fg={theme.foreground},bg={theme.panel}"',
-        f'set-option -t {shlex.quote(session_name)} status-left-length 40',
-        f'set-option -t {shlex.quote(session_name)} status-right-length 24',
-        f'set-option -t {shlex.quote(session_name)} status-left {shlex.quote(status_left)}',
-        f'set-option -t {shlex.quote(session_name)} status-right {shlex.quote(status_right)}',
-        f'set-option -t {shlex.quote(session_name)} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
-        f'set-option -t {shlex.quote(session_name)} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
-        f'set-window-option -t {shlex.quote(window_target)} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',
-        f'set-window-option -t {shlex.quote(window_target)} window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"',
-        f'set-window-option -t {shlex.quote(window_target)} window-status-format {shlex.quote(" #I:#W ")}',
-        f'set-window-option -t {shlex.quote(window_target)} window-status-current-format {shlex.quote(" #I:#W ")}',
-        f'set-window-option -t {shlex.quote(window_target)} window-status-separator {shlex.quote("")}',
-        f'set-window-option -t {shlex.quote(window_target)} pane-border-style "fg={theme.border_inactive}"',
-        f'set-window-option -t {shlex.quote(window_target)} pane-active-border-style "fg={theme.border_active}"',
-    ]
+    lines = []
+    if show_status:
+        lines.extend(
+            [
+                f"set-option -t {shlex.quote(session_name)} status-position bottom",
+                f'set-option -t {shlex.quote(session_name)} status-style "fg={theme.foreground},bg={theme.panel}"',
+                f"set-option -t {shlex.quote(session_name)} status-left-length 40",
+                f"set-option -t {shlex.quote(session_name)} status-right-length 24",
+                f"set-option -t {shlex.quote(session_name)} status-left {shlex.quote(status_left)}",
+                f"set-option -t {shlex.quote(session_name)} status-right {shlex.quote(status_right)}",
+            ]
+        )
+    else:
+        lines.append(f"set-option -t {shlex.quote(session_name)} status off")
+
+    lines.extend(
+        [
+            f'set-option -t {shlex.quote(session_name)} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
+            f'set-option -t {shlex.quote(session_name)} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
+            f'set-window-option -t {shlex.quote(window_target)} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',
+            f'set-window-option -t {shlex.quote(window_target)} window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"',
+            f"set-window-option -t {shlex.quote(window_target)} window-status-format {shlex.quote(' #I:#W ')}",
+            f"set-window-option -t {shlex.quote(window_target)} window-status-current-format {shlex.quote(' #I:#W ')}",
+            f"set-window-option -t {shlex.quote(window_target)} window-status-separator {shlex.quote('')}",
+            f'set-window-option -t {shlex.quote(window_target)} pane-border-style "fg={theme.border_inactive}"',
+            f'set-window-option -t {shlex.quote(window_target)} pane-active-border-style "fg={theme.border_active}"',
+        ]
+    )
     if pane_border_status:
         lines.append(
-            f'set-window-option -t {shlex.quote(window_target)} pane-border-status {shlex.quote(pane_border_status)}'
+            f"set-window-option -t {shlex.quote(window_target)} pane-border-status {shlex.quote(pane_border_status)}"
         )
     if pane_border_format:
         lines.append(
-            f'set-window-option -t {shlex.quote(window_target)} pane-border-format {shlex.quote(pane_border_format)}'
+            f"set-window-option -t {shlex.quote(window_target)} pane-border-format {shlex.quote(pane_border_format)}"
         )
     lines.append("")
     return "\n".join(lines)
@@ -271,6 +301,7 @@ def _panel_tmux_config(
         window_target=f"{session_name}:0",
         pane_border_status="top",
         pane_border_format=_panel_border_format(theme_name),
+        show_status=False,
     )
 
 
@@ -511,6 +542,62 @@ def _configure_panel_window(
         )
 
 
+def _panel_attach_fragment(session_name: str) -> str:
+    quoted_session = shlex.quote(session_name)
+    client_count_option = "@gitdirector_panel_clients"
+    status_restore_option = "@gitdirector_panel_prev_status"
+    border_restore_option = "@gitdirector_panel_prev_pane_border_status"
+    window_restore_option = "@gitdirector_panel_prev_window_target"
+    default_window_target = shlex.quote(f"{session_name}:0")
+    return (
+        f"panel_window=$(tmux display-message -p -t {quoted_session} '#{{session_name}}:#{{window_index}}' 2>/dev/null || printf %s {default_window_target}); "
+        f"panel_clients=$(tmux show-options -q -v -t {quoted_session} {client_count_option} 2>/dev/null || printf '0'); "
+        'case "$panel_clients" in ""|*[!0-9]*) panel_clients=0 ;; esac; '
+        'if [ "$panel_clients" -eq 0 ]; then '
+        f"panel_prev_status=$(tmux show-options -q -v -t {quoted_session} status 2>/dev/null || printf 'on'); "
+        "panel_prev_border_status=$(tmux show-window-options -q -v -t \"$panel_window\" pane-border-status 2>/dev/null || printf 'off'); "
+        f'tmux set-option -q -t {quoted_session} {status_restore_option} "$panel_prev_status" >/dev/null 2>&1 || true; '
+        f'tmux set-option -q -t {quoted_session} {border_restore_option} "$panel_prev_border_status" >/dev/null 2>&1 || true; '
+        f'tmux set-option -q -t {quoted_session} {window_restore_option} "$panel_window" >/dev/null 2>&1 || true; '
+        "fi; "
+        "panel_clients=$((panel_clients + 1)); "
+        f'tmux set-option -q -t {quoted_session} {client_count_option} "$panel_clients" >/dev/null 2>&1 || true; '
+        f"tmux set-option -q -t {quoted_session} status off >/dev/null 2>&1 || true; "
+        'tmux set-window-option -q -t "$panel_window" pane-border-status off >/dev/null 2>&1 || true; '
+        f"env -u TMUX tmux attach-session -t {quoted_session}; "
+        f"panel_clients=$(tmux show-options -q -v -t {quoted_session} {client_count_option} 2>/dev/null || printf '1'); "
+        'case "$panel_clients" in ""|*[!0-9]*) panel_clients=1 ;; esac; '
+        "panel_clients=$((panel_clients - 1)); "
+        'if [ "$panel_clients" -le 0 ]; then '
+        f"panel_prev_status=$(tmux show-options -q -v -t {quoted_session} {status_restore_option} 2>/dev/null || printf 'on'); "
+        f"panel_prev_border_status=$(tmux show-options -q -v -t {quoted_session} {border_restore_option} 2>/dev/null || printf 'off'); "
+        f"panel_restore_window=$(tmux show-options -q -v -t {quoted_session} {window_restore_option} 2>/dev/null || printf %s {default_window_target}); "
+        f'tmux set-option -q -t {quoted_session} status "$panel_prev_status" >/dev/null 2>&1 || true; '
+        f"tmux set-option -q -u -t {quoted_session} {client_count_option} >/dev/null 2>&1 || true; "
+        'tmux set-window-option -q -t "$panel_restore_window" pane-border-status "$panel_prev_border_status" >/dev/null 2>&1 || true; '
+        f"tmux set-option -q -u -t {quoted_session} {status_restore_option} >/dev/null 2>&1 || true; "
+        f"tmux set-option -q -u -t {quoted_session} {border_restore_option} >/dev/null 2>&1 || true; "
+        f"tmux set-option -q -u -t {quoted_session} {window_restore_option} >/dev/null 2>&1 || true; "
+        "else "
+        f'tmux set-option -q -t {quoted_session} {client_count_option} "$panel_clients" >/dev/null 2>&1 || true; '
+        "fi; "
+    )
+
+
+def _embedded_tmux_attach_command(session_name: str) -> str:
+    quoted_session = shlex.quote(session_name)
+    missing_message = _printf_lines_command([f"Missing session: {session_name}"])
+    script = (
+        "clear; "
+        f"if tmux has-session -t {quoted_session} >/dev/null 2>&1; then "
+        f"{_panel_attach_fragment(session_name)}"
+        "else "
+        f"{missing_message}; "
+        "fi"
+    )
+    return f"sh -c {shlex.quote(script)}"
+
+
 def _panel_pane_command(panel_name: str, pane_index: int, session_name: str | None) -> str:
     if session_name:
         quoted_session = shlex.quote(session_name)
@@ -531,7 +618,7 @@ def _panel_pane_command(panel_name: str, pane_index: int, session_name: str | No
         script = (
             "clear; "
             f"if tmux has-session -t {quoted_session} >/dev/null 2>&1; then "
-            f"env -u TMUX tmux attach-session -t {quoted_session}; "
+            f"{_panel_attach_fragment(session_name)}"
             f"clear; {detached_message}; "
             "else "
             f"{missing_message}; "
@@ -960,6 +1047,14 @@ class TmuxMonitor:
         self._readers.clear()
         for reader in readers:
             reader.stop()
+        sync_thread = self._sync_thread
+        self._sync_thread = None
+        if (
+            sync_thread is not None
+            and sync_thread is not threading.current_thread()
+            and sync_thread.is_alive()
+        ):
+            sync_thread.join(timeout=3)
 
     def get_bell_state(self, session_name: str) -> bool:
         with self._lock:

@@ -8,9 +8,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from textual.app import App
 from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent
+from textual.widgets._footer import FooterKey
 from textual.worker import WorkerFailed
 
 from gitdirector.commands.tui import (
+    _PANELS_SORT_COLUMN_NAMES,
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
@@ -118,10 +120,19 @@ class TestPaneWidget:
 
         header = pane._build_header_text()
 
-        assert "PANE 2" in header
-        assert "my-repo/copilot/3" in header
+        assert " 2 " in header
+        assert "copilot my-repo/3" in header
         assert f"on {theme.badge_active_bg.lower()}" in header.lower()
         assert f"on {theme.label_active_bg.lower()}" in header.lower()
+
+    def test_session_command_uses_embedded_attach_wrapper(self):
+        pane = PaneWidget(2, "gd/my-repo/copilot/3", theme_name="rose-pine")
+
+        command = pane._session_command("gd/my-repo/copilot/3")
+
+        assert command.startswith("sh -c ")
+        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" in command
+        assert "tmux attach-session -t gd/my-repo/copilot/3" in command
 
 
 class TestPanelViewScreen:
@@ -142,8 +153,8 @@ class TestPanelViewScreen:
 
         status = screen._build_status_text()
 
-        assert "PANE 1/2" in status
-        assert "my-repo/copilot/3" in status
+        assert " 1/2 " in status
+        assert "copilot my-repo/3" in status
         assert f"on {theme.badge_active_bg.lower()}" in status.lower()
         assert f"on {theme.label_active_bg.lower()}" in status.lower()
 
@@ -200,6 +211,34 @@ class TestGitDirectorConsole:
         hidden_keys = {binding.key for binding in GitDirectorConsole.BINDINGS if not binding.show}
 
         assert {"1", "2", "3"}.issubset(hidden_keys)
+
+    async def test_new_panel_footer_binding_only_shows_on_panels_tab(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+
+            assert not any(
+                binding.key == "n" and binding.description == "New Panel"
+                for binding in app.query(FooterKey)
+            )
+
+            await pilot.press("3")
+            await pilot.pause()
+
+            assert any(
+                binding.key == "n" and binding.description == "New Panel"
+                for binding in app.query(FooterKey)
+            )
+
+            await pilot.press("1")
+            await pilot.pause()
+
+            assert not any(
+                binding.key == "n" and binding.description == "New Panel"
+                for binding in app.query(FooterKey)
+            )
 
     def test_action_select_row_on_panels_opens_action_menu(self):
         app = GitDirectorConsole()
@@ -284,6 +323,18 @@ class TestGitDirectorConsole:
             assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1×3"
             assert table.get_cell("Ops", app._panels_col_keys[4]) == "\n1/3"
             assert table.get_row_height("Ops") == 3
+
+    async def test_panels_table_uses_panel_tmux_column_label(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+
+            table = app.query_one("#panels-table", DataTable)
+
+            assert str(table.columns[app._panels_col_keys[2]].label) == "TMUX"
+            assert _PANELS_SORT_COLUMN_NAMES[1] == "TMUX"
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     async def test_on_mount_syncs_tmux_theme_config(self, mock_sync):

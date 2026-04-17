@@ -2,8 +2,10 @@
 
 from .app import GitDirectorConsole, register
 from .constants import (
+    _DEFAULT_PANELS_SORT_COLUMN,
     _SESSION_STATUS_LABEL,
     _SESSION_STATUS_ORDER,
+    _PANELS_SORT_COLUMN_NAMES,
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
@@ -29,11 +31,13 @@ __all__ = [
     "AgentLoadingScreen",
     "ConfirmScreen",
     "CreatePanelScreen",
+    "_DEFAULT_PANELS_SORT_COLUMN",
     "GitDirectorConsole",
     "PaneWidget",
     "Panel",
     "PanelStore",
     "PanelViewScreen",
+    "_PANELS_SORT_COLUMN_NAMES",
     "RemoveSessionScreen",
     "RepoInfoScreen",
     "SelectSessionScreen",
