@@ -21,6 +21,7 @@ from gitdirector.commands.tui import (
     RepoInfoScreen,
     SortMenuScreen,
 )
+from gitdirector.commands.tui.panels import DEFAULT_PANEL_LAYOUT_KEY, get_create_panel_layouts
 from gitdirector.commands.tui.screens import PanelActionMenuScreen, _render_grid_preview
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 
@@ -239,8 +240,69 @@ class TestPanelActionMenuScreen:
             assert preview_pane.region.x > menu.region.x
             assert preview_pane.region.y == menu.region.y
 
+    async def test_compose_shows_asymmetric_panel_preview(self):
+        panel = Panel(
+            name="Focus",
+            rows=2,
+            cols=2,
+            panes={1: None, 2: None, 3: None},
+            layout_key="wide_bottom",
+        )
+        screen = PanelActionMenuScreen(panel)
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            preview = app.screen.query_one("#panel-layout-preview", Static)
+
+            assert preview.content == _render_grid_preview(2, 2, "wide_bottom")
+
 
 class TestCreatePanelScreen:
+    def test_layout_registry_skips_single_pane_and_includes_asymmetric_presets(self):
+        layout_keys = [layout.key for layout in get_create_panel_layouts()]
+
+        assert "grid_1x1" not in layout_keys
+        assert {
+            "tall_left",
+            "tall_right",
+            "wide_top",
+            "wide_bottom",
+            "duo_top_left_2x3",
+            "duo_top_right_2x3",
+            "duo_bottom_left_2x3",
+            "duo_bottom_right_2x3",
+            "duo_top_left_3x3",
+            "duo_top_right_3x3",
+            "duo_bottom_left_3x3",
+            "duo_bottom_right_3x3",
+            "quad_top_left_3x3",
+            "quad_top_right_3x3",
+            "quad_bottom_left_3x3",
+            "quad_bottom_right_3x3",
+        }.issubset(layout_keys)
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_default_layout_is_one_by_two(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            layout_menu = app.screen.query_one("#layout-menu", OptionList)
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert screen._selected_layout_key == DEFAULT_PANEL_LAYOUT_KEY
+            assert layout_menu.highlighted == 0
+            assert preview.content == _render_grid_preview(1, 2, DEFAULT_PANEL_LAYOUT_KEY)
+            assert "▦ 1×2  Two columns" in str(layout_menu.get_option_at_index(0).prompt)
+
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
     async def test_modal_height_tracks_content_for_three_by_three_layout(self, mock_sessions):
         mock_sessions.return_value = [
@@ -280,6 +342,104 @@ class TestCreatePanelScreen:
             assert preview2.content == _render_grid_preview(3, 3)
             assert container.region.height < app.size.height
             assert session_menu.region.height < session_menu.option_count
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_tall_left_layout_updates_preview_and_active_panes(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("tall_left")
+            await pilot.pause()
+
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert preview.content == _render_grid_preview(2, 2, "tall_left")
+            assert screen._active_pane_count() == 3
+            assert screen._pane_is_active(3) is True
+            assert screen._pane_is_active(4) is False
+
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            name_input.value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            preview2 = app.screen.query_one("#grid-preview-2", Static)
+
+            assert preview2.content == _render_grid_preview(2, 2, "tall_left")
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_two_by_three_corner_duo_updates_preview_and_active_panes(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("duo_top_left_2x3")
+            await pilot.pause()
+
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert preview.content == _render_grid_preview(2, 3, "duo_top_left_2x3")
+            assert screen._active_pane_count() == 5
+            assert screen._pane_is_active(5) is True
+            assert screen._pane_is_active(6) is False
+
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            name_input.value = "Wall"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            preview2 = app.screen.query_one("#grid-preview-2", Static)
+
+            assert preview2.content == _render_grid_preview(2, 3, "duo_top_left_2x3")
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_three_by_three_corner_duo_updates_preview_and_active_panes(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("duo_bottom_right_3x3")
+            await pilot.pause()
+
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert preview.content == _render_grid_preview(3, 3, "duo_bottom_right_3x3")
+            assert screen._active_pane_count() == 8
+            assert screen._pane_is_active(8) is True
+            assert screen._pane_is_active(9) is False
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_three_by_three_corner_quad_updates_preview_and_active_panes(self, mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("quad_top_left_3x3")
+            await pilot.pause()
+
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert preview.content == _render_grid_preview(3, 3, "quad_top_left_3x3")
+            assert screen._active_pane_count() == 6
+            assert screen._pane_is_active(6) is True
+            assert screen._pane_is_active(7) is False
 
 
 class TestSortMenuScreen:
