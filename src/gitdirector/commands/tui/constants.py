@@ -54,6 +54,15 @@ _SESSIONS_SORT_COLUMN_NAMES = {
 
 _DEFAULT_SESSIONS_SORT_COLUMN = 3
 
+_PANELS_SORT_COLUMN_NAMES = {
+    0: "Name",
+    1: "TMUX",
+    2: "Layout",
+    3: "Panes",
+}
+
+_DEFAULT_PANELS_SORT_COLUMN = 0
+
 _SESSION_STATUS_LABEL = {
     "waiting": "[bold yellow]● waiting[/bold yellow]",
     "running": "[green]● running[/green]",

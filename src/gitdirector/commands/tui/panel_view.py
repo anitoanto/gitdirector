@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Footer, Static
 
+from ...integrations.tmux import _embedded_tmux_attach_command, _panel_session_label
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .panels import Panel, PanelStore
 from .terminal_widget import TerminalWidget
@@ -68,6 +69,9 @@ class PaneWidget(Widget):
         self._panel_theme = resolve_panel_theme(theme_name)
         self._terminal: TerminalWidget | None = None
 
+    def _session_command(self, session_name: str) -> str:
+        return _embedded_tmux_attach_command(session_name)
+
     def compose(self) -> ComposeResult:
         yield Static(
             self._build_header_text(),
@@ -76,7 +80,7 @@ class PaneWidget(Widget):
         )
         if self.session_name:
             terminal = TerminalWidget(
-                command=f"tmux attach-session -t {self.session_name}",
+                command=self._session_command(self.session_name),
                 id=f"pane-term-{self.pane_index}",
             )
             self._terminal = terminal
@@ -100,18 +104,20 @@ class PaneWidget(Widget):
             return self.session_name[3:]
         return self.session_name
 
+    @property
+    def session_label(self) -> str | None:
+        return _panel_session_label(self.session_name)
+
     def _build_header_text(self) -> str:
         badge_style = (
             f"bold {self._panel_theme.badge_active_fg} on {self._panel_theme.badge_active_bg}"
         )
-        label_style = (
-            f"{self._panel_theme.label_active_fg} on {self._panel_theme.label_active_bg}"
-        )
+        label_style = f"{self._panel_theme.label_active_fg} on {self._panel_theme.label_active_bg}"
         empty_style = f"{self._panel_theme.empty_fg} on {self._panel_theme.empty_bg}"
-        slug = self.session_slug
-        if slug:
-            return f" [{badge_style}] PANE {self.pane_index} [/] [{label_style}] {slug} [/]"
-        return f" [{badge_style}] PANE {self.pane_index} [/] [{empty_style}] empty [/]"
+        label = self.session_label
+        if label:
+            return f" [{badge_style}] {self.pane_index} [/] [{label_style}] {label} [/]"
+        return f" [{badge_style}] {self.pane_index} [/] [{empty_style}] empty [/]"
 
     def _empty_body_text(self) -> str:
         return "[dim]No session assigned[/dim]\n\n[dim]ctrl+a[/dim] assign session"
@@ -142,7 +148,7 @@ class PaneWidget(Widget):
 
         if session_name:
             terminal = TerminalWidget(
-                command=f"tmux attach-session -t {session_name}",
+                command=self._session_command(session_name),
                 id=f"pane-term-{self.pane_index}",
             )
             self._terminal = terminal
@@ -379,10 +385,10 @@ class PanelViewScreen(Screen[None]):
         filled = self._panel.filled_panes
         total = self._panel.total_panes
         pane = self._pane_widgets.get(self._focused_pane)
-        pane_label = f"PANE {self._focused_pane}/{total}"
+        pane_label = f"{self._focused_pane}/{total}"
 
-        if pane and pane.session_slug:
-            summary = f"[{badge_style}] {pane_label} [/] [{label_style}] {pane.session_slug} [/]"
+        if pane and pane.session_label:
+            summary = f"[{badge_style}] {pane_label} [/] [{label_style}] {pane.session_label} [/]"
         else:
             summary = f"[{badge_style}] {pane_label} [/] [{empty_style}] empty [/]"
 

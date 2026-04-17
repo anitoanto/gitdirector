@@ -7,13 +7,14 @@ import termios
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from textual.widgets import LoadingIndicator, OptionList, Static
+from textual.widgets import Input, LoadingIndicator, OptionList, Static
 
 from gitdirector.commands.tui import (
     _SESSIONS_SORT_COLUMN_NAMES,
     ActionMenuScreen,
     AgentLoadingScreen,
     ConfirmScreen,
+    CreatePanelScreen,
     GitDirectorConsole,
     Panel,
     RemoveSessionScreen,
@@ -237,6 +238,48 @@ class TestPanelActionMenuScreen:
             assert not list(app.screen.query("#panel-preview-title"))
             assert preview_pane.region.x > menu.region.x
             assert preview_pane.region.y == menu.region.y
+
+
+class TestCreatePanelScreen:
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
+    async def test_modal_height_tracks_content_for_three_by_three_layout(self, mock_sessions):
+        mock_sessions.return_value = [
+            {
+                "session_name": f"gd/repo/shell/{index}",
+                "repo": "repo",
+                "purpose": f"shell{index}",
+            }
+            for index in range(1, 21)
+        ]
+
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout(3, 3)
+            await pilot.pause()
+
+            container = app.screen.query_one("#create-panel-container")
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert preview.content == _render_grid_preview(3, 3)
+            assert container.region.height < app.size.height
+
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            name_input.value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            preview2 = app.screen.query_one("#grid-preview-2", Static)
+            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
+
+            assert preview2.content == _render_grid_preview(3, 3)
+            assert container.region.height < app.size.height
+            assert session_menu.region.height < session_menu.option_count
 
 
 class TestSortMenuScreen:
@@ -613,6 +656,8 @@ class TestAgentLoadingScreen:
         screen._ready_marker = MagicMock()
         screen.dismiss = MagicMock()
         app = GitDirectorConsole()
+        app._pause_session_status_tracking = MagicMock()
+        app._resume_session_status_tracking = MagicMock()
         suspend_context = MagicMock()
         suspend_context.__enter__.return_value = None
         suspend_context.__exit__.return_value = False
@@ -627,6 +672,7 @@ class TestAgentLoadingScreen:
             screen._do_dismiss()
 
         screen._ready_marker.unlink.assert_called_once_with()
+        app._pause_session_status_tracking.assert_called_once_with()
         app.suspend.assert_called_once_with()
         assert stdout.write.call_args_list[0].args[0] == "\033[?1049h\033[H\033[2J\033[?25l"
         assert stdout.write.call_args_list[1].args[0] == "\033[?25h"
@@ -650,6 +696,7 @@ class TestAgentLoadingScreen:
         assert mock_run.call_args_list[1].kwargs == {"check": False}
         mock_attach.assert_called_once_with("gd/my-repo/copilot/1")
         mock_tcflush.assert_called_once_with(7, termios.TCIFLUSH)
+        app._resume_session_status_tracking.assert_called_once_with()
         screen.dismiss.assert_called_once_with(None)
 
     @patch("gitdirector.integrations.tmux.attach_tmux_session")
@@ -663,6 +710,8 @@ class TestAgentLoadingScreen:
         screen._ready_marker.unlink.side_effect = FileNotFoundError
         screen.dismiss = MagicMock()
         app = GitDirectorConsole()
+        app._pause_session_status_tracking = MagicMock()
+        app._resume_session_status_tracking = MagicMock()
         suspend_context = MagicMock()
         suspend_context.__enter__.return_value = None
         suspend_context.__exit__.return_value = False
@@ -678,6 +727,8 @@ class TestAgentLoadingScreen:
 
         assert mock_run.call_count == 2
         mock_attach.assert_called_once_with("gd/my-repo/copilot/1")
+        app._pause_session_status_tracking.assert_called_once_with()
+        app._resume_session_status_tracking.assert_called_once_with()
         screen.dismiss.assert_called_once_with(None)
 
 
