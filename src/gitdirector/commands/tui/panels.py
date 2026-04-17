@@ -110,6 +110,14 @@ class PanelStore:
                 return p
         return None
 
+    def rename(self, old_name: str, new_name: str) -> bool:
+        for p in self._panels:
+            if p.name == old_name:
+                p.name = new_name
+                self._save()
+                return True
+        return False
+
     def update_pane(self, panel_name: str, pane_index: int, session_name: str | None) -> None:
         panel = self.get(panel_name)
         if panel:
