@@ -51,30 +51,31 @@ from .screens import (
 
 _PANEL_PREVIEW_FILLED = "■"
 _PANEL_PREVIEW_OPEN = "□"
-_PANEL_PREVIEW_INACTIVE = "·"
 
 
 def _panel_preview_marker(panel: Panel, row_index: int, col_index: int) -> str:
-    if row_index >= panel.rows or col_index >= panel.cols:
-        return _PANEL_PREVIEW_INACTIVE
     pane_index = (row_index * panel.cols) + col_index + 1
     return _PANEL_PREVIEW_FILLED if panel.panes.get(pane_index) else _PANEL_PREVIEW_OPEN
 
 
 def _render_panel_preview(panel: Panel) -> str:
     rows: list[str] = []
-    for row_index in range(3):
+    for row_index in range(panel.rows):
         row_cells = " ".join(
-            _panel_preview_marker(panel, row_index, col_index) for col_index in range(3)
+            _panel_preview_marker(panel, row_index, col_index) for col_index in range(panel.cols)
         )
         if row_index == 0:
             rows.append(f"┌{row_cells}┐")
-        elif row_index == 2:
+        elif row_index == panel.rows - 1:
             rows.append(f"└{row_cells}┘")
         else:
             rows.append(f"│{row_cells}│")
 
     return "\n".join(rows)
+
+
+def _panel_row_height(panel: Panel) -> int:
+    return panel.rows + 2
 
 
 def _panel_row_cell(value: str) -> str:
@@ -257,7 +258,9 @@ class GitDirectorConsole(App):
             "Status", "Session", "Repository", "Session Name"
         )
         panels_table = self.query_one("#panels-table", DataTable)
-        self._panels_col_keys = panels_table.add_columns("Map", "Name", "Layout", "Panes")
+        self._panels_col_keys = panels_table.add_columns(
+            "Map", "Name", "Session", "Layout", "Panes"
+        )
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
@@ -311,7 +314,7 @@ class GitDirectorConsole(App):
 
         with ThreadPoolExecutor(max_workers=self.manager.config.max_workers) as executor:
             futures = {
-                executor.submit(self.manager.get_repository_status, path): path
+                executor.submit(self.manager.get_repository_status, path, fetch=True): path
                 for path in self._repo_paths
             }
             for future in as_completed(futures):
@@ -1008,7 +1011,7 @@ class GitDirectorConsole(App):
         """Re-fetch full repository status and session count for the given path."""
         from ...integrations.tmux import list_repo_sessions
 
-        info = self.manager.get_repository_status(path)
+        info = self.manager.get_repository_status(path, fetch=True)
         self._results[str(path)] = info
         sessions_count = len(list_repo_sessions(path.name))
         self._sessions_cache[str(path)] = sessions_count
@@ -1121,6 +1124,8 @@ class GitDirectorConsole(App):
     # -- Panels ---------------------------------------------------------------
 
     def _load_panels(self) -> None:
+        from ...integrations.tmux import make_panel_session_name
+
         self._panel_store.reload()
         self._panel_store.cleanup_orphans()
         try:
@@ -1146,9 +1151,10 @@ class GitDirectorConsole(App):
             table.add_row(
                 _panel_row_cell(_render_panel_preview(panel)),
                 _panel_row_cell(panel.name),
+                _panel_row_cell(make_panel_session_name(panel.name)),
                 _panel_row_cell(panel.layout_label),
                 _panel_row_cell(panes_label),
-                height=5,
+                height=_panel_row_height(panel),
                 key=panel.name,
             )
         self._restore_resume_selection("panels")

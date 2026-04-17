@@ -618,6 +618,7 @@ class TestAgentLoadingScreen:
         suspend_context.__exit__.return_value = False
         app.suspend = MagicMock(return_value=suspend_context)
         screen._parent = app
+        mock_run.reset_mock()
         stdout = MagicMock()
         stdin = MagicMock()
         stdin.fileno.return_value = 7
@@ -667,6 +668,7 @@ class TestAgentLoadingScreen:
         suspend_context.__exit__.return_value = False
         app.suspend = MagicMock(return_value=suspend_context)
         screen._parent = app
+        mock_run.reset_mock()
         stdout = MagicMock()
         stdin = MagicMock()
         stdin.fileno.return_value = 11

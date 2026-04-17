@@ -25,7 +25,8 @@ def register(cli: click.Group):
         ) as live:
             with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
                 futures = {
-                    executor.submit(manager.get_repository_status, path): path for path in paths
+                    executor.submit(manager.get_repository_status, path, fetch=True): path
+                    for path in paths
                 }
                 remaining = len(futures)
                 live.update(

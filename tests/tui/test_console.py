@@ -864,7 +864,7 @@ class TestRefreshRepoForPath:
             last_updated="1 min ago",
         )
         mgr = _mock_manager(repos)
-        mgr.get_repository_status.side_effect = lambda p: updated_info
+        mgr.get_repository_status.side_effect = lambda p, fetch=False: updated_info
 
         app = GitDirectorConsole()
         app.manager = mgr
@@ -882,6 +882,7 @@ class TestRefreshRepoForPath:
             assert table.get_cell(row_key, ck[3]) == "staged"
             assert table.get_cell(row_key, ck[5]) == "1"
             assert app._results[row_key].status == RepoStatus.BEHIND
+            app.manager.get_repository_status.assert_any_call(Path("/tmp/alpha"), fetch=True)
 
 
 class TestReposStatusBarEscHint:

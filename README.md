@@ -110,7 +110,7 @@ Shows repositories with uncommitted changes (staged and/or unstaged files). Prin
 
 ### pull
 
-Pulls all tracked repositories concurrently using fast-forward only (`git pull --ff-only`). Reports success or failure per repository.
+Pulls all tracked repositories concurrently using fast-forward only on each repository's current branch (`git pull --ff-only origin <current-branch>`). Reports success or failure per repository.
 
 ### cd
 
