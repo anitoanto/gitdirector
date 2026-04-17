@@ -127,6 +127,224 @@ def open_in_tmux(repo_name: str, path: Path) -> None:
     attach_tmux_session(session_name)
 
 
+def _sanitize_panel_name(name: str) -> str:
+    clean = _sanitize_repo_name(name)
+    if clean:
+        return clean
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    return f"panel-{digest}"
+
+
+def make_panel_session_name(panel_name: str) -> str:
+    return f"gd/panel/{_sanitize_panel_name(panel_name)}"
+
+
+def kill_panel_tmux_session(panel_name: str) -> bool:
+    return kill_tmux_session(make_panel_session_name(panel_name))
+
+
+def _tmux_output(*args: str) -> str:
+    result = subprocess.run(
+        ["tmux", *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _split_panel_row(start_target: str, cols: int) -> None:
+    current_target = start_target
+    for step in range(1, cols):
+        size_pct = round(100 * (cols - step) / (cols - step + 1))
+        current_target = _tmux_output(
+            "split-window",
+            "-h",
+            "-l",
+            f"{size_pct}%",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            current_target,
+        )
+
+
+def _list_window_panes_row_major(session_name: str) -> list[str]:
+    output = _tmux_output(
+        "list-panes",
+        "-t",
+        f"{session_name}:0",
+        "-F",
+        "#{pane_id}|#{pane_top}|#{pane_left}",
+    )
+    panes: list[tuple[int, int, str]] = []
+    for line in output.splitlines():
+        pane_id, pane_top, pane_left = line.split("|", 2)
+        panes.append((int(pane_top), int(pane_left), pane_id))
+    panes.sort(key=lambda item: (item[0], item[1]))
+    return [pane_id for _, _, pane_id in panes]
+
+
+def _build_panel_grid(session_name: str, rows: int, cols: int) -> list[str]:
+    root_target = f"{session_name}:0.0"
+    _split_panel_row(root_target, cols)
+
+    for row in range(2, rows + 1):
+        size_pct = round(100 / row)
+        row_target = _tmux_output(
+            "split-window",
+            "-v",
+            "-f",
+            "-l",
+            f"{size_pct}%",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            root_target,
+        )
+        _split_panel_row(row_target, cols)
+
+    return _list_window_panes_row_major(session_name)
+
+
+def _printf_lines_command(lines: list[str]) -> str:
+    if not lines:
+        return "true"
+    quoted_lines = " ".join(shlex.quote(line) for line in lines)
+    return f"printf '%s\\n' {quoted_lines}"
+
+
+def _ensure_panel_prefix_bindings() -> None:
+    for pane_number in range(1, 10):
+        subprocess.run(
+            [
+                "tmux",
+                "bind-key",
+                "-T",
+                "prefix",
+                str(pane_number),
+                "if-shell",
+                "-F",
+                "#{m:gd/panel/*,#{session_name}}",
+                f"select-pane -t:.{pane_number}",
+                f"select-window -t :={pane_number}",
+            ],
+            check=True,
+        )
+
+
+def _configure_panel_window(session_name: str, pane_ids: list[str]) -> None:
+    window_target = f"{session_name}:0"
+    subprocess.run(
+        ["tmux", "set-window-option", "-t", window_target, "pane-base-index", "1"],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "set-window-option", "-t", window_target, "pane-border-status", "top"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "set-window-option",
+            "-t",
+            window_target,
+            "pane-border-format",
+            "#{?pane_active,#[bold fg=black bg=cyan],#[fg=colour250 bg=colour236]} Pane #{pane_title} #[default]",
+        ],
+        check=True,
+    )
+
+    for pane_number, pane_id in enumerate(pane_ids, start=1):
+        subprocess.run(
+            ["tmux", "select-pane", "-t", pane_id, "-T", str(pane_number)],
+            check=True,
+        )
+
+
+def _panel_pane_command(panel_name: str, pane_index: int, session_name: str | None) -> str:
+    if session_name:
+        quoted_session = shlex.quote(session_name)
+        detached_message = _printf_lines_command(
+            [
+                f"Panel: {panel_name}",
+                f"Pane {pane_index}: detached from {session_name}",
+                "Reopen the panel from GitDirector to attach again.",
+            ]
+        )
+        missing_message = _printf_lines_command(
+            [
+                f"Panel: {panel_name}",
+                f"Pane {pane_index}: missing session",
+                session_name,
+            ]
+        )
+        script = (
+            "clear; "
+            f"if tmux has-session -t {quoted_session} >/dev/null 2>&1; then "
+            f"env -u TMUX tmux attach-session -t {quoted_session}; "
+            f"clear; {detached_message}; "
+            "else "
+            f"{missing_message}; "
+            "fi; "
+            "exec tail -f /dev/null"
+        )
+    else:
+        script = (
+            "clear; "
+            f"{_printf_lines_command([f'Panel: {panel_name}', f'Pane {pane_index}: unassigned'])}; "
+            "exec tail -f /dev/null"
+        )
+    return f"sh -c {shlex.quote(script)}"
+
+
+def rebuild_panel_tmux_session(
+    panel_name: str,
+    rows: int,
+    cols: int,
+    panes: dict[int, str | None],
+) -> str:
+    session_name = make_panel_session_name(panel_name)
+    if _session_exists(session_name):
+        subprocess.run(["tmux", "kill-session", "-t", session_name], check=False)
+
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-n",
+            panel_name,
+            "-c",
+            str(Path.home()),
+        ],
+        check=True,
+    )
+
+    pane_ids = _build_panel_grid(session_name, rows, cols)
+    _configure_panel_window(session_name, pane_ids)
+    _ensure_panel_prefix_bindings()
+    total_panes = rows * cols
+    for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):
+        subprocess.run(
+            [
+                "tmux",
+                "respawn-pane",
+                "-k",
+                "-t",
+                pane_id,
+                _panel_pane_command(panel_name, pane_index, panes.get(pane_index)),
+            ],
+            check=True,
+        )
+
+    return session_name
+
+
 def _make_agent_ready_marker() -> Path:
     """Create a unique marker path used to signal agent startup."""
     fd, raw_path = tempfile.mkstemp(prefix="gitdirector-agent-", suffix=".ready")
@@ -160,7 +378,7 @@ def launch_agent_in_tmux_session(session_name: str, agent_cmd: str) -> Path:
             "send-keys",
             "-t",
             session_name,
-            f"sh -lc {shlex.quote(cleanup_script)}",
+            f"sh -lc {shlex.quote(cleanup_script)}",  # agents need login env
             "Enter",
         ],
         check=False,
