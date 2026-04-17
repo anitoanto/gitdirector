@@ -56,9 +56,9 @@ class TestPaneWidget:
         command = pane._session_command("gd/my-repo/copilot/3")
 
         assert command.startswith("sh -c ")
-        assert "tmux new-session -d -t gd/my-repo/copilot/3 -s gitdirector-panel-main-2" in command
-        assert "tmux set-option -q -t gitdirector-panel-main-2 status off" in command
-        assert "tmux attach-session -t gitdirector-panel-main-2" in command
+        assert "tmux new-session -d -t gd/my-repo/copilot/3 -s gd-proxy/panel/main/2" in command
+        assert "tmux set-option -q -t gd-proxy/panel/main/2 status off" in command
+        assert "tmux attach-session -t gd-proxy/panel/main/2" in command
         assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" not in command
 
     def test_closed_body_text_shows_session_closed_hint(self):
@@ -220,6 +220,29 @@ class TestPanelStore:
         assert store.get("Main") is None
         assert store.panels == []
         mock_kill_panel_tmux_session.assert_called_once_with("Main")
+
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_delete_kills_panel_tmux_session(self, mock_kill_panel_tmux_session, tmp_path):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create("Main", layout_key="grid_1x2", panes={1: "gd/my-repo/shell/1"})
+
+            deleted = store.delete("Main")
+
+        assert deleted is True
+        assert store.get("Main") is None
+        assert store.panels == []
+        mock_kill_panel_tmux_session.assert_called_once_with("Main")
+
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_delete_missing_panel_skips_tmux_cleanup(self, mock_kill_panel_tmux_session, tmp_path):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+
+            deleted = store.delete("Missing")
+
+        assert deleted is False
+        mock_kill_panel_tmux_session.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_update_pane_persists_closed_state(self, mock_kill_panel_tmux_session, tmp_path):
@@ -632,7 +655,7 @@ class TestGitDirectorConsolePanels:
             )
             assert table.get_cell("Main", app._panels_col_keys[1]) == "\nMain"
             assert table.get_cell("Main", app._panels_col_keys[2]) == "\ngd/panel/main"
-            assert table.get_cell("Main", app._panels_col_keys[3]) == "\n▦ 2×2"
+            assert table.get_cell("Main", app._panels_col_keys[3]) == "\n2×2"
             assert table.get_cell("Main", app._panels_col_keys[4]) == "\n2/4"
             assert table.get_row_height("Main") == 4
             assert table.get_cell("Ops", app._panels_col_keys[0]) == "\n".join(
@@ -643,7 +666,7 @@ class TestGitDirectorConsolePanels:
             )
             assert table.get_cell("Ops", app._panels_col_keys[1]) == "\nOps"
             assert table.get_cell("Ops", app._panels_col_keys[2]) == "\ngd/panel/ops"
-            assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n▦ 1×3"
+            assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1×3"
             assert table.get_cell("Ops", app._panels_col_keys[4]) == "\n1/3"
             assert table.get_row_height("Ops") == 3
             assert table.get_cell("Studio", app._panels_col_keys[0]) == "\n".join(
@@ -660,7 +683,7 @@ class TestGitDirectorConsolePanels:
             )
             assert table.get_cell("Studio", app._panels_col_keys[1]) == "\nStudio"
             assert table.get_cell("Studio", app._panels_col_keys[2]) == "\ngd/panel/studio"
-            assert table.get_cell("Studio", app._panels_col_keys[3]) == "\n▛ 3×3 Top-left quad"
+            assert table.get_cell("Studio", app._panels_col_keys[3]) == "\n3×3 Top-left quad"
             assert table.get_cell("Studio", app._panels_col_keys[4]) == "\n3/6"
             assert table.get_row_height("Studio") == 9
 

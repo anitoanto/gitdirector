@@ -146,11 +146,11 @@ def make_panel_session_name(panel_name: str) -> str:
 
 
 def _panel_proxy_session_name(panel_name: str, pane_index: int) -> str:
-    return f"gitdirector-panel-{_sanitize_panel_name(panel_name)}-{pane_index}"
+    return f"gd-proxy/panel/{_sanitize_panel_name(panel_name)}/{pane_index}"
 
 
 def _panel_proxy_session_prefix(panel_name: str) -> str:
-    return f"gitdirector-panel-{_sanitize_panel_name(panel_name)}-"
+    return f"gd-proxy/panel/{_sanitize_panel_name(panel_name)}/"
 
 
 def _session_slug(session_name: str | None) -> str | None:

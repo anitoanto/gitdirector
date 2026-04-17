@@ -1452,9 +1452,6 @@ class GitDirectorConsole(App):
 
     def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
         if confirmed:
-            from ...integrations.tmux import kill_panel_tmux_session
-
-            kill_panel_tmux_session(panel_name)
             self._panel_store.delete(panel_name)
             self._load_panels()
 
