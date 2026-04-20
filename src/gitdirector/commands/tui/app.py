@@ -58,15 +58,25 @@ _PANEL_PREVIEW_OPEN = "□"
 _POST_RESUME_NEW_PANEL_GUARD_SECONDS = 0.25
 
 
-def _panel_preview_marker(panel: Panel, pane_index: int) -> str:
-    return _PANEL_PREVIEW_FILLED if panel.panes.get(pane_index) else _PANEL_PREVIEW_OPEN
+def _panel_preview_marker(
+    panel: Panel,
+    pane_index: int,
+    live_sessions: set[str] | None = None,
+) -> str:
+    session_name = panel.panes.get(pane_index)
+    is_filled = bool(session_name) if live_sessions is None else session_name in live_sessions
+    return _PANEL_PREVIEW_FILLED if is_filled else _PANEL_PREVIEW_OPEN
 
 
-def _render_grid_panel_preview(panel: Panel) -> str:
+def _render_grid_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
     rows: list[str] = []
     for row_index in range(panel.rows):
         row_cells = " ".join(
-            _panel_preview_marker(panel, (row_index * panel.cols) + col_index + 1)
+            _panel_preview_marker(
+                panel,
+                (row_index * panel.cols) + col_index + 1,
+                live_sessions,
+            )
             for col_index in range(panel.cols)
         )
         if row_index == 0:
@@ -79,8 +89,8 @@ def _render_grid_panel_preview(panel: Panel) -> str:
     return "\n".join(rows)
 
 
-def _render_asymmetric_panel_preview(panel: Panel) -> str:
-    marker = lambda pane_index: _panel_preview_marker(panel, pane_index)
+def _render_asymmetric_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
+    marker = lambda pane_index: _panel_preview_marker(panel, pane_index, live_sessions)
     if panel.layout.key == "tall_left":
         return "\n".join(
             [
@@ -119,14 +129,14 @@ def _render_asymmetric_panel_preview(panel: Panel) -> str:
     return render_panel_layout_preview(panel.layout, labels=labels, cell_width=1, cell_height=1)
 
 
-def _render_panel_preview(panel: Panel) -> str:
+def _render_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
     if panel.layout.key.startswith("grid_"):
-        return _render_grid_panel_preview(panel)
-    return _render_asymmetric_panel_preview(panel)
+        return _render_grid_panel_preview(panel, live_sessions)
+    return _render_asymmetric_panel_preview(panel, live_sessions)
 
 
-def _panel_row_height(panel: Panel) -> int:
-    return len(_render_panel_preview(panel).splitlines()) + 2
+def _panel_row_height(panel: Panel, live_sessions: set[str] | None = None) -> int:
+    return len(_render_panel_preview(panel, live_sessions).splitlines()) + 2
 
 
 def _panel_row_cell(value: str) -> str:
@@ -1187,13 +1197,13 @@ class GitDirectorConsole(App):
                 status_state = self._panel_status_state(panel, live_sessions)
                 status_label = _PANEL_STATUS_LABEL[status_state]
                 table.add_row(
-                    _panel_row_cell(_render_panel_preview(panel)),
+                    _panel_row_cell(_render_panel_preview(panel, live_sessions)),
                     _panel_row_cell(panel.name),
                     _panel_row_cell(make_panel_session_name(panel.name)),
                     _panel_row_cell(panel.layout_display_label),
                     _panel_row_cell(panes_label),
                     _panel_row_cell(status_label),
-                    height=_panel_row_height(panel),
+                    height=_panel_row_height(panel, live_sessions),
                     key=panel.name,
                 )
 

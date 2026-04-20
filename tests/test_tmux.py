@@ -36,6 +36,7 @@ from gitdirector.integrations.tmux import (
     _make_session_name,
     _normalize_process_command,
     _embedded_tmux_attach_command,
+    _ensure_panel_prefix_bindings,
     _panel_attach_fragment,
     _panel_border_format,
     _panel_pane_command,
@@ -681,6 +682,50 @@ class TestRebuildPanelTmuxSession:
         mock_load.assert_called_once()
         mock_sync.assert_called_once_with("rose-pine")
         mock_bindings.assert_called_once_with()
+
+
+class TestPanelPrefixBindings:
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_panel_prefix_bindings_include_overlay_alias_and_numeric_focus(self, mock_run):
+        _ensure_panel_prefix_bindings()
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+
+        assert commands[0] == [
+            "tmux",
+            "bind-key",
+            "-T",
+            "prefix",
+            "b",
+            "if-shell",
+            "-F",
+            "#{m:gd/panel/*,#{session_name}}",
+            "display-panes",
+        ]
+        assert [
+            "tmux",
+            "bind-key",
+            "-T",
+            "prefix",
+            "1",
+            "if-shell",
+            "-F",
+            "#{m:gd/panel/*,#{session_name}}",
+            "select-pane -t:.1",
+            "select-window -t :=1",
+        ] in commands
+        assert [
+            "tmux",
+            "bind-key",
+            "-T",
+            "prefix",
+            "9",
+            "if-shell",
+            "-F",
+            "#{m:gd/panel/*,#{session_name}}",
+            "select-pane -t:.9",
+            "select-window -t :=9",
+        ] in commands
 
 
 class TestDistributeEqual:
@@ -2197,24 +2242,42 @@ class TestExactMatchAttachTmuxSession:
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.reflow_panel_tmux_session")
     @patch("gitdirector.integrations.tmux._ensure_panel_resize_tracking")
+    @patch("gitdirector.integrations.tmux._ensure_panel_prefix_bindings")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_switch_client_exact(self, mock_run, mock_track_resize, mock_reflow, _mock_sync):
+    def test_switch_client_exact(
+        self,
+        mock_run,
+        mock_prefix_bindings,
+        mock_track_resize,
+        mock_reflow,
+        _mock_sync,
+    ):
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
+        mock_prefix_bindings.assert_called_once_with()
         mock_track_resize.assert_called_once_with("gd/panel/dev")
         mock_reflow.assert_called_once_with("gd/panel/dev")
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.reflow_panel_tmux_session")
     @patch("gitdirector.integrations.tmux._ensure_panel_resize_tracking")
+    @patch("gitdirector.integrations.tmux._ensure_panel_prefix_bindings")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_attach_session_exact(self, mock_run, mock_track_resize, mock_reflow, _mock_sync):
+    def test_attach_session_exact(
+        self,
+        mock_run,
+        mock_prefix_bindings,
+        mock_track_resize,
+        mock_reflow,
+        _mock_sync,
+    ):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
+        mock_prefix_bindings.assert_called_once_with()
         mock_track_resize.assert_called_once_with("gd/panel/dev")
         mock_reflow.assert_called_once_with("gd/panel/dev")
 
