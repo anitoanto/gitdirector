@@ -624,6 +624,38 @@ class TestCreatePanelScreen:
             assert screen._pane_assignments[3] == "gd/repo/copilot/2"
             assert len(app.screen.query("#panel-name-input")) == 0
 
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
+    async def test_edit_mode_clears_stale_closed_sessions_from_slot_summary(self, mock_sessions):
+        mock_sessions.return_value = [
+            {
+                "session_name": "gd/repo/shell/1",
+                "repo": "repo",
+                "purpose": "shell",
+            }
+        ]
+
+        screen = CreatePanelScreen(
+            panel_name="Ops",
+            initial_layout_key="wide_bottom",
+            initial_panes={1: "gd/repo/copilot/2", 2: None, 3: "gd/repo/shell/1"},
+            editing=True,
+        )
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
+            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
+
+            assert screen._pane_assignments[1] is None
+            assert screen._pane_assignments[3] == "gd/repo/shell/1"
+            assert "unassigned" in str(slot_menu.get_option_at_index(1).prompt)
+            assert "gd/repo/copilot/2" not in str(slot_menu.get_option_at_index(1).prompt)
+            assert session_menu.highlighted == 0
+
 
 class TestSortMenuScreen:
     async def test_compose_shows_all_columns(self):

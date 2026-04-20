@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from textual.color import Color
 from textual.app import App
 from textual.widgets import DataTable, Static
 from textual.widgets._footer import FooterKey
@@ -76,6 +77,23 @@ class TestPaneWidget:
         pane = PaneWidget(2, None, theme_name="rose-pine", closed=True)
 
         assert pane._body_text().startswith("\n[dim]SESSION CLOSED[/dim]")
+
+    def test_watch_pane_focused_uses_heavier_border_style(self):
+        theme = resolve_panel_theme("rose-pine")
+        pane = PaneWidget(2, None, theme_name="rose-pine")
+
+        assert pane.styles.border.top[0] == "round"
+        assert pane.styles.border.top[1] == Color.parse(theme.border_inactive)
+
+        pane.watch_pane_focused(True)
+
+        assert pane.styles.border.top[0] == "thick"
+        assert pane.styles.border.top[1] == Color.parse(theme.accent)
+
+        pane.watch_pane_focused(False)
+
+        assert pane.styles.border.top[0] == "round"
+        assert pane.styles.border.top[1] == Color.parse(theme.border_inactive)
 
     @patch("gitdirector.commands.tui.panel_view.cleanup_panel_attached_session")
     def test_stop_terminal_cleans_up_panel_attached_session(self, mock_cleanup):
@@ -356,6 +374,10 @@ class TestPanelStore:
 
 
 class TestTabStyling:
+    def test_tab_headers_use_three_row_height(self):
+        assert "#tabs Tabs" in GitDirectorConsole.CSS
+        assert "height: 3;" in GitDirectorConsole.CSS
+
     def test_active_tab_uses_filled_style(self):
         assert "#tabs Tab.-active" in GitDirectorConsole.CSS
         assert "background: $accent;" in GitDirectorConsole.CSS
@@ -645,7 +667,22 @@ class TestGitDirectorConsolePanels:
 
         assert isinstance(app.push_screen.call_args.args[0], ConfirmScreen)
 
-    def test_handle_panel_action_reconfigure_pushes_create_panel_screen(self):
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {
+                "session_name": "gd/my-repo/shell/1",
+                "repo": "my-repo",
+                "purpose": "shell",
+            },
+            {
+                "session_name": "gd/my-repo/copilot/1",
+                "repo": "my-repo",
+                "purpose": "copilot",
+            },
+        ],
+    )
+    def test_handle_panel_action_reconfigure_pushes_create_panel_screen(self, _mock_sessions):
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
         app._panel_store = MagicMock()
@@ -800,6 +837,54 @@ class TestGitDirectorConsolePanels:
 
             assert table.get_cell("Main", app._panels_col_keys[4]) == "\n0/3"
             assert table.get_cell("Main", app._panels_col_keys[5]) == "\n[dim]○ empty[/dim]"
+
+    @patch(
+        "gitdirector.integrations.tmux._list_sessions",
+        return_value=["gd/alpha/shell/1", "gd/ops/shell/1"],
+    )
+    async def test_panel_refresh_preserves_selected_row(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app._panel_store = MagicMock()
+        app._panel_store.panels = [
+            Panel(
+                name="Main",
+                rows=2,
+                cols=2,
+                panes={1: "gd/alpha/shell/1", 2: None, 3: None, 4: None},
+            ),
+            Panel(
+                name="Ops",
+                rows=1,
+                cols=3,
+                panes={1: None, 2: "gd/ops/shell/1", 3: None},
+            ),
+            Panel(
+                name="Studio",
+                rows=1,
+                cols=2,
+                panes={1: None, 2: None},
+            ),
+        ]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._active_tab = "panels"
+            app._load_panels()
+            await pilot.pause()
+
+            table = app.query_one("#panels-table", DataTable)
+            table.move_cursor(row=1)
+            selected_before = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+
+            app._apply_panels_filter_and_sort({"gd/alpha/shell/1", "gd/ops/shell/1"})
+            await pilot.pause()
+
+            selected_after = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+
+            assert str(selected_before.value) == "Ops"
+            assert str(selected_after.value) == "Ops"
+            assert table.cursor_coordinate.row == 1
 
     async def test_panels_table_uses_panel_tmux_column_label(self):
         app = GitDirectorConsole()

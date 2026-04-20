@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -141,6 +142,9 @@ def attach_tmux_session(session_name: str) -> None:
         sync_panel_tmux_config()
     if _should_open_in_temp_panel(session_name):
         target_session = rebuild_temp_panel_tmux_session(session_name)
+    elif _is_persistent_panel_session(target_session):
+        _ensure_panel_resize_tracking(target_session)
+        reflow_panel_tmux_session(target_session)
     if os.environ.get("TMUX"):
         subprocess.run(["tmux", "switch-client", "-t", f"={target_session}"])
     else:
@@ -204,6 +208,8 @@ _PANEL_CLIENT_COUNT_OPTION = "@gitdirector_panel_clients"
 _PANEL_STATUS_RESTORE_OPTION = "@gitdirector_panel_prev_status"
 _PANEL_BORDER_RESTORE_OPTION = "@gitdirector_panel_prev_pane_border_status"
 _PANEL_WINDOW_RESTORE_OPTION = "@gitdirector_panel_prev_window_target"
+_PANEL_RESIZE_BUSY_OPTION = "@gitdirector_panel_resize_busy"
+_PANEL_RESIZE_PENDING_OPTION = "@gitdirector_panel_resize_pending"
 
 
 def _session_slug(session_name: str | None) -> str | None:
@@ -269,6 +275,10 @@ def _panel_border_format(theme_name: str | None = None, *, show_pane_number: boo
     return f"{badge}{title}"
 
 
+def _panel_window_status_format() -> str:
+    return " #{pane_index}:#{pane_title} "
+
+
 def _gd_tmux_config_path() -> Path:
     return Path.home() / ".gitdirector" / "gd-tmux.conf"
 
@@ -309,6 +319,9 @@ def _tmux_theme_config(
     window_target: str | None = None,
     pane_border_status: str | None = None,
     pane_border_format: str | None = None,
+    pane_border_lines: str | None = None,
+    window_status_format: str = " #I:#W ",
+    window_status_current_format: str = " #I:#W ",
     show_status: bool = True,
 ) -> str:
     theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
@@ -343,8 +356,8 @@ def _tmux_theme_config(
             f'set-option -t {quoted_session} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
             f'set-window-option -t {quoted_window} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',
             f'set-window-option -t {quoted_window} window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"',
-            f"set-window-option -t {quoted_window} window-status-format {shlex.quote(' #I:#W ')}",
-            f"set-window-option -t {quoted_window} window-status-current-format {shlex.quote(' #I:#W ')}",
+            f"set-window-option -t {quoted_window} window-status-format {shlex.quote(window_status_format)}",
+            f"set-window-option -t {quoted_window} window-status-current-format {shlex.quote(window_status_current_format)}",
             f"set-window-option -t {quoted_window} window-status-separator {shlex.quote('')}",
             f'set-window-option -t {quoted_window} pane-border-style "fg={theme.border_inactive}"',
             f'set-window-option -t {quoted_window} pane-active-border-style "fg={theme.border_active}"',
@@ -353,6 +366,10 @@ def _tmux_theme_config(
     if pane_border_status:
         lines.append(
             f"set-window-option -t {quoted_window} pane-border-status {shlex.quote(pane_border_status)}"
+        )
+    if pane_border_lines:
+        lines.append(
+            f"set-window-option -t {quoted_window} pane-border-lines {shlex.quote(pane_border_lines)}"
         )
     if pane_border_format:
         lines.append(
@@ -374,7 +391,10 @@ def _panel_tmux_config(
         theme_name,
         window_target=f"{session_name}:0",
         pane_border_status="top",
+        pane_border_lines="heavy",
         pane_border_format=_panel_border_format(theme_name),
+        window_status_format=_panel_window_status_format(),
+        window_status_current_format=_panel_window_status_format(),
         show_status=True,
     )
 
@@ -410,6 +430,88 @@ def _live_panel_sessions() -> list[tuple[str, str]]:
         if _session_exists(session_name):
             sessions.append((panel.name, session_name))
     return sessions
+
+
+def _panel_for_session(session_name: str):
+    from ..commands.tui.panels import PanelStore
+
+    for panel in PanelStore().panels:
+        if make_panel_session_name(panel.name) == session_name:
+            return panel
+    return None
+
+
+def _panel_resize_hook_shell(session_name: str) -> str:
+    session_target = shlex.quote(_session_option_target(session_name))
+    python_code = (
+        "from gitdirector.integrations.tmux import reflow_panel_tmux_session; "
+        f"reflow_panel_tmux_session({session_name!r})"
+    )
+    python_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)}"
+    return (
+        f"panel_target={session_target}; "
+        f'tmux set-option -q -t "$panel_target" {_PANEL_RESIZE_PENDING_OPTION} 1'
+        " >/dev/null 2>&1 || true; "
+        f'panel_busy=$(tmux show-options -q -v -t "$panel_target"'
+        f" {_PANEL_RESIZE_BUSY_OPTION} 2>/dev/null || printf '0'); "
+        'if [ "$panel_busy" = "1" ]; then exit 0; fi; '
+        f'tmux set-option -q -t "$panel_target" {_PANEL_RESIZE_BUSY_OPTION} 1'
+        " >/dev/null 2>&1 || true; "
+        "while :; do "
+        f'tmux set-option -q -t "$panel_target" {_PANEL_RESIZE_PENDING_OPTION} 0'
+        " >/dev/null 2>&1 || true; "
+        f"{python_command} >/dev/null 2>&1 || true; "
+        f'panel_pending=$(tmux show-options -q -v -t "$panel_target"'
+        f" {_PANEL_RESIZE_PENDING_OPTION} 2>/dev/null || printf '0'); "
+        'if [ "$panel_pending" != "1" ]; then break; fi; '
+        "done; "
+        f'tmux set-option -q -u -t "$panel_target" {_PANEL_RESIZE_BUSY_OPTION}'
+        " >/dev/null 2>&1 || true; "
+        f'tmux set-option -q -u -t "$panel_target" {_PANEL_RESIZE_PENDING_OPTION}'
+        " >/dev/null 2>&1 || true"
+    )
+
+
+def _ensure_panel_resize_tracking(session_name: str) -> None:
+    if not _is_persistent_panel_session(session_name) or not _session_exists(session_name):
+        return
+
+    window_target = f"={session_name}:0"
+    session_target = _session_option_target(session_name)
+    hook_command = f"run-shell -b {shlex.quote(_panel_resize_hook_shell(session_name))}"
+
+    subprocess.run(
+        ["tmux", "set-window-option", "-q", "-t", window_target, "aggressive-resize", "on"],
+        check=False,
+    )
+    subprocess.run(
+        ["tmux", "set-hook", "-t", session_target, "client-resized", hook_command],
+        check=False,
+    )
+    subprocess.run(
+        ["tmux", "set-hook", "-w", "-t", window_target, "window-resized", hook_command],
+        check=False,
+    )
+
+
+def reflow_panel_tmux_session(session_name: str) -> bool:
+    if not _is_persistent_panel_session(session_name) or not _session_exists(session_name):
+        return False
+
+    panel = _panel_for_session(session_name)
+    if panel is None:
+        return False
+
+    pane_ids = _list_window_panes_row_major(session_name)
+    total_panes = panel.layout.total_panes
+    if len(pane_ids) < total_panes:
+        return False
+
+    try:
+        _equalize_panel_layout(session_name, pane_ids[:total_panes], panel.layout)
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return False
+    return True
 
 
 def _live_repo_tmux_sessions() -> list[str]:
@@ -662,6 +764,22 @@ def _distribute_equal(total: int, parts: int) -> list[int]:
     return [base + (1 if i < remainder else 0) for i in range(parts)]
 
 
+def _distribute_proportional(total: int, parts: int, ratios: tuple[int, ...] | None) -> list[int]:
+    if not ratios or len(ratios) != parts:
+        return _distribute_equal(total, parts)
+    total_ratio = sum(ratios)
+    if total_ratio == 0:
+        return _distribute_equal(total, parts)
+
+    sizes = [(total * r) // total_ratio for r in ratios]
+    rem = total - sum(sizes)
+
+    indices = sorted(range(parts), key=lambda i: ratios[i], reverse=True)
+    for i in range(rem):
+        sizes[indices[i % parts]] += 1
+    return sizes
+
+
 def _span_size(sizes: list[int], start: int, span: int) -> int:
     return sum(sizes[start : start + span]) + (span - 1)
 
@@ -754,8 +872,12 @@ def _equalize_panel_layout(
     for i, p in enumerate(sorted_placements):
         pane_id_map[(p.row, p.col)] = int(pane_ids[i].lstrip("%"))
 
-    row_heights = _distribute_equal(window_h - (layout.rows - 1), layout.rows)
-    col_widths = _distribute_equal(window_w - (layout.cols - 1), layout.cols)
+    row_heights = _distribute_proportional(
+        window_h - (layout.rows - 1), layout.rows, getattr(layout, "row_ratios", None)
+    )
+    col_widths = _distribute_proportional(
+        window_w - (layout.cols - 1), layout.cols, getattr(layout, "col_ratios", None)
+    )
 
     placements_tuples = tuple((p.row, p.col, p.row_span, p.col_span) for p in sorted_placements)
     spec = _build_layout_spec(placements_tuples, pane_id_map, row_heights, col_widths, 0, 0)
@@ -810,6 +932,10 @@ def _configure_panel_window(
     )
     subprocess.run(
         ["tmux", "set-window-option", "-t", window_target, "pane-border-status", "top"],
+        check=True,
+    )
+    subprocess.run(
+        ["tmux", "set-window-option", "-t", window_target, "pane-border-lines", "heavy"],
         check=True,
     )
     subprocess.run(
@@ -1116,6 +1242,7 @@ def rebuild_panel_tmux_session(
     _equalize_panel_layout(session_name, pane_ids, layout)
     _configure_panel_window(session_name, pane_ids, panes, theme_name)
     _load_panel_tmux_config(panel_name, session_name, theme_name)
+    _ensure_panel_resize_tracking(session_name)
     sync_panel_tmux_config(theme_name)
     _ensure_panel_prefix_bindings()
     total_panes = layout.total_panes

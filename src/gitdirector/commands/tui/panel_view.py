@@ -28,13 +28,9 @@ class PaneWidget(Widget):
 
     DEFAULT_CSS = """
     PaneWidget {
-        border: round $primary-darken-2;
         height: 1fr;
         width: 1fr;
         overflow: hidden;
-    }
-    PaneWidget.pane-focused {
-        border: round $accent;
     }
     PaneWidget .pane-header {
         dock: top;
@@ -80,6 +76,12 @@ class PaneWidget(Widget):
         self._on_session_closed = on_session_closed
         self._terminal: TerminalWidget | None = None
         self._empty_state = "closed" if closed and session_name is None else "empty"
+        self._apply_border_style(False)
+
+    def _apply_border_style(self, focused: bool) -> None:
+        border_type = "thick" if focused else "round"
+        border_color = self._panel_theme.accent if focused else self._panel_theme.border_inactive
+        self.styles.border = (border_type, border_color)
 
     def _session_command(self, session_name: str) -> str:
         return _embedded_tmux_attach_command(
@@ -213,6 +215,7 @@ class PaneWidget(Widget):
                 )
 
     def watch_pane_focused(self, focused: bool) -> None:
+        self._apply_border_style(focused)
         if focused:
             self.add_class("pane-focused")
             if self._terminal:
@@ -257,6 +260,7 @@ class PanelViewScreen(Screen[None]):
         layout: grid;
         grid-gutter: 0;
         height: 1fr;
+        width: 1fr;
         padding: 0;
     }
     #panel-status-bar {
@@ -304,10 +308,28 @@ class PanelViewScreen(Screen[None]):
         yield Static("", id="panel-status-bar")
         yield Footer()
 
+    def on_resize(self, event: events.Resize) -> None:
+        """Recalculate layout split rules when window resizes so grid remains consistent."""
+        grid = self.query_one("#panel-grid", Container)
+        from textual.css.scalar import Scalar
+
+        col_ratios = self._panel.layout.col_ratios or (1,) * self._panel.cols
+        row_ratios = self._panel.layout.row_ratios or (1,) * self._panel.rows
+
+        grid.styles.grid_columns = [Scalar.parse(f"{r}fr") for r in col_ratios]
+        grid.styles.grid_rows = [Scalar.parse(f"{r}fr") for r in row_ratios]
+
     def on_mount(self) -> None:
         grid = self.query_one("#panel-grid", Container)
         grid.styles.grid_size_columns = self._panel.cols
         grid.styles.grid_size_rows = self._panel.rows
+        from textual.css.scalar import Scalar
+
+        col_ratios = self._panel.layout.col_ratios or (1,) * self._panel.cols
+        row_ratios = self._panel.layout.row_ratios or (1,) * self._panel.rows
+
+        grid.styles.grid_columns = [Scalar.parse(f"{r}fr") for r in col_ratios]
+        grid.styles.grid_rows = [Scalar.parse(f"{r}fr") for r in row_ratios]
 
         for placement in self._panel.pane_placements:
             session_name = self._panel.panes.get(placement.pane_index)
