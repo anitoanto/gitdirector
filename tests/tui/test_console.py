@@ -9,7 +9,14 @@ import pytest
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
-from gitdirector.commands.tui import GitDirectorConsole
+from gitdirector.commands.tui import (
+    ConfirmScreen,
+    GitCommandResultScreen,
+    GitDirectorConsole,
+    GitOperationsMenuScreen,
+    PullLoadingScreen,
+    PullResultScreen,
+)
 from gitdirector.commands.tui.app import _run_console
 from gitdirector.info import RepoInfoResult
 from gitdirector.repo import RepoStatus
@@ -371,8 +378,304 @@ class TestGitDirectorConsoleActionRouting:
         app._handle_remove_selection("gd-test")
         app.push_screen.assert_called_once()
 
+    def test_handle_git_menu_action_pull_routes_to_prompt(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._prompt_repo_pull = MagicMock()
+
+        app._handle_git_menu_action("pull", path)
+
+        app._prompt_repo_pull.assert_called_once_with(path)
+
+    def test_handle_git_menu_action_status_routes_to_show_repo_git_status(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._show_repo_git_status = MagicMock()
+
+        app._handle_git_menu_action("status", path)
+
+        app._show_repo_git_status.assert_called_once_with(path)
+
+    def test_handle_git_menu_action_timeline_routes_to_show_repo_git_timeline(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._show_repo_git_timeline = MagicMock()
+
+        app._handle_git_menu_action("timeline", path)
+
+        app._show_repo_git_timeline.assert_called_once_with(path)
+
+    def test_handle_git_menu_action_branches_routes_to_show_repo_git_branches(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._show_repo_git_branches = MagicMock()
+
+        app._handle_git_menu_action("branches", path)
+
+        app._show_repo_git_branches.assert_called_once_with(path)
+
+    def test_handle_git_menu_action_remotes_routes_to_show_repo_git_remotes(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._show_repo_git_remotes = MagicMock()
+
+        app._handle_git_menu_action("remotes", path)
+
+        app._show_repo_git_remotes.assert_called_once_with(path)
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_show_repo_git_status_pushes_result_screen(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.status_output.return_value = (True, "On branch main")
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+
+        app._show_repo_git_status(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, GitCommandResultScreen)
+        assert screen.command == "git status"
+        assert screen.ok is True
+        assert screen.output == "On branch main"
+        callback = app.push_screen.call_args.kwargs["callback"]
+        app._handle_git_result_dismissal = MagicMock()
+        callback("back")
+        app._handle_git_result_dismissal.assert_called_once_with("back", path)
+        app._update_status.assert_called_once_with("alpha: status shown")
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_show_repo_git_timeline_pushes_result_screen(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.timeline_output.return_value = (True, "* abc1234 2026-04-20 Add timeline view")
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+
+        app._show_repo_git_timeline(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, GitCommandResultScreen)
+        assert screen.command == (
+            "git log --max-count=1000 --graph --decorate --all --color=always --date=short "
+            "--pretty=format:%C(auto)%h%Creset %C(blue)%ad%Creset %C(auto)%d%Creset %s"
+        )
+        assert screen.ok is True
+        assert "Add timeline view" in screen.output
+        app._update_status.assert_called_once_with("alpha: timeline shown")
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_show_repo_git_branches_pushes_result_screen(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.branches_output.return_value = (True, "* main\n  remotes/origin/main")
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+
+        app._show_repo_git_branches(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, GitCommandResultScreen)
+        assert screen.command == "git branch -a"
+        assert screen.ok is True
+        assert "remotes/origin/main" in screen.output
+        app._update_status.assert_called_once_with("alpha: branches shown")
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_show_repo_git_remotes_pushes_result_screen(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.remotes_output.return_value = (
+            True,
+            "origin\thttps://example.com/repo.git (fetch)",
+        )
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+
+        app._show_repo_git_remotes(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, GitCommandResultScreen)
+        assert screen.command == "git remote -v"
+        assert screen.ok is True
+        assert "origin" in screen.output
+        app._update_status.assert_called_once_with("alpha: remotes shown")
+
+    def test_handle_git_result_dismissal_reopens_git_menu_on_back(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._push_git_menu_for_path = MagicMock()
+
+        app._handle_git_result_dismissal("back", path)
+
+        app._push_git_menu_for_path.assert_called_once_with(path)
+
+    def test_handle_git_result_dismissal_ignores_normal_close(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._push_git_menu_for_path = MagicMock()
+
+        app._handle_git_result_dismissal(None, path)
+
+        app._push_git_menu_for_path.assert_not_called()
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_prompt_repo_pull_pushes_confirm_screen(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.get_pull_target.return_value = ("origin", "main", None)
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+
+        app._prompt_repo_pull(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, ConfirmScreen)
+        assert "origin/main" in screen.message
+        assert "git pull --ff-only origin main" in screen.message
+        assert callable(app.push_screen.call_args.kwargs["callback"])
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_prompt_repo_pull_shows_result_when_target_fails(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.get_pull_target.return_value = (None, None, "Cannot pull in detached HEAD")
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+
+        app._prompt_repo_pull(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, PullResultScreen)
+        assert screen.command is None
+        assert screen.output == "Cannot pull in detached HEAD"
+        assert callable(app.push_screen.call_args.kwargs["callback"])
+        app._update_status.assert_called_once_with("alpha: Cannot pull in detached HEAD")
+
+    @patch("gitdirector.commands.pull.pull_repository", return_value=("alpha", True, "Updated."))
+    def test_pull_repo_worker_uses_shared_pull_helper(self, mock_pull_repository):
+        path = Path("/tmp/alpha")
+        command = "git pull --ff-only origin main"
+        loading_screen = MagicMock()
+        app = GitDirectorConsole()
+        app.call_from_thread = MagicMock()
+
+        GitDirectorConsole._pull_repo.__wrapped__(app, path, command, loading_screen)
+
+        mock_pull_repository.assert_called_once_with(path)
+        app.call_from_thread.assert_called_once_with(
+            app._show_pull_result,
+            loading_screen,
+            path,
+            command,
+            ("alpha", True, "Updated."),
+        )
+
+    def test_do_pull_repo_pushes_loading_screen_and_starts_worker(self):
+        path = Path("/tmp/alpha")
+        command = "git pull --ff-only origin main"
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._pull_repo = MagicMock()
+        app._update_status = MagicMock()
+
+        app._do_pull_repo(True, path, command)
+
+        loading_screen = app.push_screen.call_args.args[0]
+        assert isinstance(loading_screen, PullLoadingScreen)
+        app._update_status.assert_called_once_with(f"Pulling alpha: {command}")
+        app._pull_repo.assert_called_once_with(path, command, loading_screen)
+
+    def test_show_pull_result_pushes_modal_and_refreshes(self):
+        path = Path("/tmp/alpha")
+        loading_screen = MagicMock()
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+        app._refresh_repo_for_path = MagicMock()
+
+        app._show_pull_result(
+            loading_screen,
+            path,
+            "git pull --ff-only origin main",
+            ("alpha", True, "Done"),
+        )
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, PullResultScreen)
+        assert screen.command == "git pull --ff-only origin main"
+        assert screen.ok is True
+        loading_screen.dismiss.assert_called_once_with(None)
+        app._update_status.assert_called_once_with("alpha: pull completed")
+        app._refresh_repo_for_path.assert_called_once_with(path)
+
+    def test_show_pull_result_does_not_refresh_after_failure(self):
+        path = Path("/tmp/alpha")
+        loading_screen = MagicMock()
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+        app._refresh_repo_for_path = MagicMock()
+
+        app._show_pull_result(
+            loading_screen,
+            path,
+            "git pull --ff-only origin main",
+            ("alpha", False, "fatal: Not possible to fast-forward"),
+        )
+
+        loading_screen.dismiss.assert_called_once_with(None)
+        app._update_status.assert_called_once_with("alpha: pull failed")
+        app._refresh_repo_for_path.assert_not_called()
+
 
 class TestGitDirectorConsoleDirectBranches:
+    def test_action_show_git_menu_ignored_outside_repo_tab(self):
+        app = GitDirectorConsole()
+        app._active_tab = "sessions"
+        app._get_selected_path = MagicMock()
+
+        app.action_show_git_menu()
+
+        app._get_selected_path.assert_not_called()
+
+    def test_action_show_git_menu_ignored_without_selected_path(self):
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._get_selected_path = MagicMock(return_value=None)
+        app.push_screen = MagicMock()
+
+        app.action_show_git_menu()
+
+        app.push_screen.assert_not_called()
+
+    @patch("gitdirector.commands.tui.app.GitOperationsMenuScreen")
+    def test_action_show_git_menu_uses_selected_repo_metadata(self, mock_screen_cls):
+        path = Path("/tmp/alpha")
+        screen = MagicMock()
+        mock_screen_cls.return_value = screen
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._get_selected_path = MagicMock(return_value=path)
+        app._results = {str(path): _make_info("alpha", path, branch="main")}
+        app.push_screen = MagicMock()
+
+        app.action_show_git_menu()
+
+        mock_screen_cls.assert_called_once_with("alpha", "main")
+        app.push_screen.assert_called_once()
+
     def test_action_show_info_ignored_outside_repo_tab(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
@@ -872,6 +1175,7 @@ class TestBuildLoadedStatus:
         async with app.run_test(size=(80, 24)):
             msg = app._build_loaded_status(3, 3)
             assert "3 repositories loaded" in msg
+            assert "g git" in msg
             assert "filter:" not in msg
             assert "sort:" not in msg
 

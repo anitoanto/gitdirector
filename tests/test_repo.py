@@ -417,6 +417,147 @@ def _setup_pull_mocks(
 
 
 class TestPull:
+    def test_get_pull_target(self, fake_git_repo, mocker):
+        _setup_pull_mocks(mocker, pull_results=())
+        repo = Repository(fake_git_repo)
+
+        remote, branch, err = repo.get_pull_target()
+
+        assert (remote, branch, err) == ("origin", "main", None)
+
+    def test_get_pull_target_branch_error(self, fake_git_repo, mocker):
+        _setup_pull_mocks(mocker, branch_result=(128, "", "fatal: no branch"), pull_results=())
+        repo = Repository(fake_git_repo)
+
+        remote, branch, err = repo.get_pull_target()
+
+        assert remote is None
+        assert branch is None
+        assert err == "fatal: no branch"
+
+    def test_status_output_success(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(
+                0,
+                "On branch main\nnothing to commit, working tree clean\n",
+                "",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.status_output()
+
+        assert ok is True
+        assert "On branch main" in output
+
+    def test_status_output_failure(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(1, "", "fatal: status failed\n"),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.status_output()
+
+        assert ok is False
+        assert output == "fatal: status failed"
+
+
+class TestTimelineOutput:
+    def test_success(self, fake_git_repo, mocker):
+        run_git = mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(
+                0,
+                "* abc1234 2026-04-20  (HEAD -> main) Add timeline view\n",
+                "",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.timeline_output()
+
+        assert ok is True
+        assert "* abc1234" in output
+        assert "Add timeline view" in output
+        assert "--max-count=1000" in run_git.call_args.args[0]
+
+    def test_no_commits_returns_empty_message(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(
+                128,
+                "",
+                "fatal: your current branch 'main' does not have any commits yet\n",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.timeline_output()
+
+        assert ok is True
+        assert output == "No commits yet."
+
+
+class TestBranchesOutput:
+    def test_success(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "* main\n  remotes/origin/main\n", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.branches_output()
+
+        assert ok is True
+        assert "* main" in output
+        assert "remotes/origin/main" in output
+
+    def test_empty_branch_list_returns_fallback(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.branches_output()
+
+        assert ok is True
+        assert output == "No branches found."
+
+
+class TestRemotesOutput:
+    def test_success(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(
+                0,
+                "origin\thttps://example.com/repo.git (fetch)\n"
+                "origin\thttps://example.com/repo.git (push)\n",
+                "",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.remotes_output()
+
+        assert ok is True
+        assert "origin" in output
+        assert "(fetch)" in output
+
+    def test_empty_remote_list_returns_fallback(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.remotes_output()
+
+        assert ok is True
+        assert output == "No remotes configured."
+
     def test_success(self, fake_git_repo, mocker):
         calls = _setup_pull_mocks(mocker)
         repo = Repository(fake_git_repo)
