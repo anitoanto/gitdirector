@@ -9,6 +9,7 @@ from textual.widgets import DataTable, Static
 from textual.widgets._footer import FooterKey
 
 from gitdirector.commands.tui import (
+    CreatePanelScreen,
     _PANELS_SORT_COLUMN_NAMES,
     ConfirmScreen,
     GitDirectorConsole,
@@ -313,6 +314,46 @@ class TestPanelStore:
         assert panel.closed_panes == {1}
         mock_kill_panel_tmux_session.assert_not_called()
 
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_reconfigure_updates_layout_assignments_and_kills_panel_tmux_session(
+        self,
+        mock_kill_panel_tmux_session,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create(
+                "Main",
+                layout_key="grid_1x2",
+                panes={1: "gd/my-repo/shell/1", 2: "gd/my-repo/copilot/1"},
+            )
+
+            reconfigured = store.reconfigure(
+                "Main",
+                layout_key="wide_bottom",
+                panes={1: "gd/my-repo/shell/1", 2: None, 3: "gd/my-repo/copilot/1"},
+            )
+
+            reloaded_store = PanelStore()
+
+        assert reconfigured is True
+        panel = store.get("Main")
+        assert panel is not None
+        assert panel.layout_key == "wide_bottom"
+        assert panel.rows == 2
+        assert panel.cols == 2
+        assert panel.panes == {
+            1: "gd/my-repo/shell/1",
+            2: None,
+            3: "gd/my-repo/copilot/1",
+        }
+        assert panel.closed_panes == set()
+        reloaded_panel = reloaded_store.get("Main")
+        assert reloaded_panel is not None
+        assert reloaded_panel.layout_key == "wide_bottom"
+        assert reloaded_panel.panes == panel.panes
+        mock_kill_panel_tmux_session.assert_called_once_with("Main")
+
 
 class TestTabStyling:
     def test_active_tab_uses_filled_style(self):
@@ -603,6 +644,49 @@ class TestGitDirectorConsolePanels:
         app._handle_panel_action("delete", "Main")
 
         assert isinstance(app.push_screen.call_args.args[0], ConfirmScreen)
+
+    def test_handle_panel_action_reconfigure_pushes_create_panel_screen(self):
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = Panel(
+            name="Main",
+            rows=2,
+            cols=2,
+            panes={1: "gd/my-repo/shell/1", 2: None, 3: "gd/my-repo/copilot/1"},
+            layout_key="wide_bottom",
+        )
+
+        app._handle_panel_action("reconfigure", "Main")
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, CreatePanelScreen)
+        assert screen._editing is True
+        assert screen._selected_layout_key == "wide_bottom"
+        assert screen._pane_assignments[1] == "gd/my-repo/shell/1"
+        assert screen._pane_assignments[3] == "gd/my-repo/copilot/1"
+
+    def test_handle_reconfigure_panel_updates_store_and_opens_panel(self):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        app._panel_store.reconfigure.return_value = True
+        app._load_panels = MagicMock()
+        app._open_panel = MagicMock()
+        app._update_status = MagicMock()
+
+        app._handle_reconfigure_panel(
+            "Main",
+            ("Main", "wide_bottom", {1: "gd/my-repo/shell/1", 2: None, 3: None}),
+        )
+
+        app._panel_store.reconfigure.assert_called_once_with(
+            "Main",
+            panes={1: "gd/my-repo/shell/1", 2: None, 3: None},
+            layout_key="wide_bottom",
+        )
+        app._load_panels.assert_called_once_with()
+        app._open_panel.assert_called_once_with("Main")
+        app._update_status.assert_not_called()
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",

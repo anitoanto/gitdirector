@@ -1408,6 +1408,19 @@ class GitDirectorConsole(App):
             return
         if action == "open":
             self._open_panel(panel_name)
+        elif action == "reconfigure":
+            panel = self._panel_store.get(panel_name)
+            if not panel:
+                return
+            self.push_screen(
+                CreatePanelScreen(
+                    panel_name=panel.name,
+                    initial_layout_key=panel.layout.key,
+                    initial_panes=panel.panes,
+                    editing=True,
+                ),
+                callback=lambda result: self._handle_reconfigure_panel(panel_name, result),
+            )
         elif action == "rename":
             self.push_screen(
                 RenamePanelScreen(panel_name),
@@ -1491,6 +1504,22 @@ class GitDirectorConsole(App):
             self._update_status(f"Panel '{name}' was not created because all panes are empty")
             return
         self._open_panel(name)
+
+    def _handle_reconfigure_panel(
+        self,
+        panel_name: str,
+        result: tuple[str, str, dict[int, str | None]] | None,
+    ) -> None:
+        if result is None:
+            return
+
+        _, layout_key, panes = result
+        if not self._panel_store.reconfigure(panel_name, panes=panes, layout_key=layout_key):
+            self._update_status(f"Panel '{panel_name}' could not be reconfigured")
+            return
+
+        self._load_panels()
+        self._open_panel(panel_name)
 
     def action_delete_panel(self) -> None:
         if self._active_tab != "panels":
