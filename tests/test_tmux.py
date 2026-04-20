@@ -1,17 +1,29 @@
-"""Tests for gitdirector.integrations.tmux – all subprocess calls are mocked."""
+"""Tests for gitdirector.integrations.tmux."""
 
+import os
 import shlex
+import shutil
+import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from gitdirector.integrations.tmux import (
     _AGENT_PURPOSES,
     _BELL_GRACE_SECS,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
+    _build_layout_spec,
     _build_panel_layout,
+    _current_window_target,
+    _distribute_equal,
+    _layout_checksum,
+    _span_size,
     TmuxMonitor,
     _capture_pane_text,
     _ControlModeReader,
@@ -21,11 +33,14 @@ from gitdirector.integrations.tmux import (
     _make_session_name,
     _normalize_process_command,
     _embedded_tmux_attach_command,
+    _panel_attach_fragment,
     _panel_border_format,
     _panel_pane_command,
+    _panel_proxy_attach_fragment,
     _panel_proxy_session_name,
     _panel_tmux_config,
     _session_tmux_config,
+    _tmux_theme_config,
     _configure_panel_window,
     _load_panel_tmux_config,
     _panel_pane_title,
@@ -44,6 +59,7 @@ from gitdirector.integrations.tmux import (
     list_all_gd_sessions,
     list_repo_sessions,
     open_in_tmux,
+    rebuild_panel_tmux_session,
     resolve_pane_status,
     sync_panel_tmux_config,
 )
@@ -104,7 +120,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "gd/panel/focus:0.0",
+            "=gd/panel/focus:0.0",
             "cat",
         )
         assert mock_tmux_output.call_args_list[1].args == (
@@ -120,6 +136,57 @@ class TestBuildPanelLayout:
             "cat",
         )
         mock_list_panes.assert_called_once_with("gd/panel/focus")
+
+    @patch(
+        "gitdirector.integrations.tmux._list_window_panes_row_major",
+        return_value=["%0", "%1", "%2", "%3"],
+    )
+    @patch("gitdirector.integrations.tmux._tmux_output")
+    def test_builds_two_by_two_grid_layout(self, mock_tmux_output, mock_list_panes):
+        mock_tmux_output.side_effect = ["%1", "%2", "%3"]
+
+        pane_ids = _build_panel_layout("gd/panel/grid", 2, 2, "grid_2x2")
+
+        assert pane_ids == ["%0", "%1", "%2", "%3"]
+        assert [call.args for call in mock_tmux_output.call_args_list] == [
+            (
+                "split-window",
+                "-v",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "=gd/panel/grid:0.0",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "=gd/panel/grid:0.0",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%1",
+                "cat",
+            ),
+        ]
+        mock_list_panes.assert_called_once_with("gd/panel/grid")
 
     @patch(
         "gitdirector.integrations.tmux._list_window_panes_row_major",
@@ -141,7 +208,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "gd/panel/focus:0.0",
+            "=gd/panel/focus:0.0",
             "cat",
         )
         assert mock_tmux_output.call_args_list[1].args == (
@@ -153,7 +220,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "gd/panel/focus:0.0",
+            "=gd/panel/focus:0.0",
             "cat",
         )
         mock_list_panes.assert_called_once_with("gd/panel/focus")
@@ -179,7 +246,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "gd/panel/wall:0.0",
+                "=gd/panel/wall:0.0",
                 "cat",
             ),
             (
@@ -191,7 +258,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "gd/panel/wall:0.0",
+                "=gd/panel/wall:0.0",
                 "cat",
             ),
             (
@@ -242,7 +309,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "gd/panel/grid:0.0",
+            "=gd/panel/grid:0.0",
             "cat",
         )
         assert mock_tmux_output.call_args_list[1].args == (
@@ -254,7 +321,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "gd/panel/grid:0.0",
+            "=gd/panel/grid:0.0",
             "cat",
         )
         assert mock_tmux_output.call_args_list[2].args == (
@@ -269,6 +336,117 @@ class TestBuildPanelLayout:
             "%1",
             "cat",
         )
+        mock_list_panes.assert_called_once_with("gd/panel/grid")
+
+    @patch(
+        "gitdirector.integrations.tmux._list_window_panes_row_major",
+        return_value=["%0", "%1", "%2", "%3", "%4", "%5", "%6", "%7", "%8"],
+    )
+    @patch("gitdirector.integrations.tmux._tmux_output")
+    def test_builds_three_by_three_grid_layout(self, mock_tmux_output, mock_list_panes):
+        mock_tmux_output.side_effect = ["%1", "%2", "%3", "%4", "%5", "%6", "%7", "%8"]
+
+        pane_ids = _build_panel_layout("gd/panel/grid", 3, 3, "grid_3x3")
+
+        assert pane_ids == ["%0", "%1", "%2", "%3", "%4", "%5", "%6", "%7", "%8"]
+        assert [call.args for call in mock_tmux_output.call_args_list] == [
+            (
+                "split-window",
+                "-v",
+                "-l",
+                "67%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "=gd/panel/grid:0.0",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "67%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "=gd/panel/grid:0.0",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%2",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-v",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%1",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "67%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%1",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%5",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "67%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%4",
+                "cat",
+            ),
+            (
+                "split-window",
+                "-h",
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                "%7",
+                "cat",
+            ),
+        ]
         mock_list_panes.assert_called_once_with("gd/panel/grid")
 
     @patch(
@@ -292,7 +470,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "gd/panel/studio:0.0",
+                "=gd/panel/studio:0.0",
                 "cat",
             ),
             (
@@ -304,7 +482,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "gd/panel/studio:0.0",
+                "=gd/panel/studio:0.0",
                 "cat",
             ),
             (
@@ -397,6 +575,171 @@ class TestMakeSessionName:
         assert name == "gd/foo-bar-baz/shell/1"
 
 
+class TestRebuildPanelTmuxSession:
+    @patch("gitdirector.integrations.tmux.shutil.get_terminal_size", return_value=(80, 24))
+    @patch("gitdirector.integrations.tmux._ensure_panel_prefix_bindings")
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux._load_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux._configure_panel_window")
+    @patch("gitdirector.integrations.tmux._equalize_panel_layout")
+    @patch(
+        "gitdirector.integrations.tmux._build_panel_layout", return_value=["%0", "%1", "%2", "%3"]
+    )
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_enables_pane_headers_before_building_layout(
+        self,
+        mock_run,
+        mock_kill,
+        mock_build_layout,
+        mock_equalize,
+        mock_configure,
+        mock_load,
+        mock_sync,
+        mock_bindings,
+        mock_term_size,
+    ):
+        def assert_border_enabled_first(*args, **kwargs):
+            assert [call.args for call in mock_run.call_args_list] == [
+                (
+                    [
+                        "tmux",
+                        "new-session",
+                        "-d",
+                        "-s",
+                        "gd/panel/main",
+                        "-n",
+                        "Main",
+                        "-x",
+                        "80",
+                        "-y",
+                        "24",
+                        "-c",
+                        str(Path.home()),
+                        "cat",
+                    ],
+                ),
+                (
+                    [
+                        "tmux",
+                        "set-window-option",
+                        "-t",
+                        "=gd/panel/main:0",
+                        "pane-border-status",
+                        "top",
+                    ],
+                ),
+            ]
+            return ["%0", "%1", "%2", "%3"]
+
+        mock_build_layout.side_effect = assert_border_enabled_first
+
+        session_name = rebuild_panel_tmux_session(
+            "Main",
+            2,
+            2,
+            {1: None, 2: None, 3: None, 4: None},
+            layout_key="grid_2x2",
+            theme_name="rose-pine",
+        )
+
+        assert session_name == "gd/panel/main"
+        mock_kill.assert_called_once_with("Main")
+        mock_equalize.assert_called_once()
+        mock_configure.assert_called_once()
+        mock_load.assert_called_once()
+        mock_sync.assert_called_once_with("rose-pine")
+        mock_bindings.assert_called_once_with()
+
+
+class TestDistributeEqual:
+    def test_divides_evenly(self):
+        assert _distribute_equal(30, 3) == [10, 10, 10]
+
+    def test_remainder_goes_to_first_parts(self):
+        assert _distribute_equal(10, 3) == [4, 3, 3]
+
+    def test_single_part(self):
+        assert _distribute_equal(42, 1) == [42]
+
+
+class TestSpanSize:
+    def test_single_cell(self):
+        assert _span_size([10, 10, 10], 1, 1) == 10
+
+    def test_multi_span_adds_separators(self):
+        assert _span_size([10, 10, 10], 0, 2) == 21
+
+    def test_full_span(self):
+        assert _span_size([10, 10, 10], 0, 3) == 32
+
+
+class TestLayoutChecksum:
+    def test_known_layout_checksum(self):
+        spec = "80x24,0,0{40x24,0,0,0,39x24,41,0,1}"
+        csum = _layout_checksum(spec)
+        assert isinstance(csum, int)
+        assert 0 <= csum <= 0xFFFF
+
+    def test_deterministic(self):
+        spec = "200x60,0,0[200x40,0,0,0,200x19,0,41,1]"
+        assert _layout_checksum(spec) == _layout_checksum(spec)
+
+
+class TestBuildLayoutSpec:
+    def test_single_pane_leaf(self):
+        spec = _build_layout_spec(
+            ((0, 0, 1, 1),),
+            {(0, 0): 0},
+            [24],
+            [80],
+            0,
+            0,
+        )
+        assert spec == "80x24,0,0,0"
+
+    def test_two_column_split(self):
+        spec = _build_layout_spec(
+            ((0, 0, 1, 1), (0, 1, 1, 1)),
+            {(0, 0): 0, (0, 1): 1},
+            [24],
+            [40, 39],
+            0,
+            0,
+        )
+        assert spec == "80x24,0,0{40x24,0,0,0,39x24,41,0,1}"
+
+    def test_two_row_split(self):
+        spec = _build_layout_spec(
+            ((0, 0, 1, 1), (1, 0, 1, 1)),
+            {(0, 0): 0, (1, 0): 1},
+            [12, 11],
+            [80],
+            0,
+            0,
+        )
+        assert spec == "80x24,0,0[80x12,0,0,0,80x11,0,13,1]"
+
+    def test_quad_top_left_3x3_equal_proportions(self):
+        placements = (
+            (0, 0, 2, 2),
+            (0, 2, 1, 1),
+            (1, 2, 1, 1),
+            (2, 0, 1, 1),
+            (2, 1, 1, 1),
+            (2, 2, 1, 1),
+        )
+        pane_id_map = {(0, 0): 0, (0, 2): 1, (1, 2): 2, (2, 0): 3, (2, 1): 4, (2, 2): 5}
+        row_heights = _distribute_equal(60 - 2, 3)
+        col_widths = _distribute_equal(200 - 2, 3)
+
+        spec = _build_layout_spec(placements, pane_id_map, row_heights, col_widths, 0, 0)
+
+        assert "0" in spec
+        for pane_num in range(6):
+            assert f",{pane_num}" in spec or spec.endswith(f",{pane_num}")
+
+
 class TestPanelPaneTitles:
     def test_panel_pane_title_uses_session_slug(self):
         assert _panel_pane_title(1, "gd/my-repo/copilot/3") == "copilot my-repo/3"
@@ -433,9 +776,9 @@ class TestPanelPaneTitles:
         theme = resolve_panel_theme("rose-pine")
         config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
 
-        assert "set-option -t gd/panel/main status-position bottom" in config
-        assert "set-option -t gd/panel/main status-left" in config
-        assert "set-option -t gd/panel/main status-right" in config
+        assert "set-option -t =gd/panel/main: status-position bottom" in config
+        assert "set-option -t =gd/panel/main: status-left" in config
+        assert "set-option -t =gd/panel/main: status-right" in config
         assert f'message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"' in config
         assert (
             f'window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"'
@@ -444,12 +787,11 @@ class TestPanelPaneTitles:
 
     def test_panel_pane_command_hides_session_status_while_attached(self):
         command = _panel_pane_command("Main", 1, "gd/my-repo/copilot/3")
-        proxy_session = _panel_proxy_session_name("Main", 1)
 
-        assert f"tmux new-session -d -t gd/my-repo/copilot/3 -s {proxy_session}" in command
-        assert f"tmux set-option -q -t {proxy_session} status off" in command
-        assert f"tmux attach-session -t {proxy_session}" in command
-        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" not in command
+        assert "tmux new-session -d -t =gd/my-repo/copilot/3 -s" not in command
+        assert "tmux attach-session -t =gd-proxy/panel/main/1" not in command
+        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
+        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
         assert "SESSION CLOSED" in command
         assert "Once all panes are closed, this panel will autodelete" in command
         assert "Reopen the panel from GitDirector to attach again." not in command
@@ -465,19 +807,18 @@ class TestPanelPaneTitles:
         command = _embedded_tmux_attach_command("gd/my-repo/copilot/3")
 
         assert command.startswith("sh -c ")
-        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" in command
+        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
         assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' in command
-        assert "tmux attach-session -t gd/my-repo/copilot/3" in command
+        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
-    def test_embedded_tmux_attach_command_uses_panel_proxy_when_context_provided(self):
+    def test_embedded_tmux_attach_command_uses_direct_attach_when_context_provided(self):
         command = _embedded_tmux_attach_command("gd/my-repo/copilot/3", "Main", 2)
-        proxy_session = _panel_proxy_session_name("Main", 2)
 
         assert command.startswith("sh -c ")
-        assert f"tmux new-session -d -t gd/my-repo/copilot/3 -s {proxy_session}" in command
-        assert f"tmux set-option -q -t {proxy_session} status off" in command
-        assert f"tmux attach-session -t {proxy_session}" in command
-        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" not in command
+        assert "tmux new-session -d -t =gd/my-repo/copilot/3 -s" not in command
+        assert "tmux attach-session -t =gd-proxy/panel/main/2" not in command
+        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
+        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
     @patch(
         "gitdirector.integrations.tmux._current_window_target", return_value="gd/my-repo/shell/1:2"
@@ -486,10 +827,10 @@ class TestPanelPaneTitles:
         theme = resolve_panel_theme("rose-pine")
         config = _session_tmux_config("gd/my-repo/shell/1", "rose-pine")
 
-        assert "set-option -t gd/my-repo/shell/1 status-left" in config
+        assert "set-option -t =gd/my-repo/shell/1: status-left" in config
         assert "SHELL" in config
         assert "my-repo/shell/1" in config
-        assert "set-window-option -t gd/my-repo/shell/1:2 pane-border-style" in config
+        assert "set-window-option -t =gd/my-repo/shell/1:2 pane-border-style" in config
         assert f'pane-active-border-style "fg={theme.border_active}"' in config
         assert "pane-border-status top" not in config
         assert "pane-border-format" not in config
@@ -515,7 +856,7 @@ class TestPanelPaneTitles:
         assert written_path == config_path
         assert config_path.exists()
         content = config_path.read_text()
-        assert "set-option -t gd/panel/main status-position bottom" in content
+        assert "set-option -t =gd/panel/main: status-position bottom" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux._session_exists", side_effect=[True, False])
@@ -544,8 +885,8 @@ class TestPanelPaneTitles:
         assert written_path == config_path
         content = config_path.read_text()
         assert "# theme: nord" in content
-        assert "set-option -t gd/panel/main status-position bottom" in content
-        assert "set-option -t gd/panel/me2 status-position bottom" in content
+        assert "set-option -t =gd/panel/main: status-position bottom" in content
+        assert "set-option -t =gd/panel/me2: status-position bottom" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -566,9 +907,9 @@ class TestPanelPaneTitles:
         assert written_path == config_path
         content = config_path.read_text()
         assert "# theme: nord" in content
-        assert "set-option -t gd/my-repo/shell/1 status-left" in content
+        assert "set-option -t =gd/my-repo/shell/1: status-left" in content
         assert "SHELL" in content
-        assert "set-window-option -t gd/my-repo/shell/1:2 pane-border-style" in content
+        assert "set-window-option -t =gd/my-repo/shell/1:2 pane-border-style" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -633,7 +974,7 @@ class TestPanelPaneTitles:
             "tmux",
             "set-window-option",
             "-t",
-            "gd/panel/main:0",
+            "=gd/panel/main:0",
             "pane-border-style",
             f"fg={theme.border_inactive}",
         ] in commands
@@ -641,7 +982,7 @@ class TestPanelPaneTitles:
             "tmux",
             "set-window-option",
             "-t",
-            "gd/panel/main:0",
+            "=gd/panel/main:0",
             "pane-active-border-style",
             f"fg={theme.border_active}",
         ] in commands
@@ -649,7 +990,7 @@ class TestPanelPaneTitles:
             "tmux",
             "set-window-option",
             "-t",
-            "gd/panel/main:0",
+            "=gd/panel/main:0",
             "pane-border-format",
             _panel_border_format("nord"),
         ] in commands
@@ -666,7 +1007,7 @@ class TestSessionExists:
         mock_run.return_value = MagicMock(returncode=0)
         assert _session_exists("gd/repo/shell/1") is True
         mock_run.assert_called_once_with(
-            ["tmux", "has-session", "-t", "gd/repo/shell/1"],
+            ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
             capture_output=True,
         )
 
@@ -784,14 +1125,16 @@ class TestKillPanelTmuxSession:
 
         assert kill_panel_tmux_session("Main") is True
 
-        assert mock_run.call_args_list[0].args == (["tmux", "kill-session", "-t", "gd/panel/main"],)
+        assert mock_run.call_args_list[0].args == (
+            ["tmux", "kill-session", "-t", "=gd/panel/main"],
+        )
         assert mock_run.call_args_list[0].kwargs == {"capture_output": True}
         assert mock_run.call_args_list[1].args == (
-            ["tmux", "kill-session", "-t", "gd-proxy/panel/main/1"],
+            ["tmux", "kill-session", "-t", "=gd-proxy/panel/main/1"],
         )
         assert mock_run.call_args_list[1].kwargs == {"check": False}
         assert mock_run.call_args_list[2].args == (
-            ["tmux", "kill-session", "-t", "gd-proxy/panel/main/2"],
+            ["tmux", "kill-session", "-t", "=gd-proxy/panel/main/2"],
         )
         assert mock_run.call_args_list[2].kwargs == {"check": False}
 
@@ -802,7 +1145,7 @@ class TestAttachTmuxSession:
     def test_inside_tmux_switches_client(self, mock_run, mock_sync):
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")
-        mock_run.assert_called_once_with(["tmux", "switch-client", "-t", "gd/repo/shell/1"])
+        mock_run.assert_called_once_with(["tmux", "switch-client", "-t", "=gd/repo/shell/1"])
         mock_sync.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
@@ -810,7 +1153,7 @@ class TestAttachTmuxSession:
     def test_outside_tmux_attaches(self, mock_run, mock_sync):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/repo/shell/1")
-        mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "gd/repo/shell/1"])
+        mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "=gd/repo/shell/1"])
         mock_sync.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
@@ -818,7 +1161,7 @@ class TestAttachTmuxSession:
     def test_non_gd_session_skips_theme_sync(self, mock_run, mock_sync):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("plain-session")
-        mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "plain-session"])
+        mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "=plain-session"])
         mock_sync.assert_not_called()
 
 
@@ -848,7 +1191,7 @@ class TestLaunchAgentInTmuxSession:
             "clear; copilot; status=$?; "
             "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "tmux detach-client >/dev/null 2>&1 || true; "
-            f"tmux kill-session -t {shlex.quote('gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
+            f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             "exit $status"
         )
         expected_command = f"sh -lc {shlex.quote(cleanup_script)}"
@@ -858,7 +1201,7 @@ class TestLaunchAgentInTmuxSession:
                 "tmux",
                 "send-keys",
                 "-t",
-                "gd/my-repo/copilot/1",
+                "=gd/my-repo/copilot/1:",
                 expected_command,
                 "Enter",
             ],
@@ -1537,3 +1880,409 @@ class TestCapturePaneText:
     def test_returns_none_on_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         assert _capture_pane_text("gd/repo/shell/1") is None
+
+
+# ---------------------------------------------------------------------------
+# Edge-case regression tests: tmux exact-match ``=`` prefix
+# ---------------------------------------------------------------------------
+# tmux uses *prefix matching* when ``-t`` targets don't match exactly.
+# Without the ``=`` prefix every ``-t`` argument is vulnerable to accidentally
+# matching a session whose name starts with the supplied string – the cascade
+# kill bug.  The tests below guarantee the ``=`` prefix is always present.
+# ---------------------------------------------------------------------------
+
+
+class TestExactMatchSessionExists:
+    """_session_exists must use ``=`` so ``gd/panel/dev`` doesn't match ``gd/panel/dev-tools``."""
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_has_session_uses_exact_prefix(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        _session_exists("gd/panel/dev")
+        args = mock_run.call_args[0][0]
+        assert args == ["tmux", "has-session", "-t", "=gd/panel/dev"]
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_similar_name_not_matched(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1)
+        result = _session_exists("gd/panel/dev")
+        assert result is False
+        target_arg = mock_run.call_args[0][0][3]
+        assert target_arg.startswith("=")
+
+
+class TestExactMatchKillTmuxSession:
+    """kill_tmux_session must use ``=`` so killing one session can't cascade."""
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_kill_uses_exact_prefix(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        kill_tmux_session("gd/panel/dev")
+        args = mock_run.call_args[0][0]
+        assert args == ["tmux", "kill-session", "-t", "=gd/panel/dev"]
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_kill_cannot_prefix_match_similar_session(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        kill_tmux_session("gd/panel/dev")
+        target = mock_run.call_args[0][0][3]
+        assert target == "=gd/panel/dev"
+        assert target != "gd/panel/dev"
+
+
+class TestExactMatchAttachTmuxSession:
+    """attach_tmux_session must use ``=`` for both switch-client and attach-session."""
+
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_switch_client_exact(self, mock_run, _mock_sync):
+        with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
+            attach_tmux_session("gd/panel/dev")
+        target = mock_run.call_args[0][0][3]
+        assert target == "=gd/panel/dev"
+
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_attach_session_exact(self, mock_run, _mock_sync):
+        with patch.dict("os.environ", {}, clear=True):
+            attach_tmux_session("gd/panel/dev")
+        target = mock_run.call_args[0][0][3]
+        assert target == "=gd/panel/dev"
+
+
+class TestExactMatchKillPanelTmuxSession:
+    """kill_panel_tmux_session must not cascade to panels with similar names."""
+
+    @patch(
+        "gitdirector.integrations.tmux._list_sessions",
+        return_value=[
+            "gd-proxy/panel/dev/1",
+            "gd-proxy/panel/dev/2",
+            "gd-proxy/panel/dev-tools/1",
+            "gd-proxy/panel/dev-tools/2",
+            "gd/panel/dev-tools",
+        ],
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_only_kills_exact_panel_proxies(self, mock_run, _mock_list):
+        mock_run.return_value = MagicMock(returncode=0)
+        kill_panel_tmux_session("Dev")
+
+        killed_targets = [call.args[0][3] for call in mock_run.call_args_list]
+
+        assert "=gd/panel/dev" in killed_targets
+        assert "=gd-proxy/panel/dev/1" in killed_targets
+        assert "=gd-proxy/panel/dev/2" in killed_targets
+
+        assert "=gd-proxy/panel/dev-tools/1" not in killed_targets
+        assert "=gd-proxy/panel/dev-tools/2" not in killed_targets
+        assert "=gd/panel/dev-tools" not in killed_targets
+
+    @patch(
+        "gitdirector.integrations.tmux._list_sessions",
+        return_value=[
+            "gd-proxy/panel/dev/1",
+            "gd-proxy/panel/dev-tools/1",
+        ],
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_all_targets_use_equals_prefix(self, mock_run, _mock_list):
+        mock_run.return_value = MagicMock(returncode=0)
+        kill_panel_tmux_session("Dev")
+
+        for call in mock_run.call_args_list:
+            args = call.args[0]
+            t_indices = [i for i, a in enumerate(args) if a == "-t"]
+            for i in t_indices:
+                assert args[i + 1].startswith("="), f"'-t' target missing '=' prefix: {args}"
+
+
+class TestExactMatchPanelAttachFragment:
+    """_panel_attach_fragment shell script must use ``=`` for all -t args."""
+
+    def test_all_tmux_targets_use_equals(self):
+        fragment = _panel_attach_fragment("gd/panel/dev")
+        for part in fragment.split("tmux ")[1:]:
+            if " -t " in part:
+                target = part.split(" -t ")[1].split()[0]
+                unquoted = target.strip("'\"")
+                assert unquoted.startswith("=") or unquoted.startswith("$"), (
+                    f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                )
+
+
+class TestExactMatchPanelProxyAttachFragment:
+    """_panel_proxy_attach_fragment must use exact targets and avoid grouped sessions."""
+
+    def test_proxy_targets_use_equals(self):
+        fragment = _panel_proxy_attach_fragment("Dev", 1, "gd/repo/shell/1")
+        commands = fragment.split("; ")
+        for cmd in commands:
+            if "tmux " not in cmd:
+                continue
+            parts = cmd.split()
+            for i, part in enumerate(parts):
+                if part == "-t" and i + 1 < len(parts):
+                    target = parts[i + 1].strip("'\"")
+                    assert target.startswith("=") or target.startswith("$"), (
+                        f"-t target missing '=' prefix: {cmd}"
+                    )
+
+    def test_fragment_does_not_create_grouped_session(self):
+        fragment = _panel_proxy_attach_fragment("Dev", 1, "gd/repo/shell/1")
+        assert "new-session -d" not in fragment
+        assert "gd-proxy/panel/dev/1" in fragment
+        assert "tmux set-option -q -t =gd/repo/shell/1: status off" in fragment
+        assert "tmux attach-session -t =gd/repo/shell/1" in fragment
+
+    def test_fragment_uses_direct_attach_after_proxy_cleanup(self):
+        fragment = _panel_proxy_attach_fragment("Dev", 1, "gd/repo/shell/1")
+        assert "kill-session -t =gd-proxy/panel/dev/1" in fragment
+        assert "attach-session -t =gd/repo/shell/1" in fragment
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+class TestPanelExitIntegration:
+    def test_exiting_one_panel_pane_keeps_panel_and_other_session_alive(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-"))
+        monkeypatch.setenv("HOME", str(home_dir))
+        monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+        monkeypatch.delenv("TMUX", raising=False)
+
+        suffix = uuid.uuid4().hex[:8]
+        base_a = f"gd/repro-base-a-{suffix}"
+        base_b = f"gd/repro-base-b-{suffix}"
+        panel_name = f"repro-{suffix}"
+
+        def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["tmux", *args],
+                capture_output=True,
+                text=True,
+                check=check,
+            )
+
+        try:
+            run_tmux("new-session", "-d", "-s", base_a, "-n", "a")
+            run_tmux("new-session", "-d", "-s", base_b, "-n", "b")
+
+            panel_session = rebuild_panel_tmux_session(
+                panel_name,
+                1,
+                2,
+                {1: base_a, 2: base_b},
+                layout_key="grid_1x2",
+            )
+
+            sessions_before = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+            assert panel_session in sessions_before
+            assert base_a in sessions_before
+            assert base_b in sessions_before
+            assert not any(
+                name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_before
+            )
+
+            run_tmux("send-keys", "-t", f"={panel_session}:0.1", "exit", "Enter")
+            time.sleep(1)
+
+            sessions_after = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+            pane_commands = run_tmux(
+                "list-panes",
+                "-t",
+                f"={panel_session}:0",
+                "-F",
+                "#{pane_index}|#{pane_current_command}",
+            ).stdout.splitlines()
+
+            assert panel_session in sessions_after
+            assert base_a not in sessions_after
+            assert base_b in sessions_after
+            assert not any(
+                name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_after
+            )
+            assert "1|tail" in pane_commands
+            assert any(line.startswith("2|") and line != "2|tail" for line in pane_commands)
+        finally:
+            subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
+            shutil.rmtree(tmux_dir, ignore_errors=True)
+
+
+class TestExactMatchEmbeddedTmuxAttachCommand:
+    """_embedded_tmux_attach_command must use ``=`` in has-session check."""
+
+    def test_has_session_uses_equals(self):
+        cmd = _embedded_tmux_attach_command("gd/repo/shell/1")
+        assert "has-session -t" in cmd
+        has_session_part = cmd.split("has-session -t ")[1].split()[0]
+        unquoted = has_session_part.strip("'\"")
+        assert unquoted.startswith("="), f"has-session -t missing '=' prefix: {has_session_part}"
+
+    def test_with_panel_proxy_uses_equals(self):
+        cmd = _embedded_tmux_attach_command("gd/repo/shell/1", panel_name="Dev", pane_index=1)
+        assert "has-session -t" in cmd
+        has_session_part = cmd.split("has-session -t ")[1].split()[0]
+        unquoted = has_session_part.strip("'\"")
+        assert unquoted.startswith("=")
+
+
+class TestExactMatchPanelPaneCommand:
+    """_panel_pane_command must use ``=`` in has-session check."""
+
+    def test_assigned_pane_uses_exact_has_session(self):
+        cmd = _panel_pane_command("Dev", 1, "gd/repo/shell/1")
+        assert "has-session -t" in cmd
+        has_session_part = cmd.split("has-session -t ")[1].split()[0]
+        unquoted = has_session_part.strip("'\"")
+        assert unquoted.startswith("=")
+
+    def test_unassigned_pane_has_no_tmux_target(self):
+        cmd = _panel_pane_command("Dev", 1, None)
+        assert "has-session" not in cmd
+
+
+class TestExactMatchLaunchAgent:
+    """launch_agent_in_tmux_session must use exact session and pane targets."""
+
+    @patch(
+        "gitdirector.integrations.tmux._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_send_keys_target_uses_equals(self, mock_run, _mock_marker):
+        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        send_keys_args = mock_run.call_args[0][0]
+        assert send_keys_args[0:3] == ["tmux", "send-keys", "-t"]
+        assert send_keys_args[3] == "=gd/my-repo/copilot/1:"
+
+    @patch(
+        "gitdirector.integrations.tmux._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_cleanup_script_kill_session_uses_equals(self, mock_run, _mock_marker):
+        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        cleanup_cmd = mock_run.call_args[0][0][4]
+        assert f"kill-session -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
+
+
+class TestExactMatchCapturePaneText:
+    """_capture_pane_text must use ``=`` prefix."""
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_capture_target_uses_equals(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="text")
+        _capture_pane_text("gd/repo/shell/1")
+        args = mock_run.call_args[0][0]
+        assert args == ["tmux", "capture-pane", "-p", "-t", "=gd/repo/shell/1:"]
+
+
+class TestExactMatchControlModeReader:
+    """_ControlModeReader must use ``=`` prefix in attach-session."""
+
+    def test_attach_command_uses_equals(self):
+        reader = _ControlModeReader("gd/repo/shell/1", callback=lambda *a: None)
+        with patch("gitdirector.integrations.tmux.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = iter([])
+            mock_popen.return_value = mock_proc
+            reader._run()
+            popen_args = mock_popen.call_args[0][0]
+            assert popen_args == ["tmux", "-C", "attach-session", "-t", "=gd/repo/shell/1", "-r"]
+
+
+class TestExactMatchTmuxThemeConfig:
+    """_tmux_theme_config must use ``=`` prefix in all set-option/set-window-option targets."""
+
+    def test_all_config_lines_use_equals_prefix(self):
+        config = _tmux_theme_config(
+            badge_text="SHELL",
+            label_text="my-repo",
+            session_name="gd/my-repo/shell/1",
+            pane_border_status="top",
+            pane_border_format="test-format",
+        )
+        for line in config.strip().splitlines():
+            if " -t " not in line:
+                continue
+            target = line.split(" -t ")[1].split()[0]
+            unquoted = target.strip("'\"")
+            assert unquoted.startswith("="), f"config line missing '=' prefix in -t target: {line}"
+
+    def test_custom_window_target_gets_equals(self):
+        config = _tmux_theme_config(
+            badge_text="PANEL",
+            label_text="dev",
+            session_name="gd/panel/dev",
+            window_target="gd/panel/dev:0",
+        )
+        for line in config.strip().splitlines():
+            if "set-window-option" in line and " -t " in line:
+                target = line.split(" -t ")[1].split()[0]
+                unquoted = target.strip("'\"")
+                assert unquoted.startswith("="), f"window target missing '=' prefix: {line}"
+
+
+class TestExactMatchCurrentWindowTarget:
+    """_current_window_target must use ``=`` prefix."""
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_display_message_uses_equals(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="gd/repo/shell/1:0\n")
+        _current_window_target("gd/repo/shell/1")
+        args = mock_run.call_args[0][0]
+        assert "-t" in args
+        t_index = args.index("-t")
+        assert args[t_index + 1] == "=gd/repo/shell/1:"
+
+
+class TestExactMatchSourceCodeAudit:
+    """Scan tmux.py source for any subprocess ``-t`` arg missing the ``=`` prefix.
+
+    This is a structural guard: any new code that passes ``-t`` to a subprocess
+    call list without ``=`` will be caught here.
+    """
+
+    def test_all_subprocess_list_targets_use_equals(self):
+        import ast
+        import inspect
+        import gitdirector.integrations.tmux as tmux_mod
+
+        source = inspect.getsource(tmux_mod)
+        tree = ast.parse(source)
+
+        violations = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.List):
+                continue
+            elts = node.elts
+            for i, elt in enumerate(elts):
+                if not (isinstance(elt, ast.Constant) and elt.value == "-t"):
+                    continue
+                if i + 1 >= len(elts):
+                    continue
+                next_elt = elts[i + 1]
+                if isinstance(next_elt, ast.Constant):
+                    val = str(next_elt.value)
+                    if not val.startswith("="):
+                        violations.append(f"Line {node.lineno}: literal '-t' followed by {val!r}")
+                elif isinstance(next_elt, ast.JoinedStr):
+                    first_val = next_elt.values[0] if next_elt.values else None
+                    if isinstance(first_val, ast.Constant) and not str(first_val.value).startswith(
+                        "="
+                    ):
+                        violations.append(
+                            f"Line {node.lineno}: f-string '-t' target doesn't start with '='"
+                        )
+                    elif isinstance(first_val, ast.FormattedValue):
+                        violations.append(
+                            f"Line {node.lineno}: f-string '-t' target starts with a variable (should prefix '=')"
+                        )
+        assert violations == [], (
+            "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        )
