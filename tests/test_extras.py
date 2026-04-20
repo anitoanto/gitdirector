@@ -219,34 +219,6 @@ class TestMainExceptionHandling:
 
 
 # ---------------------------------------------------------------------------
-# Manager – Pull all errors
-# ---------------------------------------------------------------------------
-
-
-class TestManagerPullAllErrors:
-    """Test error paths in RepositoryManager.pull_all()."""
-
-    def test_pull_all_with_missing_repo(self, manager, tmp_path):
-        """When repo path doesn't exist, it's added to failed list."""
-        # Add a repo to config but don't create it
-        fake_path = tmp_path / "nonexistent"
-        manager.config.add_repository(fake_path)
-
-        success, failed = manager.pull_all()
-        assert len(success) == 0
-        assert len(failed) == 1
-        assert "not found" in failed[0].lower()
-
-    def test_pull_all_with_repo_exception(self, manager, fake_git_repo, mocker):
-        """When repo.pull() raises exception, error is caught."""
-        manager.add_repository(fake_git_repo)
-        mocker.patch.object(Repository, "pull", side_effect=Exception("Pull failed"))
-        success, failed = manager.pull_all()
-        assert len(success) == 0
-        assert len(failed) == 1
-
-
-# ---------------------------------------------------------------------------
 # Manager – Get repository status error paths
 # ---------------------------------------------------------------------------
 

@@ -145,30 +145,3 @@ class RepositoryManager:
             None,
             "Repository path not found or invalid",
         )
-
-    def list_repositories(self) -> List[RepositoryInfo]:
-        return [self.get_repository_status(path) for path in self.config.repositories]
-
-    def pull_all(self) -> Tuple[List[str], List[str]]:
-        success = []
-        failed = []
-
-        for path in self.config.repositories:
-            if not path.exists() or not (path / ".git").is_dir():
-                failed.append(f"{path.name}: Path not found or invalid")
-                continue
-
-            try:
-                repo = Repository(path)
-                ok, msg = repo.pull()
-                if ok:
-                    success.append(f"{path.name}: {msg}")
-                else:
-                    failed.append(f"{path.name}: {msg}")
-            except Exception as e:
-                failed.append(f"{path.name}: {str(e)}")
-
-        return success, failed
-
-    def get_repository_count(self) -> int:
-        return len(self.config.repositories)

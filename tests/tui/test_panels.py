@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from time import monotonic
 from unittest.mock import MagicMock, patch
 
 from textual.color import Color
@@ -631,6 +632,49 @@ class TestGitDirectorConsolePanels:
                 binding.key == "n" and binding.description == "New Panel"
                 for binding in app.query(FooterKey)
             )
+
+    async def test_resume_to_panels_suppresses_first_stray_new_panel_key(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("3")
+            await pilot.pause()
+
+            app._resume_new_panel_guard_until = monotonic() + 60
+
+            await pilot.press("n")
+            await pilot.pause()
+
+            assert not isinstance(app.screen, CreatePanelScreen)
+
+            app._resume_new_panel_guard_until = 0.0
+
+            await pilot.press("n")
+            await pilot.pause()
+
+            assert isinstance(app.screen, CreatePanelScreen)
+
+    def test_suspend_and_attach_arms_new_panel_guard(self):
+        app = GitDirectorConsole()
+        app._active_tab = "panels"
+        table = MagicMock()
+        app.query_one = MagicMock(return_value=table)
+        app._pause_session_status_tracking = MagicMock()
+        app._resume_session_status_tracking = MagicMock()
+        app._monitor = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+
+        before = monotonic()
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout"):
+                with patch("termios.tcflush"):
+                    app._suspend_and_attach("test")
+
+        assert app._resume_new_panel_guard_until > before
 
     def test_action_select_row_on_panels_opens_action_menu(self):
         app = GitDirectorConsole()
