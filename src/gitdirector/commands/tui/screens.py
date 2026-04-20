@@ -378,6 +378,7 @@ class AgentLoadingScreen(ModalScreen[None]):
                 except (AttributeError, OSError):
                     pass
         finally:
+            app._arm_resume_new_panel_guard(app._active_tab)
             app._resume_session_status_tracking()
 
         self.dismiss(None)

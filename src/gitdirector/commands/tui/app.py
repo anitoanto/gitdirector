@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import monotonic
 
 import click
 from textual import work
@@ -54,6 +55,7 @@ from .screens import (
 
 _PANEL_PREVIEW_FILLED = "■"
 _PANEL_PREVIEW_OPEN = "□"
+_POST_RESUME_NEW_PANEL_GUARD_SECONDS = 0.25
 
 
 def _panel_preview_marker(panel: Panel, pane_index: int) -> str:
@@ -276,6 +278,7 @@ class GitDirectorConsole(App):
         self._resume_selection_tab: str | None = None
         self._resume_selection_key: str | None = None
         self._resume_selection_row: int | None = None
+        self._resume_new_panel_guard_until: float = 0.0
         self._panel_store = PanelStore()
         self._session_status_tracking_paused = False
 
@@ -459,6 +462,20 @@ class GitDirectorConsole(App):
         if action == "new_panel":
             return self._active_tab == "panels"
         return super().check_action(action, parameters)
+
+    def _arm_resume_new_panel_guard(self, restore_tab: str) -> None:
+        if restore_tab == "panels":
+            self._resume_new_panel_guard_until = monotonic() + _POST_RESUME_NEW_PANEL_GUARD_SECONDS
+            return
+        self._resume_new_panel_guard_until = 0.0
+
+    def _consume_resume_new_panel_guard(self) -> bool:
+        if self._resume_new_panel_guard_until <= 0.0:
+            return False
+        if monotonic() >= self._resume_new_panel_guard_until:
+            self._resume_new_panel_guard_until = 0.0
+            return False
+        return True
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
@@ -1304,6 +1321,7 @@ class GitDirectorConsole(App):
                 except (AttributeError, OSError):
                     pass
         finally:
+            self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
 
         self._repos_stale = True
@@ -1530,6 +1548,8 @@ class GitDirectorConsole(App):
 
     def action_new_panel(self) -> None:
         if self._active_tab != "panels":
+            return
+        if self._consume_resume_new_panel_guard():
             return
         self.push_screen(
             CreatePanelScreen(),

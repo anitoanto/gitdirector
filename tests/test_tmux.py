@@ -618,7 +618,7 @@ class TestRebuildPanelTmuxSession:
         mock_load,
         mock_sync,
         mock_bindings,
-        mock_term_size,
+        _mock_term_size,
     ):
         def assert_border_enabled_first(*args, **kwargs):
             assert [call.args for call in mock_run.call_args_list] == [

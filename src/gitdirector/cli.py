@@ -30,7 +30,7 @@ __all__ = [
 
 
 class _HelpGroup(click.Group):
-    def format_help(self, ctx, formatter):
+    def format_help(self, ctx, _formatter):
         show_help()
 
 
