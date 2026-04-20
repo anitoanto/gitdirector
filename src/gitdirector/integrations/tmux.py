@@ -143,6 +143,7 @@ def attach_tmux_session(session_name: str) -> None:
     if _should_open_in_temp_panel(session_name):
         target_session = rebuild_temp_panel_tmux_session(session_name)
     elif _is_persistent_panel_session(target_session):
+        _ensure_panel_prefix_bindings()
         _ensure_panel_resize_tracking(target_session)
         reflow_panel_tmux_session(target_session)
     if os.environ.get("TMUX"):
@@ -898,6 +899,20 @@ def _printf_lines_command(lines: list[str]) -> str:
 
 
 def _ensure_panel_prefix_bindings() -> None:
+    subprocess.run(
+        [
+            "tmux",
+            "bind-key",
+            "-T",
+            "prefix",
+            "b",
+            "if-shell",
+            "-F",
+            "#{m:gd/panel/*,#{session_name}}",
+            "display-panes",
+        ],
+        check=True,
+    )
     for pane_number in range(1, 10):
         subprocess.run(
             [

@@ -884,6 +884,36 @@ class TestGitDirectorConsolePanels:
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
+        return_value=["gd/alpha/shell/1"],
+    )
+    async def test_load_panels_renders_stale_sessions_as_open_squares(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        panel = Panel(
+            name="Main",
+            rows=1,
+            cols=3,
+            panes={1: "gd/alpha/shell/1", 2: "gd/stale/shell/1", 3: None},
+        )
+        app._panel_store = MagicMock()
+        app._panel_store.panels = [panel]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._load_panels()
+            table = app.query_one("#panels-table", DataTable)
+
+            assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
+                [
+                    "",
+                    "┌■ □ □┐",
+                ]
+            )
+            assert table.get_cell("Main", app._panels_col_keys[4]) == "\n1/3"
+            assert table.get_cell("Main", app._panels_col_keys[5]) == "\n[green]● active[/green]"
+
+    @patch(
+        "gitdirector.integrations.tmux._list_sessions",
         return_value=["gd/alpha/shell/1", "gd/ops/shell/1"],
     )
     async def test_panel_refresh_preserves_selected_row(self, _mock_list):
