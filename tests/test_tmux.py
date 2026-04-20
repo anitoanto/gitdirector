@@ -1,5 +1,6 @@
 """Tests for gitdirector.integrations.tmux."""
 
+import fcntl
 import os
 import shlex
 import shutil
@@ -7,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,6 +23,7 @@ from gitdirector.integrations.tmux import (
     _build_layout_spec,
     _build_panel_layout,
     _current_window_target,
+    cleanup_panel_attached_session,
     _distribute_equal,
     _layout_checksum,
     _span_size,
@@ -48,6 +51,9 @@ from gitdirector.integrations.tmux import (
     _resolve_pane_command,
     _live_panel_sessions,
     _live_repo_tmux_sessions,
+    _is_persistent_panel_session,
+    _is_temp_panel_session,
+    _parse_gd_session_name,
     _sanitize_repo_name,
     _session_exists,
     attach_tmux_session,
@@ -60,6 +66,7 @@ from gitdirector.integrations.tmux import (
     list_repo_sessions,
     open_in_tmux,
     rebuild_panel_tmux_session,
+    rebuild_temp_panel_tmux_session,
     resolve_pane_status,
     sync_panel_tmux_config,
 )
@@ -67,6 +74,18 @@ from gitdirector.ui_theme import resolve_panel_theme
 
 REAL_TMUX_MONITOR_START = TmuxMonitor.start
 REAL_TMUX_MONITOR_STOP = TmuxMonitor.stop
+
+
+@contextmanager
+def _tmux_integration_lock():
+    lock_path = Path(tempfile.gettempdir()) / "gitdirector-tmux-integration.lock"
+    with lock_path.open("w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -622,6 +641,16 @@ class TestRebuildPanelTmuxSession:
                 (
                     [
                         "tmux",
+                        "set-option",
+                        "-t",
+                        "=gd/panel/main:",
+                        "destroy-unattached",
+                        "off",
+                    ],
+                ),
+                (
+                    [
+                        "tmux",
                         "set-window-option",
                         "-t",
                         "=gd/panel/main:0",
@@ -756,6 +785,12 @@ class TestPanelPaneTitles:
         assert f"bg={theme.badge_active_bg}" in border_format
         assert f"bg={theme.label_active_bg}" in border_format
 
+    def test_panel_border_format_can_hide_pane_number(self):
+        border_format = _panel_border_format("rose-pine", show_pane_number=False)
+
+        assert "#{pane_index}" not in border_format
+        assert "#{pane_title}" in border_format
+
     @patch("gitdirector.integrations.tmux.Config")
     def test_panel_border_format_defaults_to_config_theme(self, mock_config):
         mock_config.return_value.theme = "nord"
@@ -793,22 +828,24 @@ class TestPanelPaneTitles:
         assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
         assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
         assert "SESSION CLOSED" in command
-        assert "Once all panes are closed, this panel will autodelete" in command
+        assert "Once all panes are closed, this panel will autodelete" not in command
         assert "Reopen the panel from GitDirector to attach again." not in command
 
     def test_panel_pane_command_shows_closed_message_for_closed_empty_pane(self):
         command = _panel_pane_command("Main", 1, None, closed=True)
 
         assert "SESSION CLOSED" in command
-        assert "Once all panes are closed, this panel will autodelete" in command
+        assert "Once all panes are closed, this panel will autodelete" not in command
         assert "Pane 1: unassigned" not in command
 
-    def test_embedded_tmux_attach_command_hides_inner_tmux_chrome(self):
+    def test_embedded_tmux_attach_command_reapplies_session_chrome_when_not_in_panel(self):
         command = _embedded_tmux_attach_command("gd/my-repo/copilot/3")
 
         assert command.startswith("sh -c ")
-        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
-        assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' in command
+        assert "tmux set-option -t =gd/my-repo/copilot/3: status-position bottom" in command
+        assert "tmux set-option -t =gd/my-repo/copilot/3: status-left" in command
+        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" not in command
+        assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' not in command
         assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
     def test_embedded_tmux_attach_command_uses_direct_attach_when_context_provided(self):
@@ -1037,21 +1074,49 @@ class TestListRepoSessions:
         mock_run.return_value = MagicMock(returncode=0, stdout="gd/other/shell/1\n")
         assert list_repo_sessions("my-repo") == []
 
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_skips_temp_panel_wrappers_for_matching_repo(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=("gd/my-repo/shell/1\ngd/temp/panel/my-repo/shell/1\ngd/my-repo/claude/1\n"),
+        )
+
+        result = list_repo_sessions("my-repo")
+
+        assert result == ["gd/my-repo/claude/1", "gd/my-repo/shell/1"]
+
 
 class TestListAllGdSessions:
     @patch("gitdirector.integrations.tmux._list_sessions")
-    def test_skips_non_gd_and_malformed_sessions(self, mock_list):
+    def test_skips_non_gd_malformed_and_temp_panel_sessions(self, mock_list):
         mock_list.return_value = [
             "gd/alpha/shell/1",
             "other-session",
             "gd/bad",
             "gd/beta/claude/2",
+            "gd/temp/panel/alpha/shell/1",
         ]
 
         assert list_all_gd_sessions() == [
             {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
             {"session_name": "gd/beta/claude/2", "repo": "beta", "purpose": "claude"},
         ]
+
+
+class TestSessionNamespaceHelpers:
+    def test_parse_gd_session_name_skips_temp_panel_wrapper_sessions(self):
+        assert _parse_gd_session_name("gd/temp/panel/repo/shell/1") is None
+
+    def test_parse_gd_session_name_accepts_regular_sessions_named_panel(self):
+        assert _parse_gd_session_name("gd/panel/shell/1") == ("panel", "shell", "1")
+
+    def test_persistent_panel_match_requires_exact_panel_shape(self):
+        assert _is_persistent_panel_session("gd/panel/main") is True
+        assert _is_persistent_panel_session("gd/panel/shell/1") is False
+
+    def test_temp_panel_match_requires_wrapper_shape(self):
+        assert _is_temp_panel_session("gd/temp/panel/repo/shell/1") is True
+        assert _is_temp_panel_session("gd/temp/panel/1") is False
 
 
 class TestCreateTmuxSession:
@@ -1066,9 +1131,14 @@ class TestCreateTmuxSession:
         path = Path("/tmp/my-repo")
         name = create_tmux_session("my-repo", path)
         assert name == "gd/my-repo/shell/1"
-        mock_run.assert_called_once_with(
+        assert mock_run.call_count == 2
+        mock_run.assert_any_call(
             ["tmux", "new-session", "-d", "-s", "gd/my-repo/shell/1", "-c", "/tmp/my-repo"],
             check=True,
+        )
+        mock_run.assert_any_call(
+            ["tmux", "set-option", "-t", "=gd/my-repo/shell/1:", "destroy-unattached", "off"],
+            capture_output=True,
         )
         mock_sync.assert_called_once_with()
 
@@ -1100,6 +1170,102 @@ class TestCreateTmuxSession:
         assert name == "gd/my-repo/claude/1"
         _mock_name.assert_called_with("my-repo", "claude")
         mock_sync.assert_called_once_with()
+
+
+class TestRebuildTempPanelTmuxSession:
+    @patch("gitdirector.integrations.tmux._load_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux._configure_panel_window")
+    @patch("gitdirector.integrations.tmux._build_panel_layout", return_value=["%0"])
+    @patch(
+        "gitdirector.integrations.tmux.shutil.get_terminal_size",
+        return_value=os.terminal_size((80, 24)),
+    )
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_builds_single_pane_temp_panel(
+        self,
+        mock_run,
+        _mock_exists,
+        _mock_term_size,
+        mock_build_layout,
+        mock_configure,
+        mock_load,
+    ):
+        session_name = rebuild_temp_panel_tmux_session("gd/my-repo/shell/1", "rose-pine")
+
+        assert session_name == "gd/temp/panel/my-repo/shell/1"
+        assert mock_run.call_args_list[0].args[0] == [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            "gd/temp/panel/my-repo/shell/1",
+            "-n",
+            "shell my-repo/1",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "-c",
+            str(Path.home()),
+            "cat",
+        ]
+        assert mock_run.call_args_list[1].args[0] == [
+            "tmux",
+            "set-option",
+            "-t",
+            "=gd/temp/panel/my-repo/shell/1:",
+            "destroy-unattached",
+            "off",
+        ]
+        mock_build_layout.assert_called_once_with("gd/temp/panel/my-repo/shell/1", 1, 1, "grid_1x1")
+        mock_configure.assert_called_once_with(
+            "gd/temp/panel/my-repo/shell/1",
+            ["%0"],
+            {1: "gd/my-repo/shell/1"},
+            "rose-pine",
+            show_pane_number=False,
+        )
+        mock_load.assert_called_once_with(
+            "shell my-repo/1",
+            "gd/temp/panel/my-repo/shell/1",
+            "rose-pine",
+        )
+        assert mock_run.call_args_list[2].args[0][0:5] == [
+            "tmux",
+            "respawn-pane",
+            "-k",
+            "-t",
+            "%0",
+        ]
+
+    @patch("gitdirector.integrations.tmux._load_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux._configure_panel_window")
+    @patch("gitdirector.integrations.tmux._build_panel_layout", return_value=["%0"])
+    @patch(
+        "gitdirector.integrations.tmux.shutil.get_terminal_size",
+        return_value=os.terminal_size((80, 24)),
+    )
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=True)
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_replaces_existing_temp_panel_with_same_session_name(
+        self,
+        mock_run,
+        _mock_exists,
+        _mock_term_size,
+        _mock_build_layout,
+        _mock_configure,
+        _mock_load,
+    ):
+        rebuild_temp_panel_tmux_session("gd/my-repo/shell/1", "rose-pine")
+
+        assert mock_run.call_args_list[0].args[0] == [
+            "tmux",
+            "kill-session",
+            "-t",
+            "=gd/temp/panel/my-repo/shell/1",
+        ]
+        assert mock_run.call_args_list[0].kwargs == {"check": False}
 
 
 class TestKillTmuxSession:
@@ -1140,29 +1306,45 @@ class TestKillPanelTmuxSession:
 
 
 class TestAttachTmuxSession:
+    @patch(
+        "gitdirector.integrations.tmux.rebuild_temp_panel_tmux_session",
+        return_value="gd/temp/panel/repo/shell/1",
+    )
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_inside_tmux_switches_client(self, mock_run, mock_sync):
+    def test_inside_tmux_switches_client_to_temp_panel(self, mock_run, mock_sync, mock_rebuild):
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")
-        mock_run.assert_called_once_with(["tmux", "switch-client", "-t", "=gd/repo/shell/1"])
+        mock_run.assert_called_once_with(
+            ["tmux", "switch-client", "-t", "=gd/temp/panel/repo/shell/1"]
+        )
         mock_sync.assert_called_once_with()
+        mock_rebuild.assert_called_once_with("gd/repo/shell/1")
 
+    @patch(
+        "gitdirector.integrations.tmux.rebuild_temp_panel_tmux_session",
+        return_value="gd/temp/panel/repo/shell/1",
+    )
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_outside_tmux_attaches(self, mock_run, mock_sync):
+    def test_outside_tmux_attaches_to_temp_panel(self, mock_run, mock_sync, mock_rebuild):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/repo/shell/1")
-        mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "=gd/repo/shell/1"])
+        mock_run.assert_called_once_with(
+            ["tmux", "attach-session", "-t", "=gd/temp/panel/repo/shell/1"]
+        )
         mock_sync.assert_called_once_with()
+        mock_rebuild.assert_called_once_with("gd/repo/shell/1")
 
+    @patch("gitdirector.integrations.tmux.rebuild_temp_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_non_gd_session_skips_theme_sync(self, mock_run, mock_sync):
+    def test_non_gd_session_skips_theme_sync(self, mock_run, mock_sync, mock_rebuild):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("plain-session")
         mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "=plain-session"])
         mock_sync.assert_not_called()
+        mock_rebuild.assert_not_called()
 
 
 class TestOpenInTmux:
@@ -1190,7 +1372,7 @@ class TestLaunchAgentInTmuxSession:
             "touch /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "clear; copilot; status=$?; "
             "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
-            "tmux detach-client >/dev/null 2>&1 || true; "
+            f"tmux detach-client -s {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             "exit $status"
         )
@@ -1358,6 +1540,27 @@ class TestGetAllSessionStatuses:
                 "command": "claude",
                 "dead": False,
             },
+        }
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_skips_panel_and_temp_wrapper_sessions(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=(
+                    "gd/panel/main|cat|0|101\n"
+                    "gd/temp/panel/repo/shell/1|zsh|0|201\n"
+                    "gd/repo/shell/1|zsh|0|301\n"
+                ),
+            ),
+            MagicMock(returncode=0, stdout="301 1 301 301 zsh\n"),
+        ]
+
+        assert get_all_session_statuses() == {
+            "gd/repo/shell/1": {
+                "command": "zsh",
+                "dead": False,
+            }
         }
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -1854,6 +2057,33 @@ class TestTmuxMonitor:
             {"gd/new/shell/1", "gd/existing/shell/1"}
         )
 
+    @patch("gitdirector.integrations.tmux._list_sessions")
+    def test_sync_sessions_skips_panel_and_temp_wrapper_sessions(self, mock_list_sessions):
+        monitor = TmuxMonitor()
+        monitor._running = True
+        mock_list_sessions.return_value = [
+            "gd/repo/shell/1",
+            "gd/panel/main",
+            "gd/temp/panel/repo/shell/1",
+        ]
+
+        added: list[str] = []
+
+        def add_reader(session_name: str):
+            added.append(session_name)
+            monitor._readers[session_name] = MagicMock(is_alive=MagicMock(return_value=True))
+
+        monitor._add_reader = MagicMock(side_effect=add_reader)
+        monitor._remove_reader = MagicMock()
+        monitor._poll_content_changes = MagicMock(
+            side_effect=lambda sessions: setattr(monitor, "_running", False)
+        )
+
+        monitor._sync_sessions()
+
+        assert added == ["gd/repo/shell/1"]
+        monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
+
     @patch("gitdirector.integrations.tmux.time.sleep")
     @patch("gitdirector.integrations.tmux._list_sessions", side_effect=RuntimeError("boom"))
     def test_sync_sessions_ignores_list_errors(self, _mock_list_sessions, mock_sleep):
@@ -1932,6 +2162,20 @@ class TestExactMatchKillTmuxSession:
 
 class TestExactMatchAttachTmuxSession:
     """attach_tmux_session must use ``=`` for both switch-client and attach-session."""
+
+    @patch(
+        "gitdirector.integrations.tmux.rebuild_temp_panel_tmux_session",
+        return_value="gd/temp/panel/repo/shell/1",
+    )
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_regular_session_switch_client_exact_temp_panel_target(
+        self, mock_run, _mock_sync, _mock_rebuild
+    ):
+        with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
+            attach_tmux_session("gd/repo/shell/1")
+        target = mock_run.call_args[0][0][3]
+        assert target == "=gd/temp/panel/repo/shell/1"
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -2041,6 +2285,87 @@ class TestExactMatchPanelProxyAttachFragment:
         assert "attach-session -t =gd/repo/shell/1" in fragment
 
 
+class TestCleanupPanelAttachedSession:
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux._current_window_target", return_value="gd/repo/shell/1:0")
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=True)
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_restores_session_chrome_when_last_panel_client_stops(
+        self,
+        mock_run,
+        _mock_exists,
+        _mock_window_target,
+        mock_sync,
+    ):
+        def completed(stdout: str = "", returncode: int = 0):
+            result = MagicMock()
+            result.stdout = stdout
+            result.returncode = returncode
+            return result
+
+        mock_run.side_effect = [
+            completed("1\n"),
+            completed("on\n"),
+            completed("off\n"),
+            completed("gd/repo/shell/1:2\n"),
+            completed(),
+            completed(),
+            completed(),
+            completed(),
+            completed(),
+            completed(),
+        ]
+
+        cleanup_panel_attached_session("gd/repo/shell/1", theme_name="rose-pine")
+
+        assert mock_run.call_args_list[4].args[0] == [
+            "tmux",
+            "set-option",
+            "-q",
+            "-t",
+            "=gd/repo/shell/1:",
+            "status",
+            "on",
+        ]
+        assert mock_run.call_args_list[5].args[0] == [
+            "tmux",
+            "set-window-option",
+            "-q",
+            "-t",
+            "=gd/repo/shell/1:2",
+            "pane-border-status",
+            "off",
+        ]
+        mock_sync.assert_called_once_with("rose-pine")
+
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=True)
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_decrements_client_count_when_other_panel_clients_remain(
+        self,
+        mock_run,
+        _mock_exists,
+        mock_sync,
+    ):
+        result = MagicMock()
+        result.stdout = "3\n"
+        result.returncode = 0
+        mock_run.side_effect = [result, MagicMock()]
+
+        cleanup_panel_attached_session("gd/repo/shell/1")
+
+        assert mock_run.call_args_list[1].args[0] == [
+            "tmux",
+            "set-option",
+            "-q",
+            "-t",
+            "=gd/repo/shell/1:",
+            "@gitdirector_panel_clients",
+            "2",
+        ]
+        mock_sync.assert_not_called()
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 class TestPanelExitIntegration:
     def test_exiting_one_panel_pane_keeps_panel_and_other_session_alive(
@@ -2048,69 +2373,193 @@ class TestPanelExitIntegration:
         tmp_path,
         monkeypatch,
     ):
-        home_dir = tmp_path / "home"
-        home_dir.mkdir()
-        tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-"))
-        monkeypatch.setenv("HOME", str(home_dir))
-        monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
-        monkeypatch.delenv("TMUX", raising=False)
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-"))
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
 
-        suffix = uuid.uuid4().hex[:8]
-        base_a = f"gd/repro-base-a-{suffix}"
-        base_b = f"gd/repro-base-b-{suffix}"
-        panel_name = f"repro-{suffix}"
+            suffix = uuid.uuid4().hex[:8]
+            base_a = f"gd/repro-base-a-{suffix}"
+            base_b = f"gd/repro-base-b-{suffix}"
+            panel_name = f"repro-{suffix}"
 
-        def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                ["tmux", *args],
-                capture_output=True,
-                text=True,
-                check=check,
-            )
+            def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["tmux", *args],
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
 
-        try:
-            run_tmux("new-session", "-d", "-s", base_a, "-n", "a")
-            run_tmux("new-session", "-d", "-s", base_b, "-n", "b")
+            try:
+                run_tmux("new-session", "-d", "-s", base_a, "-n", "a")
+                run_tmux("new-session", "-d", "-s", base_b, "-n", "b")
 
-            panel_session = rebuild_panel_tmux_session(
-                panel_name,
-                1,
-                2,
-                {1: base_a, 2: base_b},
-                layout_key="grid_1x2",
-            )
+                panel_session = rebuild_panel_tmux_session(
+                    panel_name,
+                    1,
+                    2,
+                    {1: base_a, 2: base_b},
+                    layout_key="grid_1x2",
+                )
 
-            sessions_before = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
-            assert panel_session in sessions_before
-            assert base_a in sessions_before
-            assert base_b in sessions_before
-            assert not any(
-                name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_before
-            )
+                sessions_before = run_tmux(
+                    "list-sessions", "-F", "#{session_name}"
+                ).stdout.splitlines()
+                assert panel_session in sessions_before
+                assert base_a in sessions_before
+                assert base_b in sessions_before
+                assert not any(
+                    name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_before
+                )
 
-            run_tmux("send-keys", "-t", f"={panel_session}:0.1", "exit", "Enter")
-            time.sleep(1)
+                run_tmux("send-keys", "-t", f"={panel_session}:0.1", "exit", "Enter")
+                time.sleep(1)
 
-            sessions_after = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
-            pane_commands = run_tmux(
-                "list-panes",
-                "-t",
-                f"={panel_session}:0",
-                "-F",
-                "#{pane_index}|#{pane_current_command}",
-            ).stdout.splitlines()
+                sessions_after = run_tmux(
+                    "list-sessions", "-F", "#{session_name}"
+                ).stdout.splitlines()
+                pane_commands = run_tmux(
+                    "list-panes",
+                    "-t",
+                    f"={panel_session}:0",
+                    "-F",
+                    "#{pane_index}|#{pane_current_command}",
+                ).stdout.splitlines()
 
-            assert panel_session in sessions_after
-            assert base_a not in sessions_after
-            assert base_b in sessions_after
-            assert not any(
-                name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_after
-            )
-            assert "1|tail" in pane_commands
-            assert any(line.startswith("2|") and line != "2|tail" for line in pane_commands)
-        finally:
-            subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
-            shutil.rmtree(tmux_dir, ignore_errors=True)
+                assert panel_session in sessions_after
+                assert base_a not in sessions_after
+                assert base_b in sessions_after
+                assert not any(
+                    name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_after
+                )
+                assert "1|tail" in pane_commands
+                assert any(line.startswith("2|") and line != "2|tail" for line in pane_commands)
+            finally:
+                subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
+                shutil.rmtree(tmux_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+class TestIdleSessionPreservationIntegration:
+    def test_idle_polling_keeps_repo_panel_and_temp_wrapper_sessions_alive(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-idle-"))
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+
+            repo_a = home_dir / "repo-a"
+            repo_b = home_dir / "repo-b"
+            repo_a.mkdir()
+            repo_b.mkdir()
+
+            def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["tmux", *args],
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
+
+            monitor = TmuxMonitor()
+            try:
+                session_a = create_tmux_session("repo-a", repo_a, purpose="shell")
+                session_b = create_tmux_session("repo-b", repo_b, purpose="shell")
+                panel_session = rebuild_panel_tmux_session(
+                    "idle-guard",
+                    1,
+                    2,
+                    {1: session_a, 2: session_b},
+                    layout_key="grid_1x2",
+                    theme_name="rose-pine",
+                )
+                temp_wrapper = f"gd/temp/panel/{session_a[3:]}"
+                run_tmux("new-session", "-d", "-s", temp_wrapper, "-n", "wrapper", "cat")
+                run_tmux("set-option", "-t", f"={temp_wrapper}:", "destroy-unattached", "off")
+                expected_sessions = {session_a, session_b, panel_session, temp_wrapper}
+
+                monitor.start()
+                for _ in range(12):
+                    assert [entry["session_name"] for entry in list_all_gd_sessions()] == [
+                        session_a,
+                        session_b,
+                    ]
+                    assert set(get_all_session_statuses()) == {session_a, session_b}
+                    sync_panel_tmux_config("rose-pine")
+
+                    live_sessions = set(
+                        run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+                    )
+                    assert expected_sessions.issubset(live_sessions)
+                    time.sleep(0.15)
+            finally:
+                monitor.stop()
+                subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
+                shutil.rmtree(tmux_dir, ignore_errors=True)
+
+    def test_repo_discovery_and_tmux_config_ignore_temp_wrappers_when_wrappers_exist(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-monitor-"))
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+
+            repo_a = home_dir / "repo-a"
+            repo_b = home_dir / "repo-b"
+            repo_a.mkdir()
+            repo_b.mkdir()
+
+            def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["tmux", *args],
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
+
+            try:
+                session_a = create_tmux_session("repo-a", repo_a, purpose="shell")
+                session_b = create_tmux_session("repo-b", repo_b, purpose="shell")
+                rebuild_panel_tmux_session(
+                    "idle-guard",
+                    1,
+                    2,
+                    {1: session_a, 2: session_b},
+                    layout_key="grid_1x2",
+                    theme_name="rose-pine",
+                )
+                temp_wrapper = f"gd/temp/panel/{session_a[3:]}"
+                run_tmux("new-session", "-d", "-s", temp_wrapper, "-n", "wrapper", "cat")
+                run_tmux("set-option", "-t", f"={temp_wrapper}:", "destroy-unattached", "off")
+
+                assert list_repo_sessions("repo-a") == [session_a]
+                assert list_repo_sessions("repo-b") == [session_b]
+
+                config_path = sync_panel_tmux_config("rose-pine")
+                config_text = config_path.read_text()
+
+                assert session_a in config_text
+                assert session_b in config_text
+                assert temp_wrapper not in config_text
+            finally:
+                subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
+                shutil.rmtree(tmux_dir, ignore_errors=True)
 
 
 class TestExactMatchEmbeddedTmuxAttachCommand:
@@ -2143,7 +2592,12 @@ class TestExactMatchPanelPaneCommand:
 
     def test_unassigned_pane_has_no_tmux_target(self):
         cmd = _panel_pane_command("Dev", 1, None)
+        script = shlex.split(cmd)[2]
         assert "has-session" not in cmd
+        assert "UNASSIGNED" in cmd
+        assert "printf '%s\\n' '' UNASSIGNED" in script
+        assert "Panel: Dev" not in cmd
+        assert "Pane 1: unassigned" not in cmd
 
 
 class TestExactMatchLaunchAgent:

@@ -287,6 +287,65 @@ class TestPanelsSearch:
             assert table.row_count == 1
             assert table.get_row_index("Main") == 0
 
+    @patch("gitdirector.integrations.tmux._list_sessions", return_value=[])
+    async def test_search_filters_panels_by_visible_live_panes_label(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app._panels_entries = [
+            Panel(
+                name="Main",
+                rows=1,
+                cols=3,
+                panes={1: "gd/alpha/shell/1", 2: None, 3: None},
+            ),
+            Panel(
+                name="Ops",
+                rows=2,
+                cols=2,
+                panes={1: None, 2: None, 3: None, 4: None},
+            ),
+        ]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._active_tab = "panels"
+            app._search_query = "0/3"
+            app._apply_panels_filter_and_sort()
+            await pilot.pause()
+
+            table = app.query_one("#panels-table", DataTable)
+            assert table.row_count == 1
+            assert table.get_row_index("Main") == 0
+
+    @patch("gitdirector.integrations.tmux._list_sessions", return_value=[])
+    async def test_search_filters_panels_by_empty_status_when_sessions_are_closed(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app._panels_entries = [
+            Panel(
+                name="Main",
+                rows=1,
+                cols=3,
+                panes={1: "gd/alpha/shell/1", 2: None, 3: None},
+            ),
+            Panel(
+                name="Ops",
+                rows=1,
+                cols=3,
+                panes={1: "gd/ops/shell/1", 2: None, 3: None},
+            ),
+        ]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._active_tab = "panels"
+            app._search_query = "empty"
+            app._apply_panels_filter_and_sort()
+            await pilot.pause()
+
+            table = app.query_one("#panels-table", DataTable)
+            assert table.row_count == 2
+
     async def test_escape_clears_active_filter_panels(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])

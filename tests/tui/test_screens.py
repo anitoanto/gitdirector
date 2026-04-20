@@ -21,7 +21,7 @@ from gitdirector.commands.tui import (
     RepoInfoScreen,
     SortMenuScreen,
 )
-from gitdirector.commands.tui.panels import DEFAULT_PANEL_LAYOUT_KEY, get_create_panel_layouts
+from gitdirector.commands.tui.panels import get_create_panel_layouts
 from gitdirector.commands.tui.screens import PanelActionMenuScreen, _render_grid_preview
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 
@@ -286,7 +286,38 @@ class TestCreatePanelScreen:
         }.issubset(layout_keys)
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_default_layout_is_one_by_two(self, mock_sessions):
+    async def test_enter_from_name_focuses_layout_list_and_selects_first_option(
+        self, mock_sessions
+    ):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            name_input = app.screen.query_one("#panel-name-input", Input)
+            layout_menu = app.screen.query_one("#layout-menu", OptionList)
+            preview = app.screen.query_one("#grid-preview", Static)
+
+            assert screen._selected_layout_key is None
+            assert layout_menu.highlighted is None
+            assert "Choose a layout to preview" in str(preview.content)
+            assert "▦ 1×2  Two columns" in str(layout_menu.get_option_at_index(0).prompt)
+
+            name_input.value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            assert screen._step == 1
+            assert app.screen.focused is layout_menu
+            assert layout_menu.highlighted == 0
+            assert screen._selected_layout_key == get_create_panel_layouts()[0].key
+            assert preview.content == _render_grid_preview(1, 2, get_create_panel_layouts()[0].key)
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_tab_from_name_focuses_layout_list_and_selects_first_option(self, mock_sessions):
         screen = CreatePanelScreen()
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -298,10 +329,16 @@ class TestCreatePanelScreen:
             layout_menu = app.screen.query_one("#layout-menu", OptionList)
             preview = app.screen.query_one("#grid-preview", Static)
 
-            assert screen._selected_layout_key == DEFAULT_PANEL_LAYOUT_KEY
+            assert screen._selected_layout_key is None
+            assert layout_menu.highlighted is None
+
+            await pilot.press("tab")
+            await pilot.pause()
+
+            assert app.screen.focused is layout_menu
             assert layout_menu.highlighted == 0
-            assert preview.content == _render_grid_preview(1, 2, DEFAULT_PANEL_LAYOUT_KEY)
-            assert "▦ 1×2  Two columns" in str(layout_menu.get_option_at_index(0).prompt)
+            assert screen._selected_layout_key == get_create_panel_layouts()[0].key
+            assert preview.content == _render_grid_preview(1, 2, get_create_panel_layouts()[0].key)
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
     async def test_modal_height_tracks_content_for_three_by_three_layout(self, mock_sessions):
@@ -454,6 +491,7 @@ class TestCreatePanelScreen:
             hint = app.screen.query_one("#create-panel-hint", Static)
             assert "↑↓/jk navigate" in str(hint.content)
 
+            screen._apply_layout("grid_1x2")
             name_input = app.screen.query_one("#panel-name-input", Input)
             name_input.value = "Ops"
             screen._go_to_step_2()
@@ -500,8 +538,9 @@ class TestCreatePanelScreen:
 
             slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
             assert "Auto" in str(slot_menu.get_option_at_index(0).prompt)
+            assert slot_menu.highlighted == 0
 
-            await pilot.press("up", "enter")
+            await pilot.press("enter")
             await pilot.pause()
 
             assert screen._pane_assignments[1] == "gd/repo/shell/1"
@@ -521,6 +560,7 @@ class TestCreatePanelScreen:
             app.push_screen(screen)
             await pilot.pause()
 
+            screen._apply_layout("grid_1x2")
             name_input = app.screen.query_one("#panel-name-input", Input)
             name_input.value = "Ops"
             screen._go_to_step_2()
@@ -528,7 +568,9 @@ class TestCreatePanelScreen:
 
             slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
 
-            await pilot.press("up", "enter")
+            assert slot_menu.highlighted == 0
+
+            await pilot.press("enter")
             await pilot.pause()
 
             assert screen._pane_assignments[1] is None

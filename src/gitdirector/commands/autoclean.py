@@ -1,9 +1,7 @@
-import subprocess
-
 import click
 
 from ..config import Config
-from ..integrations.tmux import list_all_gd_sessions
+from ..integrations.tmux import kill_tmux_session, list_all_gd_sessions
 from . import console
 
 
@@ -13,11 +11,7 @@ def _list_gd_sessions() -> list[str]:
 
 
 def _kill_session(name: str) -> bool:
-    result = subprocess.run(
-        ["tmux", "kill-session", "-t", name],
-        capture_output=True,
-    )
-    return result.returncode == 0
+    return kill_tmux_session(name)
 
 
 def register(cli: click.Group):

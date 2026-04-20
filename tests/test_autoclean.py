@@ -188,16 +188,24 @@ class TestListGdSessions:
 
 
 class TestKillSession:
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_kill_success(self, mock_run):
         from gitdirector.commands.autoclean import _kill_session
 
         mock_run.return_value = MagicMock(returncode=0)
         assert _kill_session("gd/repo/shell/1") is True
+        mock_run.assert_called_once_with(
+            ["tmux", "kill-session", "-t", "=gd/repo/shell/1"],
+            capture_output=True,
+        )
 
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_kill_failure(self, mock_run):
         from gitdirector.commands.autoclean import _kill_session
 
         mock_run.return_value = MagicMock(returncode=1)
         assert _kill_session("gd/repo/shell/1") is False
+        mock_run.assert_called_once_with(
+            ["tmux", "kill-session", "-t", "=gd/repo/shell/1"],
+            capture_output=True,
+        )
