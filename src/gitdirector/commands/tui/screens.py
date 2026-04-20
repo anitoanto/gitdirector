@@ -356,6 +356,7 @@ class AgentLoadingScreen(ModalScreen[None]):
         from ...integrations.tmux import attach_tmux_session
 
         session_name = self._session_name
+        pane_target = f"={session_name}:"
         try:
             self._ready_marker.unlink()
         except FileNotFoundError:
@@ -368,8 +369,8 @@ class AgentLoadingScreen(ModalScreen[None]):
             with app.suspend():
                 sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
                 sys.stdout.flush()
-                subprocess.run(["tmux", "send-keys", "-t", session_name, "C-l", ""], check=False)
-                subprocess.run(["tmux", "clear-history", "-t", session_name], check=False)
+                subprocess.run(["tmux", "send-keys", "-t", pane_target, "C-l", ""], check=False)
+                subprocess.run(["tmux", "clear-history", "-t", pane_target], check=False)
                 attach_tmux_session(session_name)
                 sys.stdout.write("\033[?25h")
                 sys.stdout.flush()

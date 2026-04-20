@@ -42,10 +42,10 @@ class TestPaneWidget:
         command = pane._session_command("gd/my-repo/copilot/3")
 
         assert command.startswith("sh -c ")
-        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" in command
-        assert "tmux attach-session -t gd/my-repo/copilot/3" in command
+        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
+        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
-    def test_session_command_uses_panel_proxy_when_panel_name_is_set(self):
+    def test_session_command_uses_direct_attach_when_panel_name_is_set(self):
         pane = PaneWidget(
             2,
             "gd/my-repo/copilot/3",
@@ -56,10 +56,10 @@ class TestPaneWidget:
         command = pane._session_command("gd/my-repo/copilot/3")
 
         assert command.startswith("sh -c ")
-        assert "tmux new-session -d -t gd/my-repo/copilot/3 -s gd-proxy/panel/main/2" in command
-        assert "tmux set-option -q -t gd-proxy/panel/main/2 status off" in command
-        assert "tmux attach-session -t gd-proxy/panel/main/2" in command
-        assert "tmux set-option -q -t gd/my-repo/copilot/3 status off" not in command
+        assert "tmux new-session -d -t =gd/my-repo/copilot/3 -s" not in command
+        assert "tmux attach-session -t =gd-proxy/panel/main/2" not in command
+        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
+        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
     def test_closed_body_text_shows_session_closed_hint(self):
         pane = PaneWidget(2, "gd/my-repo/copilot/3", theme_name="rose-pine")
@@ -270,6 +270,31 @@ class TestPanelStore:
         mock_kill_panel_tmux_session.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_update_pane_keeps_panel_when_last_live_assignment_closes_but_other_slots_remain(
+        self,
+        mock_kill_panel_tmux_session,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create(
+                "Main",
+                layout_key="grid_1x2",
+                panes={1: "gd/my-repo/shell/1", 2: None},
+            )
+
+            panel_removed = store.update_pane("Main", 1, None, closed=True)
+            store.reload()
+
+        assert panel_removed is False
+        panel = store.get("Main")
+        assert panel is not None
+        assert panel.panes[1] is None
+        assert panel.panes[2] is None
+        assert panel.closed_panes == {1}
+        mock_kill_panel_tmux_session.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     @patch(
         "gitdirector.integrations.tmux._session_exists",
         side_effect=lambda session_name: session_name != "gd/my-repo/shell/1",
@@ -299,8 +324,11 @@ class TestPanelStore:
         mock_kill_panel_tmux_session.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
-    def test_cleanup_orphans_removes_panels_that_end_up_empty(
+    @patch(
+        "gitdirector.integrations.tmux._session_exists",
+        side_effect=lambda session_name: session_name != "gd/my-repo/shell/1",
+    )
+    def test_cleanup_orphans_keeps_panel_when_last_live_assignment_closes_but_other_slots_remain(
         self,
         _mock_session_exists,
         mock_kill_panel_tmux_session,
@@ -308,7 +336,34 @@ class TestPanelStore:
     ):
         with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
             store = PanelStore()
-            store.create("Main", layout_key="grid_1x2", panes={1: "gd/my-repo/shell/1"})
+            store.create(
+                "Main",
+                layout_key="grid_1x2",
+                panes={1: "gd/my-repo/shell/1", 2: None},
+            )
+
+            removed_names = store.cleanup_orphans()
+            store.reload()
+
+        assert removed_names == []
+        panel = store.get("Main")
+        assert panel is not None
+        assert panel.panes[1] is None
+        assert panel.panes[2] is None
+        assert panel.closed_panes == {1}
+        mock_kill_panel_tmux_session.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    def test_cleanup_orphans_removes_panels_that_end_up_fully_closed(
+        self,
+        _mock_session_exists,
+        mock_kill_panel_tmux_session,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create("Main", layout_key="grid_1x1", panes={1: "gd/my-repo/shell/1"})
 
             removed_names = store.cleanup_orphans()
 

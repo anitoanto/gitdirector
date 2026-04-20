@@ -263,6 +263,7 @@ class GitDirectorConsole(App):
         self._waiting_count: int = 0
         self._resume_target_tab: str | None = None
         self._resume_refresh_path: Path | None = None
+        self._resume_tab_activation_guard: str | None = None
         self._resume_selection_tab: str | None = None
         self._resume_selection_key: str | None = None
         self._resume_selection_row: int | None = None
@@ -450,6 +451,11 @@ class GitDirectorConsole(App):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
+        if self._resume_tab_activation_guard == tab_id:
+            self._resume_tab_activation_guard = None
+            self._active_tab = tab_id
+            self.refresh_bindings()
+            return
         if self._resume_target_tab is not None:
             if tab_id != self._resume_target_tab:
                 self.query_one("#tabs", TabbedContent).active = self._resume_target_tab
@@ -499,6 +505,7 @@ class GitDirectorConsole(App):
         tabs = self.query_one("#tabs", TabbedContent)
 
         if tabs.active != restore_tab:
+            self._resume_tab_activation_guard = restore_tab
             tabs.active = restore_tab
         self._active_tab = restore_tab
         self.refresh_bindings()
@@ -514,20 +521,13 @@ class GitDirectorConsole(App):
             self.query_one("#repo-table", DataTable).focus()
             self._restore_resume_selection("repos")
 
-        if tabs.active != restore_tab:
-            tabs.active = restore_tab
+        self._resume_target_tab = None
+        self._resume_refresh_path = None
+
         tabs.refresh(layout=True)
 
         if restore_path is not None:
             self._refresh_repo_for_path(restore_path)
-
-        self.call_after_refresh(self._clear_resume_restore, restore_tab)
-
-    def _clear_resume_restore(self, restore_tab: str) -> None:
-        tabs = self.query_one("#tabs", TabbedContent)
-        if self._resume_target_tab == restore_tab and tabs.active == restore_tab:
-            self._resume_target_tab = None
-            self._resume_refresh_path = None
 
     @work(thread=True)
     def _load_sessions(self) -> None:

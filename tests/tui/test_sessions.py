@@ -655,6 +655,27 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_target_tab is None
             app._load_sessions.assert_called_once()
 
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_resume_tab_activation_guard_suppresses_reload(self, _mock):
+        """The one-shot resume activation guard must suppress a duplicate reload."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._load_sessions = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._load_sessions.reset_mock()
+
+            app._resume_tab_activation_guard = "sessions"
+
+            event = MagicMock()
+            event.pane.id = "sessions"
+            app.on_tabbed_content_tab_activated(event)
+
+            assert app._resume_tab_activation_guard is None
+            app._load_sessions.assert_not_called()
+
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_resume_restores_selected_session_row(self, _mock_list, _mock_status):

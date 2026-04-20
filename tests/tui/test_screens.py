@@ -936,7 +936,7 @@ class TestAgentLoadingScreen:
             "tmux",
             "send-keys",
             "-t",
-            "gd/my-repo/copilot/1",
+            "=gd/my-repo/copilot/1:",
             "C-l",
             "",
         ]
@@ -945,7 +945,7 @@ class TestAgentLoadingScreen:
             "tmux",
             "clear-history",
             "-t",
-            "gd/my-repo/copilot/1",
+            "=gd/my-repo/copilot/1:",
         ]
         assert mock_run.call_args_list[1].kwargs == {"check": False}
         mock_attach.assert_called_once_with("gd/my-repo/copilot/1")

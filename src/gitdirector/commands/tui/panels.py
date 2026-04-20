@@ -422,7 +422,14 @@ class Panel:
 
     @property
     def is_empty(self) -> bool:
-        return self.filled_panes == 0
+        return self.filled_panes == 0 and not self.closed_panes
+
+    @property
+    def all_panes_closed(self) -> bool:
+        return self.total_panes > 0 and all(
+            pane_index in self.closed_panes and not self.panes.get(pane_index)
+            for pane_index in range(1, self.total_panes + 1)
+        )
 
     @property
     def layout_label(self) -> str:
@@ -512,6 +519,12 @@ class PanelStore:
             self._panels = [panel for panel in self._panels if not panel.is_empty]
         return removed_names
 
+    def _remove_fully_closed_panels(self) -> list[str]:
+        removed_names = [panel.name for panel in self._panels if panel.all_panes_closed]
+        if removed_names:
+            self._panels = [panel for panel in self._panels if not panel.all_panes_closed]
+        return removed_names
+
     def _kill_panel_sessions(self, panel_names: list[str]) -> None:
         if not panel_names:
             return
@@ -597,6 +610,7 @@ class PanelStore:
         else:
             panel.closed_panes.discard(pane_index)
         removed_names = self._remove_empty_panels()
+        removed_names.extend(self._remove_fully_closed_panels())
         self._save()
         self._kill_panel_sessions(removed_names)
         return panel_name in removed_names
@@ -613,6 +627,7 @@ class PanelStore:
                     changed = True
 
         removed_names = self._remove_empty_panels()
+        removed_names.extend(self._remove_fully_closed_panels())
         if changed or removed_names:
             self._save()
         self._kill_panel_sessions(removed_names)
@@ -621,6 +636,7 @@ class PanelStore:
     def reload(self) -> None:
         self._load()
         removed_names = self._remove_empty_panels()
+        removed_names.extend(self._remove_fully_closed_panels())
         if removed_names:
             self._save()
             self._kill_panel_sessions(removed_names)
