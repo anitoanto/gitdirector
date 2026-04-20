@@ -147,6 +147,8 @@ class TerminalWidget(Widget, can_focus=True):
 
     _started = reactive(False)
 
+    _RESIZE_DEBOUNCE_SECONDS = 0.08
+
     def __init__(self, command: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self._command = command
@@ -157,6 +159,10 @@ class TerminalWidget(Widget, can_focus=True):
         self._render_console = Console(force_terminal=True, color_system="truecolor", width=80)
         self._recv_task: asyncio.Task | None = None
         self._mouse_tracking = False
+        self._pending_tty_size: tuple[int, int] | None = None
+        self._tty_resize_timer = None
+        self._applied_tty_size: tuple[int, int] | None = None
+        self._current_size: tuple[int, int] | None = None
 
     def start(self) -> None:
         if self._started:
@@ -168,6 +174,13 @@ class TerminalWidget(Widget, can_focus=True):
 
     def stop(self) -> None:
         self._started = False
+        if self._tty_resize_timer is not None:
+            try:
+                self._tty_resize_timer.stop()
+            except Exception:
+                pass
+            self._tty_resize_timer = None
+        self._pending_tty_size = None
         if self._recv_task:
             self._recv_task.cancel()
             self._recv_task = None
@@ -183,16 +196,49 @@ class TerminalWidget(Widget, can_focus=True):
         ncol = event.size.width
         if nrow < 1 or ncol < 1:
             return
-        self._render_console = Console(
-            force_terminal=True,
-            color_system="truecolor",
-            width=ncol,
+        if self._current_size == (nrow, ncol):
+            return
+        self._current_size = (nrow, ncol)
+
+        if self._render_console.width != ncol:
+            self._render_console = Console(
+                force_terminal=True,
+                color_system="truecolor",
+                width=ncol,
+            )
+        if self._screen is not None and (
+            self._screen.columns != ncol or self._screen.lines != nrow
+        ):
+            try:
+                self._screen.resize(nrow, ncol)
+            except Exception:
+                pass
+            self._render_screen()
+
+        self._pending_tty_size = (nrow, ncol)
+        if self._tty_resize_timer is not None:
+            try:
+                self._tty_resize_timer.stop()
+            except Exception:
+                pass
+            self._tty_resize_timer = None
+        self._tty_resize_timer = self.set_timer(
+            self._RESIZE_DEBOUNCE_SECONDS, self._commit_pending_tty_resize
         )
-        if self._screen:
-            self._screen.resize(nrow, ncol)
-        if self._emulator:
-            self._emulator.resize(nrow, ncol)
-            asyncio.create_task(self._emulator.recv_queue.put(("set_size", nrow, ncol)))
+        self.refresh()
+
+    def _commit_pending_tty_resize(self) -> None:
+        self._tty_resize_timer = None
+        pending = self._pending_tty_size
+        self._pending_tty_size = None
+        if pending is None or self._emulator is None:
+            return
+        if self._applied_tty_size == pending:
+            return
+        self._applied_tty_size = pending
+        nrow, ncol = pending
+        self._emulator.resize(nrow, ncol)
+        asyncio.create_task(self._emulator.recv_queue.put(("set_size", nrow, ncol)))
 
     async def _recv(self) -> None:
         if not self._emulator:
@@ -208,6 +254,13 @@ class TerminalWidget(Widget, can_focus=True):
                     self._stream = pyte.Stream(self._screen)
                     self._emulator.resize(nrow, ncol)
                     await self._emulator.recv_queue.put(("set_size", nrow, ncol))
+                    self._applied_tty_size = (nrow, ncol)
+                    self._current_size = (nrow, ncol)
+                    self._render_console = Console(
+                        force_terminal=True,
+                        color_system="truecolor",
+                        width=ncol,
+                    )
                 elif cmd == "stdout":
                     chars = msg[1]
                     for m in _RE_ANSI_SEQUENCE.finditer(chars):
@@ -282,12 +335,12 @@ class TerminalWidget(Widget, can_focus=True):
             return Style()
 
     def render_line(self, y: int) -> Strip:
+        cell_length = max(self.size.width, 1)
         if y < len(self._lines):
             line = self._lines[y]
-            cell_length = self._screen.columns if self._screen else max(self.size.width, 1)
             segments = list(line.render(self._render_console))
             return Strip.from_lines([segments], cell_length=cell_length)[0]
-        return Strip.blank(max(self.size.width, 1))
+        return Strip.blank(cell_length)
 
     def on_key(self, event: events.Key) -> None:
         if not self._emulator or not self._started:

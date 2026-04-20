@@ -206,6 +206,13 @@ class GitDirectorConsole(App):
     TabbedContent {
         height: 1fr;
     }
+    #tabs Tabs {
+        height: 3;
+    }
+    #tabs Tab {
+        height: 3;
+        content-align: center middle;
+    }
     #tabs Tab.-active {
         background: $accent;
         color: $text;
@@ -836,6 +843,44 @@ class GitDirectorConsole(App):
             table.focus()
         self._clear_resume_selection()
 
+    def _capture_table_selection(
+        self,
+        table: DataTable,
+    ) -> tuple[str | None, int | None, bool]:
+        if table.row_count == 0:
+            return None, None, self.focused is table
+        return self._get_selected_row_key(table), table.cursor_coordinate.row, self.focused is table
+
+    def _restore_table_selection(
+        self,
+        table: DataTable,
+        row_key: str | None,
+        row_index: int | None,
+        *,
+        restore_focus: bool,
+    ) -> None:
+        if table.row_count == 0:
+            return
+
+        restored = False
+        if row_key is not None:
+            try:
+                target_row = table.get_row_index(row_key)
+            except RowDoesNotExist:
+                pass
+            else:
+                table.move_cursor(row=target_row)
+                restored = True
+
+        if not restored and row_index is not None:
+            target_row = min(row_index, table.row_count - 1)
+            if target_row >= 0:
+                table.move_cursor(row=target_row)
+                restored = True
+
+        if restored and restore_focus:
+            table.focus()
+
     def _get_active_table(self) -> DataTable:
         if self._active_tab == "sessions":
             return self.query_one("#sessions-table", DataTable)
@@ -1085,6 +1130,13 @@ class GitDirectorConsole(App):
             table = self.query_one("#panels-table", DataTable)
         except NoMatches:
             return
+        preserved_row_key = None
+        preserved_row_index = None
+        restore_focus = False
+        if self._resume_selection_tab != "panels":
+            preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
+                table
+            )
         table.clear()
         no_msg = self.query_one("#no-panels-message", Static)
 
@@ -1128,7 +1180,15 @@ class GitDirectorConsole(App):
                     key=panel.name,
                 )
 
-        self._restore_resume_selection("panels")
+        if self._resume_selection_tab == "panels":
+            self._restore_resume_selection("panels")
+        else:
+            self._restore_table_selection(
+                table,
+                preserved_row_key,
+                preserved_row_index,
+                restore_focus=restore_focus,
+            )
         self._update_status(self._build_panels_loaded_status(len(panels), total))
 
     def _build_panels_loaded_status(self, shown: int, total: int) -> str:

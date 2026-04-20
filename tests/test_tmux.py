@@ -41,10 +41,12 @@ from gitdirector.integrations.tmux import (
     _panel_pane_command,
     _panel_proxy_attach_fragment,
     _panel_proxy_session_name,
+    _panel_window_status_format,
     _panel_tmux_config,
     _session_tmux_config,
     _tmux_theme_config,
     _configure_panel_window,
+    _ensure_panel_resize_tracking,
     _load_panel_tmux_config,
     _panel_pane_title,
     _resolved_panel_theme_name,
@@ -791,6 +793,9 @@ class TestPanelPaneTitles:
         assert "#{pane_index}" not in border_format
         assert "#{pane_title}" in border_format
 
+    def test_panel_window_status_format_uses_active_pane(self):
+        assert _panel_window_status_format() == " #{pane_index}:#{pane_title} "
+
     @patch("gitdirector.integrations.tmux.Config")
     def test_panel_border_format_defaults_to_config_theme(self, mock_config):
         mock_config.return_value.theme = "nord"
@@ -814,6 +819,7 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/panel/main: status-position bottom" in config
         assert "set-option -t =gd/panel/main: status-left" in config
         assert "set-option -t =gd/panel/main: status-right" in config
+        assert "window-status-current-format ' #{pane_index}:#{pane_title} '" in config
         assert f'message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"' in config
         assert (
             f'window-status-current-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg},bold"'
@@ -867,8 +873,10 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/my-repo/shell/1: status-left" in config
         assert "SHELL" in config
         assert "my-repo/shell/1" in config
+        assert "window-status-current-format ' #I:#W '" in config
         assert "set-window-option -t =gd/my-repo/shell/1:2 pane-border-style" in config
         assert f'pane-active-border-style "fg={theme.border_active}"' in config
+        assert "pane-border-lines" not in config
         assert "pane-border-status top" not in config
         assert "pane-border-format" not in config
 
@@ -894,6 +902,7 @@ class TestPanelPaneTitles:
         assert config_path.exists()
         content = config_path.read_text()
         assert "set-option -t =gd/panel/main: status-position bottom" in content
+        assert "set-window-option -t =gd/panel/main:0 pane-border-lines heavy" in content
         mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
 
     @patch("gitdirector.integrations.tmux._session_exists", side_effect=[True, False])
@@ -1007,6 +1016,14 @@ class TestPanelPaneTitles:
 
         assert ["tmux", "select-pane", "-t", "%1", "-T", "copilot my-repo/3"] in commands
         assert ["tmux", "select-pane", "-t", "%2", "-T", "empty"] in commands
+        assert [
+            "tmux",
+            "set-window-option",
+            "-t",
+            "=gd/panel/main:0",
+            "pane-border-lines",
+            "heavy",
+        ] in commands
         assert [
             "tmux",
             "set-window-option",
@@ -2178,20 +2195,67 @@ class TestExactMatchAttachTmuxSession:
         assert target == "=gd/temp/panel/repo/shell/1"
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.reflow_panel_tmux_session")
+    @patch("gitdirector.integrations.tmux._ensure_panel_resize_tracking")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_switch_client_exact(self, mock_run, _mock_sync):
+    def test_switch_client_exact(self, mock_run, mock_track_resize, mock_reflow, _mock_sync):
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
+        mock_track_resize.assert_called_once_with("gd/panel/dev")
+        mock_reflow.assert_called_once_with("gd/panel/dev")
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.reflow_panel_tmux_session")
+    @patch("gitdirector.integrations.tmux._ensure_panel_resize_tracking")
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_attach_session_exact(self, mock_run, _mock_sync):
+    def test_attach_session_exact(self, mock_run, mock_track_resize, mock_reflow, _mock_sync):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
+        mock_track_resize.assert_called_once_with("gd/panel/dev")
+        mock_reflow.assert_called_once_with("gd/panel/dev")
+
+
+class TestPanelResizeTracking:
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=True)
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_sets_resize_hooks_on_panel_session_and_window(self, mock_run, _mock_exists):
+        _ensure_panel_resize_tracking("gd/panel/dev")
+
+        assert mock_run.call_args_list[0].args[0] == [
+            "tmux",
+            "set-window-option",
+            "-q",
+            "-t",
+            "=gd/panel/dev:0",
+            "aggressive-resize",
+            "on",
+        ]
+        assert mock_run.call_args_list[1].args[0][:5] == [
+            "tmux",
+            "set-hook",
+            "-t",
+            "=gd/panel/dev:",
+            "client-resized",
+        ]
+        assert mock_run.call_args_list[2].args[0][:6] == [
+            "tmux",
+            "set-hook",
+            "-w",
+            "-t",
+            "=gd/panel/dev:0",
+            "window-resized",
+        ]
+
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_skips_missing_panel_session(self, mock_run, _mock_exists):
+        _ensure_panel_resize_tracking("gd/panel/dev")
+
+        mock_run.assert_not_called()
 
 
 class TestExactMatchKillPanelTmuxSession:

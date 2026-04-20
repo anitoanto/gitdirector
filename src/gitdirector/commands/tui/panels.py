@@ -72,6 +72,8 @@ class PanelLayout:
     cols: int
     placements: tuple[PanePlacement, ...]
     sort_rank: int
+    row_ratios: tuple[int, ...] | None = None
+    col_ratios: tuple[int, ...] | None = None
 
     @property
     def total_panes(self) -> int:
@@ -132,6 +134,8 @@ def _make_filled_layout(
     cols: int,
     merged_spans: tuple[tuple[int, int, int, int], ...],
     sort_rank: int,
+    row_ratios: tuple[int, ...] | None = None,
+    col_ratios: tuple[int, ...] | None = None,
 ) -> PanelLayout:
     occupied: set[tuple[int, int]] = set()
     spans: list[tuple[int, int, int, int]] = []
@@ -175,6 +179,8 @@ def _make_filled_layout(
         cols=cols,
         placements=placements,
         sort_rank=sort_rank,
+        row_ratios=row_ratios,
+        col_ratios=col_ratios,
     )
 
 
@@ -246,6 +252,7 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((0, 0, 2, 1),),
             sort_rank=6,
+            col_ratios=(2, 1),
         ),
         _make_filled_layout(
             key="tall_right",
@@ -255,6 +262,7 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((0, 1, 2, 1),),
             sort_rank=7,
+            col_ratios=(1, 2),
         ),
         _make_filled_layout(
             key="wide_top",
@@ -264,6 +272,7 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((0, 0, 1, 2),),
             sort_rank=8,
+            row_ratios=(2, 1),
         ),
         _make_filled_layout(
             key="wide_bottom",
@@ -273,6 +282,7 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((1, 0, 1, 2),),
             sort_rank=9,
+            row_ratios=(1, 2),
         ),
         _make_grid_layout(2, 3, sort_rank=10),
         _make_corner_duo_layout(2, 3, "top_left", sort_rank=11),

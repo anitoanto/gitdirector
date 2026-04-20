@@ -644,6 +644,13 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             for pane_index, session_name in initial_panes.items():
                 if 1 <= pane_index <= 9:
                     self._pane_assignments[pane_index] = session_name or None
+        self._clear_unavailable_assignments()
+
+    def _clear_unavailable_assignments(self) -> None:
+        available_sessions = set(self._session_option_ids[1:])
+        for pane_index, session_name in self._pane_assignments.items():
+            if session_name and session_name not in available_sessions:
+                self._pane_assignments[pane_index] = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="create-panel-container"):
