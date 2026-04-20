@@ -31,6 +31,13 @@ _AUTH_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NO_COMMITS_RE = re.compile(
+    r"does not have any commits yet"
+    r"|bad default revision 'HEAD'"
+    r"|ambiguous argument 'HEAD'",
+    re.IGNORECASE,
+)
+
 
 def _is_network_error(stderr: str) -> bool:
     return _NETWORK_ERROR_RE.search(stderr) is not None
@@ -42,6 +49,10 @@ def _classify_remote_error(stderr: str) -> str | None:
     if _AUTH_ERROR_RE.search(stderr):
         return "authentication failed \u2014 configure git credentials for this remote"
     return None
+
+
+def _is_no_commits_error(stderr: str) -> bool:
+    return _NO_COMMITS_RE.search(stderr) is not None
 
 
 class RepoStatus(Enum):
@@ -111,6 +122,67 @@ class Repository:
     def get_current_branch(self) -> Optional[str]:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         return out if code == 0 and out not in {"", "HEAD"} else None
+
+    def get_pull_target(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        code, branch, err = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
+        if code != 0:
+            return None, None, err or "Could not determine current branch"
+        if branch in {"", "HEAD"}:
+            return None, None, "Cannot pull in detached HEAD"
+        return "origin", branch, None
+
+    def _read_only_output(
+        self,
+        *args: str,
+        empty_text: str,
+        failure_text: str,
+        allow_no_commits: bool = False,
+    ) -> tuple[bool, str]:
+        code, out, err = self._run_git(*args, _strip=False)
+        output = out.rstrip()
+        if code == 0:
+            return True, output or empty_text
+        if allow_no_commits and _is_no_commits_error(err):
+            return True, empty_text
+        return False, err or failure_text
+
+    def status_output(self) -> tuple[bool, str]:
+        return self._read_only_output(
+            "status",
+            empty_text="Working tree clean.",
+            failure_text="git status failed",
+        )
+
+    def timeline_output(self) -> tuple[bool, str]:
+        return self._read_only_output(
+            "log",
+            "--max-count=1000",
+            "--graph",
+            "--decorate",
+            "--all",
+            "--color=always",
+            "--date=short",
+            "--pretty=format:%C(auto)%h%Creset %C(blue)%ad%Creset %C(auto)%d%Creset %s",
+            empty_text="No commits yet.",
+            failure_text="git log failed",
+            allow_no_commits=True,
+        )
+
+    def branches_output(self) -> tuple[bool, str]:
+        return self._read_only_output(
+            "branch",
+            "-a",
+            empty_text="No branches found.",
+            failure_text="git branch -a failed",
+        )
+
+    def remotes_output(self) -> tuple[bool, str]:
+        return self._read_only_output(
+            "remote",
+            "-v",
+            empty_text="No remotes configured.",
+            failure_text="git remote -v failed",
+        )
 
     @staticmethod
     def _origin_branch_ref(branch: str) -> str:
@@ -257,15 +329,13 @@ class Repository:
         )
 
     def pull(self, *, retries: int = 1) -> tuple[bool, str]:
-        code, branch, err = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
-        if code != 0:
-            return False, err or "Could not determine current branch"
-        if branch in {"", "HEAD"}:
-            return False, "Cannot pull in detached HEAD"
+        remote, branch, err = self.get_pull_target()
+        if err is not None or remote is None or branch is None:
+            return False, err or "Could not determine pull target"
 
         attempts = max(1, 1 + retries)
         for attempt in range(attempts):
-            code, out, err = self._run_git("pull", "--ff-only", "origin", branch)
+            code, out, err = self._run_git("pull", "--ff-only", remote, branch)
             if code == 0:
                 return True, out
             if attempt < attempts - 1 and "network error" in err:

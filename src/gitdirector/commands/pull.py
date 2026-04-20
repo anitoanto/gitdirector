@@ -41,7 +41,7 @@ def _build_pull_table(results: list) -> tuple[Table, int, int]:
     return table, success_count, failed_count
 
 
-def _pull_one(path: Path) -> tuple[str, bool, str]:
+def pull_repository(path: Path) -> tuple[str, bool, str]:
     name = path.name
     if not path.exists() or not (path / ".git").is_dir():
         return name, False, "path not found"
@@ -82,7 +82,7 @@ def register(cli: click.Group):
             console=console, refresh_per_second=12, transient=True, vertical_overflow="visible"
         ) as live:
             with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
-                futures = {executor.submit(_pull_one, path): path for path in paths}
+                futures = {executor.submit(pull_repository, path): path for path in paths}
                 remaining = len(futures)
                 live.update(
                     Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]")

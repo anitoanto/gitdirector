@@ -5,8 +5,10 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import monotonic
+from typing import Callable
 
 import click
+from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -24,7 +26,7 @@ from textual.widgets import (
 from textual.widgets.data_table import RowDoesNotExist
 
 from ...manager import RepositoryManager
-from ...repo import RepositoryInfo
+from ...repo import Repository, RepositoryInfo
 from .. import get_version
 from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
@@ -46,7 +48,11 @@ from .screens import (
     AgentLoadingScreen,
     ConfirmScreen,
     CreatePanelScreen,
+    GitCommandResultScreen,
+    GitOperationsMenuScreen,
     PanelActionMenuScreen,
+    PullLoadingScreen,
+    PullResultScreen,
     RemoveSessionScreen,
     RenamePanelScreen,
     RepoInfoScreen,
@@ -250,6 +256,7 @@ class GitDirectorConsole(App):
         Binding("l", "cursor_right", "Right", show=False),
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
+        Binding("g", "show_git_menu", "Git", show=True),
         Binding("i", "show_info", "Info", show=True),
         Binding("escape", "close_search", show=False),
         Binding("1", "tab_repos", "Repos", show=False),
@@ -471,6 +478,8 @@ class GitDirectorConsole(App):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "new_panel":
             return self._active_tab == "panels"
+        if action in {"show_git_menu", "show_info"}:
+            return self._active_tab == "repos"
         return super().check_action(action, parameters)
 
     def _arm_resume_new_panel_guard(self, restore_tab: str) -> None:
@@ -1086,7 +1095,7 @@ class GitDirectorConsole(App):
         if indicators:
             msg += f"  ({', '.join(indicators)})"
 
-        msg += "   ↑↓/jk navigate  [enter] open  / search  s sort  r refresh  q quit"
+        msg += "   ↑↓/jk navigate  [enter] open  g git  / search  s sort  r refresh  q quit"
         if self._search_query:
             msg += "  [esc] clear search"
         if self._waiting_count > 0:
@@ -1363,6 +1372,26 @@ class GitDirectorConsole(App):
             callback=self._handle_menu_action,
         )
 
+    def action_show_git_menu(self) -> None:
+        if self._active_tab != "repos":
+            return
+        path = self._get_selected_path()
+        if path is None:
+            return
+        self._push_git_menu_for_path(path)
+
+    def _push_git_menu_for_path(self, path: Path) -> None:
+        info = self._results.get(str(path))
+        branch = info.branch if info else None
+        self.push_screen(
+            GitOperationsMenuScreen(path.name, branch),
+            callback=lambda action: self._handle_git_menu_action(action, path),
+        )
+
+    def _handle_git_result_dismissal(self, action: str | None, path: Path) -> None:
+        if action == "back":
+            self._push_git_menu_for_path(path)
+
     def action_show_info(self) -> None:
         if self._active_tab != "repos":
             return
@@ -1385,6 +1414,165 @@ class GitDirectorConsole(App):
         total = len(self._results)
         shown = self.query_one("#repo-table", DataTable).row_count
         self._update_status(self._build_loaded_status(shown, total))
+
+    def _handle_git_menu_action(self, action: str | None, path: Path) -> None:
+        if action is None:
+            return
+        if action == "pull":
+            self._prompt_repo_pull(path)
+        elif action == "status":
+            self._show_repo_git_status(path)
+        elif action == "timeline":
+            self._show_repo_git_timeline(path)
+        elif action == "branches":
+            self._show_repo_git_branches(path)
+        elif action == "remotes":
+            self._show_repo_git_remotes(path)
+
+    def _show_repo_git_output(
+        self,
+        path: Path,
+        *,
+        command: str,
+        loader: Callable[[Repository], tuple[bool, str]],
+        success_text: str,
+        failure_text: str,
+        success_status: str,
+        failure_status: str,
+    ) -> None:
+        try:
+            repo = Repository(path)
+            ok, message = loader(repo)
+        except Exception as exc:
+            ok = False
+            message = str(exc)
+
+        self.push_screen(
+            GitCommandResultScreen(
+                path.name,
+                command,
+                ok,
+                message,
+                success_text=success_text,
+                failure_text=failure_text,
+            ),
+            callback=lambda action: self._handle_git_result_dismissal(action, path),
+        )
+        self._update_status(f"{path.name}: {success_status if ok else failure_status}")
+
+    def _show_repo_git_status(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command="git status",
+            loader=lambda repo: repo.status_output(),
+            success_text="Status output",
+            failure_text="Status failed",
+            success_status="status shown",
+            failure_status="status failed",
+        )
+
+    def _show_repo_git_timeline(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command=(
+                "git log --max-count=1000 --graph --decorate --all --color=always --date=short "
+                "--pretty=format:%C(auto)%h%Creset %C(blue)%ad%Creset %C(auto)%d%Creset %s"
+            ),
+            loader=lambda repo: repo.timeline_output(),
+            success_text="Timeline shown",
+            failure_text="Timeline failed",
+            success_status="timeline shown",
+            failure_status="timeline failed",
+        )
+
+    def _show_repo_git_branches(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command="git branch -a",
+            loader=lambda repo: repo.branches_output(),
+            success_text="Branches shown",
+            failure_text="Branches failed",
+            success_status="branches shown",
+            failure_status="branches failed",
+        )
+
+    def _show_repo_git_remotes(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command="git remote -v",
+            loader=lambda repo: repo.remotes_output(),
+            success_text="Remotes shown",
+            failure_text="Remotes failed",
+            success_status="remotes shown",
+            failure_status="remotes failed",
+        )
+
+    def _prompt_repo_pull(self, path: Path) -> None:
+        try:
+            repo = Repository(path)
+        except Exception as exc:
+            message = str(exc)
+            self._update_status(f"{path.name}: {message}")
+            self.push_screen(
+                PullResultScreen(path.name, None, False, message),
+                callback=lambda action: self._handle_git_result_dismissal(action, path),
+            )
+            return
+
+        remote, branch, err = repo.get_pull_target()
+        command = None
+        if remote is not None and branch is not None:
+            command = f"git pull --ff-only {remote} {branch}"
+
+        if err is not None or command is None or remote is None or branch is None:
+            message = err or "Could not determine pull target"
+            self._update_status(f"{path.name}: {message}")
+            self.push_screen(
+                PullResultScreen(path.name, command, False, message),
+                callback=lambda action: self._handle_git_result_dismissal(action, path),
+            )
+            return
+
+        target = f"{remote}/{branch}"
+        self.push_screen(
+            ConfirmScreen(
+                f"Pull '{escape(path.name)}' from [cyan]{escape(target)}[/cyan]?\n"
+                f"[dim]{escape(command)}[/dim]"
+            ),
+            callback=lambda confirmed: self._do_pull_repo(confirmed, path, command),
+        )
+
+    def _do_pull_repo(self, confirmed: bool, path: Path, command: str) -> None:
+        if not confirmed:
+            return
+        self._update_status(f"Pulling {path.name}: {command}")
+        loading_screen = PullLoadingScreen(path.name, command)
+        self.push_screen(loading_screen)
+        self._pull_repo(path, command, loading_screen)
+
+    @work(thread=True)
+    def _pull_repo(self, path: Path, command: str, loading_screen: PullLoadingScreen) -> None:
+        from ..pull import pull_repository
+
+        result = pull_repository(path)
+        self.call_from_thread(self._show_pull_result, loading_screen, path, command, result)
+
+    def _show_pull_result(
+        self,
+        loading_screen: PullLoadingScreen,
+        path: Path,
+        command: str,
+        result: tuple[str, bool, str],
+    ) -> None:
+        repo_name, ok, message = result
+        loading_screen.dismiss(None)
+        self.push_screen(
+            PullResultScreen(repo_name, command, ok, message),
+            callback=lambda action: self._handle_git_result_dismissal(action, path),
+        )
+        self._update_status(f"{repo_name}: {'pull completed' if ok else 'pull failed'}")
+        if ok:
+            self._refresh_repo_for_path(path)
 
     _AGENT_COMMANDS = {
         "agent:opencode": "opencode",
