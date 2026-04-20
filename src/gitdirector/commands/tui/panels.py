@@ -454,6 +454,18 @@ class PanelStore:
         self._panels: list[Panel] = []
         self._load()
 
+    @staticmethod
+    def _normalize_panes(
+        layout: PanelLayout,
+        panes: dict[int, str | None] | None = None,
+    ) -> dict[int, str | None]:
+        normalized_panes = {i: None for i in range(1, layout.total_panes + 1)}
+        if panes:
+            for pane_index, session_name in panes.items():
+                if 1 <= pane_index <= layout.total_panes:
+                    normalized_panes[pane_index] = session_name or None
+        return normalized_panes
+
     def _load(self) -> None:
         if not self.panels_file.exists():
             self._panels = []
@@ -534,11 +546,7 @@ class PanelStore:
         layout_key: str | None = None,
     ) -> Panel | None:
         layout = resolve_panel_layout(layout_key, rows, cols)
-        normalized_panes = {i: None for i in range(1, layout.total_panes + 1)}
-        if panes:
-            for pane_index, session_name in panes.items():
-                if 1 <= pane_index <= layout.total_panes:
-                    normalized_panes[pane_index] = session_name or None
+        normalized_panes = self._normalize_panes(layout, panes)
 
         if not any(normalized_panes.values()):
             return None
@@ -577,6 +585,29 @@ class PanelStore:
                 self._save()
                 return True
         return False
+
+    def reconfigure(
+        self,
+        name: str,
+        rows: int | None = None,
+        cols: int | None = None,
+        panes: dict[int, str | None] | None = None,
+        layout_key: str | None = None,
+    ) -> bool:
+        panel = self.get(name)
+        if panel is None:
+            return False
+
+        layout = resolve_panel_layout(layout_key, rows, cols)
+        source_panes = panel.panes if panes is None else panes
+        panel.rows = layout.rows
+        panel.cols = layout.cols
+        panel.layout_key = layout.key
+        panel.panes = self._normalize_panes(layout, source_panes)
+        panel.closed_panes = set()
+        self._save()
+        self._kill_panel_sessions([name])
+        return True
 
     def update_pane(
         self,

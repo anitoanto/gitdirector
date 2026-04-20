@@ -531,6 +531,10 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         height: 3;
         margin: 0 0 1 1;
     }
+    #panel-name-value {
+        padding: 0 0 1 1;
+        color: $text;
+    }
     #step-1-columns {
         height: auto;
         padding: 0;
@@ -609,12 +613,26 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     """
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        panel_name: str | None = None,
+        initial_layout_key: str | None = None,
+        initial_panes: dict[int, str | None] | None = None,
+        *,
+        editing: bool = False,
+    ) -> None:
         super().__init__()
         from ...integrations.tmux import list_all_gd_sessions
 
         self._step = 1
-        self._selected_layout_key: str | None = None
+        self._editing = editing
+        self._panel_name = (panel_name or "").strip()
+        if self._editing and not self._panel_name:
+            raise ValueError("Editing a panel requires a panel name")
+        if self._editing and not initial_layout_key:
+            raise ValueError("Editing a panel requires a layout key")
+        self._layout_highlight_enabled = False
+        self._selected_layout_key: str | None = initial_layout_key
         self._selected_pane_index = 1
         self._current_step2_field = "panes"
         self._session_entries = list_all_gd_sessions()
@@ -622,13 +640,23 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             entry["session_name"] for entry in self._session_entries
         ]
         self._pane_assignments: dict[int, str | None] = {i: None for i in range(1, 10)}
+        if initial_panes:
+            for pane_index, session_name in initial_panes.items():
+                if 1 <= pane_index <= 9:
+                    self._pane_assignments[pane_index] = session_name or None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="create-panel-container"):
-            yield Static("[bold white]Create Panel[/bold white]", id="create-panel-title")
+            yield Static(self._step_title_markup(), id="create-panel-title")
             with Vertical(id="step-1"):
-                yield Static("[dim]Name[/dim]", id="panel-name-label")
-                yield Input(placeholder="panel name…", id="panel-name-input")
+                if self._editing:
+                    yield Static("[dim]Panel[/dim]", id="panel-name-label")
+                    yield Static(
+                        f"[bold white]{self._panel_name}[/bold white]", id="panel-name-value"
+                    )
+                else:
+                    yield Static("[dim]Name[/dim]", id="panel-name-label")
+                    yield Input(placeholder="panel name…", id="panel-name-input")
                 with Horizontal(id="step-1-columns"):
                     with Vertical(id="step-1-left"):
                         yield Static("[dim]Layout[/dim]", classes="section-label")
@@ -676,28 +704,64 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def on_mount(self) -> None:
         layout_menu = self.query_one("#layout-menu", OptionList)
-        layout_menu.highlighted = None
+        if self._selected_layout_key:
+            layout_menu.highlighted = next(
+                index
+                for index, layout in enumerate(get_create_panel_layouts())
+                if layout.key == self._selected_layout_key
+            )
+        else:
+            layout_menu.highlighted = None
         self.query_one("#pane-slot-menu", OptionList).highlighted = 0
         self._sync_session_menu_highlight()
-        self._show_step(1)
-        self.query_one("#panel-name-input", Input).focus()
+        if self._editing:
+            self._show_step(2)
+            slot_menu = self.query_one("#pane-slot-menu", OptionList)
+            slot_menu.highlighted = 1 if self._active_pane_count() > 0 else 0
+            slot_menu.focus()
+        else:
+            self._show_step(1)
+            self.query_one("#panel-name-input", Input).focus()
+        self.call_after_refresh(self._enable_layout_highlight)
+
+    def _enable_layout_highlight(self) -> None:
+        self._layout_highlight_enabled = True
+
+    def _current_panel_name(self) -> str:
+        if self._editing:
+            return self._panel_name
+        return self.query_one("#panel-name-input", Input).value.strip()
+
+    def _step_title_markup(self) -> str:
+        if self._editing:
+            return "[bold white]Reconfigure Panel[/bold white]"
+        if self._step == 1:
+            return "[bold white]Create Panel[/bold white]"
+        return "[bold white]Configure Panes[/bold white]"
+
+    def _step_1_hint(self) -> str:
+        if self._editing:
+            return "↑↓/jk navigate    \\[enter] next: adjust panes    \\[esc] cancel"
+        return (
+            "↑↓/jk navigate"
+            "    \\[tab] switch fields"
+            "    \\[enter] next: assign sessions"
+            "    \\[esc] cancel"
+        )
+
+    def _step_2_hint(self) -> str:
+        verb = "save and open" if self._editing else "create and open"
+        return f"↑↓/jk navigate    \\[tab] switch lists    \\[ctrl+o] {verb}    \\[esc] back"
 
     def _show_step(self, step: int) -> None:
         self._step = step
         self.query_one("#step-1").display = step == 1
         self.query_one("#step-2").display = step == 2
         if step == 1:
-            title = "[bold white]Create Panel[/bold white]"
-            hint = (
-                "↑↓/jk navigate"
-                "    \\[tab] switch fields"
-                "    \\[enter] next: assign sessions"
-                "    \\[esc] cancel"
-            )
+            hint = self._step_1_hint()
         else:
-            name = self.query_one("#panel-name-input", Input).value.strip() or "unnamed"
+            name = self._current_panel_name() or "unnamed"
             layout = resolve_panel_layout(self._selected_layout_key)
-            title = "[bold white]Configure Panes[/bold white]"
             self.query_one("#step-2-subtitle", Static).update(
                 self._step2_subtitle_markup(name, layout.layout_label)
             )
@@ -705,19 +769,15 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             self._update_slot_markers()
             self._update_session_markers()
             self._update_session_visibility()
-            hint = (
-                "↑↓/jk navigate"
-                "    \\[tab] switch lists"
-                "    \\[ctrl+o] create and open"
-                "    \\[esc] back"
-            )
-        self.query_one("#create-panel-title", Static).update(title)
+            hint = self._step_2_hint()
+        self.query_one("#create-panel-title", Static).update(self._step_title_markup())
         self.query_one("#create-panel-hint", Static).update(hint)
 
     def _go_to_step_2(self) -> None:
-        name = self.query_one("#panel-name-input", Input).value.strip()
+        name = self._current_panel_name()
         if not name:
-            self.query_one("#panel-name-input", Input).focus()
+            if not self._editing:
+                self.query_one("#panel-name-input", Input).focus()
             return
         if not self._selected_layout_key:
             self._focus_layout_menu()
@@ -726,7 +786,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         self._current_step2_field = "panes"
         self._show_step(2)
         slot_menu = self.query_one("#pane-slot-menu", OptionList)
-        slot_menu.highlighted = 0
+        slot_menu.highlighted = 1 if self._editing else 0
         slot_menu.focus()
 
     def _focus_layout_menu(self) -> None:
@@ -865,6 +925,8 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id == "layout-menu":
+            if not self._layout_highlight_enabled:
+                return
             if self.focused is not event.option_list:
                 return
             self._apply_layout(event.option.id.split(":", 1)[1])
@@ -997,6 +1059,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def action_focus_next_field(self) -> None:
         if self._step == 1:
+            if self._editing:
+                self._focus_layout_menu()
+                return
             focused = self.focused
             if focused and focused.id == "panel-name-input":
                 self._focus_layout_menu()
@@ -1014,6 +1079,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def action_focus_prev_field(self) -> None:
         if self._step == 1:
+            if self._editing:
+                self._focus_layout_menu()
+                return
             self.action_focus_next_field()
         else:
             fields = self._step2_fields()
@@ -1028,7 +1096,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def action_go_back(self) -> None:
         if self._step == 2:
             self._show_step(1)
-            self.query_one("#layout-menu", OptionList).focus()
+            self._focus_layout_menu()
 
     def action_submit(self) -> None:
         if self._step == 1:
@@ -1037,10 +1105,11 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         self._do_submit()
 
     def _do_submit(self) -> None:
-        name = self.query_one("#panel-name-input", Input).value.strip()
+        name = self._current_panel_name()
         if not name:
             self._show_step(1)
-            self.query_one("#panel-name-input", Input).focus()
+            if not self._editing:
+                self.query_one("#panel-name-input", Input).focus()
             return
         layout_key = self._selected_layout_key
         if not layout_key:
@@ -1057,7 +1126,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def action_cancel(self) -> None:
         if self._step == 2:
             self._show_step(1)
-            self.query_one("#layout-menu", OptionList).focus()
+            self._focus_layout_menu()
             return
         self.dismiss(None)
 
@@ -1122,7 +1191,7 @@ class PanelActionMenuScreen(ModalScreen[str]):
         align: center top;
     }
     PanelActionMenuScreen #action-menu {
-        height: 7;
+        height: 8;
         padding: 0 1;
         margin: 0 0 1 0;
     }
@@ -1153,6 +1222,7 @@ class PanelActionMenuScreen(ModalScreen[str]):
                 with Vertical(id="panel-action-main"):
                     yield OptionList(
                         Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
+                        Option("[white]↺[/white] [bold]Reconfigure[/bold]", id="reconfigure"),
                         Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
                         Option("", disabled=True),
                         Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),

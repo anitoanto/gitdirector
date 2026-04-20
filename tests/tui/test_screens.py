@@ -235,7 +235,7 @@ class TestPanelActionMenuScreen:
             assert "Main" in title.content
             assert "gd/panel/main" in session_label.content
             assert preview.content == _render_grid_preview(2, 2)
-            assert menu.option_count == 4
+            assert menu.option_count == 5
             assert not list(app.screen.query("#panel-preview-title"))
             assert preview_pane.region.x > menu.region.x
             assert preview_pane.region.y == menu.region.y
@@ -576,6 +576,53 @@ class TestCreatePanelScreen:
             assert screen._pane_assignments[1] is None
             assert screen._pane_assignments[2] is None
             assert "unassigned" in str(slot_menu.get_option_at_index(1).prompt)
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
+    async def test_edit_mode_prefills_panel_configuration_and_opens_on_step_two(
+        self, mock_sessions
+    ):
+        mock_sessions.return_value = [
+            {
+                "session_name": "gd/repo/shell/1",
+                "repo": "repo",
+                "purpose": "shell",
+            },
+            {
+                "session_name": "gd/repo/copilot/2",
+                "repo": "repo",
+                "purpose": "copilot",
+            },
+        ]
+
+        screen = CreatePanelScreen(
+            panel_name="Ops",
+            initial_layout_key="wide_bottom",
+            initial_panes={1: "gd/repo/shell/1", 2: None, 3: "gd/repo/copilot/2"},
+            editing=True,
+        )
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            title = app.screen.query_one("#create-panel-title", Static)
+            subtitle = app.screen.query_one("#step-2-subtitle", Static)
+            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
+            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
+            preview = app.screen.query_one("#grid-preview-2", Static)
+
+            assert screen._step == 2
+            assert "Reconfigure Panel" in str(title.content)
+            assert "Ops" in str(subtitle.content)
+            assert "Wide bottom" in str(subtitle.content)
+            assert preview.content == _render_grid_preview(2, 2, "wide_bottom")
+            assert slot_menu.highlighted == 1
+            assert session_menu.highlighted == 1
+            assert screen._pane_assignments[1] == "gd/repo/shell/1"
+            assert screen._pane_assignments[3] == "gd/repo/copilot/2"
+            assert len(app.screen.query("#panel-name-input")) == 0
 
 
 class TestSortMenuScreen:
