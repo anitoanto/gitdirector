@@ -341,6 +341,41 @@ class TestPanelsSort:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "Main"
 
+    @patch(
+        "gitdirector.integrations.tmux._list_sessions",
+        return_value=["gd/alpha/shell/1"],
+    )
+    async def test_sort_panels_by_panes_descending_counts_only_live_sessions(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app._panels_entries = [
+            Panel(
+                name="Main",
+                rows=2,
+                cols=2,
+                panes={1: "gd/alpha/shell/1", 2: None, 3: None, 4: None},
+            ),
+            Panel(
+                name="Ops",
+                rows=1,
+                cols=3,
+                panes={1: "gd/stale/shell/1", 2: "gd/ops/shell/1", 3: None},
+            ),
+        ]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._active_tab = "panels"
+            app._panels_sort_column = 3
+            app._panels_sort_reverse = True
+            app._apply_panels_filter_and_sort()
+            await pilot.pause()
+
+            table = app.query_one("#panels-table", DataTable)
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "Main"
+
     async def test_sort_binding_opens_panel_menu(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
@@ -352,4 +387,4 @@ class TestPanelsSort:
 
             assert isinstance(app.screen, SortMenuScreen)
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 4
+            assert menu.option_count == 5

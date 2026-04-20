@@ -59,9 +59,15 @@ _PANELS_SORT_COLUMN_NAMES = {
     1: "TMUX",
     2: "Layout",
     3: "Panes",
+    4: "Status",
 }
 
 _DEFAULT_PANELS_SORT_COLUMN = 0
+
+_PANEL_STATUS_LABEL = {
+    "active": "[green]● active[/green]",
+    "empty": "[dim]○ empty[/dim]",
+}
 
 _SESSION_STATUS_LABEL = {
     "waiting": "[bold yellow]● waiting[/bold yellow]",

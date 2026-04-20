@@ -29,6 +29,7 @@ from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
+    _PANEL_STATUS_LABEL,
     _PANELS_SORT_COLUMN_NAMES,
     _SESSION_STATUS_LABEL,
     _SESSION_STATUS_ORDER,
@@ -257,6 +258,7 @@ class GitDirectorConsole(App):
         self._panels_entries: list[Panel] = []
         self._panels_sort_column: int = _DEFAULT_PANELS_SORT_COLUMN
         self._panels_sort_reverse: bool = False
+        self._panels_live_sessions: set[str] = set()
         self._repos_stale: bool = False
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
@@ -312,7 +314,9 @@ class GitDirectorConsole(App):
             "Status", "Session", "Repository", "Session Name"
         )
         panels_table = self.query_one("#panels-table", DataTable)
-        self._panels_col_keys = panels_table.add_columns("Map", "Name", "TMUX", "Layout", "Panes")
+        self._panels_col_keys = panels_table.add_columns(
+            "Map", "Name", "TMUX", "Layout", "Panes", "Status"
+        )
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(3, self._trigger_status_poll)
@@ -678,6 +682,11 @@ class GitDirectorConsole(App):
         if self._active_tab == "sessions" and self._sessions_entries:
             self._update_session_status_cells()
 
+        if self._active_tab == "panels":
+            self._apply_panels_filter_and_sort(
+                {entry["session_name"] for entry in self._sessions_entries}
+            )
+
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)
             try:
@@ -1014,16 +1023,30 @@ class GitDirectorConsole(App):
             msg += f"  ⟐ {w} {label} waiting"
         return msg
 
-    def _panel_matches_search(self, panel: Panel, query: str) -> bool:
+    def _live_panel_pane_count(self, panel: Panel, live_sessions: set[str] | None = None) -> int:
+        sessions = self._panels_live_sessions if live_sessions is None else live_sessions
+        return sum(1 for session_name in panel.panes.values() if session_name in sessions)
+
+    def _panel_status_state(self, panel: Panel, live_sessions: set[str] | None = None) -> str:
+        sessions = self._panels_live_sessions if live_sessions is None else live_sessions
+        has_live = any(session_name in sessions for session_name in panel.panes.values())
+        return "active" if has_live else "empty"
+
+    def _panel_matches_search(
+        self, panel: Panel, query: str, live_sessions: set[str] | None = None
+    ) -> bool:
         from ...integrations.tmux import make_panel_session_name
 
         normalized_query = query.replace("×", "x")
-        panes_label = f"{panel.filled_panes}/{panel.total_panes}"
+        live_panes = self._live_panel_pane_count(panel, live_sessions)
+        panes_label = f"{live_panes}/{panel.total_panes}"
+        status_label = self._panel_status_state(panel, live_sessions)
         haystacks = [
             panel.name.lower(),
             make_panel_session_name(panel.name).lower(),
             panel.layout_label.lower(),
             panes_label.lower(),
+            status_label,
         ]
         haystacks.extend(session.lower() for session in panel.panes.values() if session)
         return any(normalized_query in haystack.replace("×", "x") for haystack in haystacks)
@@ -1041,11 +1064,22 @@ class GitDirectorConsole(App):
                 panel.name.lower(),
             )
         if col == 3:
-            return lambda panel: (panel.filled_panes, panel.total_panes, panel.name.lower())
+            live = self._panels_live_sessions
+            return lambda panel: (
+                self._live_panel_pane_count(panel, live),
+                panel.total_panes,
+                panel.name.lower(),
+            )
+        if col == 4:
+            live = self._panels_live_sessions
+            return lambda panel: (
+                0 if self._panel_status_state(panel, live) == "active" else 1,
+                panel.name.lower(),
+            )
         return lambda panel: panel.name.lower()
 
-    def _apply_panels_filter_and_sort(self) -> None:
-        from ...integrations.tmux import make_panel_session_name
+    def _apply_panels_filter_and_sort(self, live_sessions: set[str] | None = None) -> None:
+        from ...integrations.tmux import _list_sessions, make_panel_session_name
 
         try:
             table = self.query_one("#panels-table", DataTable)
@@ -1057,9 +1091,17 @@ class GitDirectorConsole(App):
         panels = list(self._panels_entries)
         total = len(panels)
 
+        if live_sessions is None:
+            live_sessions = set(_list_sessions())
+        else:
+            live_sessions = set(live_sessions)
+        self._panels_live_sessions = live_sessions
+
         if self._search_query:
             query = self._search_query.lower()
-            panels = [panel for panel in panels if self._panel_matches_search(panel, query)]
+            panels = [
+                panel for panel in panels if self._panel_matches_search(panel, query, live_sessions)
+            ]
 
         panels.sort(key=self._panel_sort_key_func(), reverse=self._panels_sort_reverse)
 
@@ -1070,15 +1112,18 @@ class GitDirectorConsole(App):
             table.display = True
             no_msg.display = False
             for panel in panels:
-                filled = panel.filled_panes
+                filled = self._live_panel_pane_count(panel, live_sessions)
                 total_panes = panel.total_panes
                 panes_label = f"{filled}/{total_panes}" if filled else f"0/{total_panes}"
+                status_state = self._panel_status_state(panel, live_sessions)
+                status_label = _PANEL_STATUS_LABEL[status_state]
                 table.add_row(
                     _panel_row_cell(_render_panel_preview(panel)),
                     _panel_row_cell(panel.name),
                     _panel_row_cell(make_panel_session_name(panel.name)),
                     _panel_row_cell(panel.layout_display_label),
                     _panel_row_cell(panes_label),
+                    _panel_row_cell(status_label),
                     height=_panel_row_height(panel),
                     key=panel.name,
                 )
@@ -1323,7 +1368,6 @@ class GitDirectorConsole(App):
 
     def _load_panels(self) -> None:
         self._panel_store.reload()
-        self._panel_store.cleanup_orphans()
         try:
             self.query_one("#panels-table", DataTable)
         except NoMatches:
@@ -1386,20 +1430,29 @@ class GitDirectorConsole(App):
         self._load_panels()
 
     def _open_panel(self, panel_name: str) -> None:
-        from ...integrations.tmux import rebuild_panel_tmux_session
+        from ...integrations.tmux import (
+            _protect_session,
+            _session_exists,
+            make_panel_session_name,
+            rebuild_panel_tmux_session,
+        )
 
         panel = self._panel_store.get(panel_name)
         if not panel:
             return
 
-        session_name = rebuild_panel_tmux_session(
-            panel.name,
-            panel.rows,
-            panel.cols,
-            panel.panes,
-            closed_panes=panel.closed_panes,
-            layout_key=panel.layout.key,
-        )
+        session_name = make_panel_session_name(panel_name)
+        if _session_exists(session_name):
+            _protect_session(session_name)
+        else:
+            session_name = rebuild_panel_tmux_session(
+                panel.name,
+                panel.rows,
+                panel.cols,
+                panel.panes,
+                closed_panes=panel.closed_panes,
+                layout_key=panel.layout.key,
+            )
         self._suspend_and_attach(session_name, row_key=panel.name)
 
     def action_new_panel(self) -> None:

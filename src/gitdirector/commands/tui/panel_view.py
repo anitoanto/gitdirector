@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -14,7 +13,11 @@ from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Footer, Static
 
-from ...integrations.tmux import _embedded_tmux_attach_command, _panel_session_label
+from ...integrations.tmux import (
+    _embedded_tmux_attach_command,
+    _panel_session_label,
+    cleanup_panel_attached_session,
+)
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .panels import Panel, PanelStore
 from .terminal_widget import TerminalWidget
@@ -71,6 +74,7 @@ class PaneWidget(Widget):
         super().__init__(**kwargs)
         self.pane_index = pane_index
         self.session_name = session_name
+        self._theme_name = theme_name
         self._panel_theme = resolve_panel_theme(theme_name)
         self._panel_name = panel_name
         self._on_session_closed = on_session_closed
@@ -135,10 +139,7 @@ class PaneWidget(Widget):
         return "[dim]No session assigned[/dim]\n\n[dim]ctrl+a[/dim] assign session"
 
     def _closed_body_text(self) -> str:
-        return (
-            "\n[dim]SESSION CLOSED[/dim]\n\n"
-            "[dim]Once all panes are closed, this panel will autodelete[/dim]"
-        )
+        return "\n[dim]SESSION CLOSED[/dim]\n\n[dim]ctrl+a[/dim] assign session"
 
     def _body_text(self) -> str:
         if self._empty_state == "closed":
@@ -156,7 +157,7 @@ class PaneWidget(Widget):
             return
 
         if self._terminal:
-            self._terminal.stop()
+            self.stop_terminal()
             self._terminal.remove()
             self._terminal = None
 
@@ -205,6 +206,11 @@ class PaneWidget(Widget):
     def stop_terminal(self) -> None:
         if self._terminal:
             self._terminal.stop()
+            if self.session_name and self._panel_name:
+                cleanup_panel_attached_session(
+                    self.session_name,
+                    theme_name=self._theme_name,
+                )
 
     def watch_pane_focused(self, focused: bool) -> None:
         if focused:
@@ -321,7 +327,6 @@ class PanelViewScreen(Screen[None]):
 
         self._focus_pane(1)
         self._update_status()
-        self._poll_timer = self.set_interval(5, self._check_orphans)
 
     def _focus_pane(self, index: int) -> None:
         if index < 1 or index > self._panel.total_panes:
@@ -361,13 +366,10 @@ class PanelViewScreen(Screen[None]):
         pane = self._pane_widgets.get(self._focused_pane)
         if not pane or not pane.session_name:
             return
-        panel_removed = self._store.update_pane(self._panel.name, self._focused_pane, None)
+        self._store.update_pane(self._panel.name, self._focused_pane, None)
         self._panel.panes[self._focused_pane] = None
         self._panel.closed_panes.discard(self._focused_pane)
         pane.update_session(None)
-        if panel_removed:
-            self.action_detach()
-            return
         self._update_status()
 
     def _open_session_selector(self, pane_index: int, current: str | None = None) -> None:
@@ -382,29 +384,23 @@ class PanelViewScreen(Screen[None]):
         if not self._panel.panes.get(pane_index):
             return
         pane = self._pane_widgets.get(pane_index)
-        panel_removed = self._store.update_pane(self._panel.name, pane_index, None, closed=True)
+        self._store.update_pane(self._panel.name, pane_index, None, closed=True)
         self._panel.panes[pane_index] = None
         self._panel.closed_panes.add(pane_index)
         if pane:
             pane.show_session_closed()
-        if panel_removed:
-            self.action_detach()
-            return
         self._update_status()
 
     def _handle_session_selection(self, pane_index: int, result: str | None) -> None:
         if result is None:
             return
         if result == "__clear__":
-            panel_removed = self._store.update_pane(self._panel.name, pane_index, None)
+            self._store.update_pane(self._panel.name, pane_index, None)
             self._panel.panes[pane_index] = None
             self._panel.closed_panes.discard(pane_index)
             pane = self._pane_widgets.get(pane_index)
             if pane:
                 pane.update_session(None)
-            if panel_removed:
-                self.action_detach()
-                return
         else:
             self._store.update_pane(self._panel.name, pane_index, result)
             self._panel.panes[pane_index] = result
@@ -415,32 +411,7 @@ class PanelViewScreen(Screen[None]):
         self._update_status()
         self._focus_pane(pane_index)
 
-    @work(thread=True, exclusive=True, group="panel_orphan_check")
-    def _check_orphans(self) -> None:
-        from ...integrations.tmux import _session_exists
-
-        orphaned_indices: list[int] = []
-        for idx, session in list(self._panel.panes.items()):
-            if session and not _session_exists(session):
-                orphaned_indices.append(idx)
-
-        if orphaned_indices:
-            for idx in orphaned_indices:
-                self._panel.panes[idx] = None
-                self._panel.closed_panes.add(idx)
-            removed_names = self._store.cleanup_orphans()
-            for idx in orphaned_indices:
-                pane = self._pane_widgets.get(idx)
-                if pane:
-                    self.app.call_from_thread(pane.show_session_closed)
-            if self._panel.name in removed_names:
-                self.app.call_from_thread(self.action_detach)
-                return
-            self.app.call_from_thread(self._update_status)
-
     def action_detach(self) -> None:
-        if hasattr(self, "_poll_timer"):
-            self._poll_timer.stop()
         for pane in self._pane_widgets.values():
             pane.stop_terminal()
         self.dismiss(None)

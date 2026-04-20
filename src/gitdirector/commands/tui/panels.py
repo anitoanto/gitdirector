@@ -513,18 +513,6 @@ class PanelStore:
         with open(self.panels_file, "w") as f:
             yaml.dump(data, f, default_flow_style=False)
 
-    def _remove_empty_panels(self) -> list[str]:
-        removed_names = [panel.name for panel in self._panels if panel.is_empty]
-        if removed_names:
-            self._panels = [panel for panel in self._panels if not panel.is_empty]
-        return removed_names
-
-    def _remove_fully_closed_panels(self) -> list[str]:
-        removed_names = [panel.name for panel in self._panels if panel.all_panes_closed]
-        if removed_names:
-            self._panels = [panel for panel in self._panels if not panel.all_panes_closed]
-        return removed_names
-
     def _kill_panel_sessions(self, panel_names: list[str]) -> None:
         if not panel_names:
             return
@@ -609,34 +597,8 @@ class PanelStore:
             panel.closed_panes.add(pane_index)
         else:
             panel.closed_panes.discard(pane_index)
-        removed_names = self._remove_empty_panels()
-        removed_names.extend(self._remove_fully_closed_panels())
         self._save()
-        self._kill_panel_sessions(removed_names)
-        return panel_name in removed_names
-
-    def cleanup_orphans(self) -> list[str]:
-        from ...integrations.tmux import _session_exists
-
-        changed = False
-        for panel in self._panels:
-            for idx, session in list(panel.panes.items()):
-                if session and not _session_exists(session):
-                    panel.panes[idx] = None
-                    panel.closed_panes.add(idx)
-                    changed = True
-
-        removed_names = self._remove_empty_panels()
-        removed_names.extend(self._remove_fully_closed_panels())
-        if changed or removed_names:
-            self._save()
-        self._kill_panel_sessions(removed_names)
-        return removed_names
+        return False
 
     def reload(self) -> None:
         self._load()
-        removed_names = self._remove_empty_panels()
-        removed_names.extend(self._remove_fully_closed_panels())
-        if removed_names:
-            self._save()
-            self._kill_panel_sessions(removed_names)
