@@ -1,4 +1,4 @@
-name: Release to PyPI
+name: Release
 
 on:
   push:
@@ -6,9 +6,26 @@ on:
       - "v*"
 
 jobs:
-  test:
-    name: Run Tests
+  verify-release-tag:
+    name: Verify Release Tag
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag commit is on main
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "Release tags must reference a commit on main." >&2
+            exit 1
+          fi
+
+  build:
+    name: Build Distribution
+    runs-on: ubuntu-latest
+    needs: verify-release-tag
     steps:
       - uses: actions/checkout@v4
 
@@ -22,19 +39,6 @@ jobs:
 
       - name: Install dependencies
         run: uv sync
-
-      - name: Run tests
-        run: uv run pytest
-
-  build:
-    name: Build Distribution
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
 
       - name: Build package
         run: uv build

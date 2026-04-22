@@ -69,13 +69,21 @@ class TestAutocleanLinks:
 
     def test_broken_links_displays_paths(self, runner, tmp_path):
         """Broken link paths are printed so the user can review them."""
+        from gitdirector.commands.autoclean import console
+
         broken = tmp_path / "vanished"
 
         config = MagicMock()
         config.repositories = [broken]
 
-        with patch("gitdirector.commands.autoclean.Config", return_value=config):
-            result = runner.invoke(cli, ["autoclean", "links"], input="y\n")
+        original_width = console.width
+        console.width = 20
+        try:
+            with patch("gitdirector.commands.autoclean.Config", return_value=config):
+                result = runner.invoke(cli, ["autoclean", "links"], input="y\n")
+        finally:
+            console.width = original_width
+
         assert "vanished" in result.output
 
 
@@ -86,15 +94,15 @@ class TestAutocleanLinks:
 
 class TestAutocleanSessions:
     def test_no_sessions(self, runner):
-        """When no gd- sessions exist, prints no-sessions message."""
+        """When no gd/ sessions exist, prints no-sessions message."""
         with patch("gitdirector.commands.autoclean._list_gd_sessions", return_value=[]):
             result = runner.invoke(cli, ["autoclean", "sessions"])
         assert result.exit_code == 0
         assert "No gitdirector tmux sessions" in result.output
 
     def test_sessions_confirmed(self, runner):
-        """When user confirms, all gd- sessions are killed."""
-        sessions = ["gd-repo1-happy-panda", "gd-repo2-cool-slug"]
+        """When user confirms, all gd/ sessions are killed."""
+        sessions = ["gd/repo1/shell/1", "gd/repo2/claude/1"]
 
         with patch("gitdirector.commands.autoclean._list_gd_sessions", return_value=sessions):
             with patch(
@@ -104,12 +112,12 @@ class TestAutocleanSessions:
         assert result.exit_code == 0
         assert "Killed 2" in result.output
         assert mock_kill.call_count == 2
-        mock_kill.assert_any_call("gd-repo1-happy-panda")
-        mock_kill.assert_any_call("gd-repo2-cool-slug")
+        mock_kill.assert_any_call("gd/repo1/shell/1")
+        mock_kill.assert_any_call("gd/repo2/claude/1")
 
     def test_sessions_cancelled(self, runner):
         """When user declines, no sessions are killed."""
-        sessions = ["gd-repo1-happy-panda"]
+        sessions = ["gd/repo1/shell/1"]
 
         with patch("gitdirector.commands.autoclean._list_gd_sessions", return_value=sessions):
             with patch("gitdirector.commands.autoclean._kill_session") as mock_kill:
@@ -120,19 +128,19 @@ class TestAutocleanSessions:
 
     def test_sessions_displayed(self, runner):
         """Session names are shown to the user before confirmation."""
-        sessions = ["gd-myrepo-happy-panda"]
+        sessions = ["gd/myrepo/shell/1"]
 
         with patch("gitdirector.commands.autoclean._list_gd_sessions", return_value=sessions):
             with patch("gitdirector.commands.autoclean._kill_session", return_value=True):
                 result = runner.invoke(cli, ["autoclean", "sessions"], input="y\n")
-        assert "gd-myrepo-happy-panda" in result.output
+        assert "gd/myrepo/shell/1" in result.output
 
     def test_sessions_kill_failure(self, runner):
         """When a session fails to kill, it is reported."""
-        sessions = ["gd-repo1-slug1", "gd-repo2-slug2"]
+        sessions = ["gd/repo1/shell/1", "gd/repo2/claude/1"]
 
         def selective_kill(name):
-            return name != "gd-repo2-slug2"
+            return name != "gd/repo2/claude/1"
 
         with patch("gitdirector.commands.autoclean._list_gd_sessions", return_value=sessions):
             with patch("gitdirector.commands.autoclean._kill_session", side_effect=selective_kill):
@@ -140,7 +148,7 @@ class TestAutocleanSessions:
         assert result.exit_code == 0
         assert "Killed 1" in result.output
         assert "Failed to kill" in result.output
-        assert "gd-repo2-slug2" in result.output
+        assert "gd/repo2/claude/1" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -161,43 +169,63 @@ class TestAutocleanInvalidTarget:
 
 
 class TestListGdSessions:
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_returns_gd_sessions(self, mock_run):
         from gitdirector.commands.autoclean import _list_gd_sessions
 
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="gd-repo1-happy-panda\nother-session\ngd-repo2-cool-slug\n",
+            stdout=("gd/repo1/shell/1\nother-session\ngd/repo2/claude/1\ngd-legacy-session\n"),
         )
         result = _list_gd_sessions()
-        assert result == ["gd-repo1-happy-panda", "gd-repo2-cool-slug"]
+        assert result == ["gd/repo1/shell/1", "gd/repo2/claude/1"]
 
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_no_tmux_server(self, mock_run):
         from gitdirector.commands.autoclean import _list_gd_sessions
 
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         assert _list_gd_sessions() == []
 
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_no_gd_sessions(self, mock_run):
         from gitdirector.commands.autoclean import _list_gd_sessions
 
-        mock_run.return_value = MagicMock(returncode=0, stdout="other-session\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout="other-session\ngd-legacy-session\n")
         assert _list_gd_sessions() == []
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_includes_temp_panel_sessions(self, mock_run):
+        from gitdirector.commands.autoclean import _list_gd_sessions
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="gd/repo1/shell/1\ngd/temp/panel/repo1/shell/1\nother-session\n",
+        )
+        result = _list_gd_sessions()
+        assert "gd/temp/panel/repo1/shell/1" in result
+        assert result == ["gd/repo1/shell/1", "gd/temp/panel/repo1/shell/1"]
 
 
 class TestKillSession:
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_kill_success(self, mock_run):
         from gitdirector.commands.autoclean import _kill_session
 
         mock_run.return_value = MagicMock(returncode=0)
-        assert _kill_session("gd-repo-slug") is True
+        assert _kill_session("gd/repo/shell/1") is True
+        mock_run.assert_called_once_with(
+            ["tmux", "kill-session", "-t", "=gd/repo/shell/1"],
+            capture_output=True,
+        )
 
-    @patch("gitdirector.commands.autoclean.subprocess.run")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_kill_failure(self, mock_run):
         from gitdirector.commands.autoclean import _kill_session
 
         mock_run.return_value = MagicMock(returncode=1)
-        assert _kill_session("gd-repo-slug") is False
+        assert _kill_session("gd/repo/shell/1") is False
+        mock_run.assert_called_once_with(
+            ["tmux", "kill-session", "-t", "=gd/repo/shell/1"],
+            capture_output=True,
+        )

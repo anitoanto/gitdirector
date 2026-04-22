@@ -1,9 +1,17 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from gitdirector.config import Config
+
+
+@pytest.fixture(autouse=True)
+def _no_tmux_monitor():
+    with patch("gitdirector.integrations.tmux.TmuxMonitor.start"):
+        with patch("gitdirector.integrations.tmux.TmuxMonitor.stop"):
+            yield
 
 
 @pytest.fixture

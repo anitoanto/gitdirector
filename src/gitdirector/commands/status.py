@@ -7,7 +7,7 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 from ..manager import RepositoryManager
-from ..repo import RepositoryInfo
+from ..repo import RepositoryInfo, RepoStatus
 from . import console
 
 
@@ -45,6 +45,7 @@ def register(cli: click.Group):
             return
 
         results = []
+        dirty_results: list[RepositoryInfo] = []
         with Live(console=console, refresh_per_second=12, transient=False) as live:
             with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
                 futures = {
@@ -56,8 +57,15 @@ def register(cli: click.Group):
                 )
                 for future in as_completed(futures):
                     remaining -= 1
-                    results.append(future.result())
-                    display = _build_dirty_display(results)
+                    path = futures[future]
+                    try:
+                        info = future.result()
+                    except Exception as exc:
+                        info = RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+                    results.append(info)
+                    if info.staged or info.unstaged:
+                        dirty_results.append(info)
+                    display = _build_dirty_display(dirty_results)
                     if remaining > 0:
                         live.update(
                             Group(
