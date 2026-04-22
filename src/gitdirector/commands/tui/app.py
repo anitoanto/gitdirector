@@ -2,43 +2,63 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 
 import click
+from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import (
-    DataTable,
-    Footer,
-    Header,
-    Input,
-    Static,
-    TabbedContent,
-    TabPane,
-)
+from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
 
 from ...manager import RepositoryManager
-from ...repo import RepositoryInfo
+from ...repo import Repository, RepositoryInfo
+from .. import get_version
+from . import app_panels as _app_panels
+from .app_panels import ConsolePanelsMixin
+from .app_repos import ConsoleReposMixin
+from .app_sessions import ConsoleSessionsMixin
+from .app_ui import ConsoleUIHelpersMixin
 from .constants import (
-    _SESSIONS_SORT_COLUMN_NAMES,
-    _SORT_COLUMN_NAMES,
-    _STATUS_LABEL,
-    _STATUS_ORDER,
-    _changes_label,
+    _DEFAULT_PANELS_SORT_COLUMN,
+    _DEFAULT_SESSIONS_SORT_COLUMN,
+    _DEFAULT_SORT_COLUMN,
 )
+from .panels import Panel, PanelStore
 from .screens import (
     ActionMenuScreen,
     AgentLoadingScreen,
     ConfirmScreen,
+    GitCommandResultScreen,
+    GitOperationsMenuScreen,
+    PullLoadingScreen,
+    PullResultScreen,
     RemoveSessionScreen,
-    SortMenuScreen,
+    RepoInfoScreen,
 )
 
+_panel_row_height = _app_panels._panel_row_height
+_render_panel_preview = _app_panels._render_panel_preview
 
-class GitDirectorConsole(App):
+__all__ = [
+    "GitDirectorConsole",
+    "_panel_row_height",
+    "_render_panel_preview",
+    "_run_console",
+    "register",
+]
+
+
+class GitDirectorConsole(
+    ConsolePanelsMixin,
+    ConsoleSessionsMixin,
+    ConsoleReposMixin,
+    ConsoleUIHelpersMixin,
+    App,
+):
+    TITLE = f"GitDirector [v{get_version()}]"
     CSS = """
     Screen {
         background: $surface;
@@ -93,6 +113,14 @@ class GitDirectorConsole(App):
         padding: 2 4;
         content-align: center middle;
     }
+    #no-panels-message {
+        height: 1fr;
+        display: none;
+        align: center middle;
+        color: $text-muted;
+        padding: 2 4;
+        content-align: center middle;
+    }
     .search-indicator {
         dock: top;
         height: 1;
@@ -103,6 +131,23 @@ class GitDirectorConsole(App):
     }
     TabbedContent {
         height: 1fr;
+    }
+    #tabs Tabs {
+        height: 3;
+    }
+    #tabs Tab {
+        height: 3;
+        content-align: center middle;
+    }
+    #tabs Tab.-active {
+        background: $accent;
+        color: $text;
+        text-style: bold;
+    }
+    #tabs Tabs:focus Tab.-active {
+        background: $accent;
+        color: $text;
+        text-style: bold;
     }
     TabPane {
         padding: 0;
@@ -119,30 +164,53 @@ class GitDirectorConsole(App):
         Binding("l", "cursor_right", "Right", show=False),
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
+        Binding("g", "show_git_menu", "Git", show=True),
+        Binding("i", "show_info", "Info", show=True),
         Binding("escape", "close_search", show=False),
-        Binding("1", "tab_repos", "Repos", show=True),
-        Binding("2", "tab_sessions", "Sessions", show=True),
+        Binding("1", "tab_repos", "Repos", show=False),
+        Binding("2", "tab_sessions", "Sessions", show=False),
+        Binding("3", "tab_panels", "Panels", show=False),
+        Binding("n", "new_panel", "New Panel", show=True),
     ]
 
     def __init__(self) -> None:
         super().__init__()
+        from ...integrations.tmux import TmuxMonitor
+
         self.manager = RepositoryManager()
+        self.theme = self.manager.config.theme
         self._repo_paths: list[Path] = []
         self._results: dict[str, RepositoryInfo] = {}
         self._sessions_cache: dict[str, int] = {}
         self._search_query: str = ""
-        self._sort_column: int = 0
+        self._sort_column: int = _DEFAULT_SORT_COLUMN
         self._sort_reverse: bool = False
         self._active_tab: str = "repos"
         self._sessions_entries: list[dict[str, str]] = []
-        self._sessions_sort_column: int = 0
+        self._sessions_sort_column: int = _DEFAULT_SESSIONS_SORT_COLUMN
         self._sessions_sort_reverse: bool = False
+        self._panels_entries: list[Panel] = []
+        self._panels_sort_column: int = _DEFAULT_PANELS_SORT_COLUMN
+        self._panels_sort_reverse: bool = False
+        self._panels_live_sessions: set[str] = set()
         self._repos_stale: bool = False
+        self._monitor = TmuxMonitor()
+        self._session_statuses: dict[str, dict[str, object]] = {}
+        self._waiting_count: int = 0
+        self._resume_target_tab: str | None = None
+        self._resume_refresh_path: Path | None = None
+        self._resume_tab_activation_guard: str | None = None
+        self._resume_selection_tab: str | None = None
+        self._resume_selection_key: str | None = None
+        self._resume_selection_row: int | None = None
+        self._resume_new_panel_guard_until: float = 0.0
+        self._panel_store = PanelStore()
+        self._session_status_tracking_paused = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with TabbedContent(id="tabs"):
-            with TabPane("Repositories", id="repos"):
+            with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
                 yield DataTable(id="repo-table", cursor_type="row")
                 yield Static(
@@ -150,13 +218,20 @@ class GitDirectorConsole(App):
                     " [bold]gitdirector link <path>[/bold] to get started.",
                     id="no-repos-message",
                 )
-            with TabPane("Sessions", id="sessions"):
+            with TabPane("[2] Sessions", id="sessions"):
                 yield Static("", id="sessions-search-indicator", classes="search-indicator")
                 yield DataTable(id="sessions-table", cursor_type="row")
                 yield Static(
                     "No active sessions.  Open a repository and start a tmux session"
                     " to see it here.",
                     id="no-sessions-message",
+                )
+            with TabPane("[3] Panels", id="panels"):
+                yield Static("", id="panels-search-indicator", classes="search-indicator")
+                yield DataTable(id="panels-table", cursor_type="row")
+                yield Static(
+                    "No panels created.  Press [bold]n[/bold] to create a new panel.",
+                    id="no-panels-message",
                 )
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
@@ -170,397 +245,48 @@ class GitDirectorConsole(App):
             "Repository", "Sync", "Branch", "Changes", "Last Commit", "Sessions", "Path"
         )
         sessions_table = self.query_one("#sessions-table", DataTable)
-        self._sess_col_keys = sessions_table.add_columns("Session", "Repository", "Session Name")
+        self._sess_col_keys = sessions_table.add_columns(
+            "Status", "Session", "Repository", "Session Name"
+        )
+        panels_table = self.query_one("#panels-table", DataTable)
+        self._panels_col_keys = panels_table.add_columns(
+            "Map", "Name", "TMUX", "Layout", "Panes", "Status"
+        )
+        self.app_resume_signal.subscribe(self, self._handle_app_resume)
+        self._sync_tmux_theme_config(self.theme)
+        self._poll_timer = self.set_interval(3, self._trigger_status_poll)
+        self._monitor.start()
         self._load_repos()
+        self._trigger_status_poll()
 
-    @work(thread=True)
-    def _load_repos(self) -> None:
-        self._repo_paths = sorted(self.manager.config.repositories, key=lambda p: p.name.lower())
+    def _sync_tmux_theme_config(self, theme_name: str | None = None) -> None:
+        from ...integrations.tmux import sync_panel_tmux_config
 
-        if not self._repo_paths:
-            self.call_from_thread(self._show_no_repos)
+        sync_panel_tmux_config(theme_name or self.theme)
+
+    def _watch_theme(self, theme_name: str) -> None:
+        super()._watch_theme(theme_name)
+
+        manager = getattr(self, "manager", None)
+        if manager is None:
             return
 
-        self.call_from_thread(self._populate_initial_rows)
+        config = manager.config
+        if config.theme != theme_name:
+            config.theme = theme_name
+            config.save()
 
-        total = len(self._repo_paths)
-        done = 0
-        self.call_from_thread(self._update_status, f"Checking {total} repositories…")
-
-        from ...integrations.tmux import _alphanumeric_name, list_all_gd_sessions
-
-        all_sessions = list_all_gd_sessions()
-        sessions_by_repo: dict[str, int] = {}
-        for entry in all_sessions:
-            repo = entry["repo"]
-            sessions_by_repo[repo] = sessions_by_repo.get(repo, 0) + 1
-
-        with ThreadPoolExecutor(max_workers=self.manager.config.max_workers) as executor:
-            futures = {
-                executor.submit(self.manager.get_repository_status, path): path
-                for path in self._repo_paths
-            }
-            for future in as_completed(futures):
-                info = future.result()
-                self._results[str(info.path)] = info
-                done += 1
-                clean_name = _alphanumeric_name(info.path.name)
-                sessions_count = sessions_by_repo.get(clean_name, 0)
-                self._sessions_cache[str(info.path)] = sessions_count
-                self.call_from_thread(self._update_row, info, sessions_count)
-                remaining = total - done
-                if remaining > 0:
-                    self.call_from_thread(
-                        self._update_status,
-                        f"{done} done, {remaining} remaining…",
-                    )
-
-        if self._search_query or self._sort_column != 0 or self._sort_reverse:
-            self.call_from_thread(self._apply_filter_and_sort)
-        else:
-            self.call_from_thread(
-                self._update_status,
-                self._build_loaded_status(total, total),
-            )
-
-    def _populate_initial_rows(self) -> None:
-        table = self.query_one("#repo-table", DataTable)
-        table.clear()
-        for path in self._repo_paths:
-            table.add_row(
-                path.name,
-                "... ... ... ...",
-                "... ... ... ...",
-                "... ... ... ...",
-                "... ... ... ... ... ...",
-                "...",
-                str(path),
-                key=str(path),
-            )
-
-    def _update_row(self, info: RepositoryInfo, sessions: int = 0) -> None:
-        self._sessions_cache[str(info.path)] = sessions
-        table = self.query_one("#repo-table", DataTable)
-        row_key = str(info.path)
-        ck = self._col_keys
-        try:
-            table.update_cell(row_key, ck[1], _STATUS_LABEL.get(info.status, "unknown"))
-            table.update_cell(row_key, ck[2], info.branch or "—")
-            table.update_cell(row_key, ck[3], _changes_label(info))
-            table.update_cell(row_key, ck[4], info.last_updated or "—")
-            table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
-        except Exception:
-            pass
-
-    def _show_no_repos(self) -> None:
-        self.query_one("#repo-table", DataTable).display = False
-        self.query_one("#no-repos-message", Static).display = True
-        self._update_status("No repositories linked")
-
-    # -- Tab switching --------------------------------------------------------
-
-    def action_tab_repos(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "repos"
-
-    def action_tab_sessions(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "sessions"
-
-    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        tab_id = event.pane.id or ""
-        self._active_tab = tab_id
-        if tab_id == "sessions":
-            self._load_sessions()
-        elif tab_id == "repos":
-            if self._repos_stale:
-                self._repos_stale = False
-                self._results.clear()
-                self._sessions_cache.clear()
-                self._load_repos()
-            else:
-                total = len(self._results)
-                shown = self.query_one("#repo-table", DataTable).row_count
-                self._update_status(self._build_loaded_status(shown, total))
-
-    @work(thread=True)
-    def _load_sessions(self) -> None:
-        from ...integrations.tmux import list_all_gd_sessions
-
-        self.call_from_thread(self._update_status, "Loading sessions…")
-        entries = list_all_gd_sessions()
-        self.call_from_thread(self._populate_sessions_table, entries)
-
-    def _populate_sessions_table(self, entries: list[dict[str, str]]) -> None:
-        self._sessions_entries = entries
-        self._apply_sessions_filter_and_sort()
-
-    def _apply_sessions_filter_and_sort(self) -> None:
-        table = self.query_one("#sessions-table", DataTable)
-        table.clear()
-        no_msg = self.query_one("#no-sessions-message", Static)
-
-        entries = list(self._sessions_entries)
-        total = len(entries)
-
-        if self._search_query:
-            q = self._search_query.lower()
-            entries = [
-                e
-                for e in entries
-                if q in e["session_name"].lower()
-                or q in e["repo"].lower()
-                or q in e["slug"].lower()
-            ]
-
-        sort_keys = {
-            0: lambda e: e["slug"].lower(),
-            1: lambda e: e["repo"].lower(),
-            2: lambda e: e["session_name"].lower(),
-        }
-        key_func = sort_keys.get(self._sessions_sort_column, sort_keys[0])
-        entries.sort(key=key_func, reverse=self._sessions_sort_reverse)
-
-        if not entries and total == 0 and not self._search_query:
-            table.display = False
-            no_msg.display = True
-        else:
-            table.display = True
-            no_msg.display = False
-            for entry in entries:
-                table.add_row(
-                    entry["slug"], entry["repo"], entry["session_name"], key=entry["session_name"]
-                )
-
-        self._update_status(self._build_sessions_loaded_status(len(entries), total))
-
-    def _build_sessions_loaded_status(self, shown: int, total: int) -> str:
-        if total == 0 and not self._search_query:
-            return "No active sessions"
-
-        if self._search_query:
-            count_str = f"{shown} of {total}"
-        else:
-            count_str = str(total)
-
-        label_count = shown if self._search_query else total
-        label = "session" if label_count == 1 else "sessions"
-        msg = f"{count_str} active {label}"
-
-        indicators: list[str] = []
-        if self._search_query:
-            indicators.append(f"filter: '{self._search_query}'")
-        if self._sessions_sort_column != 0 or self._sessions_sort_reverse:
-            direction = "▼" if self._sessions_sort_reverse else "▲"
-            indicators.append(
-                f"sort: {_SESSIONS_SORT_COLUMN_NAMES[self._sessions_sort_column]} {direction}"
-            )
-        if indicators:
-            msg += f"  ({', '.join(indicators)})"
-
-        msg += "   ↑↓/jk navigate  [enter] attach  1 repos  2 sessions  r refresh  q quit"
-        if self._search_query:
-            msg += "  [esc] clear search"
-        return msg
-
-    def _update_status(self, message: str) -> None:
-        self.query_one("#status-bar", Static).update(message)
-
-    def _update_search_indicator(self) -> None:
-        repo_ind = self.query_one("#repo-search-indicator", Static)
-        sess_ind = self.query_one("#sessions-search-indicator", Static)
-        if self._search_query:
-            text = f"Search results for '[bold]{self._search_query}[/bold]'  —  press [bold]esc[/bold] to clear"
-            repo_ind.update(text)
-            sess_ind.update(text)
-            repo_ind.display = True
-            sess_ind.display = True
-        else:
-            repo_ind.display = False
-            sess_ind.display = False
-
-    def _get_selected_path(self) -> Path | None:
-        table = self.query_one("#repo-table", DataTable)
-        if table.row_count == 0:
-            return None
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        return Path(str(row_key.value))
-
-    def _get_active_table(self) -> DataTable:
-        if self._active_tab == "sessions":
-            return self.query_one("#sessions-table", DataTable)
-        return self.query_one("#repo-table", DataTable)
-
-    def action_cursor_down(self) -> None:
-        self._get_active_table().action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self._get_active_table().action_cursor_up()
-
-    def action_cursor_left(self) -> None:
-        self._get_active_table().scroll_left()
-
-    def action_cursor_right(self) -> None:
-        self._get_active_table().scroll_right()
-
-    # -- Search ---------------------------------------------------------------
-
-    def action_search(self) -> None:
-        self.query_one("#search-container").display = True
-        self.query_one("#search-bar", Input).focus()
-
-    def action_close_search(self) -> None:
-        container = self.query_one("#search-container")
-        if container.display:
-            self.query_one("#search-bar", Input).value = ""
-            container.display = False
-            self._search_query = ""
-            self._update_search_indicator()
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
-            self._get_active_table().focus()
-        elif self._search_query:
-            self._search_query = ""
-            self._update_search_indicator()
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "search-bar":
-            self._search_query = event.value
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "search-bar":
-            self._search_query = event.value
-            self._update_search_indicator()
-            if self._active_tab == "sessions":
-                self._apply_sessions_filter_and_sort()
-            else:
-                self._apply_filter_and_sort()
-            self.query_one("#search-container").display = False
-            self._get_active_table().focus()
-
-    # -- Sort -----------------------------------------------------------------
-
-    def action_sort(self) -> None:
-        if self._active_tab == "sessions":
-            self.push_screen(
-                SortMenuScreen(
-                    self._sessions_sort_column,
-                    self._sessions_sort_reverse,
-                    _SESSIONS_SORT_COLUMN_NAMES,
-                ),
-                callback=self._handle_sessions_sort_selection,
-            )
-        else:
-            self.push_screen(
-                SortMenuScreen(self._sort_column, self._sort_reverse),
-                callback=self._handle_sort_selection,
-            )
-
-    def _handle_sort_selection(self, result: tuple | None) -> None:
-        if result is None:
-            return
-        self._sort_column, self._sort_reverse = result
-        self._apply_filter_and_sort()
-
-    def _handle_sessions_sort_selection(self, result: tuple | None) -> None:
-        if result is None:
-            return
-        self._sessions_sort_column, self._sessions_sort_reverse = result
-        self._apply_sessions_filter_and_sort()
-
-    # -- Filter / sort helpers ------------------------------------------------
-
-    def _sort_key_func(self):
-        col = self._sort_column
-        if col == 1:
-            return lambda i: _STATUS_ORDER.get(i.status, 99)
-        if col == 2:
-            return lambda i: (i.branch or "").lower()
-        if col == 3:
-            return lambda i: _changes_label(i)
-        if col == 4:
-            return lambda i: i.last_commit_timestamp or 0
-        if col == 5:
-            return lambda i: self._sessions_cache.get(str(i.path), 0)
-        if col == 6:
-            return lambda i: str(i.path).lower()
-        return lambda i: i.name.lower()
-
-    def _apply_filter_and_sort(self) -> None:
-        """Rebuild table rows based on current search query and sort state."""
-        table = self.query_one("#repo-table", DataTable)
-        table.clear()
-
-        infos = list(self._results.values())
-        total = len(infos)
-
-        if self._search_query:
-            q = self._search_query.lower()
-            infos = [
-                i
-                for i in infos
-                if q in i.name.lower() or q in (i.branch or "").lower() or q in str(i.path).lower()
-            ]
-
-        infos.sort(key=self._sort_key_func(), reverse=self._sort_reverse)
-
-        for info in infos:
-            sessions = self._sessions_cache.get(str(info.path), 0)
-            table.add_row(
-                info.name,
-                _STATUS_LABEL.get(info.status, "unknown"),
-                info.branch or "—",
-                _changes_label(info),
-                info.last_updated or "—",
-                str(sessions) if sessions > 0 else "—",
-                str(info.path),
-                key=str(info.path),
-            )
-
-        self._update_status(self._build_loaded_status(len(infos), total))
-
-    def _build_loaded_status(self, shown: int, total: int) -> str:
-        if total == 0 and not self._search_query:
-            return "No repositories tracked"
-
-        if self._search_query:
-            count_str = f"{shown} of {total}"
-        else:
-            count_str = str(total)
-
-        label = "repository" if shown == 1 else "repositories"
-        msg = f"{count_str} {label} loaded"
-
-        indicators: list[str] = []
-        if self._search_query:
-            indicators.append(f"filter: '{self._search_query}'")
-        if self._sort_column != 0 or self._sort_reverse:
-            direction = "▼" if self._sort_reverse else "▲"
-            indicators.append(f"sort: {_SORT_COLUMN_NAMES[self._sort_column]} {direction}")
-        if indicators:
-            msg += f"  ({', '.join(indicators)})"
-
-        msg += "   ↑↓/jk navigate  [enter] open  / search  s sort  r refresh  q quit"
-        if self._search_query:
-            msg += "  [esc] clear search"
-        return msg
+        self._sync_tmux_theme_config(theme_name)
 
     def action_select_row(self) -> None:
         if self._active_tab == "sessions":
             table = self.query_one("#sessions-table", DataTable)
-            if table.row_count == 0:
+            session_name = self._get_selected_row_key(table)
+            if session_name is None:
                 return
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            session_name = str(row_key.value)
             self._suspend_and_attach(session_name)
+        elif self._active_tab == "panels":
+            self._open_selected_panel_menu()
         else:
             self.action_show_menu()
 
@@ -568,6 +294,8 @@ class GitDirectorConsole(App):
         if event.data_table.id == "sessions-table":
             session_name = str(event.row_key.value)
             self._suspend_and_attach(session_name)
+        elif event.data_table.id == "panels-table":
+            self._open_selected_panel_menu()
         else:
             self.action_show_menu()
 
@@ -577,51 +305,75 @@ class GitDirectorConsole(App):
         if path is None:
             return
 
-        import subprocess
+        from ...integrations.tmux import create_tmux_session, launch_agent_in_tmux_session
 
-        from ...integrations.tmux import create_tmux_session
-
-        session_name = create_tmux_session(path.name, path)
+        purpose = agent_cmd if agent_cmd else "shell"
+        session_name = create_tmux_session(path.name, path, purpose=purpose)
 
         if agent_cmd:
-            subprocess.run(
-                ["tmux", "send-keys", "-t", session_name, f"clear && {agent_cmd}", "Enter"],
-                check=False,
-            )
+            ready_marker = launch_agent_in_tmux_session(session_name, agent_cmd)
             self.push_screen(
-                AgentLoadingScreen(agent_cmd, session_name),
+                AgentLoadingScreen(agent_cmd, session_name, ready_marker),
                 callback=lambda _: self.set_timer(0.2, lambda: self._refresh_repo_for_path(path)),
             )
         else:
             self._suspend_and_attach(session_name, path)
 
-    def _suspend_and_attach(self, session_name: str, path: Path | None = None) -> None:
+    def _suspend_and_attach(
+        self,
+        session_name: str,
+        path: Path | None = None,
+        row_key: str | None = None,
+    ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
+        import termios
 
         from ...integrations.tmux import attach_tmux_session
 
-        with self.suspend():
-            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-            sys.stdout.flush()
-            attach_tmux_session(session_name)
-            sys.stdout.write("\033[?25h")
-            sys.stdout.flush()
+        self._monitor.clear_bell(session_name)
+        restore_tab = self._active_tab
+        self._resume_target_tab = restore_tab
+        self._resume_refresh_path = path
+        row_key = row_key or (
+            self._get_selected_row_key(self._get_active_table())
+            if restore_tab == "panels"
+            else None
+        )
+        self._capture_resume_selection(
+            restore_tab,
+            session_name=session_name,
+            path=path,
+            row_key=row_key,
+        )
+
+        self._pause_session_status_tracking()
+        try:
+            with self.suspend():
+                sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+                sys.stdout.flush()
+                attach_tmux_session(session_name)
+                sys.stdout.write("\033[?25h")
+                sys.stdout.flush()
+                try:
+                    termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                except (AttributeError, OSError):
+                    pass
+        finally:
+            self._arm_resume_new_panel_guard(restore_tab)
+            self._resume_session_status_tracking()
 
         self._repos_stale = True
-        if path is not None:
-            self.set_timer(0.2, lambda: self._refresh_repo_for_path(path))
-        if self._active_tab == "sessions":
-            self.set_timer(0.3, lambda: self._load_sessions())
+        self._active_tab = restore_tab
 
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:
         """Re-fetch full repository status and session count for the given path."""
         from ...integrations.tmux import list_repo_sessions
 
-        info = self.manager.get_repository_status(path)
+        info = self.manager.get_repository_status(path, fetch=True)
         self._results[str(path)] = info
-        sessions_count = len(list_repo_sessions(path.name))
+        sessions_count = len(list_repo_sessions(path))
         self._sessions_cache[str(path)] = sessions_count
         self.call_from_thread(self._update_row, info, sessions_count)
 
@@ -639,6 +391,212 @@ class GitDirectorConsole(App):
             ActionMenuScreen(path.name, path, branch),
             callback=self._handle_menu_action,
         )
+
+    def action_show_git_menu(self) -> None:
+        if self._active_tab != "repos":
+            return
+        path = self._get_selected_path()
+        if path is None:
+            return
+        self._push_git_menu_for_path(path)
+
+    def _push_git_menu_for_path(self, path: Path) -> None:
+        info = self._results.get(str(path))
+        branch = info.branch if info else None
+        self.push_screen(
+            GitOperationsMenuScreen(path.name, branch),
+            callback=lambda action: self._handle_git_menu_action(action, path),
+        )
+
+    def _handle_git_result_dismissal(self, action: str | None, path: Path) -> None:
+        if action == "back":
+            self._push_git_menu_for_path(path)
+
+    def action_show_info(self) -> None:
+        if self._active_tab != "repos":
+            return
+        path = self._get_selected_path()
+        if path is None:
+            return
+        screen = RepoInfoScreen(path.name, path)
+        self.push_screen(screen)
+        self._gather_and_show_info(path, screen)
+
+    @work(thread=True)
+    def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
+        from ...info import gather_repo_info
+
+        try:
+            result = gather_repo_info(path)
+        except Exception as exc:
+            self.call_from_thread(screen.show_error, str(exc))
+            return
+        self.call_from_thread(screen.populate, result)
+
+    def _push_info_screen(self, name: str, path: Path, result) -> None:
+        self.push_screen(RepoInfoScreen(name, path))
+        total = len(self._results)
+        shown = self.query_one("#repo-table", DataTable).row_count
+        self._update_status(self._build_loaded_status(shown, total))
+
+    def _handle_git_menu_action(self, action: str | None, path: Path) -> None:
+        if action is None:
+            return
+        if action == "pull":
+            self._prompt_repo_pull(path)
+        elif action == "status":
+            self._show_repo_git_status(path)
+        elif action == "timeline":
+            self._show_repo_git_timeline(path)
+        elif action == "branches":
+            self._show_repo_git_branches(path)
+        elif action == "remotes":
+            self._show_repo_git_remotes(path)
+
+    def _show_repo_git_output(
+        self,
+        path: Path,
+        *,
+        command: str,
+        loader: Callable[[Repository], tuple[bool, str]],
+        success_text: str,
+        failure_text: str,
+        success_status: str,
+        failure_status: str,
+    ) -> None:
+        try:
+            repo = Repository(path)
+            ok, message = loader(repo)
+        except Exception as exc:
+            ok = False
+            message = str(exc)
+
+        self.push_screen(
+            GitCommandResultScreen(
+                path.name,
+                command,
+                ok,
+                message,
+                success_text=success_text,
+                failure_text=failure_text,
+            ),
+            callback=lambda action: self._handle_git_result_dismissal(action, path),
+        )
+        self._update_status(f"{path.name}: {success_status if ok else failure_status}")
+
+    def _show_repo_git_status(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command="git status",
+            loader=lambda repo: repo.status_output(),
+            success_text="Status output",
+            failure_text="Status failed",
+            success_status="status shown",
+            failure_status="status failed",
+        )
+
+    def _show_repo_git_timeline(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command=(
+                "git log --max-count=1000 --graph --decorate --all --color=always --date=short "
+                "--pretty=format:%C(auto)%h%Creset %C(blue)%ad%Creset %C(auto)%d%Creset %s"
+            ),
+            loader=lambda repo: repo.timeline_output(),
+            success_text="Timeline shown",
+            failure_text="Timeline failed",
+            success_status="timeline shown",
+            failure_status="timeline failed",
+        )
+
+    def _show_repo_git_branches(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command="git branch -a",
+            loader=lambda repo: repo.branches_output(),
+            success_text="Branches shown",
+            failure_text="Branches failed",
+            success_status="branches shown",
+            failure_status="branches failed",
+        )
+
+    def _show_repo_git_remotes(self, path: Path) -> None:
+        self._show_repo_git_output(
+            path,
+            command="git remote -v",
+            loader=lambda repo: repo.remotes_output(),
+            success_text="Remotes shown",
+            failure_text="Remotes failed",
+            success_status="remotes shown",
+            failure_status="remotes failed",
+        )
+
+    def _prompt_repo_pull(self, path: Path) -> None:
+        try:
+            repo = Repository(path)
+        except Exception as exc:
+            message = str(exc)
+            self._update_status(f"{path.name}: {message}")
+            self.push_screen(
+                PullResultScreen(path.name, None, False, message),
+                callback=lambda action: self._handle_git_result_dismissal(action, path),
+            )
+            return
+
+        remote, branch, err = repo.get_pull_target()
+        command = None
+        if remote is not None and branch is not None:
+            command = f"git pull --ff-only {remote} {branch}"
+
+        if err is not None or command is None or remote is None or branch is None:
+            message = err or "Could not determine pull target"
+            self._update_status(f"{path.name}: {message}")
+            self.push_screen(
+                PullResultScreen(path.name, command, False, message),
+                callback=lambda action: self._handle_git_result_dismissal(action, path),
+            )
+            return
+
+        target = f"{remote}/{branch}"
+        self.push_screen(
+            ConfirmScreen(
+                f"Pull '{escape(path.name)}' from [cyan]{escape(target)}[/cyan]?\n"
+                f"[dim]{escape(command)}[/dim]"
+            ),
+            callback=lambda confirmed: self._do_pull_repo(confirmed, path, command),
+        )
+
+    def _do_pull_repo(self, confirmed: bool, path: Path, command: str) -> None:
+        if not confirmed:
+            return
+        self._update_status(f"Pulling {path.name}: {command}")
+        loading_screen = PullLoadingScreen(path.name, command)
+        self.push_screen(loading_screen)
+        self._pull_repo(path, command, loading_screen)
+
+    @work(thread=True)
+    def _pull_repo(self, path: Path, command: str, loading_screen: PullLoadingScreen) -> None:
+        from ..pull import pull_repository
+
+        result = pull_repository(path)
+        self.call_from_thread(self._show_pull_result, loading_screen, path, command, result)
+
+    def _show_pull_result(
+        self,
+        loading_screen: PullLoadingScreen,
+        path: Path,
+        command: str,
+        result: tuple[str, bool, str],
+    ) -> None:
+        repo_name, ok, message = result
+        loading_screen.dismiss(None)
+        self.push_screen(
+            PullResultScreen(repo_name, command, ok, message),
+            callback=lambda action: self._handle_git_result_dismissal(action, path),
+        )
+        self._update_status(f"{repo_name}: {'pull completed' if ok else 'pull failed'}")
+        if ok:
+            self._refresh_repo_for_path(path)
 
     _AGENT_COMMANDS = {
         "agent:opencode": "opencode",
@@ -662,7 +620,7 @@ class GitDirectorConsole(App):
             path = self._get_selected_path()
             if path:
                 self.push_screen(
-                    RemoveSessionScreen(path.name),
+                    RemoveSessionScreen(path.name, path),
                     callback=self._handle_remove_selection,
                 )
 
@@ -676,22 +634,46 @@ class GitDirectorConsole(App):
 
     def _do_remove(self, confirmed: bool, session_name: str) -> None:
         if confirmed:
-            from ...integrations.tmux import kill_tmux_session
+            from ...integrations.tmux import (
+                _parse_gd_session_name,
+                _repo_session_name_segment,
+                _sanitize_repo_name,
+                kill_tmux_session,
+            )
 
             kill_tmux_session(session_name)
-            self._update_status(f"Session '{session_name}' removed")
 
-    def action_refresh(self) -> None:
-        self._results.clear()
-        self._sessions_cache.clear()
-        self._load_repos()
-        if self._active_tab == "sessions":
-            self._load_sessions()
+            self._sessions_entries = [
+                e for e in self._sessions_entries if e["session_name"] != session_name
+            ]
+            self._apply_sessions_filter_and_sort()
+
+            parsed = _parse_gd_session_name(session_name)
+            if parsed is not None:
+                repo_slug, _, _ = parsed
+                for path_str, info in self._results.items():
+                    info_repo_slugs = {
+                        _repo_session_name_segment(info.path),
+                        _sanitize_repo_name(info.path.name),
+                    }
+                    if repo_slug in info_repo_slugs:
+                        count = sum(
+                            1
+                            for entry in self._sessions_entries
+                            if (entry_parsed := _parse_gd_session_name(entry["session_name"]))
+                            and entry_parsed[0] in info_repo_slugs
+                        )
+                        self._sessions_cache[path_str] = count
+                        self._update_row(info, count)
+                        break
 
 
 def _run_console() -> None:
     app = GitDirectorConsole()
-    app.run()
+    try:
+        app.run()
+    finally:
+        app._monitor.stop()
 
 
 def register(cli: click.Group):

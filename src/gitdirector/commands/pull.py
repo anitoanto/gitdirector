@@ -41,7 +41,7 @@ def _build_pull_table(results: list) -> tuple[Table, int, int]:
     return table, success_count, failed_count
 
 
-def _pull_one(path: Path) -> tuple[str, bool, str]:
+def pull_repository(path: Path) -> tuple[str, bool, str]:
     name = path.name
     if not path.exists() or not (path / ".git").is_dir():
         return name, False, "path not found"
@@ -49,13 +49,21 @@ def _pull_one(path: Path) -> tuple[str, bool, str]:
         repo = Repository(path)
         ok, msg = repo.pull()
         return name, ok, msg
-    except Exception as e:
-        return name, False, str(e)
+    except (OSError, ValueError) as exc:
+        return name, False, str(exc)
+
+
+def _pull_one(path: Path) -> tuple[str, bool, str]:
+    try:
+        return pull_repository(path)
+    except Exception as exc:
+        return path.name, False, str(exc)
 
 
 def register(cli: click.Group):
     @cli.command()
-    def pull():
+    @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt.")
+    def pull(yes):
         manager = RepositoryManager()
         paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
@@ -63,6 +71,18 @@ def register(cli: click.Group):
         if not paths:
             console.print("  [dim]No repositories linked[/dim]\n")
             return
+
+        console.print("  [bold]Command:[/bold] git pull --ff-only")
+        console.print(f"  [bold]Repositories ({len(paths)}):[/bold]")
+        for p in paths:
+            console.print(f"    [dim]•[/dim] {p.name}")
+        console.print()
+
+        if not yes:
+            if not click.confirm("  Proceed?", default=True):
+                console.print("  [dim]Aborted[/dim]\n")
+                return
+            console.print()
 
         results = []
         with Live(
@@ -76,7 +96,11 @@ def register(cli: click.Group):
                 )
                 for future in as_completed(futures):
                     remaining -= 1
-                    results.append(future.result())
+                    path = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        results.append((path.name, False, str(exc)))
                     done = len(results)
                     if remaining > 0:
                         live.update(

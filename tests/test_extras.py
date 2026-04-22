@@ -38,7 +38,7 @@ class TestManagerAddErrors:
         assert "Error adding repository" in msg
 
     def test_discover_config_save_failure(self, manager, tmp_path, mocker):
-        """When config.save raises during discover, the exception propagates."""
+        """When config.add_repositories raises during discover, the exception propagates."""
         repos = []
         for i in range(2):
             r = tmp_path / f"repo-{i}"
@@ -46,7 +46,9 @@ class TestManagerAddErrors:
             (r / ".git").mkdir()
             repos.append(r)
 
-        mocker.patch.object(manager.config, "save", side_effect=Exception("Write failed"))
+        mocker.patch.object(
+            manager.config, "add_repositories", side_effect=Exception("Write failed")
+        )
 
         with pytest.raises(Exception, match="Write failed"):
             manager.add_repository(tmp_path, discover=True)
@@ -165,11 +167,14 @@ class TestRepoPullErrors:
         """Pull returns auth error message when git pull fails with auth error."""
         mocker.patch(
             "subprocess.run",
-            return_value=MagicMock(
-                returncode=128,
-                stdout="",
-                stderr="fatal: Authentication failed\n",
-            ),
+            side_effect=[
+                MagicMock(returncode=0, stdout="main\n", stderr=""),
+                MagicMock(
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: Authentication failed\n",
+                ),
+            ],
         )
         repo = Repository(fake_git_repo)
         ok, msg = repo.pull()
@@ -180,11 +185,14 @@ class TestRepoPullErrors:
         """Pull returns generic error when git pull fails."""
         mocker.patch(
             "subprocess.run",
-            return_value=MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="fatal: some error\n",
-            ),
+            side_effect=[
+                MagicMock(returncode=0, stdout="main\n", stderr=""),
+                MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="fatal: some error\n",
+                ),
+            ],
         )
         repo = Repository(fake_git_repo)
         ok, msg = repo.pull()
@@ -201,43 +209,11 @@ class TestMainExceptionHandling:
     """Test error handling in cli.main()."""
 
     @patch("gitdirector.cli.cli")
-    def test_main_catches_exception(self, mock_cli, capsys):
-        """main() catches exceptions from cli and exits with code 1."""
+    def test_main_propagates_unexpected_exception(self, mock_cli):
+        """main() lets unexpected exceptions propagate for debugging."""
         mock_cli.side_effect = Exception("Test error")
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(Exception, match="Test error"):
             main()
-        assert exc_info.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error:" in captured.out
-        assert "Test error" in captured.out
-
-
-# ---------------------------------------------------------------------------
-# Manager – Pull all errors
-# ---------------------------------------------------------------------------
-
-
-class TestManagerPullAllErrors:
-    """Test error paths in RepositoryManager.pull_all()."""
-
-    def test_pull_all_with_missing_repo(self, manager, tmp_path):
-        """When repo path doesn't exist, it's added to failed list."""
-        # Add a repo to config but don't create it
-        fake_path = tmp_path / "nonexistent"
-        manager.config.add_repository(fake_path)
-
-        success, failed = manager.pull_all()
-        assert len(success) == 0
-        assert len(failed) == 1
-        assert "not found" in failed[0].lower()
-
-    def test_pull_all_with_repo_exception(self, manager, fake_git_repo, mocker):
-        """When repo.pull() raises exception, error is caught."""
-        manager.add_repository(fake_git_repo)
-        mocker.patch.object(Repository, "pull", side_effect=Exception("Pull failed"))
-        success, failed = manager.pull_all()
-        assert len(success) == 0
-        assert len(failed) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +248,7 @@ class TestRepoGetStatusParsingErrors:
     """Test error paths when parsing git status output."""
 
     def test_get_status_invalid_ahead_behind_format(self, fake_git_repo, mocker):
-        """When branch.ab line has invalid format, ahead/behind default to 0."""
+        """Sync status comes from origin/main even if branch.ab metadata is malformed."""
 
         def mock_run(*args, **kwargs):
             git_cmd = args[0]
@@ -281,6 +257,10 @@ class TestRepoGetStatusParsingErrors:
                 v2 += "# branch.upstream origin/main\n"
                 v2 += "# branch.ab invalid format\n"
                 return MagicMock(returncode=0, stdout=v2, stderr="")
+            if "show-ref" in git_cmd:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if "rev-list" in git_cmd:
+                return MagicMock(returncode=0, stdout="0\t0\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mocker.patch("subprocess.run", side_effect=mock_run)
@@ -289,20 +269,22 @@ class TestRepoGetStatusParsingErrors:
         assert status.status == RepoStatus.UP_TO_DATE
 
     def test_get_status_no_tracking_branch(self, fake_git_repo, mocker):
-        """When no tracking branch exists, returns UNKNOWN."""
+        """When origin/main does not exist, sync status is UNKNOWN."""
 
         def mock_run(*args, **kwargs):
             git_cmd = args[0]
             if "status" in git_cmd:
                 v2 = "# branch.oid abc\n# branch.head main\n"
                 return MagicMock(returncode=0, stdout=v2, stderr="")
+            if "show-ref" in git_cmd:
+                return MagicMock(returncode=1, stdout="", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mocker.patch("subprocess.run", side_effect=mock_run)
         repo = Repository(fake_git_repo)
         status = repo.get_status()
         assert status.status == RepoStatus.UNKNOWN
-        assert "tracking" in status.message.lower()
+        assert status.message == "No origin/main branch"
 
 
 # ---------------------------------------------------------------------------

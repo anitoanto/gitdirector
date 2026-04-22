@@ -1,7 +1,7 @@
 import click
 from rich.table import Table
 
-from . import get_version, console
+from . import console, get_version
 
 
 def show_help():
@@ -25,13 +25,14 @@ def show_help():
 
     for cmd, desc in [
         ("link PATH [--discover]", "Link a repository or discover all repos under a path"),
-        ("unlink PATH [--discover]", "Unlink a repository or all repos under a path"),
+        ("unlink PATH|NAME [--discover]", "Unlink a repository or all repos under a path"),
         ("list", "List all tracked repositories"),
         ("status", "Show status summary and per-repo details"),
         ("pull", "Pull latest changes for all tracked repositories"),
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
         ("autoclean links|sessions", "Clean broken links or stale tmux sessions"),
+        ("info PATH|NAME [--full]", "Show file statistics for a repository"),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

@@ -1,29 +1,16 @@
-import subprocess
-
 import click
 
 from ..config import Config
+from ..integrations.tmux import _list_sessions, kill_tmux_session
 from . import console
 
 
 def _list_gd_sessions() -> list[str]:
-    """List all tmux sessions whose names start with 'gd-'."""
-    result = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-    return sorted(s for s in result.stdout.strip().split("\n") if s.startswith("gd-"))
+    return [s for s in _list_sessions() if s.startswith("gd/")]
 
 
 def _kill_session(name: str) -> bool:
-    result = subprocess.run(
-        ["tmux", "kill-session", "-t", name],
-        capture_output=True,
-    )
-    return result.returncode == 0
+    return kill_tmux_session(name)
 
 
 def register(cli: click.Group):
@@ -49,7 +36,7 @@ def _autoclean_links():
     console.print()
     console.print(f"  Found [yellow]{len(broken)}[/yellow] broken link(s):\n")
     for p in broken:
-        console.print(f"  [red]✕[/red] {p}")
+        console.print(f"  [red]✕[/red] {p}", soft_wrap=True)
     console.print()
 
     if not click.confirm("  Remove these broken links?"):
@@ -77,7 +64,7 @@ def _autoclean_sessions():
     console.print()
     console.print(f"  Found [yellow]{len(sessions)}[/yellow] gitdirector tmux session(s):\n")
     for s in sessions:
-        console.print(f"  [dim]•[/dim] {s}")
+        console.print(f"  [dim]•[/dim] {s}", soft_wrap=True)
     console.print()
 
     if not click.confirm(f"  Kill all {len(sessions)} session(s)?"):
@@ -91,7 +78,7 @@ def _autoclean_sessions():
         if _kill_session(s):
             killed += 1
         else:
-            console.print(f"  [red]Failed to kill:[/red] {s}")
+            console.print(f"  [red]Failed to kill:[/red] {s}", soft_wrap=True)
 
     console.print()
     console.print(f"  [green]Killed {killed} session(s).[/green]")
