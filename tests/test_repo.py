@@ -230,6 +230,24 @@ class TestGetStatusSync:
         assert info.status == RepoStatus.UP_TO_DATE
         assert info.branch == "main"
 
+    def test_skips_size_when_excluded(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, ahead_behind="0\t0")
+        size_spy = mocker.patch.object(Repository, "get_tracked_size", return_value=2048)
+
+        info = Repository(fake_git_repo).get_status(include_size=False)
+
+        assert info.size is None
+        size_spy.assert_not_called()
+
+    def test_includes_size_when_requested(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, ahead_behind="0\t0")
+        size_spy = mocker.patch.object(Repository, "get_tracked_size", return_value=2048)
+
+        info = Repository(fake_git_repo).get_status(include_size=True)
+
+        assert info.size == 2048
+        size_spy.assert_called_once_with()
+
     def test_ahead(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind="0\t3")
         info = Repository(fake_git_repo).get_status()
@@ -558,7 +576,7 @@ class TestRemotesOutput:
         assert ok is True
         assert output == "No remotes configured."
 
-    def test_success(self, fake_git_repo, mocker):
+    def test_pull_success(self, fake_git_repo, mocker):
         calls = _setup_pull_mocks(mocker)
         repo = Repository(fake_git_repo)
         ok, msg = repo.pull()

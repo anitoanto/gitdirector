@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
+from ...storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
 
 _UP = 1
 _RIGHT = 2
@@ -252,7 +251,6 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((0, 0, 2, 1),),
             sort_rank=6,
-            col_ratios=(2, 1),
         ),
         _make_filled_layout(
             key="tall_right",
@@ -262,7 +260,6 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((0, 1, 2, 1),),
             sort_rank=7,
-            col_ratios=(1, 2),
         ),
         _make_filled_layout(
             key="wide_top",
@@ -272,7 +269,6 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((0, 0, 1, 2),),
             sort_rank=8,
-            row_ratios=(2, 1),
         ),
         _make_filled_layout(
             key="wide_bottom",
@@ -282,7 +278,6 @@ _PANEL_LAYOUTS: dict[str, PanelLayout] = {
             cols=2,
             merged_spans=((1, 0, 1, 2),),
             sort_rank=9,
-            row_ratios=(1, 2),
         ),
         _make_grid_layout(2, 3, sort_rank=10),
         _make_corner_duo_layout(2, 3, "top_left", sort_rank=11),
@@ -354,6 +349,16 @@ def resolve_panel_layout(
     return _make_grid_layout(rows, cols, sort_rank=999)
 
 
+def _preview_axis_sizes(
+    count: int,
+    base_size: int,
+    ratios: tuple[int, ...] | None,
+) -> list[int]:
+    if ratios and len(ratios) == count and all(ratio > 0 for ratio in ratios):
+        return [base_size * ratio for ratio in ratios]
+    return [base_size] * count
+
+
 def render_panel_layout_preview(
     layout: PanelLayout,
     labels: dict[int, str] | None = None,
@@ -361,19 +366,30 @@ def render_panel_layout_preview(
     cell_width: int = 7,
     cell_height: int = 1,
 ) -> str:
-    width = layout.cols * (cell_width + 1) + 1
-    height = layout.rows * (cell_height + 1) + 1
+    col_widths = _preview_axis_sizes(layout.cols, cell_width, layout.col_ratios)
+    row_heights = _preview_axis_sizes(layout.rows, cell_height, layout.row_ratios)
+
+    width = sum(col_widths) + layout.cols + 1
+    height = sum(row_heights) + layout.rows + 1
     connections = [[0 for _ in range(width)] for _ in range(height)]
     content = [[" " for _ in range(width)] for _ in range(height)]
     pane_labels = labels or {
         placement.pane_index: str(placement.pane_index) for placement in layout.placements
     }
 
+    x_boundaries = [0]
+    for col_width in col_widths:
+        x_boundaries.append(x_boundaries[-1] + col_width + 1)
+
+    y_boundaries = [0]
+    for row_height in row_heights:
+        y_boundaries.append(y_boundaries[-1] + row_height + 1)
+
     for placement in layout.placements:
-        x0 = placement.col * (cell_width + 1)
-        x1 = (placement.col + placement.col_span) * (cell_width + 1)
-        y0 = placement.row * (cell_height + 1)
-        y1 = (placement.row + placement.row_span) * (cell_height + 1)
+        x0 = x_boundaries[placement.col]
+        x1 = x_boundaries[placement.col + placement.col_span]
+        y0 = y_boundaries[placement.row]
+        y1 = y_boundaries[placement.row + placement.row_span]
 
         connections[y0][x0] |= _RIGHT | _DOWN
         connections[y0][x1] |= _LEFT | _DOWN
@@ -461,6 +477,7 @@ class PanelStore:
     def __init__(self) -> None:
         self.config_dir = Path.home() / ".gitdirector"
         self.panels_file = self.config_dir / "panels.yaml"
+        self.lock_file = self.config_dir / "panels.lock"
         self._panels: list[Panel] = []
         self._load()
 
@@ -477,11 +494,7 @@ class PanelStore:
         return normalized_panes
 
     def _load(self) -> None:
-        if not self.panels_file.exists():
-            self._panels = []
-            return
-        with open(self.panels_file) as f:
-            data = yaml.safe_load(f) or {}
+        data = load_yaml_mapping(self.panels_file, description="GitDirector panels config")
         self._panels = []
         for entry in data.get("panels", []):
             layout = resolve_panel_layout(
@@ -532,8 +545,8 @@ class PanelStore:
                     "panes": panes_data,
                 }
             )
-        with open(self.panels_file, "w") as f:
-            yaml.dump(data, f, default_flow_style=False)
+        with advisory_file_lock(self.lock_file):
+            write_yaml_atomic(self.panels_file, data)
 
     def _kill_panel_sessions(self, panel_names: list[str]) -> None:
         if not panel_names:

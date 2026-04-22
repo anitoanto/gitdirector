@@ -38,7 +38,7 @@ def _mock_manager(repos: list[RepositoryInfo] | None = None):
     mgr.config.repositories = [r.path for r in repos]
     mgr.config.max_workers = 2
 
-    def fake_status(path, fetch=False):
+    def fake_status(path, fetch=False, include_size=False):
         for r in repos:
             if r.path == path:
                 return r
@@ -49,7 +49,22 @@ def _mock_manager(repos: list[RepositoryInfo] | None = None):
 
 
 SAMPLE_SESSIONS = [
-    {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
-    {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
-    {"session_name": "gd/gamma/copilot/1", "repo": "gamma", "purpose": "copilot"},
+    {
+        "session_name": "gd/alpha/shell/1",
+        "repo": "alpha",
+        "repo_slug": "alpha",
+        "purpose": "shell",
+    },
+    {
+        "session_name": "gd/beta/claude/1",
+        "repo": "beta",
+        "repo_slug": "beta",
+        "purpose": "claude",
+    },
+    {
+        "session_name": "gd/gamma/copilot/1",
+        "repo": "gamma",
+        "repo_slug": "gamma",
+        "purpose": "copilot",
+    },
 ]

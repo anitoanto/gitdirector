@@ -186,6 +186,18 @@ class TestListGdSessions:
         mock_run.return_value = MagicMock(returncode=0, stdout="other-session\ngd-legacy-session\n")
         assert _list_gd_sessions() == []
 
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_includes_temp_panel_sessions(self, mock_run):
+        from gitdirector.commands.autoclean import _list_gd_sessions
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="gd/repo1/shell/1\ngd/temp/panel/repo1/shell/1\nother-session\n",
+        )
+        result = _list_gd_sessions()
+        assert "gd/temp/panel/repo1/shell/1" in result
+        assert result == ["gd/repo1/shell/1", "gd/temp/panel/repo1/shell/1"]
+
 
 class TestKillSession:
     @patch("gitdirector.integrations.tmux.subprocess.run")

@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from textual.color import Color
 from textual.theme import BUILTIN_THEMES, Theme
 
-
 DEFAULT_THEME_NAME = "rose-pine"
 
 

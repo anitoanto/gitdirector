@@ -1,13 +1,13 @@
 import click
 
 from ..config import Config
-from ..integrations.tmux import kill_tmux_session, list_all_gd_sessions
+from ..integrations.tmux import kill_tmux_session
+from ..integrations.tmux import _list_sessions
 from . import console
 
 
 def _list_gd_sessions() -> list[str]:
-    """List all tmux sessions using the shared GitDirector session parser."""
-    return [entry["session_name"] for entry in list_all_gd_sessions()]
+    return [s for s in _list_sessions() if s.startswith("gd/")]
 
 
 def _kill_session(name: str) -> bool:

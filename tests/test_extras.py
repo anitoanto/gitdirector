@@ -38,7 +38,7 @@ class TestManagerAddErrors:
         assert "Error adding repository" in msg
 
     def test_discover_config_save_failure(self, manager, tmp_path, mocker):
-        """When config.save raises during discover, the exception propagates."""
+        """When config.add_repositories raises during discover, the exception propagates."""
         repos = []
         for i in range(2):
             r = tmp_path / f"repo-{i}"
@@ -46,7 +46,9 @@ class TestManagerAddErrors:
             (r / ".git").mkdir()
             repos.append(r)
 
-        mocker.patch.object(manager.config, "save", side_effect=Exception("Write failed"))
+        mocker.patch.object(
+            manager.config, "add_repositories", side_effect=Exception("Write failed")
+        )
 
         with pytest.raises(Exception, match="Write failed"):
             manager.add_repository(tmp_path, discover=True)
@@ -207,15 +209,11 @@ class TestMainExceptionHandling:
     """Test error handling in cli.main()."""
 
     @patch("gitdirector.cli.cli")
-    def test_main_catches_exception(self, mock_cli, capsys):
-        """main() catches exceptions from cli and exits with code 1."""
+    def test_main_propagates_unexpected_exception(self, mock_cli):
+        """main() lets unexpected exceptions propagate for debugging."""
         mock_cli.side_effect = Exception("Test error")
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(Exception, match="Test error"):
             main()
-        assert exc_info.value.code == 1
-        captured = capsys.readouterr()
-        assert "Error:" in captured.out
-        assert "Test error" in captured.out
 
 
 # ---------------------------------------------------------------------------

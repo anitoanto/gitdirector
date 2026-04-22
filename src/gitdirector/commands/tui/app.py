@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import monotonic
@@ -26,7 +27,7 @@ from textual.widgets import (
 from textual.widgets.data_table import RowDoesNotExist
 
 from ...manager import RepositoryManager
-from ...repo import Repository, RepositoryInfo
+from ...repo import Repository, RepositoryInfo, RepoStatus
 from .. import get_version
 from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
@@ -63,6 +64,8 @@ _PANEL_PREVIEW_FILLED = "■"
 _PANEL_PREVIEW_OPEN = "□"
 _POST_RESUME_NEW_PANEL_GUARD_SECONDS = 0.25
 
+logger = logging.getLogger(__name__)
+
 
 def _panel_preview_marker(
     panel: Panel,
@@ -74,71 +77,16 @@ def _panel_preview_marker(
     return _PANEL_PREVIEW_FILLED if is_filled else _PANEL_PREVIEW_OPEN
 
 
-def _render_grid_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
-    rows: list[str] = []
-    for row_index in range(panel.rows):
-        row_cells = " ".join(
-            _panel_preview_marker(
-                panel,
-                (row_index * panel.cols) + col_index + 1,
-                live_sessions,
-            )
-            for col_index in range(panel.cols)
-        )
-        if row_index == 0:
-            rows.append(f"┌{row_cells}┐")
-        elif row_index == panel.rows - 1:
-            rows.append(f"└{row_cells}┘")
-        else:
-            rows.append(f"│{row_cells}│")
-
-    return "\n".join(rows)
-
-
-def _render_asymmetric_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
-    marker = lambda pane_index: _panel_preview_marker(panel, pane_index, live_sessions)
-    if panel.layout.key == "tall_left":
-        return "\n".join(
-            [
-                f"┌─┬{marker(2)}┐",
-                f"│{marker(1)}├─┤",
-                f"└─┴{marker(3)}┘",
-            ]
-        )
-    if panel.layout.key == "tall_right":
-        return "\n".join(
-            [
-                f"┌{marker(1)}┬─┐",
-                f"├─┤{marker(2)}│",
-                f"└{marker(3)}┴─┘",
-            ]
-        )
-    if panel.layout.key == "wide_top":
-        return "\n".join(
-            [
-                f"┌─{marker(1)}─┐",
-                "├─┬─┤",
-                f"└{marker(2)}┴{marker(3)}┘",
-            ]
-        )
-    if panel.layout.key == "wide_bottom":
-        return "\n".join(
-            [
-                f"┌{marker(1)}┬{marker(2)}┐",
-                "├─┴─┤",
-                f"└─{marker(3)}─┘",
-            ]
-        )
+def _render_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
     labels = {
-        placement.pane_index: marker(placement.pane_index) for placement in panel.pane_placements
+        placement.pane_index: _panel_preview_marker(
+            panel,
+            placement.pane_index,
+            live_sessions,
+        )
+        for placement in panel.pane_placements
     }
     return render_panel_layout_preview(panel.layout, labels=labels, cell_width=1, cell_height=1)
-
-
-def _render_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -> str:
-    if panel.layout.key.startswith("grid_"):
-        return _render_grid_panel_preview(panel, live_sessions)
-    return _render_asymmetric_panel_preview(panel, live_sessions)
 
 
 def _panel_row_height(panel: Panel, live_sessions: set[str] | None = None) -> int:
@@ -385,6 +333,7 @@ class GitDirectorConsole(App):
         self.call_from_thread(self._update_status, f"Checking {total} repositories…")
 
         from ...integrations.tmux import (
+            _repo_session_name_segment,
             _sanitize_repo_name,
             list_all_gd_sessions,
         )
@@ -392,8 +341,8 @@ class GitDirectorConsole(App):
         all_sessions = list_all_gd_sessions()
         sessions_by_repo: dict[str, int] = {}
         for entry in all_sessions:
-            repo = entry["repo"]
-            sessions_by_repo[repo] = sessions_by_repo.get(repo, 0) + 1
+            repo_slug = entry.get("repo_slug", entry["repo"])
+            sessions_by_repo[repo_slug] = sessions_by_repo.get(repo_slug, 0) + 1
 
         with ThreadPoolExecutor(max_workers=self.manager.config.max_workers) as executor:
             futures = {
@@ -401,11 +350,18 @@ class GitDirectorConsole(App):
                 for path in self._repo_paths
             }
             for future in as_completed(futures):
-                info = future.result()
+                path = futures[future]
+                try:
+                    info = future.result()
+                except Exception as exc:
+                    info = RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
                 self._results[str(info.path)] = info
                 done += 1
-                clean_name = _sanitize_repo_name(info.path.name)
-                sessions_count = sessions_by_repo.get(clean_name, 0)
+                repo_slug = _repo_session_name_segment(info.path)
+                sessions_count = sessions_by_repo.get(
+                    repo_slug,
+                    sessions_by_repo.get(_sanitize_repo_name(info.path.name), 0),
+                )
                 self._sessions_cache[str(info.path)] = sessions_count
                 self.call_from_thread(self._update_row, info, sessions_count)
                 remaining = total - done
@@ -451,7 +407,7 @@ class GitDirectorConsole(App):
             table.update_cell(row_key, ck[4], info.last_updated or "—")
             table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
         except Exception:
-            pass
+            logger.debug("Failed to update repo row %s", row_key, exc_info=True)
 
     def _show_no_repos(self) -> None:
         self.query_one("#repo-table", DataTable).display = False
@@ -660,7 +616,7 @@ class GitDirectorConsole(App):
 
         indicators: list[str] = []
         if self._search_query:
-            indicators.append(f"filter: '{self._search_query}'")
+            indicators.append(f"filter: '{escape(self._search_query)}'")
         if (
             self._sessions_sort_column != _DEFAULT_SESSIONS_SORT_COLUMN
             or self._sessions_sort_reverse
@@ -726,9 +682,9 @@ class GitDirectorConsole(App):
             self._update_session_status_cells()
 
         if self._active_tab == "panels":
-            self._apply_panels_filter_and_sort(
-                {entry["session_name"] for entry in self._sessions_entries}
-            )
+            live_session_names = {entry["session_name"] for entry in self._sessions_entries}
+            if live_session_names != self._panels_live_sessions:
+                self._apply_panels_filter_and_sort(live_session_names)
 
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)
@@ -770,7 +726,11 @@ class GitDirectorConsole(App):
                     _SESSION_STATUS_LABEL.get(status, "● running"),
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to update session status cell %s",
+                    entry["session_name"],
+                    exc_info=True,
+                )
 
     def _update_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
@@ -780,8 +740,9 @@ class GitDirectorConsole(App):
         sess_ind = self.query_one("#sessions-search-indicator", Static)
         panel_ind = self.query_one("#panels-search-indicator", Static)
         if self._search_query:
+            escaped_query = escape(self._search_query)
             text = (
-                f"Search results for '[bold]{self._search_query}[/bold]'"
+                f"Search results for '[bold]{escaped_query}[/bold]'"
                 "  —  press [bold]esc[/bold] to clear"
             )
             repo_ind.update(text)
@@ -805,7 +766,11 @@ class GitDirectorConsole(App):
     def _get_selected_row_key(self, table: DataTable) -> str | None:
         if table.row_count == 0:
             return None
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        try:
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        except Exception:
+            logger.debug("Failed to resolve selected row key", exc_info=True)
+            return None
         return str(row_key.value)
 
     def _table_selector_for_tab(self, tab_id: str) -> str:
@@ -1088,7 +1053,7 @@ class GitDirectorConsole(App):
 
         indicators: list[str] = []
         if self._search_query:
-            indicators.append(f"filter: '{self._search_query}'")
+            indicators.append(f"filter: '{escape(self._search_query)}'")
         if self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse:
             direction = "▼" if self._sort_reverse else "▲"
             indicators.append(f"sort: {_SORT_COLUMN_NAMES[self._sort_column]} {direction}")
@@ -1205,8 +1170,9 @@ class GitDirectorConsole(App):
                 panes_label = f"{filled}/{total_panes}" if filled else f"0/{total_panes}"
                 status_state = self._panel_status_state(panel, live_sessions)
                 status_label = _PANEL_STATUS_LABEL[status_state]
+                preview = _render_panel_preview(panel, live_sessions)
                 table.add_row(
-                    _panel_row_cell(_render_panel_preview(panel, live_sessions)),
+                    _panel_row_cell(preview),
                     _panel_row_cell(panel.name),
                     _panel_row_cell(make_panel_session_name(panel.name)),
                     _panel_row_cell(panel.layout_display_label),
@@ -1242,7 +1208,7 @@ class GitDirectorConsole(App):
 
         indicators: list[str] = []
         if self._search_query:
-            indicators.append(f"filter: '{self._search_query}'")
+            indicators.append(f"filter: '{escape(self._search_query)}'")
         if self._panels_sort_column != _DEFAULT_PANELS_SORT_COLUMN or self._panels_sort_reverse:
             direction = "▼" if self._panels_sort_reverse else "▲"
             indicators.append(
@@ -1260,10 +1226,9 @@ class GitDirectorConsole(App):
     def action_select_row(self) -> None:
         if self._active_tab == "sessions":
             table = self.query_one("#sessions-table", DataTable)
-            if table.row_count == 0:
+            session_name = self._get_selected_row_key(table)
+            if session_name is None:
                 return
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            session_name = str(row_key.value)
             self._suspend_and_attach(session_name)
         elif self._active_tab == "panels":
             self._open_selected_panel_menu()
@@ -1353,7 +1318,7 @@ class GitDirectorConsole(App):
 
         info = self.manager.get_repository_status(path, fetch=True)
         self._results[str(path)] = info
-        sessions_count = len(list_repo_sessions(path.name))
+        sessions_count = len(list_repo_sessions(path))
         self._sessions_cache[str(path)] = sessions_count
         self.call_from_thread(self._update_row, info, sessions_count)
 
@@ -1406,7 +1371,11 @@ class GitDirectorConsole(App):
     def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
         from ...info import gather_repo_info
 
-        result = gather_repo_info(path)
+        try:
+            result = gather_repo_info(path)
+        except Exception as exc:
+            self.call_from_thread(screen.show_error, str(exc))
+            return
         self.call_from_thread(screen.populate, result)
 
     def _push_info_screen(self, name: str, path: Path, result) -> None:
@@ -1596,7 +1565,7 @@ class GitDirectorConsole(App):
             path = self._get_selected_path()
             if path:
                 self.push_screen(
-                    RemoveSessionScreen(path.name),
+                    RemoveSessionScreen(path.name, path),
                     callback=self._handle_remove_selection,
                 )
 
@@ -1610,7 +1579,12 @@ class GitDirectorConsole(App):
 
     def _do_remove(self, confirmed: bool, session_name: str) -> None:
         if confirmed:
-            from ...integrations.tmux import kill_tmux_session
+            from ...integrations.tmux import (
+                _parse_gd_session_name,
+                _repo_session_name_segment,
+                _sanitize_repo_name,
+                kill_tmux_session,
+            )
 
             kill_tmux_session(session_name)
 
@@ -1619,14 +1593,21 @@ class GitDirectorConsole(App):
             ]
             self._apply_sessions_filter_and_sort()
 
-            parts = session_name.split("/")
-            if len(parts) >= 2:
-                repo_name = parts[1]
+            parsed = _parse_gd_session_name(session_name)
+            if parsed is not None:
+                repo_slug, _, _ = parsed
                 for path_str, info in self._results.items():
-                    from ...integrations.tmux import _sanitize_repo_name
-
-                    if _sanitize_repo_name(info.path.name) == repo_name:
-                        count = max(self._sessions_cache.get(path_str, 1) - 1, 0)
+                    info_repo_slugs = {
+                        _repo_session_name_segment(info.path),
+                        _sanitize_repo_name(info.path.name),
+                    }
+                    if repo_slug in info_repo_slugs:
+                        count = sum(
+                            1
+                            for entry in self._sessions_entries
+                            if (entry_parsed := _parse_gd_session_name(entry["session_name"]))
+                            and entry_parsed[0] in info_repo_slugs
+                        )
                         self._sessions_cache[path_str] = count
                         self._update_row(info, count)
                         break
@@ -1653,10 +1634,7 @@ class GitDirectorConsole(App):
 
     def _selected_panel_name(self) -> str | None:
         table = self.query_one("#panels-table", DataTable)
-        if table.row_count == 0:
-            return None
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        return str(row_key.value)
+        return self._get_selected_row_key(table)
 
     def _open_selected_panel_menu(self) -> None:
         panel_name = self._selected_panel_name()
@@ -1760,20 +1738,10 @@ class GitDirectorConsole(App):
     ) -> None:
         if result is None:
             return
-        from ...integrations.tmux import make_panel_session_name
-
         name, layout_key, panes = result
-        existing = self._panel_store.get(name)
-        if existing:
-            self._update_status(f"Panel '{name}' already exists")
-            return
-
-        session_name = make_panel_session_name(name)
-        if any(
-            make_panel_session_name(panel.name) == session_name
-            for panel in self._panel_store.panels
-        ):
-            self._update_status(f"Panel '{name}' conflicts with an existing panel session name")
+        validation_message = CreatePanelScreen.validate_new_panel_name(self._panel_store, name)
+        if validation_message:
+            self._update_status(validation_message)
             return
 
         created_panel = self._panel_store.create(name, panes=panes, layout_key=layout_key)

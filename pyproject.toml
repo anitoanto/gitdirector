@@ -14,7 +14,7 @@ authors = [
 maintainers = [
     { name = "Anito Anto", email = "49053859+anitoanto@users.noreply.github.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = ["git", "repository", "manager", "cli", "synchronization", "batch"]
 classifiers = [
     "Environment :: Console",
@@ -22,7 +22,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -43,12 +42,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
     "black>=23.0",
-    "ruff>=0.1.0",
-    "mypy>=1.0",
     "build>=1.0",
+    "mypy>=1.0",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "pytest-mock>=3.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.1.0",
     "twine>=4.0",
 ]
 
@@ -66,32 +68,35 @@ managed = true
 
 [dependency-groups]
 dev = [
+    "black>=23.0",
+    "build>=1.0",
+    "mypy>=1.0",
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "pytest-mock>=3.0",
-    "black>=23.0",
-    "ruff>=0.1.0",
-    "mypy>=1.0",
     "pytest-xdist>=3.8.0",
+    "ruff>=0.1.0",
+    "twine>=4.0",
 ]
 
 [tool.black]
 line-length = 100
-target-version = ["py39", "py310", "py311", "py312"]
+target-version = ["py310", "py311", "py312"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
+ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
