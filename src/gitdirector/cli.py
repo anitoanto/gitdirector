@@ -1,3 +1,5 @@
+import subprocess
+
 import click
 
 from .commands import (
@@ -9,6 +11,7 @@ from .commands import (
     cd,
     console,
     help,
+    info,
     link,
     listt,
     pull,
@@ -29,7 +32,7 @@ __all__ = [
 
 
 class _HelpGroup(click.Group):
-    def format_help(self, ctx, formatter):
+    def format_help(self, ctx, _formatter):
         show_help()
 
 
@@ -49,14 +52,21 @@ cd.register(cli)
 help.register(cli)
 tui.register(cli)
 autoclean.register(cli)
+info.register(cli)
 
 
 def main():
     try:
         cli()
-    except Exception as e:
-        console.print(f"\n  [red]Error:[/red] {str(e)}\n")
-        raise SystemExit(1)
+    except (
+        click.ClickException,
+        OSError,
+        RuntimeError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:
+        console.print(f"\n  [red]Error:[/red] {str(exc)}\n")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

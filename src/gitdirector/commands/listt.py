@@ -5,6 +5,7 @@ from rich.live import Live
 from rich.spinner import Spinner
 
 from ..manager import RepositoryManager
+from ..repo import RepositoryInfo, RepoStatus
 from . import _build_repo_table, console
 
 
@@ -25,7 +26,13 @@ def register(cli: click.Group):
         ) as live:
             with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
                 futures = {
-                    executor.submit(manager.get_repository_status, path): path for path in paths
+                    executor.submit(
+                        manager.get_repository_status,
+                        path,
+                        fetch=True,
+                        include_size=True,
+                    ): path
+                    for path in paths
                 }
                 remaining = len(futures)
                 live.update(
@@ -33,7 +40,13 @@ def register(cli: click.Group):
                 )
                 for future in as_completed(futures):
                     remaining -= 1
-                    results.append(future.result())
+                    path = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        results.append(
+                            RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+                        )
                     done = len(results)
                     if remaining > 0:
                         live.update(

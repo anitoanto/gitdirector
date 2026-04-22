@@ -1,3 +1,5 @@
+import runpy
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -241,7 +243,9 @@ class TestListCommand:
         info1 = RepositoryInfo(repo1, "repo1", RepoStatus.UP_TO_DATE, "main")
         info2 = RepositoryInfo(repo2, "repo2", RepoStatus.UP_TO_DATE, "dev")
         mgr = _mock_manager()
-        mgr.get_repository_status = lambda path: info1 if path == repo1 else info2
+        mgr.get_repository_status = lambda path, fetch=False, include_size=False: (
+            info1 if path == repo1 else info2
+        )
         mgr.config.repositories = [repo1, repo2]
         with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["list"])
@@ -307,6 +311,30 @@ class TestStatusCommand:
         assert result.exit_code == 0
         assert "changed" in result.output.lower()
 
+    def test_multiple_repos_updates_progress_display(self, runner, tmp_path):
+        repo1 = tmp_path / "alpha"
+        repo2 = tmp_path / "beta"
+        repo1.mkdir()
+        repo2.mkdir()
+        info1 = RepositoryInfo(repo1, repo1.name, RepoStatus.UP_TO_DATE, "main")
+        info2 = RepositoryInfo(
+            repo2,
+            repo2.name,
+            RepoStatus.UP_TO_DATE,
+            "develop",
+            staged=True,
+            staged_files=["tracked.py"],
+        )
+        mgr = _mock_manager()
+        mgr.config.repositories = [repo1, repo2]
+        mgr.get_repository_status = lambda path: info1 if path == repo1 else info2
+
+        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["status"])
+
+        assert result.exit_code == 0
+        assert "2 repositories" in result.output
+
 
 class TestPullCommand:
     def test_empty(self, runner):
@@ -327,7 +355,7 @@ class TestPullCommand:
                 "gitdirector.commands.pull._pull_one",
                 return_value=(fake_git_repo.name, True, "Already up to date."),
             ):
-                result = runner.invoke(cli, ["pull"])
+                result = runner.invoke(cli, ["pull", "-y"])
         assert result.exit_code == 0
         assert "1 repository" in result.output
 
@@ -341,9 +369,81 @@ class TestPullCommand:
                 "gitdirector.commands.pull._pull_one",
                 return_value=(fake_git_repo.name, False, "Cannot fast-forward"),
             ):
-                result = runner.invoke(cli, ["pull"])
+                result = runner.invoke(cli, ["pull", "-y"])
         assert result.exit_code == 1
         assert "failed" in result.output.lower()
+
+    def test_abort_confirmation(self, runner, fake_git_repo):
+        mgr = _mock_manager()
+        mgr.config.repositories = [fake_git_repo]
+        mgr.config.max_workers = 2
+
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["pull"], input="n\n")
+        assert result.exit_code == 0
+        assert "Aborted" in result.output
+
+    def test_confirmed_multiple_repos_updates_progress(self, runner, tmp_path):
+        repo1 = tmp_path / "alpha"
+        repo2 = tmp_path / "beta"
+        repo1.mkdir()
+        repo2.mkdir()
+        mgr = _mock_manager()
+        mgr.config.repositories = [repo1, repo2]
+        mgr.config.max_workers = 2
+
+        with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
+            with patch(
+                "gitdirector.commands.pull._pull_one",
+                side_effect=lambda path: (path.name, True, "Already up to date."),
+            ):
+                result = runner.invoke(cli, ["pull"], input="y\n")
+
+        assert result.exit_code == 0
+        assert "2 repositories" in result.output
+
+
+class TestConsoleCommand:
+    @patch("gitdirector.commands.tui.app._run_console")
+    def test_console_command_invokes_tui_runner(self, mock_run_console, runner):
+        result = runner.invoke(cli, ["console"])
+
+        assert result.exit_code == 0
+        mock_run_console.assert_called_once_with()
+
+
+class TestMainEntry:
+    def test_main_exception_handler(self, runner):
+        with patch("gitdirector.cli.cli", side_effect=RuntimeError("boom")):
+            with pytest.raises(SystemExit):
+                main()
+
+    def test_cli_module_runs_main_from_dunder_main(self, monkeypatch):
+        import sys
+
+        import click
+
+        calls = []
+
+        def fake_main(self, *args, **kwargs):
+            calls.append((self.name, args, kwargs))
+            return None
+
+        monkeypatch.setattr(click.core.Command, "main", fake_main)
+        monkeypatch.setattr(sys, "argv", ["gitdirector"])
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=(
+                    r"'gitdirector\.cli' found in sys\.modules after import of "
+                    r"package 'gitdirector'"
+                ),
+                category=RuntimeWarning,
+            )
+            runpy.run_module("gitdirector.cli", run_name="__main__")
+
+        assert len(calls) == 1
 
 
 class TestHelpCommand:
@@ -392,7 +492,7 @@ class TestCdCommand:
         mock_tmux.assert_called_once_with("my-repo", repo)
         assert result.exit_code == 0
 
-    def test_cd_libtmux_not_installed(self, runner, tmp_path):
+    def test_cd_tmux_integration_unavailable(self, runner, tmp_path):
         import sys
 
         repo = tmp_path / "my-repo"
@@ -403,7 +503,7 @@ class TestCdCommand:
             with patch.dict(sys.modules, {"gitdirector.integrations.tmux": None}):
                 result = runner.invoke(cli, ["cd", "my-repo"])
         assert result.exit_code == 1
-        assert "libtmux" in result.output
+        assert "tmux integration" in result.output
 
 
 class TestHelpGroup:
