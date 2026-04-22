@@ -14,6 +14,7 @@ from gitdirector.integrations.tmux import (
     rebuild_panel_tmux_session,
 )
 
+
 class TestSanitizeRepoName:
     def test_lowercases(self):
         assert _sanitize_repo_name("MyRepo") == "myrepo"
@@ -464,6 +465,7 @@ class TestBuildPanelLayout:
             ),
         ]
         mock_list_panes.assert_called_once_with("gd/panel/studio")
+
 
 class TestRebuildPanelTmuxSession:
     @patch("gitdirector.integrations.tmux.shutil.get_terminal_size", return_value=(80, 24))

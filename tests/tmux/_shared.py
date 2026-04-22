@@ -1,6 +1,6 @@
-from contextlib import contextmanager
 import fcntl
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from gitdirector.integrations.tmux import TmuxMonitor

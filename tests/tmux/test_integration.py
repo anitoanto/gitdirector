@@ -21,6 +21,7 @@ from gitdirector.integrations.tmux import (
 
 from ._shared import _tmux_integration_lock
 
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 class TestPanelExitIntegration:
     def test_exiting_one_panel_pane_keeps_panel_and_other_session_alive(

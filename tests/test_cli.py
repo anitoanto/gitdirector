@@ -492,7 +492,7 @@ class TestCdCommand:
         mock_tmux.assert_called_once_with("my-repo", repo)
         assert result.exit_code == 0
 
-    def test_cd_libtmux_not_installed(self, runner, tmp_path):
+    def test_cd_tmux_integration_unavailable(self, runner, tmp_path):
         import sys
 
         repo = tmp_path / "my-repo"
@@ -503,7 +503,7 @@ class TestCdCommand:
             with patch.dict(sys.modules, {"gitdirector.integrations.tmux": None}):
                 result = runner.invoke(cli, ["cd", "my-repo"])
         assert result.exit_code == 1
-        assert "libtmux" in result.output
+        assert "tmux integration" in result.output
 
 
 class TestHelpGroup:

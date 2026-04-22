@@ -5,12 +5,8 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
-import tempfile
-import threading
-import time
 from base64 import b32encode
 from pathlib import Path
 
