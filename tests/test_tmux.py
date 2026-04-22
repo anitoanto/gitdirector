@@ -20,46 +20,45 @@ from gitdirector.integrations.tmux import (
     _BELL_GRACE_SECS,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
+    TmuxMonitor,
     _build_layout_spec,
     _build_panel_layout,
-    _current_window_target,
-    cleanup_panel_attached_session,
-    _distribute_equal,
-    _layout_checksum,
-    _span_size,
-    TmuxMonitor,
     _capture_pane_text,
+    _configure_panel_window,
     _ControlModeReader,
+    _current_window_target,
+    _distribute_equal,
+    _embedded_tmux_attach_command,
+    _ensure_panel_prefix_bindings,
+    _ensure_panel_resize_tracking,
     _get_process_snapshot,
     _hash_content,
+    _is_persistent_panel_session,
+    _is_temp_panel_session,
+    _layout_checksum,
+    _live_panel_sessions,
+    _live_repo_tmux_sessions,
+    _load_panel_tmux_config,
     _make_agent_ready_marker,
     _make_session_name,
     _normalize_process_command,
-    _embedded_tmux_attach_command,
-    _ensure_panel_prefix_bindings,
     _panel_attach_fragment,
     _panel_border_format,
     _panel_pane_command,
-    _panel_proxy_attach_fragment,
-    _panel_proxy_session_name,
-    _panel_window_status_format,
-    _panel_tmux_config,
-    _session_tmux_config,
-    _tmux_theme_config,
-    _configure_panel_window,
-    _ensure_panel_resize_tracking,
-    _load_panel_tmux_config,
     _panel_pane_title,
-    _resolved_panel_theme_name,
-    _resolve_pane_command,
-    _live_panel_sessions,
-    _live_repo_tmux_sessions,
-    _is_persistent_panel_session,
-    _is_temp_panel_session,
+    _panel_tmux_config,
+    _panel_window_status_format,
     _parse_gd_session_name,
+    _repo_session_name_segment,
+    _resolve_pane_command,
+    _resolved_panel_theme_name,
     _sanitize_repo_name,
     _session_exists,
+    _session_tmux_config,
+    _span_size,
+    _tmux_theme_config,
     attach_tmux_session,
+    cleanup_panel_attached_session,
     create_tmux_session,
     get_all_session_statuses,
     kill_panel_tmux_session,
@@ -553,48 +552,78 @@ class TestMakeSessionName:
         return_value=[],
     )
     def test_first_session(self, _mock_list):
-        name = _make_session_name("my-repo")
-        assert name == "gd/my-repo/shell/1"
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path)
+
+        assert name == f"gd/{repo_slug}/shell/1"
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
-        return_value=["gd/my-repo/shell/1", "gd/my-repo/shell/2"],
+        return_value=[
+            f"gd/{_repo_session_name_segment(Path('/tmp/my-repo'))}/shell/1",
+            f"gd/{_repo_session_name_segment(Path('/tmp/my-repo'))}/shell/2",
+        ],
     )
     def test_increments_past_existing(self, _mock_list):
-        name = _make_session_name("my-repo")
-        assert name == "gd/my-repo/shell/3"
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path)
+
+        assert name == f"gd/{repo_slug}/shell/3"
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
-        return_value=["gd/my-repo/shell/1", "gd/my-repo/shell/3"],
+        return_value=[
+            f"gd/{_repo_session_name_segment(Path('/tmp/my-repo'))}/shell/1",
+            f"gd/{_repo_session_name_segment(Path('/tmp/my-repo'))}/shell/3",
+        ],
     )
     def test_increments_past_max_with_gap(self, _mock_list):
-        name = _make_session_name("my-repo")
-        assert name == "gd/my-repo/shell/4"
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path)
+
+        assert name == f"gd/{repo_slug}/shell/4"
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
-        return_value=["gd/my-repo/claude/1"],
+        return_value=[f"gd/{_repo_session_name_segment(Path('/tmp/my-repo'))}/claude/1"],
     )
     def test_purpose_shell_independent_of_agent(self, _mock_list):
-        name = _make_session_name("my-repo", "shell")
-        assert name == "gd/my-repo/shell/1"
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path, "shell")
+
+        assert name == f"gd/{repo_slug}/shell/1"
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
-        return_value=["gd/my-repo/claude/1"],
+        return_value=[f"gd/{_repo_session_name_segment(Path('/tmp/my-repo'))}/claude/1"],
     )
     def test_purpose_agent(self, _mock_list):
-        name = _make_session_name("my-repo", "claude")
-        assert name == "gd/my-repo/claude/2"
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path, "claude")
+
+        assert name == f"gd/{repo_slug}/claude/2"
 
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
         return_value=[],
     )
     def test_special_chars_sanitized(self, _mock_list):
-        name = _make_session_name("foo.bar/baz")
-        assert name == "gd/foo-bar-baz/shell/1"
+        repo_path = Path("/tmp/foo.bar@baz")
+
+        name = _make_session_name(repo_path)
+
+        assert name.startswith("gd/foo-bar-baz_")
+        assert name.endswith("/shell/1")
 
 
 class TestRebuildPanelTmuxSession:
@@ -875,7 +904,6 @@ class TestPanelPaneTitles:
         command = _panel_pane_command("Main", 1, "gd/my-repo/copilot/3")
 
         assert "tmux new-session -d -t =gd/my-repo/copilot/3 -s" not in command
-        assert "tmux attach-session -t =gd-proxy/panel/main/1" not in command
         assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
         assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
         assert "SESSION CLOSED" in command
@@ -897,15 +925,6 @@ class TestPanelPaneTitles:
         assert "tmux set-option -t =gd/my-repo/copilot/3: status-left" in command
         assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" not in command
         assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' not in command
-        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
-
-    def test_embedded_tmux_attach_command_uses_direct_attach_when_context_provided(self):
-        command = _embedded_tmux_attach_command("gd/my-repo/copilot/3", "Main", 2)
-
-        assert command.startswith("sh -c ")
-        assert "tmux new-session -d -t =gd/my-repo/copilot/3 -s" not in command
-        assert "tmux attach-session -t =gd-proxy/panel/main/2" not in command
-        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
         assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
     @patch(
@@ -1152,16 +1171,26 @@ class TestListAllGdSessions:
     @patch("gitdirector.integrations.tmux._list_sessions")
     def test_skips_non_gd_malformed_and_temp_panel_sessions(self, mock_list):
         mock_list.return_value = [
-            "gd/alpha/shell/1",
+            "gd/alpha_abcd2/shell/1",
             "other-session",
             "gd/bad",
-            "gd/beta/claude/2",
+            "gd/beta_efgh2/claude/2",
             "gd/temp/panel/alpha/shell/1",
         ]
 
         assert list_all_gd_sessions() == [
-            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
-            {"session_name": "gd/beta/claude/2", "repo": "beta", "purpose": "claude"},
+            {
+                "session_name": "gd/alpha_abcd2/shell/1",
+                "repo": "alpha",
+                "repo_slug": "alpha_abcd2",
+                "purpose": "shell",
+            },
+            {
+                "session_name": "gd/beta_efgh2/claude/2",
+                "repo": "beta",
+                "repo_slug": "beta_efgh2",
+                "purpose": "claude",
+            },
         ]
 
 
@@ -1230,7 +1259,7 @@ class TestCreateTmuxSession:
         path = Path("/tmp/my-repo")
         name = create_tmux_session("my-repo", path, purpose="claude")
         assert name == "gd/my-repo/claude/1"
-        _mock_name.assert_called_with("my-repo", "claude")
+        _mock_name.assert_called_with("my-repo", "claude", repo_path=path)
         mock_sync.assert_called_once_with()
 
 
@@ -1343,12 +1372,8 @@ class TestKillTmuxSession:
 
 
 class TestKillPanelTmuxSession:
-    @patch(
-        "gitdirector.integrations.tmux._list_sessions",
-        return_value=["gd-proxy/panel/main/1", "gd-proxy/panel/main/2", "gd/alpha/shell/1"],
-    )
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_kills_panel_proxy_sessions(self, mock_run, _mock_list):
+    def test_kills_panel_session(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
 
         assert kill_panel_tmux_session("Main") is True
@@ -1357,14 +1382,6 @@ class TestKillPanelTmuxSession:
             ["tmux", "kill-session", "-t", "=gd/panel/main"],
         )
         assert mock_run.call_args_list[0].kwargs == {"capture_output": True}
-        assert mock_run.call_args_list[1].args == (
-            ["tmux", "kill-session", "-t", "=gd-proxy/panel/main/1"],
-        )
-        assert mock_run.call_args_list[1].kwargs == {"check": False}
-        assert mock_run.call_args_list[2].args == (
-            ["tmux", "kill-session", "-t", "=gd-proxy/panel/main/2"],
-        )
-        assert mock_run.call_args_list[2].kwargs == {"check": False}
 
 
 class TestAttachTmuxSession:
@@ -2321,53 +2338,6 @@ class TestPanelResizeTracking:
         mock_run.assert_not_called()
 
 
-class TestExactMatchKillPanelTmuxSession:
-    """kill_panel_tmux_session must not cascade to panels with similar names."""
-
-    @patch(
-        "gitdirector.integrations.tmux._list_sessions",
-        return_value=[
-            "gd-proxy/panel/dev/1",
-            "gd-proxy/panel/dev/2",
-            "gd-proxy/panel/dev-tools/1",
-            "gd-proxy/panel/dev-tools/2",
-            "gd/panel/dev-tools",
-        ],
-    )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_only_kills_exact_panel_proxies(self, mock_run, _mock_list):
-        mock_run.return_value = MagicMock(returncode=0)
-        kill_panel_tmux_session("Dev")
-
-        killed_targets = [call.args[0][3] for call in mock_run.call_args_list]
-
-        assert "=gd/panel/dev" in killed_targets
-        assert "=gd-proxy/panel/dev/1" in killed_targets
-        assert "=gd-proxy/panel/dev/2" in killed_targets
-
-        assert "=gd-proxy/panel/dev-tools/1" not in killed_targets
-        assert "=gd-proxy/panel/dev-tools/2" not in killed_targets
-        assert "=gd/panel/dev-tools" not in killed_targets
-
-    @patch(
-        "gitdirector.integrations.tmux._list_sessions",
-        return_value=[
-            "gd-proxy/panel/dev/1",
-            "gd-proxy/panel/dev-tools/1",
-        ],
-    )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_all_targets_use_equals_prefix(self, mock_run, _mock_list):
-        mock_run.return_value = MagicMock(returncode=0)
-        kill_panel_tmux_session("Dev")
-
-        for call in mock_run.call_args_list:
-            args = call.args[0]
-            t_indices = [i for i, a in enumerate(args) if a == "-t"]
-            for i in t_indices:
-                assert args[i + 1].startswith("="), f"'-t' target missing '=' prefix: {args}"
-
-
 class TestExactMatchPanelAttachFragment:
     """_panel_attach_fragment shell script must use ``=`` for all -t args."""
 
@@ -2380,36 +2350,6 @@ class TestExactMatchPanelAttachFragment:
                 assert unquoted.startswith("=") or unquoted.startswith("$"), (
                     f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
                 )
-
-
-class TestExactMatchPanelProxyAttachFragment:
-    """_panel_proxy_attach_fragment must use exact targets and avoid grouped sessions."""
-
-    def test_proxy_targets_use_equals(self):
-        fragment = _panel_proxy_attach_fragment("Dev", 1, "gd/repo/shell/1")
-        commands = fragment.split("; ")
-        for cmd in commands:
-            if "tmux " not in cmd:
-                continue
-            parts = cmd.split()
-            for i, part in enumerate(parts):
-                if part == "-t" and i + 1 < len(parts):
-                    target = parts[i + 1].strip("'\"")
-                    assert target.startswith("=") or target.startswith("$"), (
-                        f"-t target missing '=' prefix: {cmd}"
-                    )
-
-    def test_fragment_does_not_create_grouped_session(self):
-        fragment = _panel_proxy_attach_fragment("Dev", 1, "gd/repo/shell/1")
-        assert "new-session -d" not in fragment
-        assert "gd-proxy/panel/dev/1" in fragment
-        assert "tmux set-option -q -t =gd/repo/shell/1: status off" in fragment
-        assert "tmux attach-session -t =gd/repo/shell/1" in fragment
-
-    def test_fragment_uses_direct_attach_after_proxy_cleanup(self):
-        fragment = _panel_proxy_attach_fragment("Dev", 1, "gd/repo/shell/1")
-        assert "kill-session -t =gd-proxy/panel/dev/1" in fragment
-        assert "attach-session -t =gd/repo/shell/1" in fragment
 
 
 class TestCleanupPanelAttachedSession:
@@ -2540,7 +2480,7 @@ class TestPanelExitIntegration:
                 assert base_a in sessions_before
                 assert base_b in sessions_before
                 assert not any(
-                    name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_before
+                    name.startswith(f"gd/temp/panel/{panel_name}/") for name in sessions_before
                 )
 
                 run_tmux("send-keys", "-t", f"={panel_session}:0.1", "exit", "Enter")
@@ -2561,7 +2501,7 @@ class TestPanelExitIntegration:
                 assert base_a not in sessions_after
                 assert base_b in sessions_after
                 assert not any(
-                    name.startswith(f"gd-proxy/panel/{panel_name}/") for name in sessions_after
+                    name.startswith(f"gd/temp/panel/{panel_name}/") for name in sessions_after
                 )
                 assert "1|tail" in pane_commands
                 assert any(line.startswith("2|") and line != "2|tail" for line in pane_commands)
@@ -2832,6 +2772,7 @@ class TestExactMatchSourceCodeAudit:
     def test_all_subprocess_list_targets_use_equals(self):
         import ast
         import inspect
+
         import gitdirector.integrations.tmux as tmux_mod
 
         source = inspect.getsource(tmux_mod)

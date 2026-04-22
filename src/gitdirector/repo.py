@@ -32,9 +32,7 @@ _AUTH_ERROR_RE = re.compile(
 )
 
 _NO_COMMITS_RE = re.compile(
-    r"does not have any commits yet"
-    r"|bad default revision 'HEAD'"
-    r"|ambiguous argument 'HEAD'",
+    r"does not have any commits yet" r"|bad default revision 'HEAD'" r"|ambiguous argument 'HEAD'",
     re.IGNORECASE,
 )
 
@@ -259,7 +257,7 @@ class Repository:
                     pass
         return total
 
-    def get_status(self, *, fetch: bool = False) -> RepositoryInfo:
+    def get_status(self, *, fetch: bool = False, include_size: bool = True) -> RepositoryInfo:
         code, out, _ = self._run_git("status", "--porcelain=v2", "--branch", _strip=False)
         if code != 0:
             return RepositoryInfo(
@@ -311,7 +309,7 @@ class Repository:
             status, msg = self._get_origin_sync_status(branch)
 
         last_updated, last_commit_ts = self.get_last_commit_info()
-        size = self.get_tracked_size()
+        size = self.get_tracked_size() if include_size else None
 
         return RepositoryInfo(
             self.path,

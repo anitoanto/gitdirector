@@ -14,6 +14,8 @@ GitDirector gives you a single cockpit for all of it. See every repo's status, D
 pip install gitdirector
 ```
 
+Requires Python 3.10+.
+
 ## Support
 
 If you find GitDirector useful, please star this repository on GitHub, we need more stars to qualify for inclusion in Homebrew. Your support helps a lot, thank you!
@@ -102,7 +104,7 @@ Displays a live table of all tracked repositories with:
 - Tracked file size
 - Path
 
-Checks run concurrently (default: 10 workers).
+Checks run concurrently (default: 10 workers, configurable from 1 to 32).
 
 ### status
 
@@ -137,7 +139,7 @@ Config is stored at `~/.gitdirector/config.yaml`.
 repositories:
     - /path/to/repo1
     - /path/to/repo2
-max_workers: 10 # optional, default 10
+max_workers: 10 # optional, valid range 1-32, default 10
 theme: rose-pine # optional, default rose-pine
 ```
 
@@ -147,7 +149,7 @@ theme: rose-pine # optional, default rose-pine
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - Git
 - [tmux](https://github.com/tmux/tmux) ≥ 3.2a (for `gitdirector cd`)
 

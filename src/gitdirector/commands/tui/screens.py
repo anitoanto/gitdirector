@@ -24,6 +24,7 @@ from ...info import RepoInfoResult
 from .constants import _MODAL_BINDINGS, _MODAL_CSS, _SORT_COLUMN_NAMES
 from .panels import (
     Panel,
+    PanelStore,
     get_create_panel_layouts,
     render_panel_layout_preview,
     resolve_panel_layout,
@@ -54,7 +55,7 @@ class ActionMenuScreen(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         from ...integrations.tmux import list_repo_sessions
 
-        sessions = list_repo_sessions(self.repo_name)
+        sessions = list_repo_sessions(self.repo_path)
 
         with Vertical(id="menu-container"):
             yield Static(f"[bold white]{self.repo_name}[/bold white]", id="menu-title")
@@ -192,14 +193,15 @@ class RemoveSessionScreen(ModalScreen[str | None]):
         " }" + _MODAL_CSS
     )
 
-    def __init__(self, repo_name: str) -> None:
+    def __init__(self, repo_name: str, repo_path: Path) -> None:
         super().__init__()
         self.repo_name = repo_name
+        self.repo_path = repo_path
 
     def compose(self) -> ComposeResult:
         from ...integrations.tmux import list_repo_sessions
 
-        sessions = list_repo_sessions(self.repo_name)
+        sessions = list_repo_sessions(self.repo_path)
 
         with Vertical(id="menu-container"):
             yield Static("[bold white]Select session to remove[/bold white]", id="menu-title")
@@ -805,6 +807,13 @@ class RepoInfoScreen(ModalScreen[None]):
             hint.mount(table, before=hint)
         hint.update("\\[esc] close")
 
+    def show_error(self, message: str) -> None:
+        loading = self.query("#info-loading")
+        if loading:
+            loading.first().remove()
+        hint = self.query_one("#info-hint", Static)
+        hint.update(f"[red]{escape(message)}[/red]\n\\[esc] close")
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
@@ -960,6 +969,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         self._selected_layout_key: str | None = initial_layout_key
         self._selected_pane_index = 1
         self._current_step2_field = "panes"
+        self._validation_message: str | None = None
         self._session_entries = list_all_gd_sessions()
         self._session_option_ids = ["__clear__"] + [
             entry["session_name"] for entry in self._session_entries
@@ -1085,13 +1095,54 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         verb = "save and open" if self._editing else "create and open"
         return f"↑↓/jk navigate    \\[tab] switch lists    \\[ctrl+o] {verb}    \\[esc] back"
 
+    @staticmethod
+    def validate_new_panel_name(panel_store: PanelStore, name: str) -> str | None:
+        from ...integrations.tmux import _session_exists, make_panel_session_name
+
+        if panel_store.get(name):
+            return f"Panel '{name}' already exists"
+
+        session_name = make_panel_session_name(name)
+        if any(make_panel_session_name(panel.name) == session_name for panel in panel_store.panels):
+            return f"Panel '{name}' conflicts with tmux session name '{session_name}'"
+
+        if _session_exists(session_name):
+            return f"TMUX session '{session_name}' already exists"
+
+        return None
+
+    def _validate_current_panel_name(self, name: str) -> str | None:
+        if self._editing:
+            return None
+        panel_store = getattr(self.app, "_panel_store", None)
+        if panel_store is None:
+            return None
+        return self.validate_new_panel_name(panel_store, name)
+
+    def _hint_markup(self, hint: str) -> str:
+        if not self._validation_message:
+            return hint
+        return f"[red]{escape(self._validation_message)}[/red]\n{hint}"
+
+    def _update_hint(self) -> None:
+        hint = self._step_1_hint() if self._step == 1 else self._step_2_hint()
+        self.query_one("#create-panel-hint", Static).update(self._hint_markup(hint))
+
+    def _set_validation_message(self, message: str) -> None:
+        self._validation_message = message
+        self._update_hint()
+
+    def _clear_validation_message(self) -> None:
+        if not self._validation_message:
+            return
+        self._validation_message = None
+        self._update_hint()
+
     def _show_step(self, step: int) -> None:
         self._step = step
         self.query_one("#step-1").display = step == 1
         self.query_one("#step-2").display = step == 2
-        if step == 1:
-            hint = self._step_1_hint()
-        else:
+        if step != 1:
             name = self._current_panel_name() or "unnamed"
             layout = resolve_panel_layout(self._selected_layout_key)
             self.query_one("#step-2-subtitle", Static).update(
@@ -1101,9 +1152,8 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             self._update_slot_markers()
             self._update_session_markers()
             self._update_session_visibility()
-            hint = self._step_2_hint()
         self.query_one("#create-panel-title", Static).update(self._step_title_markup())
-        self.query_one("#create-panel-hint", Static).update(hint)
+        self._update_hint()
 
     def _go_to_step_2(self) -> None:
         name = self._current_panel_name()
@@ -1111,6 +1161,13 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             if not self._editing:
                 self.query_one("#panel-name-input", Input).focus()
             return
+        validation_message = self._validate_current_panel_name(name)
+        if validation_message:
+            self._set_validation_message(validation_message)
+            if not self._editing:
+                self.query_one("#panel-name-input", Input).focus()
+            return
+        self._clear_validation_message()
         if not self._selected_layout_key:
             self._focus_layout_menu()
             return
@@ -1255,6 +1312,10 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         if event.input.id == "panel-name-input":
             self._go_to_step_2()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "panel-name-input":
+            self._clear_validation_message()
+
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list.id == "layout-menu":
             if not self._layout_highlight_enabled:
@@ -1379,6 +1440,44 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             "#pane-session-menu", OptionList
         ).highlighted = self._session_option_ids.index(oid)
 
+    def _commit_highlighted_slot_selection(self) -> None:
+        focused = self.focused
+        slot_menu_focused = focused is not None and focused.id == "pane-slot-menu"
+        if self._current_step2_field != "panes" and not slot_menu_focused:
+            return
+
+        menu = self.query_one("#pane-slot-menu", OptionList)
+        highlighted = menu.highlighted
+        if highlighted is None:
+            return
+
+        option = menu.get_option_at_index(highlighted)
+        if option.id == self.AUTO_ASSIGN_OPTION_ID:
+            self._auto_assign_panes()
+
+    def _commit_highlighted_session_selection(self) -> None:
+        focused = self.focused
+        session_menu_focused = focused is not None and focused.id == "pane-session-menu"
+        if not self._pane_is_active() or (
+            self._current_step2_field != "sessions" and not session_menu_focused
+        ):
+            return
+
+        menu = self.query_one("#pane-session-menu", OptionList)
+        highlighted = menu.highlighted
+        if highlighted is None:
+            return
+
+        option = menu.get_option_at_index(highlighted)
+        if option.id == "__empty__":
+            return
+
+        self._pane_assignments[self._selected_pane_index] = (
+            None if option.id == "__clear__" else option.id
+        )
+        self._update_slot_markers()
+        self._update_session_markers()
+
     def _focus_step2_field(self) -> None:
         field = self._current_step2_field
         if field == "panes":
@@ -1448,6 +1547,16 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             self._show_step(1)
             self.query_one("#layout-menu", OptionList).focus()
             return
+        validation_message = self._validate_current_panel_name(name)
+        if validation_message:
+            self._show_step(1)
+            self._set_validation_message(validation_message)
+            if not self._editing:
+                self.query_one("#panel-name-input", Input).focus()
+            return
+        self._clear_validation_message()
+        self._commit_highlighted_slot_selection()
+        self._commit_highlighted_session_selection()
         total_panes = self._active_pane_count()
         panes = {
             pane_index: self._pane_assignments[pane_index]

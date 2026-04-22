@@ -49,8 +49,15 @@ def pull_repository(path: Path) -> tuple[str, bool, str]:
         repo = Repository(path)
         ok, msg = repo.pull()
         return name, ok, msg
-    except Exception as e:
-        return name, False, str(e)
+    except (OSError, ValueError) as exc:
+        return name, False, str(exc)
+
+
+def _pull_one(path: Path) -> tuple[str, bool, str]:
+    try:
+        return pull_repository(path)
+    except Exception as exc:
+        return path.name, False, str(exc)
 
 
 def register(cli: click.Group):
@@ -82,14 +89,18 @@ def register(cli: click.Group):
             console=console, refresh_per_second=12, transient=True, vertical_overflow="visible"
         ) as live:
             with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
-                futures = {executor.submit(pull_repository, path): path for path in paths}
+                futures = {executor.submit(_pull_one, path): path for path in paths}
                 remaining = len(futures)
                 live.update(
                     Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]")
                 )
                 for future in as_completed(futures):
                     remaining -= 1
-                    results.append(future.result())
+                    path = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        results.append((path.name, False, str(exc)))
                     done = len(results)
                     if remaining > 0:
                         live.update(

@@ -75,4 +75,6 @@ uv run ruff check src/ tests/
 
 1. Bump `version` in `pyproject.toml`
 2. Run `uv sync`
-3. Merge with main, tag the release with v<version>, GitHub Actions will build and publish to PyPI.
+3. Run `uv run black --check src/ tests/`, `uv run ruff check src/ tests/`, and `uv run pytest`
+4. Merge with main, tag the release with `v<version>`, and let GitHub Actions build and publish to PyPI.
+5. Update `Formula/gitdirector.rb` to the new published PyPI sdist URL and sha256 after the release is live.

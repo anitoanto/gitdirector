@@ -45,17 +45,18 @@ def register(cli: click.Group):
     def info(target: str, full: bool):
         """Show file statistics for a repository."""
         manager = RepositoryManager()
-        path = Path(target).resolve()
+        candidate_path = Path(target).expanduser()
 
-        if path.is_dir() and (path / ".git").is_dir():
-            repo_path = path
+        if candidate_path.is_dir() and (candidate_path / ".git").is_dir():
+            repo_path = candidate_path.resolve()
         else:
             repos = manager.config.repositories
-            exact = [r for r in repos if r.name == target]
+            target_lower = target.lower()
+            exact = [r for r in repos if r.name.lower() == target_lower]
             if exact:
                 matches = exact
             else:
-                matches = [r for r in repos if target.lower() in r.name.lower()]
+                matches = [r for r in repos if target_lower in r.name.lower()]
 
             if not matches:
                 console.print(f"\n  [red]Repository '{target}' not found[/red]\n")

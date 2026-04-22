@@ -202,6 +202,36 @@ class TestGetRepositoryStatus:
         info = manager.get_repository_status(fake_git_repo)
         assert info.status == RepoStatus.UP_TO_DATE
 
+    def test_excludes_size_by_default(self, manager, fake_git_repo, mocker):
+        repo = MagicMock()
+        repo.get_status.return_value = RepositoryInfo(
+            fake_git_repo,
+            fake_git_repo.name,
+            RepoStatus.UP_TO_DATE,
+            "main",
+        )
+        mocker.patch("gitdirector.manager.Repository", return_value=repo)
+
+        manager.get_repository_status(fake_git_repo)
+
+        repo.get_status.assert_called_once_with(fetch=False, include_size=False)
+
+    def test_can_include_size(self, manager, fake_git_repo, mocker):
+        repo = MagicMock()
+        repo.get_status.return_value = RepositoryInfo(
+            fake_git_repo,
+            fake_git_repo.name,
+            RepoStatus.UP_TO_DATE,
+            "main",
+            size=1024,
+        )
+        mocker.patch("gitdirector.manager.Repository", return_value=repo)
+
+        info = manager.get_repository_status(fake_git_repo, fetch=True, include_size=True)
+
+        assert info.size == 1024
+        repo.get_status.assert_called_once_with(fetch=True, include_size=True)
+
     def test_missing_path(self, manager, tmp_path):
         info = manager.get_repository_status(tmp_path / "gone")
         assert info.status == RepoStatus.UNKNOWN

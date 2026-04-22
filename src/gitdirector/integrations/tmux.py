@@ -1,6 +1,7 @@
 """tmux integration via subprocess."""
 
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -10,10 +11,16 @@ import sys
 import tempfile
 import threading
 import time
+from base64 import b32encode
 from pathlib import Path
 
 from ..config import Config
+from ..storage import atomic_write_text, normalize_repository_path
 from ..ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
+
+logger = logging.getLogger(__name__)
+
+_REPO_ID_LENGTH = 5
 
 
 def _sanitize_repo_name(name: str) -> str:
@@ -27,6 +34,24 @@ def _sanitize_repo_name(name: str) -> str:
     name = re.sub(r"[^a-z0-9-]", "-", name)
     name = re.sub(r"-+", "-", name)
     return name.strip("-")
+
+
+def _repo_id_suffix(repo_path: Path) -> str:
+    normalized_path = normalize_repository_path(repo_path)
+    digest = hashlib.sha1(str(normalized_path).encode("utf-8")).digest()
+    return b32encode(digest).decode("ascii").lower().rstrip("=")[:_REPO_ID_LENGTH]
+
+
+def _repo_session_name_segment(repo_path: Path) -> str:
+    clean = _sanitize_repo_name(repo_path.name) or "repo"
+    return f"{clean}_{_repo_id_suffix(repo_path)}"
+
+
+def _repo_label_from_segment(repo_segment: str) -> str:
+    base, separator, suffix = repo_segment.rpartition("_")
+    if separator and len(suffix) == _REPO_ID_LENGTH and re.fullmatch(r"[a-z2-7]+", suffix):
+        return base or "repo"
+    return repo_segment
 
 
 def _list_sessions() -> list[str]:
@@ -52,9 +77,20 @@ def _next_n(prefix: str, sessions: list[str] | None = None) -> int:
     return max_n + 1
 
 
-def _make_session_name(repo_name: str, purpose: str = "shell") -> str:
+def _make_session_name(
+    repo_name: str | Path,
+    purpose: str = "shell",
+    *,
+    repo_path: Path | None = None,
+) -> str:
     """Generate the next sequential session name: gd/{repo}/{purpose}/{N}."""
-    clean = _sanitize_repo_name(repo_name)
+    if repo_path is None and isinstance(repo_name, Path):
+        repo_path = repo_name
+    clean = (
+        _repo_session_name_segment(repo_path)
+        if repo_path is not None
+        else _sanitize_repo_name(str(repo_name))
+    )
     prefix = f"gd/{clean}/{purpose}/"
     n = _next_n(prefix)
     return f"{prefix}{n}"
@@ -87,18 +123,29 @@ def _session_option_target(session_name: str) -> str:
     return f"={session_name}:"
 
 
-def list_repo_sessions(repo_name: str) -> list[str]:
+def list_repo_sessions(repo_name: str | Path) -> list[str]:
     """List all tmux sessions for a given repository."""
-    clean = _sanitize_repo_name(repo_name)
-    prefix = f"gd/{clean}/"
+    if isinstance(repo_name, Path):
+        clean = _sanitize_repo_name(repo_name.name)
+        prefixes = [f"gd/{_repo_session_name_segment(repo_name)}/", f"gd/{clean}/"]
+    else:
+        clean = _sanitize_repo_name(repo_name)
+        prefixes = [f"gd/{clean}/", f"gd/{clean}_"]
     sessions = _list_sessions()
-    return sorted([s for s in sessions if s.startswith(prefix) and not _is_temp_panel_session(s)])
+    return sorted(
+        [
+            session_name
+            for session_name in sessions
+            if any(session_name.startswith(prefix) for prefix in prefixes)
+            and not _is_temp_panel_session(session_name)
+        ]
+    )
 
 
 def list_all_gd_sessions() -> list[dict[str, str]]:
     """List all GitDirector tmux sessions (gd/ prefix).
 
-    Returns a list of dicts with keys: session_name, repo, purpose.
+    Returns a list of dicts with keys: session_name, repo, repo_slug, purpose.
     """
     sessions = _list_sessions()
     entries = []
@@ -106,15 +153,22 @@ def list_all_gd_sessions() -> list[dict[str, str]]:
         parsed = _parse_gd_session_name(s)
         if parsed is None:
             continue
-        repo, purpose, _ = parsed
-        entries.append({"session_name": s, "repo": repo, "purpose": purpose})
+        repo_slug, purpose, _ = parsed
+        entries.append(
+            {
+                "session_name": s,
+                "repo": _repo_label_from_segment(repo_slug),
+                "repo_slug": repo_slug,
+                "purpose": purpose,
+            }
+        )
     return entries
 
 
 def create_tmux_session(repo_name: str, path: Path, purpose: str = "shell") -> str:
     """Create a new detached tmux session with a unique name and return it."""
     for _ in range(10):
-        session_name = _make_session_name(repo_name, purpose)
+        session_name = _make_session_name(repo_name, purpose, repo_path=path)
         if not _session_exists(session_name):
             break
     subprocess.run(
@@ -197,14 +251,6 @@ def make_panel_session_name(panel_name: str) -> str:
     return f"gd/panel/{_sanitize_panel_name(panel_name)}"
 
 
-def _panel_proxy_session_name(panel_name: str, pane_index: int) -> str:
-    return f"gd-proxy/panel/{_sanitize_panel_name(panel_name)}/{pane_index}"
-
-
-def _panel_proxy_session_prefix(panel_name: str) -> str:
-    return f"gd-proxy/panel/{_sanitize_panel_name(panel_name)}/"
-
-
 _PANEL_CLIENT_COUNT_OPTION = "@gitdirector_panel_clients"
 _PANEL_STATUS_RESTORE_OPTION = "@gitdirector_panel_prev_status"
 _PANEL_BORDER_RESTORE_OPTION = "@gitdirector_panel_prev_pane_border_status"
@@ -216,6 +262,10 @@ _PANEL_RESIZE_PENDING_OPTION = "@gitdirector_panel_resize_pending"
 def _session_slug(session_name: str | None) -> str | None:
     if not session_name:
         return None
+    parsed = _parse_gd_session_name(session_name)
+    if parsed:
+        repo_slug, purpose, sequence = parsed
+        return f"{_repo_label_from_segment(repo_slug)}/{purpose}/{sequence}"
     if session_name.startswith("gd/"):
         return session_name[3:]
     return session_name
@@ -236,8 +286,8 @@ def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | N
 def _panel_session_label(session_name: str | None) -> str | None:
     parsed = _parse_gd_session_name(session_name)
     if parsed:
-        repo, purpose, sequence = parsed
-        return f"{purpose} {repo}/{sequence}"
+        repo_slug, purpose, sequence = parsed
+        return f"{purpose} {_repo_label_from_segment(repo_slug)}/{sequence}"
     return _session_slug(session_name)
 
 
@@ -417,7 +467,7 @@ def _load_panel_tmux_config(
 ) -> Path:
     config_path = _gd_tmux_config_path()
     config_path.parent.mkdir(exist_ok=True)
-    config_path.write_text(_panel_tmux_config(panel_name, session_name, theme_name))
+    atomic_write_text(config_path, _panel_tmux_config(panel_name, session_name, theme_name))
     subprocess.run(["tmux", "source-file", str(config_path)], check=True)
     return config_path
 
@@ -519,6 +569,7 @@ def _live_repo_tmux_sessions() -> list[str]:
     try:
         entries = list_all_gd_sessions()
     except Exception:
+        logger.debug("Failed to list GitDirector tmux sessions", exc_info=True)
         return []
 
     sessions: list[str] = []
@@ -546,7 +597,7 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     for session_name in live_repo_sessions:
         lines.append(_session_tmux_config(session_name, resolved_theme))
 
-    config_path.write_text("\n".join(lines))
+    atomic_write_text(config_path, "\n".join(lines))
 
     if live_panel_sessions or live_repo_sessions:
         try:
@@ -558,12 +609,7 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
 
 
 def kill_panel_tmux_session(panel_name: str) -> bool:
-    killed = kill_tmux_session(make_panel_session_name(panel_name))
-    proxy_prefix = _panel_proxy_session_prefix(panel_name)
-    for session_name in _list_sessions():
-        if session_name.startswith(proxy_prefix):
-            subprocess.run(["tmux", "kill-session", "-t", f"={session_name}"], check=False)
-    return killed
+    return kill_tmux_session(make_panel_session_name(panel_name))
 
 
 def _tmux_output(*args: str) -> str:
@@ -1104,15 +1150,6 @@ def cleanup_panel_attached_session(session_name: str, theme_name: str | None = N
         sync_panel_tmux_config(theme_name)
 
 
-def _panel_proxy_attach_fragment(panel_name: str, pane_index: int, session_name: str) -> str:
-    proxy_session = _panel_proxy_session_name(panel_name, pane_index)
-    quoted_proxy_target = shlex.quote(f"={proxy_session}")
-    return (
-        f"tmux kill-session -t {quoted_proxy_target} >/dev/null 2>&1 || true; "
-        f"{_panel_attach_fragment(session_name)}"
-    )
-
-
 def _standalone_attach_fragment(session_name: str) -> str:
     quoted_session = shlex.quote(_session_option_target(session_name))
     quoted_attach_target = shlex.quote(f"={session_name}")
@@ -1149,9 +1186,9 @@ def _embedded_tmux_attach_command(
     pane_index: int | None = None,
 ) -> str:
     quoted_session_target = shlex.quote(f"={session_name}")
-    missing_message = _printf_lines_command([f"Missing session: {session_name}"])
+    missing_message = _printf_lines_command(["", "MISSING SESSION", session_name])
     attach_fragment = (
-        _panel_proxy_attach_fragment(panel_name, pane_index, session_name)
+        _panel_attach_fragment(session_name)
         if panel_name is not None and pane_index is not None
         else _standalone_attach_fragment(session_name)
     )
@@ -1191,7 +1228,7 @@ def _panel_pane_command(
         script = (
             "clear; "
             f"if tmux has-session -t {quoted_session_target} >/dev/null 2>&1; then "
-            f"{_panel_proxy_attach_fragment(panel_name, pane_index, session_name)}"
+            f"{_panel_attach_fragment(session_name)}"
             f"clear; {closed_message}; "
             "else "
             f"{missing_message}; "

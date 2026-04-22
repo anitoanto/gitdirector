@@ -5,15 +5,15 @@ from __future__ import annotations
 from time import monotonic
 from unittest.mock import MagicMock, patch
 
-from textual.color import Color
 from textual.app import App
+from textual.color import Color
 from textual.widgets import DataTable, Static
 from textual.widgets._footer import FooterKey
 
 from gitdirector.commands.tui import (
-    CreatePanelScreen,
     _PANELS_SORT_COLUMN_NAMES,
     ConfirmScreen,
+    CreatePanelScreen,
     GitDirectorConsole,
     Panel,
     PanelStore,
@@ -21,6 +21,7 @@ from gitdirector.commands.tui import (
     PaneWidget,
 )
 from gitdirector.commands.tui.app import _panel_row_height, _render_panel_preview
+from gitdirector.commands.tui.panels import resolve_panel_layout
 from gitdirector.commands.tui.screens import RenamePanelScreen
 from gitdirector.ui_theme import resolve_panel_theme
 
@@ -62,7 +63,6 @@ class TestPaneWidget:
 
         assert command.startswith("sh -c ")
         assert "tmux new-session -d -t =gd/my-repo/copilot/3 -s" not in command
-        assert "tmux attach-session -t =gd-proxy/panel/main/2" not in command
         assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" in command
         assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
 
@@ -385,6 +385,17 @@ class TestTabStyling:
 
 
 class TestGitDirectorConsolePanels:
+    def test_three_pane_presets_use_equalized_layout_ratios(self):
+        tall_left = resolve_panel_layout("tall_left")
+        tall_right = resolve_panel_layout("tall_right")
+        wide_top = resolve_panel_layout("wide_top")
+        wide_bottom = resolve_panel_layout("wide_bottom")
+
+        assert tall_left.col_ratios is None
+        assert tall_right.col_ratios is None
+        assert wide_top.row_ratios is None
+        assert wide_bottom.row_ratios is None
+
     def test_render_panel_preview_matches_panel_layout(self):
         panel = Panel(
             name="Main",
@@ -397,8 +408,11 @@ class TestGitDirectorConsolePanels:
 
         assert preview == "\n".join(
             [
-                "┌■ □┐",
-                "└□ ■┘",
+                "┌─┬─┐",
+                "│■│□│",
+                "├─┼─┤",
+                "│□│■│",
+                "└─┴─┘",
             ]
         )
 
@@ -438,9 +452,11 @@ class TestGitDirectorConsolePanels:
 
         assert preview == "\n".join(
             [
-                "┌─┬□┐",
+                "┌─┬─┐",
+                "│ │□│",
                 "│■├─┤",
-                "└─┴■┘",
+                "│ │■│",
+                "└─┴─┘",
             ]
         )
 
@@ -536,17 +552,17 @@ class TestGitDirectorConsolePanels:
     def test_panel_row_height_tracks_preview_rows(self):
         assert (
             _panel_row_height(Panel(name="Solo", rows=1, cols=3, panes={1: None, 2: None, 3: None}))
-            == 3
+            == 5
         )
         assert (
             _panel_row_height(
                 Panel(name="Main", rows=2, cols=2, panes={1: None, 2: None, 3: None, 4: None})
             )
-            == 4
+            == 7
         )
         assert (
             _panel_row_height(Panel(name="Grid", rows=3, cols=1, panes={1: None, 2: None, 3: None}))
-            == 5
+            == 9
         )
         assert (
             _panel_row_height(
@@ -558,7 +574,7 @@ class TestGitDirectorConsolePanels:
                     layout_key="tall_left",
                 )
             )
-            == 5
+            == 7
         )
         assert (
             _panel_row_height(
@@ -820,8 +836,11 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
                 [
                     "",
-                    "┌■ □┐",
-                    "└□ ■┘",
+                    "┌─┬─┐",
+                    "│■│□│",
+                    "├─┼─┤",
+                    "│□│■│",
+                    "└─┴─┘",
                 ]
             )
             assert table.get_cell("Main", app._panels_col_keys[1]) == "\nMain"
@@ -829,11 +848,13 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Main", app._panels_col_keys[3]) == "\n2×2"
             assert table.get_cell("Main", app._panels_col_keys[4]) == "\n2/4"
             assert table.get_cell("Main", app._panels_col_keys[5]) == "\n[green]● active[/green]"
-            assert table.get_row_height("Main") == 4
+            assert table.get_row_height("Main") == 7
             assert table.get_cell("Ops", app._panels_col_keys[0]) == "\n".join(
                 [
                     "",
-                    "┌□ ■ □┐",
+                    "┌─┬─┬─┐",
+                    "│□│■│□│",
+                    "└─┴─┴─┘",
                 ]
             )
             assert table.get_cell("Ops", app._panels_col_keys[1]) == "\nOps"
@@ -841,7 +862,7 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1×3"
             assert table.get_cell("Ops", app._panels_col_keys[4]) == "\n1/3"
             assert table.get_cell("Ops", app._panels_col_keys[5]) == "\n[green]● active[/green]"
-            assert table.get_row_height("Ops") == 3
+            assert table.get_row_height("Ops") == 5
             assert table.get_cell("Studio", app._panels_col_keys[0]) == "\n".join(
                 [
                     "",
@@ -906,7 +927,9 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
                 [
                     "",
-                    "┌■ □ □┐",
+                    "┌─┬─┬─┐",
+                    "│■│□│□│",
+                    "└─┴─┴─┘",
                 ]
             )
             assert table.get_cell("Main", app._panels_col_keys[4]) == "\n1/3"

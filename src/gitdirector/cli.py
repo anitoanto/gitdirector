@@ -1,3 +1,5 @@
+import subprocess
+
 import click
 
 from .commands import (
@@ -56,9 +58,15 @@ info.register(cli)
 def main():
     try:
         cli()
-    except Exception as e:
-        console.print(f"\n  [red]Error:[/red] {str(e)}\n")
-        raise SystemExit(1)
+    except (
+        click.ClickException,
+        OSError,
+        RuntimeError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:
+        console.print(f"\n  [red]Error:[/red] {str(exc)}\n")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

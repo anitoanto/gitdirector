@@ -3,9 +3,9 @@
 from .app import GitDirectorConsole, register
 from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
+    _PANELS_SORT_COLUMN_NAMES,
     _SESSION_STATUS_LABEL,
     _SESSION_STATUS_ORDER,
-    _PANELS_SORT_COLUMN_NAMES,
     _SESSIONS_SORT_COLUMN_NAMES,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
@@ -14,7 +14,6 @@ from .constants import (
 )
 from .panel_view import PanelViewScreen, PaneWidget
 from .panels import Panel, PanelStore
-from .terminal_widget import TerminalWidget
 from .screens import (
     ActionMenuScreen,
     AgentLoadingScreen,
@@ -29,6 +28,7 @@ from .screens import (
     SelectSessionScreen,
     SortMenuScreen,
 )
+from .terminal_widget import TerminalWidget
 
 __all__ = [
     "ActionMenuScreen",

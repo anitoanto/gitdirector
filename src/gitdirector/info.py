@@ -5,11 +5,17 @@ from __future__ import annotations
 import os
 import subprocess
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from functools import lru_cache
+from itertools import islice
 from pathlib import Path
 
 import tiktoken
+
+_GIT_LS_FILES_TIMEOUT = 30
+_INFO_PENDING_MULTIPLIER = 2
+_MAX_INFO_WORKERS = 8
 
 _BINARY_EXTENSIONS = frozenset(
     {
@@ -100,14 +106,25 @@ class RepoInfoResult:
 
 
 def _get_non_ignored_files(repo_path: Path) -> list[str]:
-    result = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        capture_output=True,
-        cwd=str(repo_path),
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            capture_output=True,
+            cwd=str(repo_path),
+            timeout=_GIT_LS_FILES_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"git ls-files timed out after {_GIT_LS_FILES_TIMEOUT}s for {repo_path}"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise RuntimeError("git not found") from exc
+    except OSError as exc:
+        raise RuntimeError(f"git ls-files failed for {repo_path}: {exc}") from exc
     if result.returncode != 0:
-        return []
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(stderr or f"git ls-files failed for {repo_path}")
     return [f for f in result.stdout.decode("utf-8", errors="replace").split("\0") if f]
 
 
@@ -138,14 +155,9 @@ def _count_lines(file_path: Path) -> int | None:
     return _count_lines_from_text(text)
 
 
-_encoder = None
-
-
+@lru_cache(maxsize=1)
 def _get_encoder():
-    global _encoder
-    if _encoder is None:
-        _encoder = tiktoken.get_encoding("cl100k_base")
-    return _encoder
+    return tiktoken.get_encoding("cl100k_base")
 
 
 def _count_tokens(text: str) -> int:
@@ -154,6 +166,11 @@ def _count_tokens(text: str) -> int:
         return len(encoder.encode_ordinary(text))
     except AttributeError:
         return len(encoder.encode(text, disallowed_special=()))
+
+
+def _info_worker_count(total_files: int) -> int:
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(total_files, cpu_count, _MAX_INFO_WORKERS))
 
 
 def _process_file(repo_path: Path, rel_path: str) -> tuple[str, str, int | None, int | None]:
@@ -170,6 +187,31 @@ def _process_file(repo_path: Path, rel_path: str) -> tuple[str, str, int | None,
     lines = _count_lines_from_text(text)
     tokens = _count_tokens(text)
     return rel_path, ext, lines, tokens
+
+
+def _iter_processed_files(repo_path: Path, files: list[str]):
+    worker_count = _info_worker_count(len(files))
+    pending_limit = worker_count * _INFO_PENDING_MULTIPLIER
+    file_iter = iter(files)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        pending = {
+            pool.submit(_process_file, repo_path, rel_path): rel_path
+            for rel_path in islice(file_iter, pending_limit)
+        }
+
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending.pop(future, None)
+                yield future.result()
+
+            while len(pending) < pending_limit:
+                try:
+                    rel_path = next(file_iter)
+                except StopIteration:
+                    break
+                pending[pool.submit(_process_file, repo_path, rel_path)] = rel_path
 
 
 def gather_repo_info(repo_path: Path, *, full: bool = False) -> RepoInfoResult:
@@ -191,10 +233,7 @@ def gather_repo_info(repo_path: Path, *, full: bool = False) -> RepoInfoResult:
     total_lines = 0
     total_tokens = 0
 
-    with ThreadPoolExecutor() as pool:
-        results = pool.map(_process_file, [repo_path] * total_files, files)
-
-    for rel_path, ext, lines, tokens in results:
+    for rel_path, ext, lines, tokens in _iter_processed_files(repo_path, files):
         depth = rel_path.count("/")
         if depth > max_depth:
             max_depth = depth

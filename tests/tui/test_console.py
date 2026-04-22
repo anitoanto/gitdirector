@@ -13,7 +13,6 @@ from gitdirector.commands.tui import (
     ConfirmScreen,
     GitCommandResultScreen,
     GitDirectorConsole,
-    GitOperationsMenuScreen,
     PullLoadingScreen,
     PullResultScreen,
 )
@@ -897,6 +896,20 @@ class TestGitDirectorConsoleDirectBranches:
         app._apply_panels_filter_and_sort.assert_called_once_with({"gd/alpha/shell/1"})
         assert app._waiting_count == 0
 
+    def test_on_statuses_updated_skips_panels_refresh_when_live_sessions_unchanged(self):
+        app = GitDirectorConsole()
+        app._sessions_entries = [{"session_name": "gd/alpha/shell/1", "purpose": "shell"}]
+        app._resolve_session_status = MagicMock(return_value="running")
+        app._waiting_count = 0
+        app._active_tab = "panels"
+        app._panels_live_sessions = {"gd/alpha/shell/1"}
+        app._apply_panels_filter_and_sort = MagicMock()
+
+        app._on_statuses_updated()
+
+        app._apply_panels_filter_and_sort.assert_not_called()
+        assert app._waiting_count == 0
+
     def test_update_session_status_cells_ignores_table_errors(self):
         app = GitDirectorConsole()
         app._sessions_entries = [{"session_name": "gd/alpha/shell/1", "purpose": "shell"}]
@@ -1272,7 +1285,9 @@ class TestRefreshRepoForPath:
             last_updated="1 min ago",
         )
         mgr = _mock_manager(repos)
-        mgr.get_repository_status.side_effect = lambda p, fetch=False: updated_info
+        mgr.get_repository_status.side_effect = lambda p, fetch=False, include_size=False: (
+            updated_info
+        )
 
         app = GitDirectorConsole()
         app.manager = mgr

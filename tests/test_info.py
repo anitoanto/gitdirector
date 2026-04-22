@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from gitdirector.info import (
     FileTypeInfo,
     RepoInfoResult,
@@ -270,8 +272,8 @@ class TestGetNonIgnoredFiles:
         assert "root.log" not in files
 
     def test_not_a_git_repo(self, tmp_path):
-        files = _get_non_ignored_files(tmp_path)
-        assert files == []
+        with pytest.raises(RuntimeError, match="not a git repository"):
+            _get_non_ignored_files(tmp_path)
 
     def test_gitignore_trailing_spaces_handled(self, tmp_path):
         repo = _init_repo(tmp_path)
@@ -694,9 +696,8 @@ class TestGatherRepoInfo:
             mock_run.return_value = subprocess.CompletedProcess(
                 args=[], returncode=128, stdout=b"", stderr=b""
             )
-            result = gather_repo_info(tmp_path)
-        assert result.total_files == 0
-        assert result.file_types == []
+            with pytest.raises(RuntimeError, match="git ls-files failed"):
+                gather_repo_info(tmp_path)
 
     def test_gitignore_pattern_applied_to_subdirectory_files(self, tmp_path):
         repo = _init_repo(tmp_path)

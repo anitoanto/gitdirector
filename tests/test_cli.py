@@ -243,7 +243,9 @@ class TestListCommand:
         info1 = RepositoryInfo(repo1, "repo1", RepoStatus.UP_TO_DATE, "main")
         info2 = RepositoryInfo(repo2, "repo2", RepoStatus.UP_TO_DATE, "dev")
         mgr = _mock_manager()
-        mgr.get_repository_status = lambda path, fetch=False: info1 if path == repo1 else info2
+        mgr.get_repository_status = lambda path, fetch=False, include_size=False: (
+            info1 if path == repo1 else info2
+        )
         mgr.config.repositories = [repo1, repo2]
         with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["list"])
