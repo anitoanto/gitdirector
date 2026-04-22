@@ -1,8 +1,7 @@
 import click
 
 from ..config import Config
-from ..integrations.tmux import kill_tmux_session
-from ..integrations.tmux import _list_sessions
+from ..integrations.tmux import _list_sessions, kill_tmux_session
 from . import console
 
 

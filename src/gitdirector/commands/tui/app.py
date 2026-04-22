@@ -14,7 +14,7 @@ from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
 
 from ...manager import RepositoryManager
-from ...repo import Repository
+from ...repo import Repository, RepositoryInfo
 from .. import get_version
 from . import app_panels as _app_panels
 from .app_panels import ConsolePanelsMixin
@@ -26,7 +26,7 @@ from .constants import (
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
 )
-from .panels import PanelStore
+from .panels import Panel, PanelStore
 from .screens import (
     ActionMenuScreen,
     AgentLoadingScreen,

@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from gitdirector.integrations.tmux import (
     _configure_panel_window,
-    _current_window_target,
     _embedded_tmux_attach_command,
     _live_panel_sessions,
     _live_repo_tmux_sessions,
@@ -20,6 +19,7 @@ from gitdirector.integrations.tmux import (
     sync_panel_tmux_config,
 )
 from gitdirector.ui_theme import resolve_panel_theme
+
 
 class TestPanelPaneTitles:
     def test_panel_pane_title_uses_session_slug(self):

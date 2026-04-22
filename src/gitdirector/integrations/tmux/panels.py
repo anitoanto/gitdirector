@@ -17,13 +17,13 @@ from .core import (
     _protect_session,
     _resolved_panel_theme_name,
     _session_exists,
-    _session_tmux_config,
     _session_option_target,
+    _session_tmux_config,
     _temp_panel_display_name,
+    kill_tmux_session,
     make_panel_session_name,
     make_temp_panel_session_name,
     sync_panel_tmux_config,
-    kill_tmux_session,
 )
 
 

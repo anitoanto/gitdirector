@@ -25,6 +25,7 @@ from gitdirector.integrations.tmux import (
 
 from ._shared import REAL_TMUX_MONITOR_START, REAL_TMUX_MONITOR_STOP
 
+
 class TestLaunchAgentInTmuxSession:
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",

@@ -21,6 +21,7 @@ from gitdirector.integrations.tmux import (
     rebuild_temp_panel_tmux_session,
 )
 
+
 class TestMakeSessionName:
     @patch(
         "gitdirector.integrations.tmux.core._list_sessions",
@@ -99,6 +100,7 @@ class TestMakeSessionName:
 
         assert name.startswith("gd/foo-bar-baz_")
         assert name.endswith("/shell/1")
+
 
 class TestSessionExists:
     @patch("gitdirector.integrations.tmux.subprocess.run")
