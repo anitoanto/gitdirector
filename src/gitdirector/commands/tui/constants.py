@@ -35,6 +35,8 @@ _SORT_COLUMN_NAMES = {
     6: "Path",
 }
 
+_DEFAULT_SORT_COLUMN = 0
+
 _STATUS_ORDER = {
     RepoStatus.UP_TO_DATE: 0,
     RepoStatus.AHEAD: 1,
@@ -44,9 +46,39 @@ _STATUS_ORDER = {
 }
 
 _SESSIONS_SORT_COLUMN_NAMES = {
-    0: "Session",
-    1: "Repository",
-    2: "Session Name",
+    0: "Status",
+    1: "Session",
+    2: "Repository",
+    3: "Session Name",
+}
+
+_DEFAULT_SESSIONS_SORT_COLUMN = 3
+
+_PANELS_SORT_COLUMN_NAMES = {
+    0: "Name",
+    1: "TMUX",
+    2: "Layout",
+    3: "Panes",
+    4: "Status",
+}
+
+_DEFAULT_PANELS_SORT_COLUMN = 0
+
+_PANEL_STATUS_LABEL = {
+    "active": "[green]● active[/green]",
+    "empty": "[dim]○ empty[/dim]",
+}
+
+_SESSION_STATUS_LABEL = {
+    "waiting": "[bold yellow]● waiting[/bold yellow]",
+    "running": "[green]● running[/green]",
+    "idle": "[dim]○ idle[/dim]",
+}
+
+_SESSION_STATUS_ORDER = {
+    "waiting": 0,
+    "running": 1,
+    "idle": 2,
 }
 
 

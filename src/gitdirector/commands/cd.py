@@ -28,8 +28,8 @@ def register(cli: click.Group):
             from ..integrations.tmux import open_in_tmux
         except ImportError:
             console.print(
-                "\n  [red]libtmux is required for the cd command.[/red]\n"
-                "  Install it with: [dim]pip install libtmux[/dim]\n"
+                "\n  [red]The tmux integration is unavailable for the cd command.[/red]\n"
+                "  Reinstall gitdirector or check your installation.\n"
             )
             raise SystemExit(1)
 

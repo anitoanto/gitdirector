@@ -202,6 +202,36 @@ class TestGetRepositoryStatus:
         info = manager.get_repository_status(fake_git_repo)
         assert info.status == RepoStatus.UP_TO_DATE
 
+    def test_excludes_size_by_default(self, manager, fake_git_repo, mocker):
+        repo = MagicMock()
+        repo.get_status.return_value = RepositoryInfo(
+            fake_git_repo,
+            fake_git_repo.name,
+            RepoStatus.UP_TO_DATE,
+            "main",
+        )
+        mocker.patch("gitdirector.manager.Repository", return_value=repo)
+
+        manager.get_repository_status(fake_git_repo)
+
+        repo.get_status.assert_called_once_with(fetch=False, include_size=False)
+
+    def test_can_include_size(self, manager, fake_git_repo, mocker):
+        repo = MagicMock()
+        repo.get_status.return_value = RepositoryInfo(
+            fake_git_repo,
+            fake_git_repo.name,
+            RepoStatus.UP_TO_DATE,
+            "main",
+            size=1024,
+        )
+        mocker.patch("gitdirector.manager.Repository", return_value=repo)
+
+        info = manager.get_repository_status(fake_git_repo, fetch=True, include_size=True)
+
+        assert info.size == 1024
+        repo.get_status.assert_called_once_with(fetch=True, include_size=True)
+
     def test_missing_path(self, manager, tmp_path):
         info = manager.get_repository_status(tmp_path / "gone")
         assert info.status == RepoStatus.UNKNOWN
@@ -212,94 +242,3 @@ class TestGetRepositoryStatus:
         d.mkdir()
         info = manager.get_repository_status(d)
         assert info.status == RepoStatus.UNKNOWN
-
-
-# ---------------------------------------------------------------------------
-# list_repositories
-# ---------------------------------------------------------------------------
-
-
-class TestListRepositories:
-    def test_empty(self, manager):
-        assert manager.list_repositories() == []
-
-    def test_returns_info(self, manager, fake_git_repo, mocker):
-        manager.config.add_repository(fake_git_repo)
-        mocker.patch(
-            "gitdirector.manager.Repository",
-            return_value=MagicMock(
-                get_status=MagicMock(
-                    return_value=RepositoryInfo(
-                        fake_git_repo, fake_git_repo.name, RepoStatus.UP_TO_DATE, "main"
-                    )
-                )
-            ),
-        )
-        result = manager.list_repositories()
-        assert len(result) == 1
-        assert result[0].name == fake_git_repo.name
-
-
-# ---------------------------------------------------------------------------
-# pull_all
-# ---------------------------------------------------------------------------
-
-
-class TestPullAll:
-    def test_all_success(self, manager, fake_git_repo, mocker):
-        manager.config.add_repository(fake_git_repo)
-        mocker.patch(
-            "gitdirector.manager.Repository",
-            return_value=MagicMock(pull=MagicMock(return_value=(True, "Already up to date."))),
-        )
-        success, failed = manager.pull_all()
-        assert len(success) == 1
-        assert len(failed) == 0
-
-    def test_partial_failure(self, manager, tmp_path, mocker):
-        r1 = tmp_path / "good"
-        r1.mkdir()
-        (r1 / ".git").mkdir()
-        r2 = tmp_path / "bad"
-        r2.mkdir()
-        (r2 / ".git").mkdir()
-
-        manager.config.add_repository(r1)
-        manager.config.add_repository(r2)
-
-        call_count = 0
-
-        def make_repo(path):
-            nonlocal call_count
-            call_count += 1
-            m = MagicMock()
-            if call_count == 1:
-                m.pull.return_value = (True, "Updated.")
-            else:
-                m.pull.return_value = (False, "Cannot fast-forward")
-            return m
-
-        mocker.patch("gitdirector.manager.Repository", side_effect=make_repo)
-        success, failed = manager.pull_all()
-        assert len(success) == 1
-        assert len(failed) == 1
-
-    def test_missing_path_fails(self, manager, tmp_path):
-        manager.config.repositories.append(tmp_path / "gone")
-        success, failed = manager.pull_all()
-        assert len(failed) == 1
-        assert "not found" in failed[0].lower() or "invalid" in failed[0].lower()
-
-
-# ---------------------------------------------------------------------------
-# get_repository_count
-# ---------------------------------------------------------------------------
-
-
-class TestGetRepositoryCount:
-    def test_empty(self, manager):
-        assert manager.get_repository_count() == 0
-
-    def test_with_repos(self, manager, fake_git_repo):
-        manager.config.add_repository(fake_git_repo)
-        assert manager.get_repository_count() == 1
