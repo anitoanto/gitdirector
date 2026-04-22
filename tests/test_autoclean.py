@@ -69,13 +69,21 @@ class TestAutocleanLinks:
 
     def test_broken_links_displays_paths(self, runner, tmp_path):
         """Broken link paths are printed so the user can review them."""
+        from gitdirector.commands.autoclean import console
+
         broken = tmp_path / "vanished"
 
         config = MagicMock()
         config.repositories = [broken]
 
-        with patch("gitdirector.commands.autoclean.Config", return_value=config):
-            result = runner.invoke(cli, ["autoclean", "links"], input="y\n")
+        original_width = console.width
+        console.width = 20
+        try:
+            with patch("gitdirector.commands.autoclean.Config", return_value=config):
+                result = runner.invoke(cli, ["autoclean", "links"], input="y\n")
+        finally:
+            console.width = original_width
+
         assert "vanished" in result.output
 
 

@@ -36,7 +36,7 @@ def _autoclean_links():
     console.print()
     console.print(f"  Found [yellow]{len(broken)}[/yellow] broken link(s):\n")
     for p in broken:
-        console.print(f"  [red]✕[/red] {p}")
+        console.print(f"  [red]✕[/red] {p}", soft_wrap=True)
     console.print()
 
     if not click.confirm("  Remove these broken links?"):
@@ -64,7 +64,7 @@ def _autoclean_sessions():
     console.print()
     console.print(f"  Found [yellow]{len(sessions)}[/yellow] gitdirector tmux session(s):\n")
     for s in sessions:
-        console.print(f"  [dim]•[/dim] {s}")
+        console.print(f"  [dim]•[/dim] {s}", soft_wrap=True)
     console.print()
 
     if not click.confirm(f"  Kill all {len(sessions)} session(s)?"):
@@ -78,7 +78,7 @@ def _autoclean_sessions():
         if _kill_session(s):
             killed += 1
         else:
-            console.print(f"  [red]Failed to kill:[/red] {s}")
+            console.print(f"  [red]Failed to kill:[/red] {s}", soft_wrap=True)
 
     console.print()
     console.print(f"  [green]Killed {killed} session(s).[/green]")
