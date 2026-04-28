@@ -2,10 +2,61 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+from textual.css.query import NoMatches
+from textual.widgets import Static
+from textual.worker_manager import WorkerManager
+
 from gitdirector.repo import RepositoryInfo, RepoStatus
+
+_LOADING_STATUS_PREFIXES = ("Loading ", "Checking ")
+_LOADING_STATUS_MARKERS = (" remaining…", " remaining...", " done, ")
+_MAX_TUI_SETTLE_ROUNDS = 10
+
+
+def _status_is_loading(app) -> bool:
+    if app is None:
+        return False
+    try:
+        status = str(app.query_one("#status-bar", Static).content)
+    except NoMatches:
+        return False
+    if status.startswith(_LOADING_STATUS_PREFIXES):
+        return True
+    return any(marker in status for marker in _LOADING_STATUS_MARKERS)
+
+
+@pytest.fixture(autouse=True)
+def _stabilize_tui_worker_wait(monkeypatch):
+    original_wait = WorkerManager.wait_for_complete
+
+    async def settle_after_wait(self: WorkerManager, *args, **kwargs):
+        explicit_workers = bool(args) or "workers" in kwargs
+        result = None
+
+        if explicit_workers:
+            await asyncio.sleep(0)
+            result = await original_wait(self, *args, **kwargs)
+            await asyncio.sleep(0)
+            return result
+
+        app = getattr(self, "_app", None)
+
+        for _ in range(_MAX_TUI_SETTLE_ROUNDS):
+            await asyncio.sleep(0)
+            result = await original_wait(self)
+            if app is None:
+                return result
+            await asyncio.sleep(0)
+            if len(self) == 0 and not _status_is_loading(app):
+                break
+        return result
+
+    monkeypatch.setattr(WorkerManager, "wait_for_complete", settle_after_wait)
 
 
 def _make_info(
