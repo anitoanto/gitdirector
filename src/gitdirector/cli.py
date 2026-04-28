@@ -6,6 +6,7 @@ from .commands import (
     _changes_text,
     _format_size,
     _path_text,
+    print_update_notice,
     _status_text,
     autoclean,
     cd,
@@ -39,6 +40,7 @@ class _HelpGroup(click.Group):
 @click.group(cls=_HelpGroup, invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
+    print_update_notice()
     if ctx.invoked_subcommand is None:
         show_help()
 

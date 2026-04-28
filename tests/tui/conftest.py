@@ -14,7 +14,7 @@ from textual.worker_manager import WorkerManager
 from gitdirector.repo import RepositoryInfo, RepoStatus
 
 _LOADING_STATUS_PREFIXES = ("Loading ", "Checking ")
-_LOADING_STATUS_MARKERS = (" remaining…", " remaining...", " done, ")
+_LOADING_STATUS_MARKERS = (" remaining...", " done, ")
 _MAX_TUI_SETTLE_ROUNDS = 10
 
 
