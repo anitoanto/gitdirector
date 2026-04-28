@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 
 class ConsoleUIHelpersMixin:
+    def _compose_status_message(self, message: str) -> str:
+        notice = getattr(self, "_update_notice", None)
+        if not notice:
+            return message
+        if not message:
+            return notice
+        return f"{message}  |  {notice}"
+
+    def _refresh_status_bar(self) -> None:
+        try:
+            self.query_one("#status-bar", Static).update(
+                self._compose_status_message(self._status_message)
+            )
+        except NoMatches:
+            return
+
     def action_tab_repos(self) -> None:
         if self._resume_target_tab is not None and self._resume_target_tab != "repos":
             return
@@ -66,6 +82,7 @@ class ConsoleUIHelpersMixin:
             self._resume_tab_activation_guard = None
             self._active_tab = tab_id
             self.refresh_bindings()
+            self._sync_session_status_tracking()
             return
         if self._resume_target_tab is not None:
             if tab_id != self._resume_target_tab:
@@ -73,9 +90,11 @@ class ConsoleUIHelpersMixin:
                 return
             self._active_tab = tab_id
             self.refresh_bindings()
+            self._sync_session_status_tracking()
             return
         self._active_tab = tab_id
         self.refresh_bindings()
+        self._sync_session_status_tracking()
         if tab_id == "sessions":
             self._load_sessions()
         elif tab_id == "panels":
@@ -123,6 +142,7 @@ class ConsoleUIHelpersMixin:
             tabs.active = restore_tab
         self._active_tab = restore_tab
         self.refresh_bindings()
+        self._sync_session_status_tracking()
 
         if restore_tab == "sessions":
             self._load_sessions()
@@ -144,7 +164,8 @@ class ConsoleUIHelpersMixin:
             self._refresh_repo_for_path(restore_path)
 
     def _update_status(self, message: str) -> None:
-        self.query_one("#status-bar", Static).update(message)
+        self._status_message = message
+        self._refresh_status_bar()
 
     def _update_search_indicator(self) -> None:
         repo_ind = self.query_one("#repo-search-indicator", Static)

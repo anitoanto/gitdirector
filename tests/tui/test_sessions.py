@@ -829,6 +829,31 @@ class TestTabRestorationAfterSuspend:
             assert table.cursor_coordinate.row == 1
             assert str(row_key.value) == str(repos[1].path)
 
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_repo_table_refresh_preserves_selected_row(self, _mock_sessions):
+        repos = [
+            _make_info("alpha", Path("/tmp/alpha")),
+            _make_info("beta", Path("/tmp/beta")),
+            _make_info("gamma", Path("/tmp/gamma")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=0)
+            await pilot.pause()
+
+            app._sort_reverse = True
+            app._apply_filter_and_sort()
+            await pilot.pause()
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == str(repos[0].path)
+            assert table.cursor_coordinate.row == 2
+
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_sessions_table_restore_falls_back_to_saved_row_position(
@@ -879,6 +904,26 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_selection_tab is None
             assert app._resume_selection_key is None
             assert app._resume_selection_row is None
+
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sessions_table_refresh_preserves_selected_row(self, _mock_list, _mock_status):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=1)
+            await pilot.pause()
+
+            app._apply_sessions_filter_and_sort()
+            await pilot.pause()
+
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/beta/claude/1"
 
     async def test_with_filter_and_sort(self):
         app = GitDirectorConsole()
@@ -944,9 +989,11 @@ class TestSessionsRefreshOnReturn:
             app.manager.get_repository_status.reset_mock()
             app._repos_stale = True
             app.action_tab_sessions()
+            await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
             app.action_tab_repos()
+            await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app._repos_stale is False
@@ -965,6 +1012,7 @@ class TestSessionsRefreshOnReturn:
             app.action_tab_sessions()
             await pilot.pause()
             app.action_tab_repos()
+            await pilot.pause()
             await pilot.pause()
             app.manager.get_repository_status.assert_not_called()
 

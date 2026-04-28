@@ -129,6 +129,17 @@ class TestGitDirectorConsole:
             status_text = app.query_one("#status-bar", Static).content
             assert "No repositories linked" in status_text
 
+    async def test_status_bar_appends_update_notice(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._set_update_notice("Update available: v1.5.0 (current v1.4.2)")
+            app._update_status("No repositories linked")
+            status_text = app.query_one("#status-bar", Static).content
+            assert "No repositories linked" in status_text
+            assert "Update available: v1.5.0 (current v1.4.2)" in status_text
+
     async def test_table_columns_created(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -806,6 +817,7 @@ class TestGitDirectorConsoleDirectBranches:
     )
     def test_poll_session_statuses_updates_state_and_notifies(self, _mock_statuses):
         app = GitDirectorConsole()
+        app._active_tab = "sessions"
         app.call_from_thread = MagicMock()
         app._on_statuses_updated = MagicMock()
 
@@ -816,11 +828,21 @@ class TestGitDirectorConsoleDirectBranches:
 
     def test_trigger_status_poll_delegates_to_worker(self):
         app = GitDirectorConsole()
+        app._active_tab = "sessions"
         app._poll_session_statuses = MagicMock()
 
         app._trigger_status_poll()
 
         app._poll_session_statuses.assert_called_once_with()
+
+    def test_trigger_status_poll_skips_inactive_tabs(self):
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._poll_session_statuses = MagicMock()
+
+        app._trigger_status_poll()
+
+        app._poll_session_statuses.assert_not_called()
 
     def test_resolve_session_status_waits_without_tmux_info(self):
         app = GitDirectorConsole()
@@ -981,6 +1003,7 @@ class TestGitDirectorConsoleDirectBranches:
 
     def test_pause_session_status_tracking_stops_timer_and_monitor(self):
         app = GitDirectorConsole()
+        app._session_status_tracking_running = True
         app._poll_timer = MagicMock()
         app._monitor = MagicMock()
 
@@ -992,6 +1015,7 @@ class TestGitDirectorConsoleDirectBranches:
 
     def test_resume_session_status_tracking_restarts_timer_and_monitor(self):
         app = GitDirectorConsole()
+        app._active_tab = "sessions"
         app._session_status_tracking_paused = True
         app._poll_timer = MagicMock()
         app._monitor = MagicMock()
@@ -1001,6 +1025,20 @@ class TestGitDirectorConsoleDirectBranches:
         assert app._session_status_tracking_paused is False
         app._monitor.start.assert_called_once_with()
         app._poll_timer.resume.assert_called_once_with()
+
+    def test_resume_session_status_tracking_stays_stopped_off_sessions_tab(self):
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._session_status_tracking_paused = True
+        app._poll_timer = MagicMock()
+        app._monitor = MagicMock()
+
+        app._resume_session_status_tracking()
+
+        assert app._session_status_tracking_paused is False
+        app._monitor.start.assert_not_called()
+        app._poll_timer.resume.assert_not_called()
+        app._poll_timer.pause.assert_called_once_with()
 
     def test_suspend_and_attach_pauses_and_resumes_status_tracking(self):
         app = GitDirectorConsole()
@@ -1145,9 +1183,10 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_action_refresh_loads_sessions_on_sessions_tab(self):
+    def test_action_refresh_loads_only_sessions_on_sessions_tab(self):
         app = GitDirectorConsole()
-        app._results = {"/tmp/alpha": object()}
+        result = object()
+        app._results = {"/tmp/alpha": result}
         app._sessions_cache = {"/tmp/alpha": 1}
         app._load_repos = MagicMock()
         app._load_sessions = MagicMock()
@@ -1155,10 +1194,21 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_refresh()
 
-        assert app._results == {}
-        assert app._sessions_cache == {}
-        app._load_repos.assert_called_once_with()
+        assert app._results == {"/tmp/alpha": result}
+        assert app._sessions_cache == {"/tmp/alpha": 1}
+        app._load_repos.assert_not_called()
         app._load_sessions.assert_called_once_with()
+
+    def test_action_refresh_loads_only_panels_on_panels_tab(self):
+        app = GitDirectorConsole()
+        app._load_repos = MagicMock()
+        app._load_panels = MagicMock()
+        app._active_tab = "panels"
+
+        app.action_refresh()
+
+        app._load_repos.assert_not_called()
+        app._load_panels.assert_called_once_with()
 
     @patch("gitdirector.commands.tui.app.GitDirectorConsole")
     def test_run_console_stops_monitor_when_run_raises(self, mock_console_cls):
