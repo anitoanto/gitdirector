@@ -1,17 +1,17 @@
 from typing import Optional
 
+import click
 from rich import box
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from .. import version_check
 from ..repo import RepoStatus
 
 
 def _get_version() -> str:
-    from importlib.metadata import version
-
-    return version("gitdirector")
+    return version_check.get_installed_version()
 
 
 __version__: Optional[str] = None
@@ -22,6 +22,23 @@ def get_version() -> str:
     if __version__ is None:
         __version__ = _get_version()
     return __version__
+
+
+def print_update_notice() -> None:
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        root_ctx = ctx.find_root()
+        if root_ctx.meta.get("update_notice_printed"):
+            return
+        root_ctx.meta["update_notice_printed"] = True
+
+    notice = version_check.get_update_notice()
+    if notice is None:
+        return
+
+    console.print()
+    console.print(f" [yellow]{notice}[/yellow]")
+    console.print()
 
 
 console = Console(highlight=False)

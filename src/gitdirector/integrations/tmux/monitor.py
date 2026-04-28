@@ -69,9 +69,9 @@ _SHELL_COMMANDS = frozenset(
 
 _AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex"})
 
-_SILENCE_THRESHOLD_SECS = 8
+_SILENCE_THRESHOLD_SECS = 11
 _BELL_GRACE_SECS = 1.0
-_CONTENT_POLL_SECS = 2
+_CONTENT_POLL_SECS = 10
 
 
 def _normalize_process_command(raw_args: str) -> str:
@@ -440,7 +440,7 @@ class TmuxMonitor:
             except Exception:
                 pass
 
-            for _ in range(20):
+            for _ in range(_CONTENT_POLL_SECS * 10):
                 if not self._running:
                     return
                 time.sleep(0.1)
