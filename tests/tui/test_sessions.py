@@ -944,9 +944,11 @@ class TestSessionsRefreshOnReturn:
             app.manager.get_repository_status.reset_mock()
             app._repos_stale = True
             app.action_tab_sessions()
+            await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
             app.action_tab_repos()
+            await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app._repos_stale is False
@@ -965,6 +967,7 @@ class TestSessionsRefreshOnReturn:
             app.action_tab_sessions()
             await pilot.pause()
             app.action_tab_repos()
+            await pilot.pause()
             await pilot.pause()
             app.manager.get_repository_status.assert_not_called()
 
