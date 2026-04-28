@@ -411,6 +411,17 @@ class TestConsoleCommand:
         assert result.exit_code == 0
         mock_run_console.assert_called_once_with()
 
+    def test_console_command_prints_update_notice(self, runner):
+        with patch(
+            "gitdirector.version_check.get_update_notice",
+            return_value="Update available: v1.5.0 (current v1.4.2)",
+        ):
+            with patch("gitdirector.commands.tui.app._run_console"):
+                result = runner.invoke(cli, ["console"])
+
+        assert result.exit_code == 0
+        assert "Update available: v1.5.0 (current v1.4.2)" in result.output
+
 
 class TestMainEntry:
     def test_main_exception_handler(self, runner):
@@ -512,6 +523,16 @@ class TestHelpGroup:
         result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
+
+    def test_help_flag_prints_update_notice(self, runner):
+        with patch(
+            "gitdirector.version_check.get_update_notice",
+            return_value="Update available: v1.5.0 (current v1.4.2)",
+        ):
+            result = runner.invoke(cli, ["--help"])
+
+        assert result.exit_code == 0
+        assert result.output.count("Update available: v1.5.0 (current v1.4.2)") == 1
 
 
 class TestMain:

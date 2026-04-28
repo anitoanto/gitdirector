@@ -14,6 +14,16 @@ def _no_tmux_monitor():
             yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_version_check_cache(monkeypatch, tmp_path):
+    cache_dir = tmp_path / ".gitdirector"
+    monkeypatch.setattr(
+        "gitdirector.version_check._cache_paths",
+        lambda: (cache_dir / "version_check.yaml", cache_dir / "version_check.lock"),
+    )
+    monkeypatch.setattr("gitdirector.version_check._fetch_latest_version", lambda: None)
+
+
 @pytest.fixture
 def config_dir(tmp_path):
     """Return a temporary directory to use as ~/.gitdirector."""
