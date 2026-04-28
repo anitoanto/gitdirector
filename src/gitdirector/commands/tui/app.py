@@ -15,6 +15,7 @@ from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedCont
 
 from ...manager import RepositoryManager
 from ...repo import Repository, RepositoryInfo
+from ... import version_check
 from .. import get_version
 from . import app_panels as _app_panels
 from .app_panels import ConsolePanelsMixin
@@ -25,6 +26,7 @@ from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
+    _SESSION_STATUS_POLL_INTERVAL_SECS,
 )
 from .panels import Panel, PanelStore
 from .screens import (
@@ -205,7 +207,10 @@ class GitDirectorConsole(
         self._resume_selection_row: int | None = None
         self._resume_new_panel_guard_until: float = 0.0
         self._panel_store = PanelStore()
+        self._status_message = "Loading repositories…"
+        self._update_notice = version_check.get_cached_update_notice()
         self._session_status_tracking_paused = False
+        self._session_status_tracking_running = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -236,7 +241,7 @@ class GitDirectorConsole(
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
             yield Input(placeholder="type to filter…", id="search-bar")
-        yield Static("Loading repositories…", id="status-bar")
+        yield Static(self._compose_status_message(self._status_message), id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -254,10 +259,22 @@ class GitDirectorConsole(
         )
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
-        self._poll_timer = self.set_interval(3, self._trigger_status_poll)
-        self._monitor.start()
+        self._poll_timer = self.set_interval(
+            _SESSION_STATUS_POLL_INTERVAL_SECS,
+            self._trigger_status_poll,
+        )
+        self._set_session_status_tracking_running(False)
+        self._load_update_notice()
         self._load_repos()
-        self._trigger_status_poll()
+
+    @work(thread=True)
+    def _load_update_notice(self) -> None:
+        notice = version_check.format_update_notice(version_check.get_update_status())
+        self.call_from_thread(self._set_update_notice, notice)
+
+    def _set_update_notice(self, notice: str | None) -> None:
+        self._update_notice = notice
+        self._refresh_status_bar()
 
     def _sync_tmux_theme_config(self, theme_name: str | None = None) -> None:
         from ...integrations.tmux import sync_panel_tmux_config

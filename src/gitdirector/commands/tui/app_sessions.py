@@ -39,6 +39,13 @@ class ConsoleSessionsMixin:
             table = self.query_one("#sessions-table", DataTable)
         except NoMatches:
             return
+        preserved_row_key = None
+        preserved_row_index = None
+        restore_focus = False
+        if self._resume_selection_tab != "sessions":
+            preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
+                table
+            )
         table.clear()
         no_msg = self.query_one("#no-sessions-message", Static)
 
@@ -86,7 +93,15 @@ class ConsoleSessionsMixin:
                     key=entry["session_name"],
                 )
 
-        self._restore_resume_selection("sessions")
+        if self._resume_selection_tab == "sessions":
+            self._restore_resume_selection("sessions")
+        else:
+            self._restore_table_selection(
+                table,
+                preserved_row_key,
+                preserved_row_index,
+                restore_focus=restore_focus,
+            )
         self._update_status(self._build_sessions_loaded_status(len(entries), total))
 
     def _build_sessions_loaded_status(self, shown: int, total: int) -> str:
@@ -121,30 +136,53 @@ class ConsoleSessionsMixin:
             msg += "  [esc] clear search"
         return msg
 
+    def _should_run_session_status_tracking(self) -> bool:
+        return self._active_tab == "sessions" and not self._session_status_tracking_paused
+
+    def _set_session_status_tracking_running(self, running: bool) -> None:
+        poll_timer = getattr(self, "_poll_timer", None)
+
+        if running:
+            if self._session_status_tracking_running:
+                return
+            self._monitor.start()
+            if poll_timer is not None:
+                poll_timer.resume()
+            self._session_status_tracking_running = True
+            return
+
+        if poll_timer is not None:
+            poll_timer.pause()
+        if self._session_status_tracking_running:
+            self._monitor.stop()
+        self._session_status_tracking_running = False
+
+    def _sync_session_status_tracking(self) -> None:
+        self._set_session_status_tracking_running(self._should_run_session_status_tracking())
+
     def _pause_session_status_tracking(self) -> None:
         if self._session_status_tracking_paused:
             return
         self._session_status_tracking_paused = True
-        poll_timer = getattr(self, "_poll_timer", None)
-        if poll_timer is not None:
-            poll_timer.pause()
-        self._monitor.stop()
+        self._set_session_status_tracking_running(False)
 
     def _resume_session_status_tracking(self) -> None:
         if not self._session_status_tracking_paused:
             return
         self._session_status_tracking_paused = False
-        self._monitor.start()
-        poll_timer = getattr(self, "_poll_timer", None)
-        if poll_timer is not None:
-            poll_timer.resume()
+        self._sync_session_status_tracking()
 
     def _trigger_status_poll(self) -> None:
+        if not self._should_run_session_status_tracking():
+            return
         self._poll_session_statuses()
 
     @work(thread=True, exclusive=True, group="status_poll")
     def _poll_session_statuses(self) -> None:
         from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
+
+        if not self._should_run_session_status_tracking():
+            return
 
         entries = list_all_gd_sessions()
         statuses = get_all_session_statuses()

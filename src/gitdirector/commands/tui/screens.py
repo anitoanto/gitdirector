@@ -98,7 +98,9 @@ class ActionMenuScreen(ModalScreen[str]):
                 items.extend(
                     [
                         Option("", disabled=True),
-                        Option("[white]✕[/white] [dim]Remove Session…[/dim]", id="remove_session"),
+                        Option(
+                            "[white]✕[/white] [dim]Remove Session...[/dim]", id="remove_session"
+                        ),
                     ]
                 )
             yield OptionList(*items, id="action-menu")
@@ -537,7 +539,7 @@ class PullLoadingScreen(ModalScreen[None]):
             yield LoadingIndicator()
             yield Static(f"Pulling [bold]{escape(self.repo_name)}[/bold]", id="pull-loading-title")
             yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-loading-command")
-            yield Static("please wait…", id="pull-loading-hint")
+            yield Static("please wait...", id="pull-loading-hint")
 
 
 class SortMenuScreen(ModalScreen[tuple | None]):
@@ -998,7 +1000,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
                     )
                 else:
                     yield Static("[dim]Name[/dim]", id="panel-name-label")
-                    yield Input(placeholder="panel name…", id="panel-name-input")
+                    yield Input(placeholder="panel name...", id="panel-name-input")
                 with Horizontal(id="step-1-columns"):
                     with Vertical(id="step-1-left"):
                         yield Static("[dim]Layout[/dim]", classes="section-label")
@@ -1436,9 +1438,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def _sync_session_menu_highlight(self) -> None:
         current = self._pane_assignments.get(self._selected_pane_index)
         oid = current if current in self._session_option_ids else "__clear__"
-        self.query_one("#pane-session-menu", OptionList).highlighted = (
-            self._session_option_ids.index(oid)
-        )
+        self.query_one(
+            "#pane-session-menu", OptionList
+        ).highlighted = self._session_option_ids.index(oid)
 
     def _commit_highlighted_slot_selection(self) -> None:
         focused = self.focused
@@ -1604,7 +1606,9 @@ class PanelActionMenuScreen(ModalScreen[str]):
     CSS = (
         "PanelActionMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + """
+        " }"
+        + _MODAL_CSS
+        + """
     PanelActionMenuScreen #menu-container {
         width: 72;
         padding: 1 1;
