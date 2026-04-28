@@ -1438,9 +1438,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def _sync_session_menu_highlight(self) -> None:
         current = self._pane_assignments.get(self._selected_pane_index)
         oid = current if current in self._session_option_ids else "__clear__"
-        self.query_one(
-            "#pane-session-menu", OptionList
-        ).highlighted = self._session_option_ids.index(oid)
+        self.query_one("#pane-session-menu", OptionList).highlighted = (
+            self._session_option_ids.index(oid)
+        )
 
     def _commit_highlighted_slot_selection(self) -> None:
         focused = self.focused
@@ -1606,9 +1606,7 @@ class PanelActionMenuScreen(ModalScreen[str]):
     CSS = (
         "PanelActionMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        + _MODAL_CSS
-        + """
+        " }" + _MODAL_CSS + """
     PanelActionMenuScreen #menu-container {
         width: 72;
         padding: 1 1;
