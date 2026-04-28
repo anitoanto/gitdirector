@@ -13,9 +13,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
 
+from ... import version_check
 from ...manager import RepositoryManager
 from ...repo import Repository, RepositoryInfo
-from ... import version_check
 from .. import get_version
 from . import app_panels as _app_panels
 from .app_panels import ConsolePanelsMixin
