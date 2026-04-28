@@ -98,7 +98,9 @@ class ActionMenuScreen(ModalScreen[str]):
                 items.extend(
                     [
                         Option("", disabled=True),
-                        Option("[white]✕[/white] [dim]Remove Session…[/dim]", id="remove_session"),
+                        Option(
+                            "[white]✕[/white] [dim]Remove Session...[/dim]", id="remove_session"
+                        ),
                     ]
                 )
             yield OptionList(*items, id="action-menu")
@@ -537,7 +539,7 @@ class PullLoadingScreen(ModalScreen[None]):
             yield LoadingIndicator()
             yield Static(f"Pulling [bold]{escape(self.repo_name)}[/bold]", id="pull-loading-title")
             yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-loading-command")
-            yield Static("please wait…", id="pull-loading-hint")
+            yield Static("please wait...", id="pull-loading-hint")
 
 
 class SortMenuScreen(ModalScreen[tuple | None]):
@@ -998,7 +1000,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
                     )
                 else:
                     yield Static("[dim]Name[/dim]", id="panel-name-label")
-                    yield Input(placeholder="panel name…", id="panel-name-input")
+                    yield Input(placeholder="panel name...", id="panel-name-input")
                 with Horizontal(id="step-1-columns"):
                     with Vertical(id="step-1-left"):
                         yield Static("[dim]Layout[/dim]", classes="section-label")

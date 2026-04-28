@@ -87,6 +87,13 @@ class ConsoleReposMixin:
 
     def _populate_initial_rows(self) -> None:
         table = self.query_one("#repo-table", DataTable)
+        preserved_row_key = None
+        preserved_row_index = None
+        restore_focus = False
+        if self._resume_selection_tab != "repos":
+            preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
+                table
+            )
         table.clear()
         for path in self._repo_paths:
             table.add_row(
@@ -99,7 +106,16 @@ class ConsoleReposMixin:
                 str(path),
                 key=str(path),
             )
+
+        if self._resume_selection_tab == "repos":
             self._restore_resume_selection("repos")
+        else:
+            self._restore_table_selection(
+                table,
+                preserved_row_key,
+                preserved_row_index,
+                restore_focus=restore_focus,
+            )
 
     def _update_row(self, info: RepositoryInfo, sessions: int = 0) -> None:
         self._sessions_cache[str(info.path)] = sessions
@@ -138,6 +154,13 @@ class ConsoleReposMixin:
 
     def _apply_filter_and_sort(self) -> None:
         table = self.query_one("#repo-table", DataTable)
+        preserved_row_key = None
+        preserved_row_index = None
+        restore_focus = False
+        if self._resume_selection_tab != "repos":
+            preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
+                table
+            )
         table.clear()
 
         infos = list(self._results.values())
@@ -168,7 +191,15 @@ class ConsoleReposMixin:
                 key=str(info.path),
             )
 
-        self._restore_resume_selection("repos")
+        if self._resume_selection_tab == "repos":
+            self._restore_resume_selection("repos")
+        else:
+            self._restore_table_selection(
+                table,
+                preserved_row_key,
+                preserved_row_index,
+                restore_focus=restore_focus,
+            )
         self._update_status(self._build_loaded_status(len(infos), total))
 
     def _build_loaded_status(self, shown: int, total: int) -> str:
@@ -202,10 +233,11 @@ class ConsoleReposMixin:
         return msg
 
     def action_refresh(self) -> None:
-        self._results.clear()
-        self._sessions_cache.clear()
-        self._load_repos()
         if self._active_tab == "sessions":
             self._load_sessions()
         elif self._active_tab == "panels":
             self._load_panels()
+        else:
+            self._results.clear()
+            self._sessions_cache.clear()
+            self._load_repos()

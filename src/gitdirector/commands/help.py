@@ -1,10 +1,11 @@
 import click
 from rich.table import Table
 
-from . import console, get_version
+from . import console, get_version, print_update_notice
 
 
 def show_help():
+    print_update_notice()
     console.print()
     console.print(
         f" [bold white]GITDIRECTOR[/bold white]  "
