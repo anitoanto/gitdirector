@@ -267,6 +267,11 @@ class GitDirectorConsole(
         self._load_update_notice()
         self._load_repos()
 
+    def action_quit(self) -> None:
+        self._pause_session_status_tracking(wait=False)
+        self._monitor.stop(wait=False)
+        self.exit()
+
     @work(thread=True)
     def _load_update_notice(self) -> None:
         notice = version_check.format_update_notice(version_check.get_update_status())
@@ -690,7 +695,7 @@ def _run_console() -> None:
     try:
         app.run()
     finally:
-        app._monitor.stop()
+        app._monitor.stop(wait=False)
 
 
 def register(cli: click.Group):

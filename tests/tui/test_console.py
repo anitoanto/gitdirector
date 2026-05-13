@@ -58,9 +58,10 @@ class TestGitDirectorConsole:
     async def test_quit_binding(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
+        app._monitor = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("q")
-            assert True
+        app._monitor.stop.assert_called_once_with(wait=False)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_cursor_down_binding(self, _mock_sessions):
@@ -1011,7 +1012,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         assert app._session_status_tracking_paused is True
         app._poll_timer.pause.assert_called_once_with()
-        app._monitor.stop.assert_called_once_with()
+        app._monitor.stop.assert_called_once_with(wait=True)
 
     def test_resume_session_status_tracking_restarts_timer_and_monitor(self):
         app = GitDirectorConsole()
@@ -1039,6 +1040,18 @@ class TestGitDirectorConsoleDirectBranches:
         app._monitor.start.assert_not_called()
         app._poll_timer.resume.assert_not_called()
         app._poll_timer.pause.assert_called_once_with()
+
+    def test_action_quit_uses_non_blocking_session_monitor_shutdown(self):
+        app = GitDirectorConsole()
+        app._pause_session_status_tracking = MagicMock()
+        app._monitor = MagicMock()
+        app.exit = MagicMock()
+
+        app.action_quit()
+
+        app._pause_session_status_tracking.assert_called_once_with(wait=False)
+        app._monitor.stop.assert_called_once_with(wait=False)
+        app.exit.assert_called_once_with()
 
     def test_suspend_and_attach_pauses_and_resumes_status_tracking(self):
         app = GitDirectorConsole()
@@ -1222,7 +1235,7 @@ class TestGitDirectorConsoleDirectBranches:
             except RuntimeError:
                 pass
 
-        mock_stop.assert_called_once_with()
+        mock_stop.assert_called_once_with(wait=False)
 
 
 class TestBuildLoadedStatus:

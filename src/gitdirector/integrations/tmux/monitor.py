@@ -72,6 +72,7 @@ _AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex"})
 _SILENCE_THRESHOLD_SECS = 11
 _BELL_GRACE_SECS = 1.0
 _CONTENT_POLL_SECS = 10
+_CONTROL_MODE_STOP_WAIT_SECS = 2.0
 
 
 def _normalize_process_command(raw_args: str) -> str:
@@ -298,18 +299,34 @@ class _ControlModeReader:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def request_stop(self):
         self._running = False
         proc = self._process
         if proc:
             try:
                 proc.terminate()
-                proc.wait(timeout=2)
             except Exception:
                 try:
                     proc.kill()
                 except Exception:
                     pass
+
+    def wait_for_stop(self, *, timeout: float = _CONTROL_MODE_STOP_WAIT_SECS):
+        proc = self._process
+        if not proc:
+            return
+        try:
+            proc.wait(timeout=timeout)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def stop(self, *, wait: bool = True, timeout: float = _CONTROL_MODE_STOP_WAIT_SECS):
+        self.request_stop()
+        if wait:
+            self.wait_for_stop(timeout=timeout)
 
     def is_alive(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
@@ -336,7 +353,7 @@ class _ControlModeReader:
             if proc:
                 try:
                     proc.terminate()
-                    proc.wait(timeout=2)
+                    proc.wait(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
                 except Exception:
                     try:
                         proc.kill()
@@ -373,16 +390,22 @@ class TmuxMonitor:
         self._sync_thread = threading.Thread(target=self._sync_sessions, daemon=True)
         self._sync_thread.start()
 
-    def stop(self):
+    def stop(self, *, wait: bool = True):
         self._running = False
         readers = list(self._readers.values())
         self._readers.clear()
         for reader in readers:
-            reader.stop()
+            reader.request_stop()
+
+        if wait:
+            for reader in readers:
+                reader.wait_for_stop(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
+
         sync_thread = self._sync_thread
         self._sync_thread = None
         if (
-            sync_thread is not None
+            wait
+            and sync_thread is not None
             and sync_thread is not threading.current_thread()
             and sync_thread.is_alive()
         ):
