@@ -1,4 +1,5 @@
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -82,6 +83,53 @@ class TestRunGit:
         code, out, err = repo._run_git("status")
         assert code == 1
         assert "not found" in err
+
+    def test_running_git_commands_can_be_killed(self, fake_git_repo, mocker):
+        started = threading.Event()
+        killed = threading.Event()
+
+        class FakeProcess:
+            def __init__(self):
+                self.pid = 4321
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+                killed.set()
+
+            def communicate(self, timeout=None):
+                started.set()
+                if not killed.wait(timeout or 1):
+                    raise AssertionError("expected running git command to be killed")
+                return "", ""
+
+        mocker.patch("gitdirector.repo.subprocess.Popen", return_value=FakeProcess())
+        killpg = mocker.patch(
+            "gitdirector.repo.os.killpg",
+            side_effect=lambda pid, sig: (setattr(worker_process, "returncode", -9), killed.set()),
+        )
+
+        repo = Repository(fake_git_repo)
+        result: dict[str, tuple[int, str, str]] = {}
+        worker_process = repo._run_git.__globals__["subprocess"].Popen.return_value
+
+        worker = threading.Thread(
+            target=lambda: result.setdefault("value", repo._run_git("fetch")),
+            daemon=True,
+        )
+        worker.start()
+
+        assert started.wait(1)
+
+        Repository.kill_running_git_commands()
+
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert result["value"] == (1, "", "git command cancelled")
+        killpg.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
