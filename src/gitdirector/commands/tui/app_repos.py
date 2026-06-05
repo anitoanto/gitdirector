@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rich.markup import escape
 from textual import work
-from textual.worker import get_current_worker
 from textual.widgets import DataTable, Static
 
 from ...repo import RepositoryInfo, RepoStatus
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 class ConsoleReposMixin:
     @work(thread=True)
     def _load_repos(self) -> None:
-        worker = get_current_worker()
+        worker = self._current_worker_or_none()
 
         def shutdown_requested() -> bool:
             return self._background_shutdown_requested(worker)
