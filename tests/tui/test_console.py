@@ -18,7 +18,7 @@ from gitdirector.commands.tui import (
 )
 from gitdirector.commands.tui.app import _run_console
 from gitdirector.info import RepoInfoResult
-from gitdirector.repo import RepoStatus
+from gitdirector.repo import Repository, RepoStatus
 
 from .conftest import _make_info, _mock_manager
 
@@ -1045,12 +1045,19 @@ class TestGitDirectorConsoleDirectBranches:
         app = GitDirectorConsole()
         app._pause_session_status_tracking = MagicMock()
         app._monitor = MagicMock()
+        executor = MagicMock()
+        app._repo_status_executor = executor
         app.exit = MagicMock()
 
-        app.action_quit()
+        with patch.object(app.workers, "cancel_all") as mock_cancel_all:
+            with patch.object(Repository, "kill_running_git_commands") as mock_kill_git:
+                app.action_quit()
 
         app._pause_session_status_tracking.assert_called_once_with(wait=False)
         app._monitor.stop.assert_called_once_with(wait=False)
+        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        mock_cancel_all.assert_called_once_with()
+        mock_kill_git.assert_called_once_with()
         app.exit.assert_called_once_with()
 
     def test_suspend_and_attach_pauses_and_resumes_status_tracking(self):
