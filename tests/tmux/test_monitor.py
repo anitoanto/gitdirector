@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from gitdirector.integrations.tmux import (
     _AGENT_PURPOSES,
     _BELL_GRACE_SECS,
+    _CONTROL_MODE_STOP_WAIT_SECS,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
     TmuxMonitor,
@@ -419,7 +420,16 @@ class TestControlModeReader:
         reader.stop()
 
         reader._process.terminate.assert_called_once_with()
-        reader._process.wait.assert_called_once_with(timeout=2)
+        reader._process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
+
+    def test_stop_without_wait_skips_waiting_for_process(self):
+        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
+        reader._process = MagicMock()
+
+        reader.stop(wait=False)
+
+        reader._process.terminate.assert_called_once_with()
+        reader._process.wait.assert_not_called()
 
     def test_stop_ignores_kill_failure(self):
         reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
@@ -482,7 +492,7 @@ class TestControlModeReader:
             ("gd/repo/shell/1", "output"),
         ]
         process.terminate.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=2)
+        process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
         assert reader._running is False
         assert reader._process is None
 
@@ -499,7 +509,7 @@ class TestControlModeReader:
 
         assert events == []
         process.terminate.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=2)
+        process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
 
     @patch("gitdirector.integrations.tmux.subprocess.Popen")
     def test_run_ignores_kill_failure_during_cleanup(self, mock_popen):
@@ -556,8 +566,28 @@ class TestTmuxMonitor:
 
         assert monitor._running is False
         assert monitor._readers == {}
-        reader_one.stop.assert_called_once_with()
-        reader_two.stop.assert_called_once_with()
+        reader_one.request_stop.assert_called_once_with()
+        reader_two.request_stop.assert_called_once_with()
+        reader_one.wait_for_stop.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
+        reader_two.wait_for_stop.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
+
+    def test_stop_without_wait_requests_reader_shutdown_without_blocking(self):
+        monitor = TmuxMonitor()
+        reader = MagicMock()
+        sync_thread = MagicMock()
+        sync_thread.is_alive.return_value = True
+        monitor._readers = {"gd/alpha/shell/1": reader}
+        monitor._sync_thread = sync_thread
+        monitor._running = True
+
+        REAL_TMUX_MONITOR_STOP(monitor, wait=False)
+
+        assert monitor._running is False
+        assert monitor._readers == {}
+        assert monitor._sync_thread is None
+        reader.request_stop.assert_called_once_with()
+        reader.wait_for_stop.assert_not_called()
+        sync_thread.join.assert_not_called()
 
     def test_stop_waits_for_sync_thread_to_exit(self):
         monitor = TmuxMonitor()

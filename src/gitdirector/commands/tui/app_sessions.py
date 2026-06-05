@@ -139,7 +139,7 @@ class ConsoleSessionsMixin:
     def _should_run_session_status_tracking(self) -> bool:
         return self._active_tab == "sessions" and not self._session_status_tracking_paused
 
-    def _set_session_status_tracking_running(self, running: bool) -> None:
+    def _set_session_status_tracking_running(self, running: bool, *, wait: bool = True) -> None:
         poll_timer = getattr(self, "_poll_timer", None)
 
         if running:
@@ -154,17 +154,17 @@ class ConsoleSessionsMixin:
         if poll_timer is not None:
             poll_timer.pause()
         if self._session_status_tracking_running:
-            self._monitor.stop()
+            self._monitor.stop(wait=wait)
         self._session_status_tracking_running = False
 
     def _sync_session_status_tracking(self) -> None:
         self._set_session_status_tracking_running(self._should_run_session_status_tracking())
 
-    def _pause_session_status_tracking(self) -> None:
+    def _pause_session_status_tracking(self, *, wait: bool = True) -> None:
         if self._session_status_tracking_paused:
             return
         self._session_status_tracking_paused = True
-        self._set_session_status_tracking_running(False)
+        self._set_session_status_tracking_running(False, wait=wait)
 
     def _resume_session_status_tracking(self) -> None:
         if not self._session_status_tracking_paused:
