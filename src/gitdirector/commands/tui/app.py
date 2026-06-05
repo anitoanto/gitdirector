@@ -12,8 +12,8 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.worker import Worker, get_current_worker
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
+from textual.worker import NoActiveWorker, Worker, get_current_worker
 
 from ... import version_check
 from ...manager import RepositoryManager
@@ -274,6 +274,12 @@ class GitDirectorConsole(
     def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
         return self._shutdown_requested or (worker is not None and worker.is_cancelled)
 
+    def _current_worker_or_none(self) -> Worker | None:
+        try:
+            return get_current_worker()
+        except NoActiveWorker:
+            return None
+
     def _shutdown_background_work(self) -> None:
         if self._shutdown_requested:
             return
@@ -413,7 +419,7 @@ class GitDirectorConsole(
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:
         """Re-fetch full repository status and session count for the given path."""
-        worker = get_current_worker()
+        worker = self._current_worker_or_none()
         if self._background_shutdown_requested(worker):
             return
 
@@ -478,7 +484,7 @@ class GitDirectorConsole(
 
     @work(thread=True)
     def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
-        worker = get_current_worker()
+        worker = self._current_worker_or_none()
         if self._background_shutdown_requested(worker):
             return
 
@@ -638,7 +644,7 @@ class GitDirectorConsole(
 
     @work(thread=True)
     def _pull_repo(self, path: Path, command: str, loading_screen: PullLoadingScreen) -> None:
-        worker = get_current_worker()
+        worker = self._current_worker_or_none()
         if self._background_shutdown_requested(worker):
             return
 
@@ -741,7 +747,16 @@ def _run_console() -> None:
     try:
         app.run()
     finally:
-        app._shutdown_background_work()
+        shutdown_background_work = getattr(app, "_shutdown_background_work", None)
+        if (
+            callable(shutdown_background_work)
+            and getattr(shutdown_background_work, "__self__", None) is app
+        ):
+            shutdown_background_work()
+        else:
+            monitor = getattr(app, "_monitor", None)
+            if monitor is not None:
+                monitor.stop(wait=False)
 
 
 def register(cli: click.Group):
