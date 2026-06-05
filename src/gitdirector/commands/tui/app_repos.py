@@ -24,12 +24,21 @@ logger = logging.getLogger(__name__)
 class ConsoleReposMixin:
     @work(thread=True)
     def _load_repos(self) -> None:
+        worker = self._current_worker_or_none()
+
+        def shutdown_requested() -> bool:
+            return self._background_shutdown_requested(worker)
+
         self._repo_paths = sorted(
             self.manager.config.repositories, key=lambda path: path.name.lower()
         )
 
         if not self._repo_paths:
-            self.call_from_thread(self._show_no_repos)
+            if not shutdown_requested():
+                self.call_from_thread(self._show_no_repos)
+            return
+
+        if shutdown_requested():
             return
 
         self.call_from_thread(self._populate_initial_rows)
@@ -50,17 +59,23 @@ class ConsoleReposMixin:
             repo_slug = entry.get("repo_slug", entry["repo"])
             sessions_by_repo[repo_slug] = sessions_by_repo.get(repo_slug, 0) + 1
 
-        with ThreadPoolExecutor(max_workers=self.manager.config.max_workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=self.manager.config.max_workers)
+        self._repo_status_executor = executor
+        try:
             futures = {
                 executor.submit(self.manager.get_repository_status, path, fetch=True): path
                 for path in self._repo_paths
             }
             for future in as_completed(futures):
+                if shutdown_requested():
+                    break
                 path = futures[future]
                 try:
                     info = future.result()
                 except Exception as exc:
                     info = RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+                if shutdown_requested():
+                    break
                 self._results[str(info.path)] = info
                 done += 1
                 repo_slug = _repo_session_name_segment(info.path)
@@ -71,11 +86,20 @@ class ConsoleReposMixin:
                 self._sessions_cache[str(info.path)] = sessions_count
                 self.call_from_thread(self._update_row, info, sessions_count)
                 remaining = total - done
+                if shutdown_requested():
+                    break
                 if remaining > 0:
                     self.call_from_thread(
                         self._update_status,
                         f"{done} done, {remaining} remaining…",
                     )
+        finally:
+            executor.shutdown(wait=not shutdown_requested(), cancel_futures=shutdown_requested())
+            if self._repo_status_executor is executor:
+                self._repo_status_executor = None
+
+        if shutdown_requested():
+            return
 
         if self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse:
             self.call_from_thread(self._apply_filter_and_sort)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -12,6 +13,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
+from textual.worker import NoActiveWorker, Worker, get_current_worker
 
 from ... import version_check
 from ...manager import RepositoryManager
@@ -211,6 +213,8 @@ class GitDirectorConsole(
         self._update_notice = version_check.get_cached_update_notice()
         self._session_status_tracking_paused = False
         self._session_status_tracking_running = False
+        self._shutdown_requested = False
+        self._repo_status_executor: ThreadPoolExecutor | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -266,6 +270,35 @@ class GitDirectorConsole(
         self._set_session_status_tracking_running(False)
         self._load_update_notice()
         self._load_repos()
+
+    def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
+        return self._shutdown_requested or (worker is not None and worker.is_cancelled)
+
+    def _current_worker_or_none(self) -> Worker | None:
+        try:
+            return get_current_worker()
+        except NoActiveWorker:
+            return None
+
+    def _shutdown_background_work(self) -> None:
+        if self._shutdown_requested:
+            return
+
+        self._shutdown_requested = True
+        self._pause_session_status_tracking(wait=False)
+        self._monitor.stop(wait=False)
+
+        executor = self._repo_status_executor
+        self._repo_status_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        self.workers.cancel_all()
+        Repository.kill_running_git_commands()
+
+    def action_quit(self) -> None:
+        self._shutdown_background_work()
+        self.exit()
 
     @work(thread=True)
     def _load_update_notice(self) -> None:
@@ -386,11 +419,21 @@ class GitDirectorConsole(
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:
         """Re-fetch full repository status and session count for the given path."""
+        worker = self._current_worker_or_none()
+        if self._background_shutdown_requested(worker):
+            return
+
         from ...integrations.tmux import list_repo_sessions
 
         info = self.manager.get_repository_status(path, fetch=True)
+        if self._background_shutdown_requested(worker):
+            return
+
         self._results[str(path)] = info
         sessions_count = len(list_repo_sessions(path))
+        if self._background_shutdown_requested(worker):
+            return
+
         self._sessions_cache[str(path)] = sessions_count
         self.call_from_thread(self._update_row, info, sessions_count)
 
@@ -441,12 +484,20 @@ class GitDirectorConsole(
 
     @work(thread=True)
     def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
+        worker = self._current_worker_or_none()
+        if self._background_shutdown_requested(worker):
+            return
+
         from ...info import gather_repo_info
 
         try:
             result = gather_repo_info(path)
         except Exception as exc:
+            if self._background_shutdown_requested(worker):
+                return
             self.call_from_thread(screen.show_error, str(exc))
+            return
+        if self._background_shutdown_requested(worker):
             return
         self.call_from_thread(screen.populate, result)
 
@@ -593,9 +644,15 @@ class GitDirectorConsole(
 
     @work(thread=True)
     def _pull_repo(self, path: Path, command: str, loading_screen: PullLoadingScreen) -> None:
+        worker = self._current_worker_or_none()
+        if self._background_shutdown_requested(worker):
+            return
+
         from ..pull import pull_repository
 
         result = pull_repository(path)
+        if self._background_shutdown_requested(worker):
+            return
         self.call_from_thread(self._show_pull_result, loading_screen, path, command, result)
 
     def _show_pull_result(
@@ -690,7 +747,16 @@ def _run_console() -> None:
     try:
         app.run()
     finally:
-        app._monitor.stop()
+        shutdown_background_work = getattr(app, "_shutdown_background_work", None)
+        if (
+            callable(shutdown_background_work)
+            and getattr(shutdown_background_work, "__self__", None) is app
+        ):
+            shutdown_background_work()
+        else:
+            monitor = getattr(app, "_monitor", None)
+            if monitor is not None:
+                monitor.stop(wait=False)
 
 
 def register(cli: click.Group):

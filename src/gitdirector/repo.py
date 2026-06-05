@@ -1,10 +1,16 @@
 import os
 import re
+import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+_ORIGINAL_SUBPROCESS_RUN = subprocess.run
+_RUNNING_GIT_PROCESSES: set[subprocess.Popen] = set()
+_RUNNING_GIT_PROCESSES_LOCK = threading.Lock()
 
 _NETWORK_ERROR_RE = re.compile(
     r"connection reset"
@@ -53,6 +59,49 @@ def _is_no_commits_error(stderr: str) -> bool:
     return _NO_COMMITS_RE.search(stderr) is not None
 
 
+def _register_running_git_process(process: subprocess.Popen) -> None:
+    with _RUNNING_GIT_PROCESSES_LOCK:
+        _RUNNING_GIT_PROCESSES.add(process)
+
+
+def _unregister_running_git_process(process: subprocess.Popen) -> None:
+    with _RUNNING_GIT_PROCESSES_LOCK:
+        _RUNNING_GIT_PROCESSES.discard(process)
+
+
+def _kill_running_git_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _normalize_git_result(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    *,
+    strip_stdout: bool,
+) -> tuple[int, str, str]:
+    normalized_stdout = stdout.strip() if strip_stdout else stdout
+    normalized_stderr = stderr.strip()
+
+    if returncode < 0:
+        return 1, normalized_stdout, normalized_stderr or "git command cancelled"
+
+    if returncode != 0:
+        classified = _classify_remote_error(normalized_stderr)
+        if classified:
+            return returncode, normalized_stdout, classified
+
+    return returncode, normalized_stdout, normalized_stderr
+
+
 class RepoStatus(Enum):
     UP_TO_DATE = "up-to-date"
     AHEAD = "ahead"
@@ -91,31 +140,69 @@ class Repository:
     def _is_git_repo(path: Path) -> bool:
         return (path / ".git").is_dir()
 
+    @classmethod
+    def kill_running_git_commands(cls) -> None:
+        with _RUNNING_GIT_PROCESSES_LOCK:
+            processes = tuple(_RUNNING_GIT_PROCESSES)
+        for process in processes:
+            _kill_running_git_process(process)
+
     def _run_git(self, *args: str, _strip: bool = True, _timeout: int = 30) -> tuple[int, str, str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
         if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
             env["GIT_SSH_COMMAND"] = "ssh -o ConnectTimeout=10"
+        command = ["git", "-C", str(self.path)] + list(args)
         try:
-            result = subprocess.run(
-                ["git", "-C", str(self.path)] + list(args),
-                capture_output=True,
+            if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=_timeout,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                )
+                return _normalize_git_result(
+                    result.returncode,
+                    result.stdout,
+                    result.stderr,
+                    strip_stdout=_strip,
+                )
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=_timeout,
                 env=env,
                 stdin=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            stdout = result.stdout.strip() if _strip else result.stdout
-            stderr = result.stderr.strip()
-            if result.returncode != 0:
-                classified = _classify_remote_error(stderr)
-                if classified:
-                    return result.returncode, stdout, classified
-            return result.returncode, stdout, stderr
         except subprocess.TimeoutExpired:
             return 1, "", "git command timed out"
         except FileNotFoundError:
             return 1, "", "git not found"
+
+        _register_running_git_process(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_timeout)
+        except subprocess.TimeoutExpired:
+            _kill_running_git_process(process)
+            try:
+                process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            return 1, "", "git command timed out"
+        finally:
+            _unregister_running_git_process(process)
+
+        return _normalize_git_result(
+            process.returncode if process.returncode is not None else 1,
+            stdout,
+            stderr,
+            strip_stdout=_strip,
+        )
 
     def get_current_branch(self) -> Optional[str]:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
