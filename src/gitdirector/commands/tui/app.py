@@ -366,13 +366,20 @@ class GitDirectorConsole(
                 callback=lambda _: self.set_timer(0.2, lambda: self._refresh_repo_for_path(path)),
             )
         else:
-            self._suspend_and_attach(session_name, path)
+            # create_tmux_session already called sync_panel_tmux_config, so skip
+            # the redundant sync in attach_tmux_session. Without this skip the
+            # sync re-lists every tmux session, rewrites gd-tmux.conf, and runs
+            # `tmux source-file` between the manual screen clear and tmux's
+            # first redraw — long enough to expose a visible empty alt-screen.
+            self._suspend_and_attach(session_name, path, skip_config_sync=True)
 
     def _suspend_and_attach(
         self,
         session_name: str,
         path: Path | None = None,
         row_key: str | None = None,
+        *,
+        skip_config_sync: bool = False,
     ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
@@ -401,7 +408,7 @@ class GitDirectorConsole(
             with self.suspend():
                 sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
                 sys.stdout.flush()
-                attach_tmux_session(session_name)
+                attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
                 sys.stdout.write("\033[?25h")
                 sys.stdout.flush()
                 try:
