@@ -12,7 +12,12 @@ from .constants import (
     _PANELS_SORT_COLUMN_NAMES,
 )
 from .panels import Panel, render_panel_layout_preview
-from .screens import ConfirmScreen, CreatePanelScreen, PanelActionMenuScreen, RenamePanelScreen
+from .screens.panels import (
+    ConfirmScreen,
+    CreatePanelScreen,
+    PanelActionMenuScreen,
+    RenamePanelScreen,
+)
 
 _PANEL_PREVIEW_FILLED = "■"
 _PANEL_PREVIEW_OPEN = "□"

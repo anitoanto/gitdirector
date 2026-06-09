@@ -2,10 +2,8 @@
 
 import shutil
 import subprocess
-import tempfile
 import time
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -19,7 +17,7 @@ from gitdirector.integrations.tmux import (
     sync_panel_tmux_config,
 )
 
-from ._shared import _tmux_integration_lock
+from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
@@ -32,7 +30,7 @@ class TestPanelExitIntegration:
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
             home_dir.mkdir()
-            tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-"))
+            tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
             monkeypatch.delenv("TMUX", raising=False)
@@ -96,7 +94,7 @@ class TestPanelExitIntegration:
                 assert any(line.startswith("2|") and line != "2|tail" for line in pane_commands)
             finally:
                 subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
-                shutil.rmtree(tmux_dir, ignore_errors=True)
+                _cleanup_tmux_tmpdir(tmux_dir)
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
@@ -109,7 +107,7 @@ class TestIdleSessionPreservationIntegration:
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
             home_dir.mkdir()
-            tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-idle-"))
+            tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
             monkeypatch.delenv("TMUX", raising=False)
@@ -161,7 +159,7 @@ class TestIdleSessionPreservationIntegration:
             finally:
                 monitor.stop()
                 subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
-                shutil.rmtree(tmux_dir, ignore_errors=True)
+                _cleanup_tmux_tmpdir(tmux_dir)
 
     def test_repo_discovery_and_tmux_config_ignore_temp_wrappers_when_wrappers_exist(
         self,
@@ -171,7 +169,7 @@ class TestIdleSessionPreservationIntegration:
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
             home_dir.mkdir()
-            tmux_dir = Path(tempfile.mkdtemp(prefix="gd-tmux-monitor-"))
+            tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
             monkeypatch.delenv("TMUX", raising=False)
@@ -215,4 +213,4 @@ class TestIdleSessionPreservationIntegration:
                 assert temp_wrapper not in config_text
             finally:
                 subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
-                shutil.rmtree(tmux_dir, ignore_errors=True)
+                _cleanup_tmux_tmpdir(tmux_dir)

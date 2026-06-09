@@ -1453,7 +1453,7 @@ class TestAgentLoadingScreen:
             assert "copilot" in loading_text.content
             assert "waiting for agent to initialize" in loading_hint.content
 
-    @patch("gitdirector.commands.tui.screens.time.monotonic", return_value=42.0)
+    @patch("gitdirector.commands.tui.screens.panels.time.monotonic", return_value=42.0)
     def test_on_mount_starts_poll_and_timeout_timers(self, mock_monotonic):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         poll_timer = MagicMock()
@@ -1472,7 +1472,7 @@ class TestAgentLoadingScreen:
         assert screen._timeout_timer is timeout_timer
         mock_monotonic.assert_called_once_with()
 
-    @patch("gitdirector.commands.tui.screens.time.monotonic")
+    @patch("gitdirector.commands.tui.screens.panels.time.monotonic")
     def test_check_ready_waits_for_minimum_time_and_marker(self, mock_monotonic):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         screen._poll_timer = MagicMock()
@@ -1499,7 +1499,7 @@ class TestAgentLoadingScreen:
         screen._timeout_timer.stop.assert_not_called()
         screen._do_dismiss.assert_not_called()
 
-    @patch("gitdirector.commands.tui.screens.time.monotonic", return_value=101.5)
+    @patch("gitdirector.commands.tui.screens.panels.time.monotonic", return_value=101.5)
     def test_check_ready_dismisses_when_marker_exists(self, _mock_monotonic):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         screen._poll_timer = MagicMock()

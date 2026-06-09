@@ -31,17 +31,16 @@ from .constants import (
     _SESSION_STATUS_POLL_INTERVAL_SECS,
 )
 from .panels import Panel, PanelStore
-from .screens import (
+from .screens.panels import AgentLoadingScreen, ConfirmScreen
+from .screens.repos import (
     ActionMenuScreen,
-    AgentLoadingScreen,
-    ConfirmScreen,
     GitCommandResultScreen,
     GitOperationsMenuScreen,
     PullLoadingScreen,
     PullResultScreen,
-    RemoveSessionScreen,
     RepoInfoScreen,
 )
+from .screens.sessions import RemoveSessionScreen
 
 _panel_row_height = _app_panels._panel_row_height
 _render_panel_preview = _app_panels._render_panel_preview
