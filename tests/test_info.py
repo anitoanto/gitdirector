@@ -14,6 +14,7 @@ from gitdirector.info import (
     _count_lines,
     _count_tokens,
     _get_non_ignored_files,
+    _read_text,
     gather_repo_info,
 )
 
@@ -795,3 +796,48 @@ class TestInfoCommand:
 
         result = runner.invoke(cli, ["info", "my-app"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Scalability and edge cases for _read_text
+# ---------------------------------------------------------------------------
+#
+# `_read_text` is the binary-detector that backs the whole info subsystem.
+# The current implementation reads the *entire* file into memory if no null
+# bytes appear in the first 8 KB, which can OOM on a multi-gigabyte log
+# file inside a repo. We don't fix that here, but the regression tests
+# below pin down:
+#   * legitimate large text files are still handled (so the fix can be a
+#     cap, not a "reject everything > 1MB")
+#   * a null byte exactly at the chunk boundary is detected
+#   * a file whose second chunk is binary is detected (boundary case)
+# ---------------------------------------------------------------------------
+
+
+class TestReadTextScalability:
+    def test_reads_multi_megabyte_text_file_without_error(self, tmp_path):
+        f = tmp_path / "big.txt"
+        # 5 MB of pure text — well above the 8KB chunk boundary.
+        f.write_bytes(b"hello world\n" * 500_000)
+        text = _read_text(f)
+        assert text is not None
+        assert len(text) == f.stat().st_size
+
+    def test_distinguishes_text_from_binary_at_exact_chunk_boundary(self, tmp_path):
+        """A null byte at exactly byte 8193 must be detected, not just the first chunk.
+
+        The current 8 KB chunk check would only see the leading 8192 'a'
+        bytes; the second `read()` must catch the null.
+        """
+        f = tmp_path / "edge.bin"
+        f.write_bytes(b"a" * 8192 + b"\x00" + b"b" * 100)
+        assert _read_text(f) is None
+
+    def test_text_with_null_like_byte_sequence_is_treated_as_text(self, tmp_path):
+        """UTF-8 text containing non-null high bytes should still be readable."""
+        f = tmp_path / "utf8.txt"
+        # 'héllo' + a bunch of multi-byte chars; no NULs anywhere.
+        f.write_bytes("héllo wörld 🌍\n".encode("utf-8") * 1000)
+        text = _read_text(f)
+        assert text is not None
+        assert "héllo" in text

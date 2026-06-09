@@ -774,3 +774,81 @@ class TestRepositoryInfo:
         assert "repo" in text
         assert "up-to-date" in text
         assert "main" in text
+
+
+# ---------------------------------------------------------------------------
+# get_status() with a remote fetch failure — classification contract
+# ---------------------------------------------------------------------------
+#
+# When the user runs `list` (which sets fetch=True) the repo's status goes
+# through `_get_origin_sync_status` after `_fetch_origin_branch`. If the
+# fetch fails, the message surfaced to the UI must be the *classified*
+# string (so the TUI can colour it sensibly and the CLI can show a useful
+# summary). Without classification, raw `fatal: ...` from git leaks into
+# the message and breaks downstream parsing/colouring.
+# ---------------------------------------------------------------------------
+
+
+class TestGetStatusFetchErrorClassification:
+    def test_fetch_auth_error_yields_classified_message(self, tmp_path, monkeypatch):
+        from gitdirector import repo as repo_mod
+
+        # Build a real local repo so the non-fetch code path is exercised.
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "t"], cwd=str(repo_dir), check=True, capture_output=True
+        )
+        (repo_dir / "README.md").write_text("hi")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True
+        )
+
+        # Simulate real subprocess output by patching the lower-level call
+        # so the production normalization/classification path runs. We patch
+        # `subprocess.Popen` (the constructor) so the existing
+        # `_run_git`/`_normalize_git_result` pipeline classifies the error.
+        def fake_popen(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            # The real _run_git uses text=True, so communicate() returns str.
+            if "status" in cmd:
+                rc, out, err = 0, "# branch.head main\n", ""
+            elif "fetch" in cmd:
+                rc, out, err = (
+                    1,
+                    "",
+                    "fatal: Authentication failed for 'https://example.com/r.git'",
+                )
+            elif "show-ref" in cmd:
+                rc, out, err = 1, "", "unknown ref"
+            elif "rev-list" in cmd:
+                rc, out, err = 0, "0\t0", ""
+            elif "log" in cmd:
+                rc, out, err = 0, "2 hours ago\n1234", ""
+            elif "ls-tree" in cmd:
+                rc, out, err = 0, "", ""
+            else:
+                raise AssertionError(f"Unexpected git command: {cmd}")
+
+            proc = MagicMock()
+            # text=True means communicate() returns strings, not bytes.
+            proc.communicate.return_value = (out, err)
+            proc.returncode = rc
+            return proc
+
+        monkeypatch.setattr(repo_mod.subprocess, "Popen", fake_popen)
+
+        info = Repository(repo_dir).get_status(fetch=True)
+        assert info.status == repo_mod.RepoStatus.UNKNOWN
+        msg = info.message.lower()
+        # The classified message must be present, NOT the raw git stderr.
+        assert "authentication" in msg or "network" in msg
+        assert "fatal:" not in info.message
