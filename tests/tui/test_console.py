@@ -1154,7 +1154,9 @@ class TestGitDirectorConsoleDirectBranches:
         app.action_open_tmux()
 
         mock_create.assert_called_once_with("alpha", Path("/tmp/alpha"), purpose="shell")
-        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/shell/1", Path("/tmp/alpha"), skip_config_sync=True
+        )
 
     def test_action_open_tmux_without_selection_is_noop(self):
         app = GitDirectorConsole()
