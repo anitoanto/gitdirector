@@ -70,6 +70,7 @@ class ActionMenuScreen(ModalScreen[str]):
                 [
                     Option("", disabled=True),
                     Option("[dim]Launch AI Agent[/dim]", disabled=True),
+                    Option("[white]◆[/white] [bold]Pi[/bold]", id="agent:pi"),
                     Option("[white]◆[/white] [bold]OpenCode[/bold]", id="agent:opencode"),
                     Option("[white]◆[/white] [bold]Claude Code[/bold]", id="agent:claude"),
                     Option("[white]◆[/white] [bold]GitHub Copilot[/bold]", id="agent:copilot"),

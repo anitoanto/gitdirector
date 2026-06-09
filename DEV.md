@@ -30,7 +30,7 @@ every 3 seconds:
 			state = idle
 		elif command is a plain shell (zsh/bash/sh/etc):
 			state = idle
-		elif session purpose is an agent (opencode/claude/copilot/codex)
+		elif session purpose is an agent (opencode/claude/copilot/codex/pi)
 				 and command matches that agent
 				 and now - last_change >= 10 seconds:
 			state = idle
