@@ -61,7 +61,7 @@ Features:
 - Press `enter` on any repository to open an action menu:
     - **New tmux session** — create and attach a session for the repository
     - **Attach existing session** — switch to any already-running tmux session
-    - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, or Codex in a new tmux session
+    - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
     - **Remove session** — kill a running tmux session
 
 ### unlink

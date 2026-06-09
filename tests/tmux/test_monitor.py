@@ -365,7 +365,7 @@ class TestResolvePaneStatus:
         )
 
     def test_known_agent_purposes(self):
-        assert _AGENT_PURPOSES == {"opencode", "claude", "copilot", "codex"}
+        assert _AGENT_PURPOSES == {"opencode", "claude", "copilot", "codex", "pi"}
 
     @patch("gitdirector.integrations.tmux.monitor.time")
     def test_shell_purpose_ignores_silence_threshold(self, mock_time):

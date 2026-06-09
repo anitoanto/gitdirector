@@ -676,6 +676,7 @@ class GitDirectorConsole(
         "agent:claude": "claude",
         "agent:copilot": "copilot",
         "agent:codex": "codex",
+        "agent:pi": "pi",
     }
 
     def _handle_menu_action(self, action: str | None) -> None:
