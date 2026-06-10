@@ -69,6 +69,7 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/panel/main: status-position bottom" in config
         assert "set-option -t =gd/panel/main: status-left" in config
         assert "set-option -t =gd/panel/main: status-right" in config
+        assert "set-option -t =gd/panel/main: mouse on" in config
         assert "window-status-current-format ' #{pane_index}:#{pane_title} '" in config
         assert f'message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"' in config
         assert (
@@ -112,6 +113,7 @@ class TestPanelPaneTitles:
         config = _session_tmux_config("gd/my-repo/shell/1", "rose-pine")
 
         assert "set-option -t =gd/my-repo/shell/1: status-left" in config
+        assert "set-option -t =gd/my-repo/shell/1: mouse on" in config
         assert "SHELL" in config
         assert "my-repo/shell/1" in config
         assert "window-status-current-format ' #I:#W '" in config

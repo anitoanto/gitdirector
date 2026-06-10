@@ -31,17 +31,17 @@ from .constants import (
     _SESSION_STATUS_POLL_INTERVAL_SECS,
 )
 from .panels import Panel, PanelStore
-from .screens import (
+from .screens.diff import DiffReviewScreen
+from .screens.panels import AgentLoadingScreen, ConfirmScreen
+from .screens.repos import (
     ActionMenuScreen,
-    AgentLoadingScreen,
-    ConfirmScreen,
     GitCommandResultScreen,
     GitOperationsMenuScreen,
     PullLoadingScreen,
     PullResultScreen,
-    RemoveSessionScreen,
     RepoInfoScreen,
 )
+from .screens.sessions import RemoveSessionScreen
 
 _panel_row_height = _app_panels._panel_row_height
 _render_panel_preview = _app_panels._render_panel_preview
@@ -367,13 +367,20 @@ class GitDirectorConsole(
                 callback=lambda _: self.set_timer(0.2, lambda: self._refresh_repo_for_path(path)),
             )
         else:
-            self._suspend_and_attach(session_name, path)
+            # create_tmux_session already called sync_panel_tmux_config, so skip
+            # the redundant sync in attach_tmux_session. Without this skip the
+            # sync re-lists every tmux session, rewrites gd-tmux.conf, and runs
+            # `tmux source-file` between the manual screen clear and tmux's
+            # first redraw — long enough to expose a visible empty alt-screen.
+            self._suspend_and_attach(session_name, path, skip_config_sync=True)
 
     def _suspend_and_attach(
         self,
         session_name: str,
         path: Path | None = None,
         row_key: str | None = None,
+        *,
+        skip_config_sync: bool = False,
     ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
@@ -402,7 +409,7 @@ class GitDirectorConsole(
             with self.suspend():
                 sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
                 sys.stdout.flush()
-                attach_tmux_session(session_name)
+                attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
                 sys.stdout.write("\033[?25h")
                 sys.stdout.flush()
                 try:
@@ -677,6 +684,7 @@ class GitDirectorConsole(
         "agent:claude": "claude",
         "agent:copilot": "copilot",
         "agent:codex": "codex",
+        "agent:pi": "pi",
     }
 
     def _handle_menu_action(self, action: str | None) -> None:
@@ -690,6 +698,8 @@ class GitDirectorConsole(
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
             self._attach_to_session(session_name, path)
+        elif action == "review_diff":
+            self._open_review_diff()
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
@@ -697,6 +707,14 @@ class GitDirectorConsole(
                     RemoveSessionScreen(path.name, path),
                     callback=self._handle_remove_selection,
                 )
+
+    def _open_review_diff(self) -> None:
+        path = self._get_selected_path()
+        if path is None:
+            return
+        info = self._results.get(str(path))
+        branch = info.branch if info else None
+        self.push_screen(DiffReviewScreen(path.name, path, branch=branch))
 
     def _handle_remove_selection(self, session_name: str | None) -> None:
         if session_name is None:

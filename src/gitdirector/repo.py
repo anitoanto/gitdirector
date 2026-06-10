@@ -426,3 +426,115 @@ class Repository:
             if attempt < attempts - 1 and "network error" in err:
                 continue
             return False, err
+
+    def add(self, paths: list[str] | None = None) -> tuple[bool, str]:
+        """Stage files for the next commit.
+
+        With ``paths=None`` runs ``git add -A`` to stage every change
+        (tracked modifications plus untracked, minus paths excluded by
+        the repo's ``.gitignore``). With an explicit ``paths`` list runs
+        ``git add -- <paths>`` to stage only those relative paths.
+        """
+        if paths:
+            code, out, err = self._run_git("add", "--", *paths)
+        else:
+            code, out, err = self._run_git("add", "-A")
+        if code != 0:
+            return False, err or out or "git add failed"
+        return True, out
+
+    def commit(self, message: str) -> tuple[bool, str]:
+        """Create a commit with ``message``; returns ``(ok, output)``."""
+        if not message or not message.strip():
+            return False, "commit message is empty"
+        code, out, err = self._run_git("commit", "-m", message)
+        if code != 0:
+            return False, err or out or "git commit failed"
+        return True, out
+
+    def push(self, *, set_upstream: bool = False) -> tuple[bool, str]:
+        """Push the current branch to its upstream.
+
+        With ``set_upstream=True`` runs ``git push -u origin <branch>`` so
+        the local branch tracks the remote on the first push. Subsequent
+        pushes (or pushes from a clone that already has the tracking
+        branch) can pass ``set_upstream=False`` for a plain ``git push``.
+        """
+        if set_upstream:
+            branch = self.get_current_branch()
+            if not branch:
+                return False, "Could not determine current branch"
+            code, out, err = self._run_git("push", "-u", "origin", branch)
+        else:
+            code, out, err = self._run_git("push")
+        if code != 0:
+            return False, err or out or "git push failed"
+        return True, out
+
+    def get_diff_against_head(
+        self, *, max_bytes: int = 2 * 1024 * 1024
+    ) -> tuple[bool, str, list[str]]:
+        """Return combined uncommitted diff plus list of untracked file paths.
+
+        The diff covers both staged and unstaged changes for tracked files,
+        produced by ``git diff HEAD`` so reviewers see a single coherent
+        picture of uncommitted work. Untracked files are returned separately
+        because git cannot produce a diff for files that have no HEAD entry.
+
+        The diff text is capped at ``max_bytes`` to keep the TUI responsive
+        on very large changesets. A truncated diff is signalled by a trailing
+        marker line that the renderer can display to the user.
+        """
+        code, diff_text, err = self._run_git("diff", "HEAD", "--no-color", _strip=False)
+        if code != 0:
+            return False, err or "git diff failed", []
+
+        untracked = self._list_untracked_files()
+        if len(diff_text.encode("utf-8", errors="replace")) > max_bytes:
+            truncated = diff_text.encode("utf-8", errors="replace")[:max_bytes].decode(
+                "utf-8", errors="replace"
+            )
+            diff_text = truncated + "\n[gd-truncated] diff exceeded size cap\n"
+        elif diff_text and not diff_text.endswith("\n"):
+            diff_text += "\n"
+        return True, diff_text, untracked
+
+    def _list_untracked_files(self) -> list[str]:
+        code, out, _ = self._run_git(
+            "ls-files", "--others", "--exclude-standard", "-z", _strip=False
+        )
+        if code != 0 or not out:
+            return []
+        paths: list[str] = []
+        for chunk in out.split("\x00"):
+            if chunk:
+                paths.append(chunk)
+        return paths
+
+    def read_file_text(self, rel_path: str, *, max_bytes: int = 256 * 1024) -> str | None:
+        """Read a tracked or untracked file's text content, capped to ``max_bytes``.
+
+        Returns ``None`` if the file is missing, binary, or unreadable.
+        """
+        candidate = self.path / rel_path
+        if not candidate.is_file():
+            return None
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            return None
+        if size > max_bytes:
+            try:
+                with candidate.open("rb") as fh:
+                    data = fh.read(max_bytes)
+            except OSError:
+                return None
+            return data.decode("utf-8", errors="replace") + "\n[gd-truncated]\n"
+        try:
+            with candidate.open("rb") as fh:
+                data = fh.read()
+        except OSError:
+            return None
+        if b"\x00" in data:
+            return None
+        return data.decode("utf-8", errors="replace")

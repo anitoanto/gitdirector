@@ -14,20 +14,24 @@ from .constants import (
 )
 from .panel_view import PanelViewScreen, PaneWidget
 from .panels import Panel, PanelStore
-from .screens import (
-    ActionMenuScreen,
+from .screens import SortMenuScreen
+from .screens.diff import DiffReviewScreen
+from .screens.panels import (
     AgentLoadingScreen,
     ConfirmScreen,
     CreatePanelScreen,
+    PanelActionMenuScreen,
+    RenamePanelScreen,
+)
+from .screens.repos import (
+    ActionMenuScreen,
     GitCommandResultScreen,
     GitOperationsMenuScreen,
     PullLoadingScreen,
     PullResultScreen,
-    RemoveSessionScreen,
     RepoInfoScreen,
-    SelectSessionScreen,
-    SortMenuScreen,
 )
+from .screens.sessions import RemoveSessionScreen, SelectSessionScreen
 from .terminal_widget import TerminalWidget
 
 __all__ = [
@@ -35,18 +39,21 @@ __all__ = [
     "AgentLoadingScreen",
     "ConfirmScreen",
     "CreatePanelScreen",
+    "DiffReviewScreen",
     "GitCommandResultScreen",
     "GitOperationsMenuScreen",
     "_DEFAULT_PANELS_SORT_COLUMN",
     "GitDirectorConsole",
     "PaneWidget",
     "Panel",
+    "PanelActionMenuScreen",
     "PanelStore",
     "PanelViewScreen",
     "_PANELS_SORT_COLUMN_NAMES",
     "PullLoadingScreen",
     "PullResultScreen",
     "RemoveSessionScreen",
+    "RenamePanelScreen",
     "RepoInfoScreen",
     "SelectSessionScreen",
     "SortMenuScreen",
