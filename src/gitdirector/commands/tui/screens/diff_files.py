@@ -455,10 +455,6 @@ class FileTileList(ListView):
             tile = FileTile(spec)
             self.append(ListItem(tile, id=f"file-tile-{id(tile)}"))
         if self._specs:
-            # The ListItem children mount asynchronously, so we set the
-            # initial index via a deferred call. Trying to set ``index``
-            # now would fire ``watch_index`` against half-mounted children
-            # and crash with NoMatches.
             self._suppress_watch = True
             self._pending_index = 0
             self.call_after_refresh(self._apply_initial_selection)
@@ -466,6 +462,9 @@ class FileTileList(ListView):
     def _apply_initial_selection(self) -> None:
         pending = getattr(self, "_pending_index", None)
         if pending is None:
+            return
+        if len(self._nodes) <= pending:
+            self.call_after_refresh(self._apply_initial_selection)
             return
         self._pending_index = None
         self._suppress_watch = False
