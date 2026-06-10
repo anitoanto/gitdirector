@@ -3,6 +3,8 @@
 - ``screens.repos``   — repository action menu, git command results, pull, info
 - ``screens.sessions`` — tmux session selection and removal
 - ``screens.panels``  — panel create/reconfigure/rename/action and agent loading
+- ``screens.commit``  — stage-all confirm, commit message, commit loading,
+  commit result
 - ``screens._shared`` — generic confirm and sort dialogs, plus the shared ANSI
   renderer
 
@@ -13,6 +15,13 @@ This package re-exports the same public surface that the previous monolithic
 from __future__ import annotations
 
 from ._shared import ConfirmScreen, SortMenuScreen, _render_ansi_output
+from .commit import (
+    CommitLoadingScreen,
+    CommitMessageScreen,
+    CommitResultScreen,
+    StageFilesConfirmScreen,
+)
+from .diff import DiffReviewScreen
 from .panels import (
     AgentLoadingScreen,
     CreatePanelScreen,
@@ -33,8 +42,12 @@ from .sessions import RemoveSessionScreen, SelectSessionScreen
 __all__ = [
     "ActionMenuScreen",
     "AgentLoadingScreen",
+    "CommitLoadingScreen",
+    "CommitMessageScreen",
+    "CommitResultScreen",
     "ConfirmScreen",
     "CreatePanelScreen",
+    "DiffReviewScreen",
     "GitCommandResultScreen",
     "GitOperationsMenuScreen",
     "PanelActionMenuScreen",
@@ -45,6 +58,7 @@ __all__ = [
     "RepoInfoScreen",
     "SelectSessionScreen",
     "SortMenuScreen",
+    "StageFilesConfirmScreen",
     "_render_ansi_output",
     "_render_grid_preview",
 ]

@@ -47,6 +47,11 @@ class ActionMenuScreen(ModalScreen[str]):
             )
             items: list[Option] = [
                 Option("[white]+[/white] [bold]TMUX Session[/bold]", id="new_session"),
+                Option("", disabled=True),
+                Option(
+                    "[white]\u00b1[/white] [bold]Review Diff[/bold] [dim]uncommitted changes[/dim]",
+                    id="review_diff",
+                ),
             ]
             if sessions:
                 items.append(

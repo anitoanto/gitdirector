@@ -131,7 +131,7 @@ class TestActionMenuScreen:
             branch_label = app.screen.query_one("#menu-branch", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
             assert "main" in branch_label.content
-            assert menu.option_count == 8
+            assert menu.option_count == 10
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_no_branch_shows_dash(self, mock_sessions):
@@ -207,7 +207,7 @@ class TestActionMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 14
+            assert menu.option_count == 16
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
     async def test_disabled_options_and_navigation(self, _mock_sessions):
