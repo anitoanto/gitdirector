@@ -31,6 +31,7 @@ from .constants import (
     _SESSION_STATUS_POLL_INTERVAL_SECS,
 )
 from .panels import Panel, PanelStore
+from .screens.diff import DiffReviewScreen
 from .screens.panels import AgentLoadingScreen, ConfirmScreen
 from .screens.repos import (
     ActionMenuScreen,
@@ -697,6 +698,8 @@ class GitDirectorConsole(
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
             self._attach_to_session(session_name, path)
+        elif action == "review_diff":
+            self._open_review_diff()
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
@@ -704,6 +707,14 @@ class GitDirectorConsole(
                     RemoveSessionScreen(path.name, path),
                     callback=self._handle_remove_selection,
                 )
+
+    def _open_review_diff(self) -> None:
+        path = self._get_selected_path()
+        if path is None:
+            return
+        info = self._results.get(str(path))
+        branch = info.branch if info else None
+        self.push_screen(DiffReviewScreen(path.name, path, branch=branch))
 
     def _handle_remove_selection(self, session_name: str | None) -> None:
         if session_name is None:

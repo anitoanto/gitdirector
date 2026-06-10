@@ -15,6 +15,7 @@ from .constants import (
 from .panel_view import PanelViewScreen, PaneWidget
 from .panels import Panel, PanelStore
 from .screens import SortMenuScreen
+from .screens.diff import DiffReviewScreen
 from .screens.panels import (
     AgentLoadingScreen,
     ConfirmScreen,
@@ -38,6 +39,7 @@ __all__ = [
     "AgentLoadingScreen",
     "ConfirmScreen",
     "CreatePanelScreen",
+    "DiffReviewScreen",
     "GitCommandResultScreen",
     "GitOperationsMenuScreen",
     "_DEFAULT_PANELS_SORT_COLUMN",
