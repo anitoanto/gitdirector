@@ -242,3 +242,69 @@ class TestGetRepositoryStatus:
         d.mkdir()
         info = manager.get_repository_status(d)
         assert info.status == RepoStatus.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# `link --discover` walk semantics — locks down the noisy-tree behaviour
+# ---------------------------------------------------------------------------
+#
+# The current discover walker only removes ``.git`` from the directory list
+# before recursing. That means ``node_modules/``, ``target/`` and other vendor
+# trees are walked in full. We pin the *current* behaviour here so the
+# eventual fix (skip-list) doesn't accidentally drop the contract of
+# "find every repo, including nested ones".
+# ---------------------------------------------------------------------------
+
+
+def _make_real_git_repo(parent, name):
+    repo = parent / name
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    return repo
+
+
+def _make_nested_git_marker(parent, *parts):
+    """Drop a ``.git`` directory inside a non-repo path (vendor / submodule)."""
+    nested = parent.joinpath(*parts)
+    nested.mkdir(parents=True)
+    (nested / ".git").mkdir()
+    return nested
+
+
+def _make_noise_dir(parent, name):
+    d = parent / name
+    d.mkdir()
+    (d / "stuff.txt").write_text("x" * 1024)
+    return d
+
+
+class TestDiscoverWalkSemantics:
+    def test_finds_nested_git_marker_in_vendor(self, manager, tmp_path):
+        """A ``.git`` directory nested inside vendor/submodules is still discovered."""
+        _make_real_git_repo(tmp_path, "app")
+        _make_nested_git_marker(tmp_path, "vendor", "third-party", "widget")
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+        assert ok is True
+        names = {p.name for p in added}
+        assert names == {"app", "widget"}
+
+    def test_descends_into_noisy_directories(self, manager, tmp_path):
+        """Current behaviour: discovery walks *into* node_modules/target/.venv.
+
+        The bug is that noisy dirs are not skipped. The test locks the
+        current behaviour down so a future fix has a regression net: any
+        change that stops descending into ``node_modules`` *and* also drops
+        the nested repo would fail this test.
+        """
+        _make_real_git_repo(tmp_path, "app")
+        node_modules = _make_noise_dir(tmp_path, "node_modules")
+        nested = node_modules / "some-pkg"
+        nested.mkdir()
+        (nested / ".git").mkdir()
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+        assert ok is True
+        names = {p.name for p in added}
+        # Both the top-level app AND the nested node_modules/some-pkg are found.
+        assert "app" in names
+        assert "some-pkg" in names

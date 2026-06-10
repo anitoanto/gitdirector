@@ -1,4 +1,4 @@
-"""Modal screen classes for the TUI."""
+"""Modal screens related to panels (create, reconfigure, rename, action menu, agent loading)."""
 
 from __future__ import annotations
 
@@ -6,226 +6,126 @@ import time
 from pathlib import Path
 
 from rich.markup import escape
-from rich.text import Text
 from textual.app import ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import (
-    Input,
-    LoadingIndicator,
-    OptionList,
-    Static,
-)
+from textual.widgets import Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ...info import RepoInfoResult
-from .constants import _MODAL_BINDINGS, _MODAL_CSS, _SORT_COLUMN_NAMES
-from .panels import (
+from ..constants import _MODAL_BINDINGS, _MODAL_CSS
+from ..panels import (
     Panel,
     PanelStore,
     get_create_panel_layouts,
     render_panel_layout_preview,
     resolve_panel_layout,
 )
+from ._shared import ConfirmScreen, SortMenuScreen  # re-export for backward compat
+
+__all__ = [
+    "AgentLoadingScreen",
+    "ConfirmScreen",  # re-exported for backward compat
+    "CreatePanelScreen",
+    "PanelActionMenuScreen",
+    "RenamePanelScreen",
+    "SortMenuScreen",  # re-exported for backward compat
+    "_render_grid_preview",
+]
 
 
-def _render_ansi_output(output: str) -> Text:
-    return Text.from_ansi(output)
+def _render_grid_preview(rows: int, cols: int, layout_key: str | None = None) -> str:
+    layout = resolve_panel_layout(layout_key, rows, cols)
+    return render_panel_layout_preview(layout, cell_width=7, cell_height=1)
 
 
-class ActionMenuScreen(ModalScreen[str]):
-    """Modal popup with actions for the selected repository."""
+class PanelActionMenuScreen(ModalScreen[str]):
+    """Modal popup with actions for the selected panel."""
 
     BINDINGS = _MODAL_BINDINGS
 
     CSS = (
-        "ActionMenuScreen {"
+        "PanelActionMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
+        " }" + _MODAL_CSS + """
+    PanelActionMenuScreen #menu-container {
+        width: 72;
+        padding: 1 1;
+    }
+    PanelActionMenuScreen #menu-title {
+        padding: 0 1 0 1;
+    }
+    PanelActionMenuScreen #menu-branch {
+        padding: 0 1 1 1;
+    }
+    #panel-action-layout {
+        height: auto;
+        align: left top;
+    }
+    #panel-action-main {
+        width: 1fr;
+        height: auto;
+    }
+    #panel-preview-pane {
+        width: 27;
+        height: auto;
+        padding: 0 0 0 1;
+        align: center top;
+    }
+    PanelActionMenuScreen #action-menu {
+        height: 8;
+        padding: 0 1;
+        margin: 0 0 1 0;
+    }
+    PanelActionMenuScreen #menu-hint {
+        padding: 0 1 0 1;
+    }
+    #panel-layout-preview {
+        width: auto;
+        height: auto;
+        color: $text;
+    }
+    """
     )
 
-    def __init__(self, repo_name: str, repo_path: Path, branch: str | None = None) -> None:
+    def __init__(self, panel: Panel) -> None:
         super().__init__()
-        self.repo_name = repo_name
-        self.repo_path = repo_path
-        self.branch = branch
+        self.panel = panel
 
     def compose(self) -> ComposeResult:
-        from ...integrations.tmux import list_repo_sessions
+        from ....integrations.tmux import make_panel_session_name
 
-        sessions = list_repo_sessions(self.repo_path)
+        session_name = make_panel_session_name(self.panel.name)
 
         with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.repo_name}[/bold white]", id="menu-title")
-            yield Static(
-                f"[dim]branch:[/dim] [cyan]{self.branch or '—'}[/cyan]",
-                id="menu-branch",
-            )
-            items: list[Option] = [
-                Option("[white]+[/white] [bold]TMUX Session[/bold]", id="new_session"),
-            ]
-            if sessions:
-                items.append(
-                    Option("", disabled=True),
-                )
-                count = len(sessions)
-                label = "session" if count == 1 else "sessions"
-                items.append(
-                    Option(f"[dim]{count} active {label}[/dim]", disabled=True),
-                )
-                for s in sessions:
-                    parts = s.split("/")
-                    label = f"{parts[2]}/{parts[3]}" if len(parts) >= 4 else s
-                    items.append(
-                        Option(
-                            f"[white]●[/white] [bold]{label}[/bold] [dim]{s}[/dim]",
-                            id=f"attach:{s}",
-                        )
-                    )
-            items.extend(
-                [
-                    Option("", disabled=True),
-                    Option("[dim]Launch AI Agent[/dim]", disabled=True),
-                    Option("[white]◆[/white] [bold]OpenCode[/bold]", id="agent:opencode"),
-                    Option("[white]◆[/white] [bold]Claude Code[/bold]", id="agent:claude"),
-                    Option("[white]◆[/white] [bold]GitHub Copilot[/bold]", id="agent:copilot"),
-                    Option("[white]◆[/white] [bold]Codex[/bold]", id="agent:codex"),
-                ]
-            )
-            if sessions:
-                items.extend(
-                    [
+            yield Static(f"[bold white]{self.panel.name}[/bold white]", id="menu-title")
+            yield Static(f"[dim]{session_name}[/dim]", id="menu-branch")
+            with Horizontal(id="panel-action-layout"):
+                with Vertical(id="panel-action-main"):
+                    yield OptionList(
+                        Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
+                        Option("[white]↺[/white] [bold]Reconfigure[/bold]", id="reconfigure"),
+                        Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
                         Option("", disabled=True),
-                        Option(
-                            "[white]✕[/white] [dim]Remove Session...[/dim]", id="remove_session"
-                        ),
-                    ]
-                )
-            yield OptionList(*items, id="action-menu")
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#action-menu", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_up()
-
-
-class GitOperationsMenuScreen(ModalScreen[str]):
-    """Modal popup with git operations for the selected repository."""
-
-    BINDINGS = _MODAL_BINDINGS
-
-    CSS = (
-        "GitOperationsMenuScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
-
-    def __init__(self, repo_name: str, branch: str | None = None) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.branch = branch
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.repo_name}[/bold white]", id="menu-title")
-            yield Static(
-                f"[dim]branch:[/dim] [cyan]{self.branch or '—'}[/cyan]",
-                id="menu-branch",
-            )
-            yield OptionList(
-                Option("[white]>[/white] [bold]Status[/bold] [dim]git status[/dim]", id="status"),
-                Option(
-                    "[white]*[/white] [bold]Timeline[/bold] "
-                    "[dim]git log --graph --decorate --all[/dim]",
-                    id="timeline",
-                ),
-                Option(
-                    "[white]⑂[/white] [bold]Branches[/bold] [dim]git branch -a[/dim]",
-                    id="branches",
-                ),
-                Option(
-                    "[white]◎[/white] [bold]Remotes[/bold] [dim]git remote -v[/dim]",
-                    id="remotes",
-                ),
-                Option(
-                    "[white]↓[/white] [bold]Pull[/bold] [dim]git pull --ff-only[/dim]",
-                    id="pull",
-                ),
-                id="action-menu",
-            )
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#action-menu", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_up()
-
-
-class RemoveSessionScreen(ModalScreen[str | None]):
-    """Modal listing sessions available for removal."""
-
-    BINDINGS = _MODAL_BINDINGS
-
-    CSS = (
-        "RemoveSessionScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
-
-    def __init__(self, repo_name: str, repo_path: Path) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.repo_path = repo_path
-
-    def compose(self) -> ComposeResult:
-        from ...integrations.tmux import list_repo_sessions
-
-        sessions = list_repo_sessions(self.repo_path)
-
-        with Vertical(id="menu-container"):
-            yield Static("[bold white]Select session to remove[/bold white]", id="menu-title")
-            if sessions:
-                options = [
-                    Option(
-                        f"[red]●[/red] [bold]"
-                        f"{'/'.join(s.split('/')[2:]) if '/' in s else s}"
-                        f"[/bold] [dim]{s}[/dim]",
-                        id=s,
+                        Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),
+                        id="action-menu",
                     )
-                    for s in sessions
-                ]
-                yield OptionList(*options, id="action-menu")
-            else:
-                yield Static("[dim]No active sessions[/dim]", id="menu-branch")
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
+                    yield Static(
+                        "↑↓/jk select    \\[enter] confirm    \\[esc] close",
+                        id="menu-hint",
+                    )
+                with Vertical(id="panel-preview-pane"):
+                    yield Static(
+                        _render_grid_preview(
+                            self.panel.rows,
+                            self.panel.cols,
+                            self.panel.layout_key,
+                        ),
+                        id="panel-layout-preview",
+                    )
 
     def on_mount(self) -> None:
-        menu = self.query("#action-menu")
-        if menu:
-            menu.first().focus()
+        self.query_one("#action-menu", OptionList).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option.id)
@@ -234,367 +134,52 @@ class RemoveSessionScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
     def action_cursor_down(self) -> None:
-        menu = self.query("#action-menu")
-        if menu:
-            menu.first().action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        menu = self.query("#action-menu")
-        if menu:
-            menu.first().action_cursor_up()
-
-
-class ConfirmScreen(ModalScreen[bool]):
-    """Simple yes/no confirmation dialog."""
-
-    BINDINGS = _MODAL_BINDINGS
-
-    CSS = (
-        "ConfirmScreen { align: center middle; background: $panel 80%; hatch: right $primary 30%; }"
-        + _MODAL_CSS
-    )
-
-    def __init__(self, message: str) -> None:
-        super().__init__()
-        self.message = message
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.message}[/bold white]", id="menu-title")
-            yield OptionList(
-                Option("[dim]✗ No[/dim]", id="no"),
-                Option("[white]✓[/white] [bold]Yes[/bold]", id="yes"),
-                id="action-menu",
-            )
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#action-menu", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id == "yes")
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
-
-    def action_cursor_down(self) -> None:
         self.query_one("#action-menu", OptionList).action_cursor_down()
 
     def action_cursor_up(self) -> None:
         self.query_one("#action-menu", OptionList).action_cursor_up()
 
 
-class GitCommandResultScreen(ModalScreen[str | None]):
-    """Modal popup showing the output of a git command."""
-
-    BINDINGS = [
-        Binding("escape", "back", "Esc back", show=False),
-        Binding("enter", "cancel", "Enter close", show=False),
-        Binding("down", "scroll_down", "↓", show=False),
-        Binding("j", "scroll_down", "↓", show=False),
-        Binding("up", "scroll_up", "↑", show=False),
-        Binding("k", "scroll_up", "↑", show=False),
-    ]
-
-    DEFAULT_CSS = """
-    GitCommandResultScreen {
-        align: center middle;
-        background: $panel 80%;
-        hatch: right $primary 30%;
-    }
-    #git-command-result-container {
-        width: 84;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #git-command-result-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #git-command-result-command {
-        text-align: center;
-        padding: 0 1 1 1;
-        color: $text-muted;
-    }
-    #git-command-result-status {
-        text-align: center;
-        padding: 0 1 1 1;
-    }
-    #git-command-result-output-scroll {
-        height: 12;
-        border: round $surface;
-        padding: 0 1;
-        margin: 0 1;
-    }
-    #git-command-result-output {
-        color: $text;
-    }
-    #git-command-result-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """
-
-    def __init__(
-        self,
-        repo_name: str,
-        command: str | None,
-        ok: bool,
-        output: str,
-        *,
-        success_text: str = "Command completed",
-        failure_text: str = "Command failed",
-    ) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.command = command
-        self.ok = ok
-        self.output = output.strip() or ("No output." if not ok else "Command completed.")
-        self.success_text = success_text
-        self.failure_text = failure_text
-
-    def compose(self) -> ComposeResult:
-        status_text = self.success_text if self.ok else self.failure_text
-        status_style = "green" if self.ok else "red"
-
-        with Vertical(id="git-command-result-container"):
-            yield Static(
-                f"[bold white]{escape(self.repo_name)}[/bold white]",
-                id="git-command-result-title",
-            )
-            if self.command:
-                yield Static(
-                    f"[dim]{escape(self.command)}[/dim]",
-                    id="git-command-result-command",
-                )
-            yield Static(
-                f"[{status_style}]{escape(status_text)}[/{status_style}]",
-                id="git-command-result-status",
-            )
-            with VerticalScroll(id="git-command-result-output-scroll"):
-                yield Static(_render_ansi_output(self.output), id="git-command-result-output")
-            yield Static(
-                "↑↓/jk scroll    \\[enter] close    \\[esc] back",
-                id="git-command-result-hint",
-            )
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_back(self) -> None:
-        self.dismiss("back")
-
-    def action_scroll_down(self) -> None:
-        self.query_one("#git-command-result-output-scroll", VerticalScroll).action_scroll_down()
-
-    def action_scroll_up(self) -> None:
-        self.query_one("#git-command-result-output-scroll", VerticalScroll).action_scroll_up()
-
-
-class PullResultScreen(ModalScreen[str | None]):
-    """Modal popup showing the outcome of a repository pull."""
-
-    BINDINGS = [
-        Binding("escape", "back", "Esc back", show=False),
-        Binding("enter", "cancel", "Enter close", show=False),
-        Binding("down", "scroll_down", "↓", show=False),
-        Binding("j", "scroll_down", "↓", show=False),
-        Binding("up", "scroll_up", "↑", show=False),
-        Binding("k", "scroll_up", "↑", show=False),
-    ]
-
-    CSS = (
-        "PullResultScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        """
-    #pull-result-container {
-        width: 84;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #pull-result-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #pull-result-command {
-        text-align: center;
-        padding: 0 1 1 1;
-        color: $text-muted;
-    }
-    #pull-result-status {
-        text-align: center;
-        padding: 0 1 1 1;
-    }
-    #pull-result-output-scroll {
-        height: 12;
-        border: round $surface;
-        padding: 0 1;
-        margin: 0 1;
-    }
-    #pull-result-output {
-        color: $text;
-    }
-    #pull-result-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """
-    )
-
-    def __init__(self, repo_name: str, command: str | None, ok: bool, output: str) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.command = command
-        self.ok = ok
-        self.output = output.strip() or ("Already up to date." if ok else "No output.")
-
-    def compose(self) -> ComposeResult:
-        status_text = "Pull completed" if self.ok else "Pull failed"
-        status_style = "green" if self.ok else "red"
-
-        with Vertical(id="pull-result-container"):
-            yield Static(
-                f"[bold white]{escape(self.repo_name)}[/bold white]",
-                id="pull-result-title",
-            )
-            if self.command:
-                yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-result-command")
-            yield Static(
-                f"[{status_style}]{status_text}[/{status_style}]",
-                id="pull-result-status",
-            )
-            with VerticalScroll(id="pull-result-output-scroll"):
-                yield Static(_render_ansi_output(self.output), id="pull-result-output")
-            yield Static(
-                "↑↓/jk scroll    \\[enter] close    \\[esc] back",
-                id="pull-result-hint",
-            )
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_back(self) -> None:
-        self.dismiss("back")
-
-    def action_scroll_down(self) -> None:
-        self.query_one("#pull-result-output-scroll", VerticalScroll).action_scroll_down()
-
-    def action_scroll_up(self) -> None:
-        self.query_one("#pull-result-output-scroll", VerticalScroll).action_scroll_up()
-
-
-class PullLoadingScreen(ModalScreen[None]):
-    """Loading overlay shown while a repository pull is in progress."""
-
-    DEFAULT_CSS = """
-    PullLoadingScreen {
-        align: center middle;
-        background: $panel 80%;
-        hatch: right $primary 30%;
-    }
-    #pull-loading-container {
-        width: 50%;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #pull-loading-container LoadingIndicator {
-        height: 3;
-        color: $primary;
-    }
-    #pull-loading-title {
-        text-align: center;
-        color: white;
-        padding: 1 0 0 0;
-    }
-    #pull-loading-command {
-        text-align: center;
-        color: $text-muted;
-        padding: 0 0 1 0;
-    }
-    #pull-loading-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """
-
-    def __init__(self, repo_name: str, command: str) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.command = command
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="pull-loading-container"):
-            yield LoadingIndicator()
-            yield Static(f"Pulling [bold]{escape(self.repo_name)}[/bold]", id="pull-loading-title")
-            yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-loading-command")
-            yield Static("please wait...", id="pull-loading-hint")
-
-
-class SortMenuScreen(ModalScreen[tuple | None]):
-    """Modal for selecting the sort column and direction."""
+class RenamePanelScreen(ModalScreen[str | None]):
+    """Modal for renaming a panel."""
 
     BINDINGS = _MODAL_BINDINGS
 
     CSS = (
-        "SortMenuScreen {"
+        "RenamePanelScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
     )
 
-    def __init__(
-        self, current_column: int, current_reverse: bool, column_names: dict[int, str] | None = None
-    ) -> None:
+    def __init__(self, current_name: str) -> None:
         super().__init__()
-        self._current_column = current_column
-        self._current_reverse = current_reverse
-        self._column_names = column_names or _SORT_COLUMN_NAMES
+        self.current_name = current_name
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static("[bold white]Sort by[/bold white]", id="menu-title")
-            items: list[Option] = []
-            for idx, name in self._column_names.items():
-                if idx == self._current_column:
-                    arrow = "▼" if self._current_reverse else "▲"
-                    label = f"[cyan]● {name} {arrow}[/cyan]"
-                else:
-                    label = f"  {name}"
-                items.append(Option(label, id=f"sort:{idx}"))
-            yield OptionList(*items, id="action-menu")
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
+            yield Static("[bold white]Rename Panel[/bold white]", id="menu-title")
+            yield Static(f"[dim]Current: {self.current_name}[/dim]", id="menu-branch")
+            yield Input(value=self.current_name, id="rename-input")
+            yield Static("\\[enter] confirm    \\[esc] cancel", id="menu-hint")
 
     def on_mount(self) -> None:
-        menu = self.query_one("#action-menu", OptionList)
-        menu.focus()
-        menu.highlighted = self._current_column
+        inp = self.query_one("#rename-input", Input)
+        inp.focus()
+        inp.action_end()
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        col_idx = int(event.option.id.split(":")[1])
-        if col_idx == self._current_column:
-            self.dismiss((col_idx, not self._current_reverse))
-        else:
-            self.dismiss((col_idx, False))
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        new_name = event.value.strip()
+        if new_name:
+            self.dismiss(new_name)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def action_cursor_down(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_down()
+        pass
 
     def action_cursor_up(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_up()
+        pass
 
 
 class AgentLoadingScreen(ModalScreen[None]):
@@ -680,7 +265,7 @@ class AgentLoadingScreen(ModalScreen[None]):
         import sys
         import termios
 
-        from ...integrations.tmux import attach_tmux_session
+        from ....integrations.tmux import attach_tmux_session
 
         session_name = self._session_name
         pane_target = f"={session_name}:"
@@ -710,119 +295,6 @@ class AgentLoadingScreen(ModalScreen[None]):
             app._resume_session_status_tracking()
 
         self.dismiss(None)
-
-
-class RepoInfoScreen(ModalScreen[None]):
-    """Modal popup showing repository file statistics."""
-
-    BINDINGS = [_MODAL_BINDINGS[0]]
-
-    CSS = (
-        "RepoInfoScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        """
-    #info-container {
-        width: 80;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #info-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #info-path {
-        text-align: center;
-        padding: 0 1 1 1;
-        color: $text-muted;
-    }
-    #info-loading {
-        height: 3;
-        padding: 1 0;
-    }
-    #info-stats {
-        padding: 0 3;
-        color: $text;
-        text-align: center;
-    }
-    #info-table {
-        padding: 1 3 0 3;
-        color: $text;
-        text-align: center;
-    }
-    #info-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """
-    )
-
-    def __init__(self, repo_name: str, repo_path: Path) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.repo_path = repo_path
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="info-container"):
-            yield Static(
-                f"[bold white]{self.repo_name}[/bold white]",
-                id="info-title",
-            )
-            yield Static(
-                f"[dim]{self.repo_path}[/dim]",
-                id="info-path",
-            )
-            yield LoadingIndicator(id="info-loading")
-            yield Static("", id="info-hint")
-
-    def populate(self, result: RepoInfoResult) -> None:
-        self.query_one("#info-loading", LoadingIndicator).remove()
-        r = result
-        stats = Static(
-            f"[dim]Files[/dim]  [bold white]{r.total_files:,}[/bold white]    "
-            f"[dim]Lines[/dim]  [bold white]{r.total_lines:,}[/bold white]\n"
-            f"[dim]Tokens[/dim]  [bold white]{r.total_tokens:,}[/bold white]    "
-            f"[dim]Max Depth[/dim]  [bold white]{r.max_depth}[/bold white]",
-            id="info-stats",
-        )
-        hint = self.query_one("#info-hint", Static)
-        hint.mount(stats, before=hint)
-        if r.file_types:
-            rows = (
-                f"[dim]{'':>2}{'EXTENSION':<12} {'FILES':>6}   {'LINES':>8}"
-                f"   {'TOKENS':>10}[/dim]\n"
-            )
-            for ft in r.file_types:
-                lines_str = f"{ft.line_count:,}" if ft.line_count is not None else "-"
-                tokens_str = f"{ft.token_count:,}" if ft.token_count is not None else "-"
-                rows += (
-                    f"[cyan]  {ft.extension:<12}[/cyan]"
-                    f" [white]{ft.count:>6}[/white]"
-                    f"   [dim]{lines_str:>8}[/dim]"
-                    f"   [dim]{tokens_str:>10}[/dim]\n"
-                )
-            table = Static(rows.rstrip(), id="info-table")
-            hint.mount(table, before=hint)
-        hint.update("\\[esc] close")
-
-    def show_error(self, message: str) -> None:
-        loading = self.query("#info-loading")
-        if loading:
-            loading.first().remove()
-        hint = self.query_one("#info-hint", Static)
-        hint.update(f"[red]{escape(message)}[/red]\n\\[esc] close")
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-def _render_grid_preview(rows: int, cols: int, layout_key: str | None = None) -> str:
-    layout = resolve_panel_layout(layout_key, rows, cols)
-    return render_panel_layout_preview(layout, cell_width=7, cell_height=1)
 
 
 class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | None]):
@@ -958,7 +430,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         editing: bool = False,
     ) -> None:
         super().__init__()
-        from ...integrations.tmux import list_all_gd_sessions
+        from ....integrations.tmux import list_all_gd_sessions
 
         self._step = 1
         self._editing = editing
@@ -1099,7 +571,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     @staticmethod
     def validate_new_panel_name(panel_store: PanelStore, name: str) -> str | None:
-        from ...integrations.tmux import _session_exists, make_panel_session_name
+        from ....integrations.tmux import _session_exists, make_panel_session_name
 
         if panel_store.get(name):
             return f"Panel '{name}' already exists"
@@ -1596,212 +1068,3 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
                 self.query_one("#pane-slot-menu", OptionList).action_cursor_up()
             elif self._current_step2_field == "sessions":
                 self.query_one("#pane-session-menu", OptionList).action_cursor_up()
-
-
-class PanelActionMenuScreen(ModalScreen[str]):
-    """Modal popup with actions for the selected panel."""
-
-    BINDINGS = _MODAL_BINDINGS
-
-    CSS = (
-        "PanelActionMenuScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + """
-    PanelActionMenuScreen #menu-container {
-        width: 72;
-        padding: 1 1;
-    }
-    PanelActionMenuScreen #menu-title {
-        padding: 0 1 0 1;
-    }
-    PanelActionMenuScreen #menu-branch {
-        padding: 0 1 1 1;
-    }
-    #panel-action-layout {
-        height: auto;
-        align: left top;
-    }
-    #panel-action-main {
-        width: 1fr;
-        height: auto;
-    }
-    #panel-preview-pane {
-        width: 27;
-        height: auto;
-        padding: 0 0 0 1;
-        align: center top;
-    }
-    PanelActionMenuScreen #action-menu {
-        height: 8;
-        padding: 0 1;
-        margin: 0 0 1 0;
-    }
-    PanelActionMenuScreen #menu-hint {
-        padding: 0 1 0 1;
-    }
-    #panel-layout-preview {
-        width: auto;
-        height: auto;
-        color: $text;
-    }
-    """
-    )
-
-    def __init__(self, panel: Panel) -> None:
-        super().__init__()
-        self.panel = panel
-
-    def compose(self) -> ComposeResult:
-        from ...integrations.tmux import make_panel_session_name
-
-        session_name = make_panel_session_name(self.panel.name)
-
-        with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.panel.name}[/bold white]", id="menu-title")
-            yield Static(f"[dim]{session_name}[/dim]", id="menu-branch")
-            with Horizontal(id="panel-action-layout"):
-                with Vertical(id="panel-action-main"):
-                    yield OptionList(
-                        Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
-                        Option("[white]↺[/white] [bold]Reconfigure[/bold]", id="reconfigure"),
-                        Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
-                        Option("", disabled=True),
-                        Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),
-                        id="action-menu",
-                    )
-                    yield Static(
-                        "↑↓/jk select    \\[enter] confirm    \\[esc] close",
-                        id="menu-hint",
-                    )
-                with Vertical(id="panel-preview-pane"):
-                    yield Static(
-                        _render_grid_preview(
-                            self.panel.rows,
-                            self.panel.cols,
-                            self.panel.layout_key,
-                        ),
-                        id="panel-layout-preview",
-                    )
-
-    def on_mount(self) -> None:
-        self.query_one("#action-menu", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_up()
-
-
-class RenamePanelScreen(ModalScreen[str | None]):
-    """Modal for renaming a panel."""
-
-    BINDINGS = _MODAL_BINDINGS
-
-    CSS = (
-        "RenamePanelScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
-
-    def __init__(self, current_name: str) -> None:
-        super().__init__()
-        self.current_name = current_name
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="menu-container"):
-            yield Static("[bold white]Rename Panel[/bold white]", id="menu-title")
-            yield Static(f"[dim]Current: {self.current_name}[/dim]", id="menu-branch")
-            yield Input(value=self.current_name, id="rename-input")
-            yield Static("\\[enter] confirm    \\[esc] cancel", id="menu-hint")
-
-    def on_mount(self) -> None:
-        inp = self.query_one("#rename-input", Input)
-        inp.focus()
-        inp.action_end()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        new_name = event.value.strip()
-        if new_name:
-            self.dismiss(new_name)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cursor_down(self) -> None:
-        pass
-
-    def action_cursor_up(self) -> None:
-        pass
-
-
-class SelectSessionScreen(ModalScreen[str | None]):
-    """Modal for selecting a tmux session to assign to a pane."""
-
-    BINDINGS = _MODAL_BINDINGS
-
-    CSS = (
-        "SelectSessionScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
-
-    def __init__(self, pane_index: int, current_session: str | None = None) -> None:
-        super().__init__()
-        self.pane_index = pane_index
-        self.current_session = current_session
-
-    def compose(self) -> ComposeResult:
-        from ...integrations.tmux import list_all_gd_sessions
-
-        sessions = list_all_gd_sessions()
-
-        with Vertical(id="menu-container"):
-            yield Static(
-                f"[bold white]Assign Session to Pane {self.pane_index}[/bold white]",
-                id="menu-title",
-            )
-            items: list[Option] = []
-            if self.current_session:
-                items.append(
-                    Option("[red]✕[/red] [dim]Clear pane[/dim]", id="__clear__"),
-                )
-                items.append(Option("", disabled=True))
-            if sessions:
-                for entry in sessions:
-                    sn = entry["session_name"]
-                    repo = entry["repo"]
-                    purpose = entry["purpose"]
-                    current_marker = " [cyan]◄ current[/cyan]" if sn == self.current_session else ""
-                    items.append(
-                        Option(
-                            f"[white]●[/white] [bold]{purpose}[/bold]"
-                            f" [dim]{repo}[/dim]  {sn}{current_marker}",
-                            id=sn,
-                        )
-                    )
-            else:
-                items.append(Option("[dim]No active sessions[/dim]", disabled=True))
-            yield OptionList(*items, id="action-menu")
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#action-menu", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_up()

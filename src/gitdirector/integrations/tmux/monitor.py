@@ -67,7 +67,7 @@ _SHELL_COMMANDS = frozenset(
     }
 )
 
-_AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex"})
+_AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex", "pi"})
 
 _SILENCE_THRESHOLD_SECS = 11
 _BELL_GRACE_SECS = 1.0

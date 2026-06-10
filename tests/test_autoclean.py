@@ -1,5 +1,6 @@
 """Tests for the autoclean command (links and sessions)."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from gitdirector.cli import cli
@@ -229,3 +230,72 @@ class TestKillSession:
             ["tmux", "kill-session", "-t", "=gd/repo/shell/1"],
             capture_output=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Mixed kill results — high-value integration of the full command
+# ---------------------------------------------------------------------------
+#
+# The unit tests above mock `subprocess.run` directly, so they verify
+# "kill returns True/False". The end-to-end command path also formats
+# output, increments counters, and prints failed session names. We
+# exercise that here with a real click runner against a stubbed helper
+# surface.
+# ---------------------------------------------------------------------------
+
+
+class TestAutocleanSessionsCommandEndToEnd:
+    def test_mixed_kill_results_reports_both_counts(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from gitdirector.cli import cli
+        from gitdirector.commands import autoclean as autoclean_mod
+        from gitdirector.config import Config
+
+        cfg_dir = tmp_path / ".gitdirector"
+        cfg_dir.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        Config()
+
+        monkeypatch.setattr(
+            autoclean_mod,
+            "_list_gd_sessions",
+            lambda: ["gd/keep/one", "gd/bad/two", "gd/also-good/three"],
+        )
+        kill_iter = iter([True, False, True])
+        monkeypatch.setattr(autoclean_mod, "_kill_session", lambda _n: next(kill_iter))
+
+        result = CliRunner().invoke(cli, ["autoclean", "sessions"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "Killed 2" in result.output
+        # The failed session name should be surfaced in the output.
+        assert "gd/bad/two" in result.output
+
+    def test_decline_at_confirm_does_not_kill_anything(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from gitdirector.cli import cli
+        from gitdirector.commands import autoclean as autoclean_mod
+        from gitdirector.config import Config
+
+        kills: list[str] = []
+        cfg_dir = tmp_path / ".gitdirector"
+        cfg_dir.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        Config()
+
+        monkeypatch.setattr(
+            autoclean_mod,
+            "_list_gd_sessions",
+            lambda: ["gd/should-not-kill/one"],
+        )
+        monkeypatch.setattr(
+            autoclean_mod,
+            "_kill_session",
+            lambda name: kills.append(name) or True,
+        )
+
+        result = CliRunner().invoke(cli, ["autoclean", "sessions"], input="n\n")
+        assert result.exit_code == 0
+        assert kills == [], "no sessions should have been killed when user declines"
+        assert "Cancelled" in result.output

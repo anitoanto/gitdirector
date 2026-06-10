@@ -60,8 +60,9 @@ Features:
 - `r` to refresh all statuses
 - Press `enter` on any repository to open an action menu:
     - **New tmux session** — create and attach a session for the repository
+    - **Review Diff** — open a two-pane viewer for uncommitted changes (left: file list with GitHub-style status pills and +/- counts; right: per-file unified diff with GitHub-dark syntax highlighting, line numbers, and green/red backgrounds for added/removed lines). Navigate files with `j`/`k`, `n`/`p`, `g`/`G`, or `]`/`[`. Switch the focused panel with `tab`. `r` refreshes, `esc` closes.
     - **Attach existing session** — switch to any already-running tmux session
-    - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, or Codex in a new tmux session
+    - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
     - **Remove session** — kill a running tmux session
 
 ### unlink

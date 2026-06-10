@@ -185,15 +185,31 @@ def kill_tmux_session(session_name: str) -> bool:
     return result.returncode == 0
 
 
-def attach_tmux_session(session_name: str) -> None:
-    """Attach to an existing tmux session, blocking until detach/exit."""
+def attach_tmux_session(
+    session_name: str,
+    *,
+    skip_config_sync: bool = False,
+) -> None:
+    """Attach to an existing tmux session, blocking until detach/exit.
+
+    When *skip_config_sync* is true the leading ``sync_panel_tmux_config`` call
+    is omitted. Callers that just created the session (and therefore triggered
+    a sync moments ago) should set this to avoid a visible flicker: the sync
+    re-lists every tmux session, rewrites the gd-tmux.conf file, and runs
+    ``tmux source-file``, which together take long enough to expose a brief
+    empty alt-screen between the manual screen clear and tmux's first redraw.
+    """
     from .panels import (
         _ensure_panel_prefix_bindings,
         rebuild_temp_panel_tmux_session,
     )
 
     target_session = session_name
-    if session_name.startswith("gd/") and not _is_temp_panel_session(session_name):
+    if (
+        not skip_config_sync
+        and session_name.startswith("gd/")
+        and not _is_temp_panel_session(session_name)
+    ):
         sync_panel_tmux_config()
     if _should_open_in_temp_panel(session_name):
         target_session = rebuild_temp_panel_tmux_session(session_name)
@@ -404,6 +420,7 @@ def _tmux_theme_config(
 
     lines.extend(
         [
+            f"set-option -t {quoted_session} mouse on",
             f'set-option -t {quoted_session} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
             f'set-option -t {quoted_session} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
             f'set-window-option -t {quoted_window} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',

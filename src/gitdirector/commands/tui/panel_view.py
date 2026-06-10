@@ -396,7 +396,7 @@ class PanelViewScreen(Screen[None]):
         self._update_status()
 
     def _open_session_selector(self, pane_index: int, current: str | None = None) -> None:
-        from .screens import SelectSessionScreen
+        from .screens.sessions import SelectSessionScreen
 
         self.app.push_screen(
             SelectSessionScreen(pane_index, current),
