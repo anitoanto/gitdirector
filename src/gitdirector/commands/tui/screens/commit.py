@@ -86,8 +86,7 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
                 id="action-menu",
             )
             yield Static(
-                "[green]+N[/green] additions  [red]-N[/red] deletions  "
-                "\u00b7  esc to cancel",
+                "[green]+N[/green] additions  [red]-N[/red] deletions  " "\u00b7  esc to cancel",
                 id="menu-hint",
             )
 

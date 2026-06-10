@@ -602,9 +602,7 @@ class TestAddCommitPush:
     def test_commit_failure(self, fake_git_repo, mocker):
         mocker.patch(
             "subprocess.run",
-            return_value=_make_run_result(
-                1, "", "error: nothing to commit\n"
-            ),
+            return_value=_make_run_result(1, "", "error: nothing to commit\n"),
         )
         repo = Repository(fake_git_repo)
 

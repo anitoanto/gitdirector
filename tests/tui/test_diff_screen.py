@@ -665,7 +665,11 @@ class TestDiffReviewScreenCommitFlow:
         def fake_push(self, *, set_upstream=False):
             return True, "To origin\n"
 
-        mocker.patch.object(repo_mod.Repository, "__init__", lambda self, p: setattr(self, "path", p) or setattr(self, "name", p.name))
+        mocker.patch.object(
+            repo_mod.Repository,
+            "__init__",
+            lambda self, p: setattr(self, "path", p) or setattr(self, "name", p.name),
+        )
         mocker.patch.object(repo_mod.Repository, "get_diff_against_head", fake_diff)
         mocker.patch.object(repo_mod.Repository, "_list_untracked_files", lambda self: [])
         mocker.patch.object(repo_mod.Repository, "read_file_text", lambda self, p, **_kw: None)
@@ -693,9 +697,11 @@ class TestDiffReviewScreenCommitFlow:
 
             pushed: list = []
             original = app.push_screen
+
             def spy(*a, **kw):
                 pushed.append(a)
                 return original(*a, **kw)
+
             app.push_screen = spy  # type: ignore[assignment]
             await pilot.press("g")
             await pilot.pause()
@@ -830,7 +836,8 @@ class TestDiffReviewScreenCommitFlow:
             return False, "nothing to commit"
 
         mocker.patch.object(
-            repo_mod.Repository, "__init__",
+            repo_mod.Repository,
+            "__init__",
             lambda self, p: setattr(self, "path", p) or setattr(self, "name", p.name),
         )
         mocker.patch.object(repo_mod.Repository, "get_diff_against_head", fake_diff)
@@ -839,7 +846,8 @@ class TestDiffReviewScreenCommitFlow:
         mocker.patch.object(repo_mod.Repository, "add", lambda self, paths=None: (True, ""))
         mocker.patch.object(repo_mod.Repository, "commit", fake_commit)
         mocker.patch.object(
-            repo_mod.Repository, "push",
+            repo_mod.Repository,
+            "push",
             lambda self, *, set_upstream=False: (True, ""),
         )
 
@@ -864,4 +872,3 @@ class TestDiffReviewScreenCommitFlow:
 
             assert isinstance(app.screen, CommitResultScreen)
             assert app.screen.commit_ok is False
-
