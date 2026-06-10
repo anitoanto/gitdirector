@@ -241,6 +241,7 @@ class ChangedFile:
             return f"{self.old_path} \u2192 {self.path}"
         return self.path
 
+
 @dataclass
 class DiffBundle:
     """Result of parsing a raw ``git diff`` payload.
@@ -461,8 +462,7 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
             f"new file mode 100644\n"
             f"--- /dev/null\n"
             f"+++ b/{rel_path}\n"
-            f"@@ -0,0 +1,{line_count} @@\n"
-            + "".join(f"+{line}\n" for line in body_lines)
+            f"@@ -0,0 +1,{line_count} @@\n" + "".join(f"+{line}\n" for line in body_lines)
         )
         files.append(
             ChangedFile(

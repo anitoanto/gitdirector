@@ -665,7 +665,9 @@ class DiffReviewScreen(ModalScreen[None]):
             _post(loading.set_status, "Staging changes\u2026")
             ok, out = repo.add()
             if not ok:
-                _post(self._show_commit_result, False, commit_message, None, f"git add failed: {out}")
+                _post(
+                    self._show_commit_result, False, commit_message, None, f"git add failed: {out}"
+                )
                 return
             if out:
                 output_lines.append(out)
@@ -746,7 +748,11 @@ class DiffReviewScreen(ModalScreen[None]):
 
         self.app.push_screen(
             CommitResultScreen(
-                self.repo_name, commit_ok, commit_message, push_ok, output,
+                self.repo_name,
+                commit_ok,
+                commit_message,
+                push_ok,
+                output,
             )
         )
         # After a successful commit (with or without push) the
