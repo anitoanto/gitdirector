@@ -408,6 +408,21 @@ class TestAttachTmuxSession:
         mock_sync.assert_not_called()
         mock_rebuild.assert_not_called()
 
+    @patch(
+        "gitdirector.integrations.tmux.panels.rebuild_temp_panel_tmux_session",
+        return_value="gd/temp/panel/alpha/shell/1",
+    )
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_skip_config_sync_skips_outer_sync(self, mock_run, mock_sync, mock_rebuild):
+        with patch.dict("os.environ", {}, clear=True):
+            attach_tmux_session("gd/alpha/shell/1", skip_config_sync=True)
+        mock_sync.assert_not_called()
+        mock_rebuild.assert_called_once_with("gd/alpha/shell/1")
+        mock_run.assert_called_once_with(
+            ["tmux", "attach-session", "-t", "=gd/temp/panel/alpha/shell/1"]
+        )
+
 
 class TestOpenInTmux:
     @patch("gitdirector.integrations.tmux.core.attach_tmux_session")

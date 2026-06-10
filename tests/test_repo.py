@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from gitdirector import repo as repo_mod
 from gitdirector.repo import (
     Repository,
     RepositoryInfo,
@@ -530,6 +531,128 @@ class TestPull:
         assert output == "fatal: status failed"
 
 
+class TestAddCommitPush:
+    def _repo_path(self, fake_git_repo):
+        return str(fake_git_repo)
+
+    def test_add_all(self, fake_git_repo, mocker):
+        run_git = mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.add()
+
+        assert ok is True
+        assert output == ""
+        argv = run_git.call_args.args[0]
+        assert argv[:3] == ["git", "-C", self._repo_path(fake_git_repo)]
+        assert argv[3:] == ["add", "-A"]
+
+    def test_add_specific_paths(self, fake_git_repo, mocker):
+        run_git = mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.add(["src/foo.py", "src/bar.py"])
+
+        assert ok is True
+        argv = run_git.call_args.args[0]
+        assert argv[3:] == ["add", "--", "src/foo.py", "src/bar.py"]
+
+    def test_add_failure(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(1, "", "fatal: pathspec 'nope' did not match\n"),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.add()
+
+        assert ok is False
+        assert "pathspec" in output
+
+    def test_commit_success(self, fake_git_repo, mocker):
+        run_git = mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "[main abc1234] test\n", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.commit("test")
+
+        assert ok is True
+        assert "[main abc1234]" in output
+        argv = run_git.call_args.args[0]
+        assert argv[3:6] == ["commit", "-m", "test"]
+
+    def test_commit_empty_message_rejected_locally(self, fake_git_repo, mocker):
+        run_git = mocker.patch("subprocess.run")
+        repo = Repository(fake_git_repo)
+
+        ok, msg = repo.commit("   ")
+
+        assert ok is False
+        assert "empty" in msg.lower()
+        run_git.assert_not_called()
+
+    def test_commit_failure(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(1, "", "error: nothing to commit\n"),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.commit("msg")
+
+        assert ok is False
+        assert "nothing to commit" in output
+
+    def test_push_plain(self, fake_git_repo, mocker):
+        run_git = mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(0, "To origin\n", ""),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, output = repo.push()
+
+        assert ok is True
+        assert "origin" in output
+        assert run_git.call_args.args[0][3:] == ["push"]
+
+    def test_push_set_upstream(self, fake_git_repo, mocker):
+        run_git = mocker.patch(
+            "subprocess.run",
+            side_effect=[
+                _make_run_result(0, "main\n", ""),  # get_current_branch
+                _make_run_result(0, "To origin\n", ""),  # push
+            ],
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, _ = repo.push(set_upstream=True)
+
+        assert ok is True
+        # The second ``subprocess.run`` call is the actual push.
+        assert run_git.call_args_list[1].args[0][3:] == ["push", "-u", "origin", "main"]
+
+    def test_push_set_upstream_without_branch(self, fake_git_repo, mocker):
+        mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(128, "", "fatal: not a git repo\n"),
+        )
+        repo = Repository(fake_git_repo)
+
+        ok, msg = repo.push(set_upstream=True)
+
+        assert ok is False
+        assert "branch" in msg.lower()
+
+
 class TestTimelineOutput:
     def test_success(self, fake_git_repo, mocker):
         run_git = mocker.patch(
@@ -774,3 +897,207 @@ class TestRepositoryInfo:
         assert "repo" in text
         assert "up-to-date" in text
         assert "main" in text
+
+
+# ---------------------------------------------------------------------------
+# get_status() with a remote fetch failure — classification contract
+# ---------------------------------------------------------------------------
+#
+# When the user runs `list` (which sets fetch=True) the repo's status goes
+# through `_get_origin_sync_status` after `_fetch_origin_branch`. If the
+# fetch fails, the message surfaced to the UI must be the *classified*
+# string (so the TUI can colour it sensibly and the CLI can show a useful
+# summary). Without classification, raw `fatal: ...` from git leaks into
+# the message and breaks downstream parsing/colouring.
+# ---------------------------------------------------------------------------
+
+
+class TestGetStatusFetchErrorClassification:
+    def test_fetch_auth_error_yields_classified_message(self, tmp_path, monkeypatch):
+        from gitdirector import repo as repo_mod
+
+        # Build a real local repo so the non-fetch code path is exercised.
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "t"], cwd=str(repo_dir), check=True, capture_output=True
+        )
+        (repo_dir / "README.md").write_text("hi")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True
+        )
+
+        # Simulate real subprocess output by patching the lower-level call
+        # so the production normalization/classification path runs. We patch
+        # `subprocess.Popen` (the constructor) so the existing
+        # `_run_git`/`_normalize_git_result` pipeline classifies the error.
+        def fake_popen(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            # The real _run_git uses text=True, so communicate() returns str.
+            if "status" in cmd:
+                rc, out, err = 0, "# branch.head main\n", ""
+            elif "fetch" in cmd:
+                rc, out, err = (
+                    1,
+                    "",
+                    "fatal: Authentication failed for 'https://example.com/r.git'",
+                )
+            elif "show-ref" in cmd:
+                rc, out, err = 1, "", "unknown ref"
+            elif "rev-list" in cmd:
+                rc, out, err = 0, "0\t0", ""
+            elif "log" in cmd:
+                rc, out, err = 0, "2 hours ago\n1234", ""
+            elif "ls-tree" in cmd:
+                rc, out, err = 0, "", ""
+            else:
+                raise AssertionError(f"Unexpected git command: {cmd}")
+
+            proc = MagicMock()
+            # text=True means communicate() returns strings, not bytes.
+            proc.communicate.return_value = (out, err)
+            proc.returncode = rc
+            return proc
+
+        monkeypatch.setattr(repo_mod.subprocess, "Popen", fake_popen)
+
+        info = Repository(repo_dir).get_status(fetch=True)
+        assert info.status == repo_mod.RepoStatus.UNKNOWN
+        msg = info.message.lower()
+        # The classified message must be present, NOT the raw git stderr.
+        assert "authentication" in msg or "network" in msg
+        assert "fatal:" not in info.message
+
+
+# ---------------------------------------------------------------------------
+# get_diff_against_head / read_file_text — diff view support
+# ---------------------------------------------------------------------------
+
+
+class TestGetDiffAgainstHead:
+    def test_success_returns_diff_and_untracked(self, fake_git_repo, mocker):
+        diff_text = "diff --git a/a.py b/a.py\n" "@@ -1 +1 @@\n" "-old\n" "+new\n"
+        responses = {
+            ("diff", "HEAD", "--no-color"): (0, diff_text, ""),
+            ("ls-files", "--others", "--exclude-standard", "-z"): (
+                0,
+                "untracked.py\x00",
+                "",
+            ),
+        }
+
+        def fake_run_git(self, *args, **_kwargs):
+            key = tuple(args)
+            if key in responses:
+                rc, out, err = responses[key]
+                return rc, out, err
+            return 1, "", f"unexpected call: {args}"
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        repo = Repository(fake_git_repo)
+        ok, text, untracked = repo.get_diff_against_head()
+        assert ok is True
+        assert "+new" in text
+        assert untracked == ["untracked.py"]
+
+    def test_failure_returns_error_and_empty_untracked(self, fake_git_repo, mocker):
+        def fake_run_git(self, *args, **_kwargs):
+            return 128, "", "fatal: bad revision"
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        repo = Repository(fake_git_repo)
+        ok, text, untracked = repo.get_diff_against_head()
+        assert ok is False
+        assert "bad revision" in text
+        assert untracked == []
+
+    def test_truncates_diff_above_max_bytes(self, fake_git_repo, mocker):
+        huge = "x" * (3 * 1024 * 1024)
+        responses = {
+            ("diff", "HEAD", "--no-color"): (0, huge, ""),
+            ("ls-files", "--others", "--exclude-standard", "-z"): (0, "", ""),
+        }
+
+        def fake_run_git(self, *args, **_kwargs):
+            return responses.get(tuple(args), (1, "", "unexpected"))
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        repo = Repository(fake_git_repo)
+        ok, text, _ = repo.get_diff_against_head(max_bytes=1024)
+        assert ok is True
+        assert len(text) < len(huge)
+        assert "gd-truncated" in text
+
+    def test_empty_diff_returns_empty_string(self, fake_git_repo, mocker):
+        responses = {
+            ("diff", "HEAD", "--no-color"): (0, "", ""),
+            ("ls-files", "--others", "--exclude-standard", "-z"): (0, "", ""),
+        }
+
+        def fake_run_git(self, *args, **_kwargs):
+            return responses.get(tuple(args), (1, "", "unexpected"))
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        repo = Repository(fake_git_repo)
+        ok, text, _ = repo.get_diff_against_head()
+        assert ok is True
+        assert text == ""
+
+
+class TestListUntrackedFiles:
+    def test_parses_null_separated_paths(self, fake_git_repo, mocker):
+        def fake_run_git(self, *args, **_kwargs):
+            if args[:1] == ("ls-files",):
+                return 0, "a.py\x00b.py\x00c.py\x00", ""
+            return 1, "", "unexpected"
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        repo = Repository(fake_git_repo)
+        assert repo._list_untracked_files() == ["a.py", "b.py", "c.py"]
+
+    def test_returns_empty_on_empty_output(self, fake_git_repo, mocker):
+        def fake_run_git(self, *args, **_kwargs):
+            return 0, "", ""
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        repo = Repository(fake_git_repo)
+        assert repo._list_untracked_files() == []
+
+
+class TestReadFileText:
+    def test_reads_text_file(self, fake_git_repo):
+        (fake_git_repo / "hello.txt").write_text("hello world\n")
+        repo = Repository(fake_git_repo)
+        text = repo.read_file_text("hello.txt")
+        assert text == "hello world\n"
+
+    def test_returns_none_for_missing_file(self, fake_git_repo):
+        repo = Repository(fake_git_repo)
+        assert repo.read_file_text("does_not_exist.txt") is None
+
+    def test_returns_none_for_binary_file(self, fake_git_repo):
+        (fake_git_repo / "blob.bin").write_bytes(b"\x00\x01\x02\x03")
+        repo = Repository(fake_git_repo)
+        assert repo.read_file_text("blob.bin") is None
+
+    def test_truncates_large_file(self, fake_git_repo):
+        big = "x" * 1024
+        (fake_git_repo / "big.txt").write_text(big)
+        repo = Repository(fake_git_repo)
+        text = repo.read_file_text("big.txt", max_bytes=100)
+        assert text is not None
+        assert "gd-truncated" in text
+        assert len(text) < 200
+
+    def test_handles_unicode(self, fake_git_repo):
+        (fake_git_repo / "u.txt").write_text("héllo wörld 🚀\n", encoding="utf-8")
+        repo = Repository(fake_git_repo)
+        assert repo.read_file_text("u.txt") == "héllo wörld 🚀\n"
