@@ -33,6 +33,7 @@ from textual.widgets import Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
+from ..terminal_caps import strip_unsupported_css as _safe_css
 
 # ---------------------------------------------------------------------------
 # Stage-all confirm
@@ -52,7 +53,7 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "StageFilesConfirmScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
@@ -86,7 +87,7 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
                 id="action-menu",
             )
             yield Static(
-                "[green]+N[/green] additions  [red]-N[/red] deletions  " "\u00b7  esc to cancel",
+                "[green]+N[/green] additions  [red]-N[/red] deletions  \u00b7  esc to cancel",
                 id="menu-hint",
             )
 
@@ -142,10 +143,12 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         Binding("up", "action_cursor_up", "\u2191 action", show=False),
     ]
 
-    CSS = (
+    CSS = _safe_css(
         "CommitMessageScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + """
+        " }"
+        + _MODAL_CSS
+        + """
         #commit-message-container {
             width: 60%;
             height: auto;
@@ -202,8 +205,7 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         noun = "file" if self.file_count == 1 else "files"
         with Vertical(id="commit-message-container"):
             yield Static(
-                f"[bold white]Commit changes in[/bold white] "
-                f"[cyan]{escape(self.repo_name)}[/cyan]",
+                f"[bold white]Commit changes in[/bold white] [cyan]{escape(self.repo_name)}[/cyan]",
                 id="commit-message-title",
             )
             yield Static(
@@ -222,10 +224,7 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
                 id="commit-message-action-list",
             )
             yield Static(
-                "type message    "
-                "[\u2191\u2193] pick action    "
-                "[enter] confirm    "
-                "[esc] cancel",
+                "type message    [\u2191\u2193] pick action    [enter] confirm    [esc] cancel",
                 id="commit-message-hint",
             )
 
@@ -304,10 +303,12 @@ class CommitLoadingScreen(ModalScreen[None]):
 
     BINDINGS = [Binding("escape", "noop", "Esc", show=False)]
 
-    CSS = (
+    CSS = _safe_css(
         "CommitLoadingScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + """
+        " }"
+        + _MODAL_CSS
+        + """
         #commit-loading-container {
             width: 50%;
             height: auto;
@@ -368,10 +369,12 @@ class CommitResultScreen(ModalScreen[None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "CommitResultScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + """
+        " }"
+        + _MODAL_CSS
+        + """
         #commit-result-container {
             width: 60%;
             height: auto;

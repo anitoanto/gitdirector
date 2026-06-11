@@ -448,6 +448,9 @@ class FileTileList(ListView):
         super().__init__(**kwargs)
         self._specs: list[_FileTileSpec] = []
         self._repo_dir: str = ""
+        self._pending_index: int | None = None
+        self._pending_retry_count = 0
+        self._PENDING_RETRY_LIMIT = 50
 
     def set_files(self, files: list[ChangedFile], repo_dir: str = "") -> None:
         self._repo_dir = repo_dir
@@ -460,16 +463,26 @@ class FileTileList(ListView):
         if self._specs:
             self._suppress_watch = True
             self._pending_index = 0
+            self._pending_retry_count = 0
             self.call_after_refresh(self._apply_initial_selection)
+        else:
+            self._suppress_watch = False
+            self._pending_index = None
 
     def _apply_initial_selection(self) -> None:
-        pending = getattr(self, "_pending_index", None)
+        pending = self._pending_index
         if pending is None:
             return
         if len(self._nodes) <= pending:
+            self._pending_retry_count += 1
+            if self._pending_retry_count > self._PENDING_RETRY_LIMIT:
+                self._pending_index = None
+                self._suppress_watch = False
+                return
             self.call_after_refresh(self._apply_initial_selection)
             return
         self._pending_index = None
+        self._pending_retry_count = 0
         self._suppress_watch = False
         self.index = pending
 
