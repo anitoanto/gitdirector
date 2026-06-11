@@ -31,7 +31,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector status`                         | Show repositories with staged/unstaged files           |
 | `gitdirector pull`                           | Pull latest changes for all tracked repositories       |
 | `gitdirector cd NAME`                        | Open or switch to a tmux session for a repository      |
-| `gitdirector autoclean links\|sessions`      | Clean broken links or stale tmux sessions              |
+| `gitdirector autoclean`                      | Remove broken repository links from tracking           |
 | `gitdirector info PATH\|NAME [--full]`       | Show file statistics for a repository                  |
 | `gitdirector help`                           | Show help                                              |
 
@@ -131,6 +131,14 @@ Opens a [tmux](https://github.com/tmux/tmux) session rooted at the repository di
 > macOS: `brew install tmux`  
 > Debian/Ubuntu: `sudo apt install tmux`  
 > Arch: `sudo pacman -S tmux`
+
+### autoclean
+
+```bash
+gitdirector autoclean
+```
+
+Scans the tracked repositories in `~/.gitdirector/config.yaml` for paths that no longer exist on disk and removes them from the config. Lists any broken links for review and asks for confirmation before deleting them.
 
 ## Configuration
 
