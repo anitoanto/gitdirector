@@ -32,7 +32,7 @@ def show_help():
         ("pull", "Pull latest changes for all tracked repositories"),
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
-        ("autoclean links|sessions", "Clean broken links or stale tmux sessions"),
+        ("autoclean", "Remove broken repository links from tracking"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
         ("help", "Show this help message"),
     ]:
