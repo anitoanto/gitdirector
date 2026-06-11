@@ -167,9 +167,9 @@ class TestExactMatchPanelAttachFragment:
             if " -t " in part:
                 target = part.split(" -t ")[1].split()[0]
                 unquoted = target.strip("'\"")
-                assert unquoted.startswith("=") or unquoted.startswith(
-                    "$"
-                ), f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                assert unquoted.startswith("=") or unquoted.startswith("$"), (
+                    f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                )
 
 
 class TestCleanupPanelAttachedSession:
@@ -432,6 +432,6 @@ class TestExactMatchSourceCodeAudit:
                         violations.append(
                             f"Line {node.lineno}: f-string '-t' target starts with a variable (should prefix '=')"
                         )
-        assert (
-            violations == []
-        ), "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        assert violations == [], (
+            "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        )
