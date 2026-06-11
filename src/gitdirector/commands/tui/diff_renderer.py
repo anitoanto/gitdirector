@@ -218,6 +218,7 @@ class ChangedFile:
     additions: int = 0
     deletions: int = 0
     is_binary: bool = False
+    is_image: bool = False
     is_rename: bool = False
     old_path: str | None = None
     diff_text: str = ""
@@ -262,6 +263,35 @@ _RENAME_FROM_RE = re.compile(r"^rename from (.+)$")
 _RENAME_TO_RE = re.compile(r"^rename to (.+)$")
 _BINARY_RE = re.compile(r"^Binary files .* differ$")
 _HUNK_HEADER_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@")
+
+_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".tiff",
+        ".tif",
+    }
+)
+
+
+def is_image_file(path: str) -> bool:
+    """Return ``True`` if ``path`` has a raster-image extension.
+
+    Used to decide whether the diff viewer should suppress the right-hand
+    diff/preview pane entirely for a file. SVG is intentionally excluded
+    because it's text-based and the regular diff renderer handles it fine.
+    """
+    if not path:
+        return False
+    name = PurePosixPath(path).name.lower()
+    if "." not in name:
+        return False
+    return "." + name.rsplit(".", 1)[1] in _IMAGE_EXTENSIONS
 
 
 def _parse_hunk_start(header: str) -> tuple[int, int]:
@@ -373,6 +403,7 @@ def parse_diff_files(diff_text: str) -> list[ChangedFile]:
                 additions=current.additions,
                 deletions=current.deletions,
                 is_binary=current.is_binary,
+                is_image=current.is_image,
                 is_rename=current.is_rename,
                 old_path=current.old_path,
                 diff_text="\n".join(current_lines).rstrip("\n"),
@@ -399,6 +430,7 @@ def parse_diff_files(diff_text: str) -> list[ChangedFile]:
                 path=new_name,
                 status="M",
                 is_rename=is_rename,
+                is_image=is_image_file(new_name),
                 old_path=old_name if is_rename else None,
             )
             current_lines = [raw_line]
@@ -469,6 +501,7 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
                 path=rel_path,
                 status="?",
                 additions=line_count,
+                is_image=is_image_file(rel_path),
                 diff_text=synthetic.rstrip("\n"),
                 raw_untracked_text=text,
             )
@@ -512,6 +545,9 @@ def render_change_summary(
     if file.is_binary:
         text.append("  ")
         text.append("[binary]", style="dim")
+    elif file.is_image:
+        text.append("  ")
+        text.append("[image]", style="dim")
     elif file.additions or file.deletions:
         text.append("  ")
         text.append(f"+{file.additions}", style="#3fb950")
@@ -539,9 +575,12 @@ def render_file_diff(
 
     pieces.append(_render_file_header(file))
 
+    if file.is_image:
+        return Group(*pieces)
+
     if file.is_binary:
         body = RichText(
-            "\n  Binary file differs from HEAD.\n" "  Diff is not shown for binary files.\n",
+            "\n  Binary file differs from HEAD.\n  Diff is not shown for binary files.\n",
             style="italic dim",
         )
         pieces.append(Padding(body, (1, 2)))

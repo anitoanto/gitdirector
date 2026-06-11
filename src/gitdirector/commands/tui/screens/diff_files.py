@@ -353,6 +353,9 @@ class FileTile(Static):
         if self._spec.file.is_binary:
             text.append("[binary]", style="#8b949e")
             return text
+        if self._spec.file.is_image:
+            text.append("[image]", style="#8b949e")
+            return text
         additions = self._spec.file.additions
         deletions = self._spec.file.deletions
         text.append(f"+{additions}", style="bold #3fb950")
