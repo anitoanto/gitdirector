@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -53,6 +54,9 @@ __all__ = [
     "_run_console",
     "register",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 class GitDirectorConsole(
@@ -657,10 +661,27 @@ class GitDirectorConsole(
 
         from ..pull import pull_repository
 
-        result = pull_repository(path)
+        try:
+            result = pull_repository(path)
+        except Exception as exc:
+            logger.exception("pull worker crashed")
+            error_result = (path.name, False, f"Pull failed: {exc}")
+            if self._background_shutdown_requested(worker):
+                return
+            try:
+                self.call_from_thread(
+                    self._show_pull_result, loading_screen, path, command, error_result
+                )
+            except Exception:
+                logger.debug("Failed to post pull error to UI", exc_info=True)
+            return
+
         if self._background_shutdown_requested(worker):
             return
-        self.call_from_thread(self._show_pull_result, loading_screen, path, command, result)
+        try:
+            self.call_from_thread(self._show_pull_result, loading_screen, path, command, result)
+        except Exception:
+            logger.debug("Failed to post pull result to UI", exc_info=True)
 
     def _show_pull_result(
         self,

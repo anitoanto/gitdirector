@@ -11,6 +11,7 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
+from ..terminal_caps import strip_unsupported_css as _safe_css
 
 
 class RemoveSessionScreen(ModalScreen[str | None]):
@@ -18,7 +19,7 @@ class RemoveSessionScreen(ModalScreen[str | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "RemoveSessionScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
@@ -78,7 +79,7 @@ class SelectSessionScreen(ModalScreen[str | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "SelectSessionScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
