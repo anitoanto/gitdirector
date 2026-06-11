@@ -53,3 +53,7 @@ Before pushing any code, always run the full test suite, linting, and formatting
 3. **Format check:** `uv run ruff format --check src/ tests/`
 
 If `ruff format` reports files to reformat, run `uv run ruff format src/ tests/` to apply the changes, re-run the tests, then commit the formatting fix alongside the rest of the changes.
+
+## Git Actions Require User Permission
+
+Always ask for the user's explicit permission before performing any of the following git actions: `git add`, `git commit`, `git push`, `git rebase`, `git merge`, `git reset`, `git checkout` of other branches, force-push, or any other history-altering operation. Confirm the exact set of files to be staged, the commit message, and the target branch before running the command. The only exception is read-only inspection (`git status`, `git diff`, `git log`) which may be done freely.
