@@ -43,3 +43,13 @@ Always setup the `.venv` correctly before running any commands or tests.
 ## Code Style
 
 - Use very minimal comments in the codebase — let the code speak for itself
+
+## Pre-push Checklist
+
+Before pushing any code, always run the full test suite, linting, and formatting unless the user explicitly says not to:
+
+1. **Tests:** `uv run pytest`
+2. **Lint:** `uv run ruff check src/ tests/`
+3. **Format check:** `uv run ruff format --check src/ tests/`
+
+If `ruff format` reports files to reformat, run `uv run ruff format src/ tests/` to apply the changes, re-run the tests, then commit the formatting fix alongside the rest of the changes.
