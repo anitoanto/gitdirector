@@ -21,8 +21,25 @@ from textual.reactive import reactive
 from textual.strip import Strip
 from textual.widget import Widget
 
+from .terminal_caps import host_color_system, no_color_requested
+
 _RE_ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _DECSET_PREFIX = "\x1b[?"
+
+
+def _render_console_kwargs(width: int) -> dict:
+    """Build kwargs for the render Rich ``Console`` used to format cells.
+
+    We still set ``force_terminal=True`` because the output is consumed
+    by Textual (which paints the strips itself), but we let the colour
+    system degrade to whatever the host actually supports instead of
+    unconditionally forcing truecolor. When ``NO_COLOR`` is set we drop
+    the colour system entirely so we don't emit unrenderable escapes.
+    """
+    if no_color_requested():
+        return {"force_terminal": True, "color_system": None, "width": width}
+    system = host_color_system() or "256"
+    return {"force_terminal": True, "color_system": system, "width": width}
 
 
 class _Emulator:
@@ -156,7 +173,7 @@ class TerminalWidget(Widget, can_focus=True):
         self._screen: pyte.Screen | None = None
         self._stream: pyte.Stream | None = None
         self._lines: list[Text] = []
-        self._render_console = Console(force_terminal=True, color_system="truecolor", width=80)
+        self._render_console = Console(**_render_console_kwargs(80))
         self._recv_task: asyncio.Task | None = None
         self._mouse_tracking = False
         self._pending_tty_size: tuple[int, int] | None = None
@@ -201,11 +218,7 @@ class TerminalWidget(Widget, can_focus=True):
         self._current_size = (nrow, ncol)
 
         if self._render_console.width != ncol:
-            self._render_console = Console(
-                force_terminal=True,
-                color_system="truecolor",
-                width=ncol,
-            )
+            self._render_console = Console(**_render_console_kwargs(ncol))
         if self._screen is not None and (
             self._screen.columns != ncol or self._screen.lines != nrow
         ):
@@ -256,11 +269,7 @@ class TerminalWidget(Widget, can_focus=True):
                     await self._emulator.recv_queue.put(("set_size", nrow, ncol))
                     self._applied_tty_size = (nrow, ncol)
                     self._current_size = (nrow, ncol)
-                    self._render_console = Console(
-                        force_terminal=True,
-                        color_system="truecolor",
-                        width=ncol,
-                    )
+                    self._render_console = Console(**_render_console_kwargs(ncol))
                 elif cmd == "stdout":
                     chars = msg[1]
                     for m in _RE_ANSI_SEQUENCE.finditer(chars):
@@ -331,8 +340,14 @@ class TerminalWidget(Widget, can_focus=True):
                 strike=char.strikethrough,
                 reverse=char.reverse,
             )
-        except Exception:
-            return Style()
+        except (TypeError, ValueError):
+            # Bad color value from the child process. Render the cell with
+            # the foreground only so the rest of the pane stays legible
+            # rather than collapsing the whole cell to an unstyled glyph.
+            try:
+                return Style(color=fg)
+            except (TypeError, ValueError):
+                return Style()
 
     def render_line(self, y: int) -> Strip:
         cell_length = max(self.size.width, 1)

@@ -984,7 +984,7 @@ class TestGetStatusFetchErrorClassification:
 
 class TestGetDiffAgainstHead:
     def test_success_returns_diff_and_untracked(self, fake_git_repo, mocker):
-        diff_text = "diff --git a/a.py b/a.py\n" "@@ -1 +1 @@\n" "-old\n" "+new\n"
+        diff_text = "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
         responses = {
             ("diff", "HEAD", "--no-color"): (0, diff_text, ""),
             ("ls-files", "--others", "--exclude-standard", "-z"): (

@@ -79,7 +79,15 @@ def _make_session_name(
     *,
     repo_path: Path | None = None,
 ) -> str:
-    """Generate the next sequential session name: gd/{repo}/{purpose}/{N}."""
+    """Generate the next sequential session name: gd/{repo}/{purpose}/{N}.
+
+    The purpose is sanitized to ``[a-z0-9-]`` so the resulting name always
+    has exactly four ``/``-separated parts. This is what
+    :func:`_parse_gd_session_name` and the TUI Sessions tab rely on. The
+    full unsanitized purpose (e.g. a ``gitdirector gd-tmux`` command) is
+    still embedded verbatim in the session's working command, so no
+    information is lost — only the session-name label is normalized.
+    """
     if repo_path is None and isinstance(repo_name, Path):
         repo_path = repo_name
     clean = (
@@ -87,7 +95,8 @@ def _make_session_name(
         if repo_path is not None
         else _sanitize_repo_name(str(repo_name))
     )
-    prefix = f"gd/{clean}/{purpose}/"
+    clean_purpose = _sanitize_repo_name(purpose) or "cmd"
+    prefix = f"gd/{clean}/{clean_purpose}/"
     n = _next_n(prefix)
     return f"{prefix}{n}"
 

@@ -337,7 +337,7 @@ class TestGitDirectorConsoleActionRouting:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch("gitdirector.commands.tui.app.AgentLoadingScreen")
     @patch(
-        "gitdirector.integrations.tmux.launch_agent_in_tmux_session",
+        "gitdirector.integrations.tmux.launch_command_in_tmux_session",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
     @patch(
@@ -347,7 +347,7 @@ class TestGitDirectorConsoleActionRouting:
     async def test_action_open_tmux_agent_uses_self_cleaning_launch(
         self,
         mock_create_session,
-        mock_launch_agent,
+        mock_launch_command,
         mock_loading_screen,
         _mock_sessions,
     ):
@@ -365,7 +365,7 @@ class TestGitDirectorConsoleActionRouting:
                 Path("/tmp/alpha"),
                 purpose="copilot",
             )
-            mock_launch_agent.assert_called_once_with("gd/alpha/copilot/1", "copilot")
+            mock_launch_command.assert_called_once_with("gd/alpha/copilot/1", "copilot")
             mock_loading_screen.assert_called_once_with(
                 "copilot",
                 "gd/alpha/copilot/1",

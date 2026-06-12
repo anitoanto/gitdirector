@@ -10,6 +10,7 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS, _SORT_COLUMN_NAMES
+from ..terminal_caps import strip_unsupported_css as _safe_css
 
 
 def _render_ansi_output(output: str) -> Text:
@@ -21,7 +22,7 @@ class ConfirmScreen(ModalScreen[bool]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "ConfirmScreen { align: center middle; background: $panel 80%; hatch: right $primary 30%; }"
         + _MODAL_CSS
     )
@@ -61,7 +62,7 @@ class SortMenuScreen(ModalScreen[tuple | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "SortMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
