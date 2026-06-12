@@ -17,7 +17,7 @@ from gitdirector.integrations.tmux import (
     attach_tmux_session,
     cleanup_panel_attached_session,
     kill_tmux_session,
-    launch_agent_in_tmux_session,
+    launch_command_in_tmux_session,
 )
 
 
@@ -294,8 +294,8 @@ class TestExactMatchPanelPaneCommand:
         assert "Pane 1: unassigned" not in cmd
 
 
-class TestExactMatchLaunchAgent:
-    """launch_agent_in_tmux_session must use exact session and pane targets."""
+class TestExactMatchLaunchCommand:
+    """launch_command_in_tmux_session must use exact session and pane targets."""
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -303,7 +303,7 @@ class TestExactMatchLaunchAgent:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_send_keys_target_uses_equals(self, mock_run, _mock_marker):
-        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         send_keys_args = mock_run.call_args[0][0]
         assert send_keys_args[0:3] == ["tmux", "send-keys", "-t"]
         assert send_keys_args[3] == "=gd/my-repo/copilot/1:"
@@ -314,7 +314,7 @@ class TestExactMatchLaunchAgent:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_cleanup_script_kill_session_uses_equals(self, mock_run, _mock_marker):
-        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         cleanup_cmd = mock_run.call_args[0][0][4]
         assert f"kill-session -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
 
