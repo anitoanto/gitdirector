@@ -33,6 +33,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector cd NAME`                        | Open or switch to a tmux session for a repository      |
 | `gitdirector autoclean`                      | Remove broken repository links from tracking           |
 | `gitdirector info PATH\|NAME [--full]`       | Show file statistics for a repository                  |
+| `gitdirector gd-tmux PATH\|NAME "command"`   | Create a gd tmux session and run a command in it       |
 | `gitdirector help`                           | Show help                                              |
 
 ### link
@@ -132,6 +133,21 @@ Opens a [tmux](https://github.com/tmux/tmux) session rooted at the repository di
 > Debian/Ubuntu: `sudo apt install tmux`  
 > Arch: `sudo pacman -S tmux`
 
+### gd-tmux
+
+```bash
+gitdirector gd-tmux my-repo "npm test"
+gitdirector gd-tmux /path/to/my-repo "make build"
+gitdirector gd-tmux my-repo 'echo "hello world"'
+```
+
+Creates a new gd tmux session rooted at the given repository, runs the supplied command inside it, and attaches the session. The session is created using the same code path the TUI's **Launch AI agent** menu uses: it is a real `gd/{repo}/{command}/{N}` session, visible in the Sessions tab of `gitdirector console`, and it self-destructs when the command exits.
+
+- `PATH|NAME` — accept either an absolute path to a tracked repository or its basename, with the same disambiguation rules as `gitdirector unlink`.
+- `"command"` — the shell command to run inside the new session. Pass it quoted so the shell hands the whole string to gitdirector; quotes and arguments are preserved verbatim.
+
+The command is the same as opening the repo in the console, picking **Launch AI agent** from the action menu, and entering the command — but you can do it from any shell without entering the TUI first. The new session shows up in the Sessions tab immediately.
+
 ### autoclean
 
 ```bash
@@ -139,6 +155,45 @@ gitdirector autoclean
 ```
 
 Scans the tracked repositories in `~/.gitdirector/config.yaml` for paths that no longer exist on disk and removes them from the config. Lists any broken links for review and asks for confirmation before deleting them.
+
+## Note for AI coding agents
+
+If you are an AI coding agent reading this project: when the user asks you to run a long-lived process inside a tracked repository — a dev server, a frontend bundler, a backend API, a watcher, a database, a test runner with a long timeout, or anything else that does not exit on its own — **do not run it in the foreground**. A foreground process will block your shell for the rest of the session and the user will not be able to interact with you.
+
+Use `gitdirector gd-tmux` to launch the process in a detached gd tmux session that the user can monitor and tear down themselves. The session shows up in the Sessions tab of `gitdirector console`, auto-cleans up when the process exits, and supports path-or-name lookup the same way every other gitdirector command does.
+
+**Always prefer the absolute path over the repo name.** The by-name lookup matches the *directory name on disk* verbatim (via `Path.name`) — case-sensitive, dots and spaces included — and is ambiguous if two tracked repos share the same basename. When in doubt, look up the path with `gitdirector list` and use the absolute path. Quoting a path is fine; an absolute path is never ambiguous.
+
+Examples:
+
+```bash
+# Frontend dev server in the user's web repo — use the absolute path
+gitdirector gd-tmux /Users/me/projects/webapp "npm run dev"
+
+# Backend API in the api repo
+gitdirector gd-tmux /Users/me/projects/api "uvicorn app.main:app --reload --port 8000"
+
+# A long-running integration test with output captured to a log
+gitdirector gd-tmux /Users/me/projects/myrepo "pytest -x -v 2>&1 | tee /tmp/test.log"
+
+# A watcher or build loop
+gitdirector gd-tmux /Users/me/projects/myrepo "npm run watch"
+
+# A repo whose directory name contains a space — quote both the path and the command
+gitdirector gd-tmux "/Users/me/projects/My Repo" "npm run dev"
+```
+
+The by-name form is supported for ergonomic use by humans in interactive shells, but agents should default to the absolute path to avoid any chance of matching the wrong repo.
+
+Rules of thumb:
+
+- **Use the absolute path.** It is unambiguous and survives the user renaming or moving the directory. The by-name form is convenient shorthand, not a slug — it is the raw directory name, case-sensitive.
+- **Repo names with spaces, dots, or punctuation are matched verbatim** when you do use the by-name form. A repo at `/Users/me/My Repo` is matched by `"My Repo"`, not by `My` or `Repo`. Quote the name to keep the shell from splitting it.
+- **Quoting the command matters.** The command string is handed to `sh -lc` inside the new session, so write it as a single quoted string. `'echo "hi"'` (single-quote outer, double-quote inner) is the safest pattern for embedded double quotes.
+- **Path separators in the command are fine.** Commands like `python /path/to/script.py` or `find . -name foo/bar` work; the command is embedded verbatim into the inner shell, while the session-name label is auto-sanitized.
+- **The session self-destructs** when the command exits (success or failure), so you do not need to clean it up.
+- **If you need to capture output**, redirect it to a file in the command itself (`> /tmp/out 2>&1`) and read the file later — the session is gone once the command exits.
+- **If the user asks you to stop a running process**, kill the matching session: `gitdirector console` → Sessions tab, or directly with `tmux kill-session -t =<session-name>`.
 
 ## Configuration
 

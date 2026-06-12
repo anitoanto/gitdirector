@@ -10,6 +10,7 @@ from .commands import (
     autoclean,
     cd,
     console,
+    gd_tmux,
     help,
     info,
     link,
@@ -55,6 +56,7 @@ help.register(cli)
 tui.register(cli)
 autoclean.register(cli)
 info.register(cli)
+gd_tmux.register(cli)
 
 
 def main():

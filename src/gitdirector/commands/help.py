@@ -34,6 +34,7 @@ def show_help():
         ("console", "Interactive TUI for browsing and opening repositories"),
         ("autoclean", "Remove broken repository links from tracking"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
+        ('gd-tmux PATH|NAME "cmd"', "Create a gd tmux session and run a command in it"),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

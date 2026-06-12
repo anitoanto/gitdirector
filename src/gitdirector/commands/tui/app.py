@@ -359,13 +359,13 @@ class GitDirectorConsole(
         if path is None:
             return
 
-        from ...integrations.tmux import create_tmux_session, launch_agent_in_tmux_session
+        from ...integrations.tmux import create_tmux_session, launch_command_in_tmux_session
 
         purpose = agent_cmd if agent_cmd else "shell"
         session_name = create_tmux_session(path.name, path, purpose=purpose)
 
         if agent_cmd:
-            ready_marker = launch_agent_in_tmux_session(session_name, agent_cmd)
+            ready_marker = launch_command_in_tmux_session(session_name, agent_cmd)
             self.push_screen(
                 AgentLoadingScreen(agent_cmd, session_name, ready_marker),
                 callback=lambda _: self.set_timer(0.2, lambda: self._refresh_repo_for_path(path)),
