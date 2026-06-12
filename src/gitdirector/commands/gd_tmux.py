@@ -1,0 +1,79 @@
+from pathlib import Path
+
+import click
+
+from ..manager import RepositoryManager
+from ..storage import normalize_repository_path
+from . import console
+
+
+def _resolve_repo(target: str) -> Path | None:
+    """Resolve *target* to a tracked repository path.
+
+    Tries the value as a filesystem path first. If no path-based match is
+    found and the value does not look path-like, falls back to looking it up
+    by repository name. Prints a rich error and returns ``None`` on missing
+    or ambiguous targets.
+    """
+    manager = RepositoryManager()
+    candidate = Path(target)
+    is_path_like = (
+        "/" in target
+        or "\\" in target
+        or target in (".", "..")
+        or candidate.is_absolute()
+        or target.startswith("~")
+        or candidate.exists()
+    )
+
+    if is_path_like:
+        normalized = normalize_repository_path(candidate)
+        if manager.config.has_repository(normalized):
+            return normalized
+        console.print(f"\n  [red]No tracked repository at path: {normalized}[/red]\n")
+        return None
+
+    matches = [r for r in manager.config.repositories if r.name == target]
+    if not matches:
+        console.print(f"\n  [red]No tracked repository named: {target}[/red]\n")
+        return None
+    if len(matches) > 1:
+        paths_list = "\n".join(f"  {p}" for p in matches)
+        console.print(
+            f"\n  [red]Multiple repositories named '{target}' — use the full path:[/red]\n"
+            f"{paths_list}\n"
+        )
+        return None
+    return matches[0]
+
+
+def register(cli: click.Group):
+    @cli.command()
+    @click.argument("target", metavar="PATH|NAME")
+    @click.argument("command")
+    def gd_tmux(target: str, command: str):
+        """Create a gd tmux session for a repository and run a command in it."""
+        if not command.strip():
+            console.print("\n  [red]Command must not be empty.[/red]\n")
+            raise SystemExit(1)
+
+        repo_path = _resolve_repo(target)
+        if repo_path is None:
+            raise SystemExit(1)
+
+        try:
+            from ..integrations.tmux import (
+                attach_tmux_session,
+                create_tmux_session,
+                launch_command_in_tmux_session,
+            )
+        except ImportError:
+            console.print(
+                "\n  [red]The tmux integration is unavailable for the gd-tmux command.[/red]\n"
+                "  Reinstall gitdirector or check your installation.\n"
+            )
+            raise SystemExit(1)
+
+        session_name = create_tmux_session(repo_path.name, repo_path, purpose=command)
+        launch_command_in_tmux_session(session_name, command)
+        attach_tmux_session(session_name, skip_config_sync=True)

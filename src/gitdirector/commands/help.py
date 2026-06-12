@@ -32,8 +32,9 @@ def show_help():
         ("pull", "Pull latest changes for all tracked repositories"),
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
-        ("autoclean links|sessions", "Clean broken links or stale tmux sessions"),
+        ("autoclean", "Remove broken repository links from tracking"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
+        ('gd-tmux PATH|NAME "cmd"', "Create a gd tmux session and run a command in it"),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

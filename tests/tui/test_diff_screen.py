@@ -576,9 +576,9 @@ class TestContentPanelTone:
             screen._render_selected_file()
             await pilot.pause()
             assert files_list.index == 1
-            assert not content.has_class(
-                "--added"
-            ), "stale --added class left over from the new file"
+            assert not content.has_class("--added"), (
+                "stale --added class left over from the new file"
+            )
             assert not content.has_class("--deleted")
 
 

@@ -14,6 +14,7 @@ from textual.widgets.option_list import Option
 
 from ....info import RepoInfoResult
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
+from ..terminal_caps import strip_unsupported_css as _safe_css
 from ._shared import _render_ansi_output
 
 
@@ -22,7 +23,7 @@ class ActionMenuScreen(ModalScreen[str]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "ActionMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
@@ -115,7 +116,7 @@ class GitOperationsMenuScreen(ModalScreen[str]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "GitOperationsMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
@@ -184,7 +185,7 @@ class GitCommandResultScreen(ModalScreen[str | None]):
         Binding("k", "scroll_up", "↑", show=False),
     ]
 
-    DEFAULT_CSS = """
+    DEFAULT_CSS = _safe_css("""
     GitCommandResultScreen {
         align: center middle;
         background: $panel 80%;
@@ -225,7 +226,7 @@ class GitCommandResultScreen(ModalScreen[str | None]):
         padding: 1 1 1 1;
         color: $text-muted;
     }
-    """
+    """)
 
     def __init__(
         self,
@@ -295,7 +296,7 @@ class PullResultScreen(ModalScreen[str | None]):
         Binding("k", "scroll_up", "↑", show=False),
     ]
 
-    CSS = (
+    CSS = _safe_css(
         "PullResultScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }"
@@ -383,7 +384,7 @@ class PullResultScreen(ModalScreen[str | None]):
 class PullLoadingScreen(ModalScreen[None]):
     """Loading overlay shown while a repository pull is in progress."""
 
-    DEFAULT_CSS = """
+    DEFAULT_CSS = _safe_css("""
     PullLoadingScreen {
         align: center middle;
         background: $panel 80%;
@@ -415,7 +416,7 @@ class PullLoadingScreen(ModalScreen[None]):
         padding: 1 1 1 1;
         color: $text-muted;
     }
-    """
+    """)
 
     def __init__(self, repo_name: str, command: str) -> None:
         super().__init__()
@@ -435,7 +436,7 @@ class RepoInfoScreen(ModalScreen[None]):
 
     BINDINGS = [_MODAL_BINDINGS[0]]
 
-    CSS = (
+    CSS = _safe_css(
         "RepoInfoScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }"

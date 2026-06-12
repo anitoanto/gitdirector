@@ -23,9 +23,18 @@ def _make_agent_ready_marker() -> Path:
     return marker_path
 
 
-def launch_agent_in_tmux_session(session_name: str, agent_cmd: str) -> Path:
-    """Launch an agent in *session_name* and return a startup marker path."""
-    normalized_agent_cmd = shlex.join(shlex.split(agent_cmd))
+def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
+    """Run *command* in *session_name* and self-destruct the session on exit.
+
+    The command is sent to the active pane via ``tmux send-keys``. When the
+    command exits, the wrapping shell detaches any attached client and kills
+    the session so the lifecycle matches a one-shot invocation.
+
+    A temporary marker path is returned (created and immediately removed) so
+    callers that need to wait on a startup signal (such as the TUI's agent
+    loading screen) can do so. Generic command callers can ignore the return
+    value.
+    """
     ready_marker = _make_agent_ready_marker()
     ready_marker_quoted = shlex.quote(str(ready_marker))
     pane_target = _active_pane_target(session_name)
@@ -33,7 +42,7 @@ def launch_agent_in_tmux_session(session_name: str, agent_cmd: str) -> Path:
     cleanup_script = (
         f"touch {ready_marker_quoted} >/dev/null 2>&1 || true; "
         "clear; "
-        f"{normalized_agent_cmd}; "
+        f"{command}; "
         "status=$?; "
         f"rm -f {ready_marker_quoted} >/dev/null 2>&1 || true; "
         f"tmux detach-client -s {quoted_session_target} >/dev/null 2>&1 || true; "

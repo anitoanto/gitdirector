@@ -101,6 +101,41 @@ class TestMakeSessionName:
         assert name.startswith("gd/foo-bar-baz_")
         assert name.endswith("/shell/1")
 
+    @patch(
+        "gitdirector.integrations.tmux.core._list_sessions",
+        return_value=[],
+    )
+    def test_purpose_with_slashes_is_sanitized(self, _mock_list):
+        """A purpose containing ``/`` must be sanitized so the session name
+        always has exactly four ``/``-separated parts. Otherwise
+        ``_parse_gd_session_name`` would not recognise the session and the
+        TUI Sessions tab would silently drop it.
+        """
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path, "python /path/to/script.py")
+
+        assert name == f"gd/{repo_slug}/python-path-to-script-py/1"
+        parsed = _parse_gd_session_name(name)
+        assert parsed is not None
+        assert parsed[1] == "python-path-to-script-py"
+
+    @patch(
+        "gitdirector.integrations.tmux.core._list_sessions",
+        return_value=[],
+    )
+    def test_purpose_only_special_chars_falls_back_to_cmd(self, _mock_list):
+        """A purpose that is all-special-chars sanitizes to empty; we fall
+        back to ``cmd`` so the name still has a purpose segment.
+        """
+        repo_path = Path("/tmp/my-repo")
+        repo_slug = _repo_session_name_segment(repo_path)
+
+        name = _make_session_name(repo_path, "///")
+
+        assert name == f"gd/{repo_slug}/cmd/1"
+
 
 class TestSessionExists:
     @patch("gitdirector.integrations.tmux.subprocess.run")

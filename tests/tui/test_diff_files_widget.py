@@ -583,7 +583,7 @@ class TestFileListScrolling:
         out = []
         for i in range(count):
             out.append(f"diff --git a/file{i}.py b/file{i}.py\n")
-            out.append(f"index {i:04x}..{i+1:04x} 100644\n")
+            out.append(f"index {i:04x}..{i + 1:04x} 100644\n")
             out.append(f"--- a/file{i}.py\n")
             out.append(f"+++ b/file{i}.py\n")
             out.append("@@ -1 +1 @@\n")
@@ -727,3 +727,46 @@ class TestFocusBorderTint:
             assert content_pane.has_class("--files-focused")
             assert not files_pane.has_class("--diff-focused")
             assert not content_pane.has_class("--diff-focused")
+
+
+class TestSetFilesRegression:
+    """Regression tests for the empty-list and unbounded-retry fix.
+
+    Previously, ``set_files([])`` left ``_suppress_watch=True`` forever
+    so the user could never change selection, and
+    ``_apply_initial_selection`` re-queued itself unboundedly.
+    """
+
+    def test_empty_list_clears_suppress_watch(self):
+        from textual.app import App
+
+        class _MiniApp(App):
+            pass
+
+        app = _MiniApp()
+        with app._context():  # required for widget construction
+            fl = FileTileList()
+            fl.set_files([])
+            assert fl._suppress_watch is False
+            assert fl._pending_index is None
+
+    def test_apply_initial_selection_bounded_by_retry_limit(self):
+        from textual.app import App
+
+        class _MiniApp(App):
+            pass
+
+        app = _MiniApp()
+        with app._context():
+            fl = FileTileList()
+            # Set a pending index that will never be satisfied because
+            # the list has 0 nodes.
+            fl._pending_index = 0
+            fl._pending_retry_count = 0
+            fl._suppress_watch = True
+            # Call repeatedly: should bail out at the retry limit
+            # rather than re-queue forever.
+            for _ in range(fl._PENDING_RETRY_LIMIT + 5):
+                fl._apply_initial_selection()
+            assert fl._pending_index is None
+            assert fl._suppress_watch is False

@@ -569,7 +569,7 @@ class TestRenderFileDiff:
             status="M",
             additions=1,
             deletions=1,
-            diff_text=("diff --git a/foo.py b/foo.py\n" "@@ -1 +1 @@\n" "-old\n" "+new\n"),
+            diff_text=("diff --git a/foo.py b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"),
         )
         r = render_file_diff(f, theme="monokai")
         assert isinstance(r, Group)
@@ -578,10 +578,37 @@ class TestRenderFileDiff:
         assert len(syntax_pieces) == 1
 
     def test_binary_file_shows_message_no_syntax(self):
-        f = ChangedFile(path="img.png", status="M", is_binary=True, diff_text="")
+        f = ChangedFile(path="app.exe", status="M", is_binary=True, diff_text="")
         r = render_file_diff(f)
         syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
         assert syntax_pieces == []
+
+    def test_image_file_renders_header_only_no_diff(self):
+        f = ChangedFile(path="logo.png", status="A", is_image=True, additions=0, deletions=0)
+        r = render_file_diff(f)
+        syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
+        assert syntax_pieces == []
+        # Header is still rendered so the user sees which file is selected.
+        assert len(r.renderables) == 1
+
+    def test_image_extension_detection_marks_untracked(self):
+        diff = ""
+        bundle = build_diff_bundle(diff, ["hero.jpg", "script.py"], lambda _p: "x = 1\n")
+        by_path = {f.path: f for f in bundle.files}
+        assert by_path["hero.jpg"].is_image is True
+        assert by_path["script.py"].is_image is False
+
+    def test_image_extension_detection_from_diff(self):
+        diff = (
+            "diff --git a/banner.png b/banner.png\n"
+            "index 1234..5678 100644\n"
+            "--- a/banner.png\n"
+            "+++ b/banner.png\n"
+            "Binary files a/banner.png and b/banner.png differ\n"
+        )
+        files = parse_diff_files(diff)
+        assert files[0].is_image is True
+        assert files[0].is_binary is True
 
     def test_renders_very_large_diff_without_truncation(self):
         line_count = 5000
@@ -616,7 +643,7 @@ class TestBuildDiffBundle:
                 return "alpha\nbeta\n"
             return None
 
-        diff = "diff --git a/m1.py b/m1.py\n" "@@ -1 +1 @@\n" "-old\n" "+new\n"
+        diff = "diff --git a/m1.py b/m1.py\n@@ -1 +1 @@\n-old\n+new\n"
         bundle = build_diff_bundle(diff, ["u1.py", "u2.py"], lookup)
         assert len(bundle.files) == 3
         statuses = [(f.path, f.status) for f in bundle.files]

@@ -17,7 +17,7 @@ from gitdirector.integrations.tmux import (
     attach_tmux_session,
     cleanup_panel_attached_session,
     kill_tmux_session,
-    launch_agent_in_tmux_session,
+    launch_command_in_tmux_session,
 )
 
 
@@ -167,9 +167,9 @@ class TestExactMatchPanelAttachFragment:
             if " -t " in part:
                 target = part.split(" -t ")[1].split()[0]
                 unquoted = target.strip("'\"")
-                assert unquoted.startswith("=") or unquoted.startswith(
-                    "$"
-                ), f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                assert unquoted.startswith("=") or unquoted.startswith("$"), (
+                    f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                )
 
 
 class TestCleanupPanelAttachedSession:
@@ -294,8 +294,8 @@ class TestExactMatchPanelPaneCommand:
         assert "Pane 1: unassigned" not in cmd
 
 
-class TestExactMatchLaunchAgent:
-    """launch_agent_in_tmux_session must use exact session and pane targets."""
+class TestExactMatchLaunchCommand:
+    """launch_command_in_tmux_session must use exact session and pane targets."""
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -303,7 +303,7 @@ class TestExactMatchLaunchAgent:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_send_keys_target_uses_equals(self, mock_run, _mock_marker):
-        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         send_keys_args = mock_run.call_args[0][0]
         assert send_keys_args[0:3] == ["tmux", "send-keys", "-t"]
         assert send_keys_args[3] == "=gd/my-repo/copilot/1:"
@@ -314,7 +314,7 @@ class TestExactMatchLaunchAgent:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_cleanup_script_kill_session_uses_equals(self, mock_run, _mock_marker):
-        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         cleanup_cmd = mock_run.call_args[0][0][4]
         assert f"kill-session -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
 
@@ -432,6 +432,6 @@ class TestExactMatchSourceCodeAudit:
                         violations.append(
                             f"Line {node.lineno}: f-string '-t' target starts with a variable (should prefix '=')"
                         )
-        assert (
-            violations == []
-        ), "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        assert violations == [], (
+            "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        )

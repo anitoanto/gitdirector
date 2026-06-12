@@ -20,21 +20,21 @@ from gitdirector.integrations.tmux import (
     _normalize_process_command,
     _resolve_pane_command,
     get_all_session_statuses,
-    launch_agent_in_tmux_session,
+    launch_command_in_tmux_session,
     resolve_pane_status,
 )
 
 from ._shared import REAL_TMUX_MONITOR_START, REAL_TMUX_MONITOR_STOP
 
 
-class TestLaunchAgentInTmuxSession:
+class TestLaunchCommandInTmuxSession:
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_queues_cleanup_script(self, mock_run, _mock_marker):
-        ready_marker = launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        ready_marker = launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         cleanup_script = (
             "touch /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "clear; copilot; status=$?; "
@@ -56,6 +56,184 @@ class TestLaunchAgentInTmuxSession:
             ],
             check=False,
         )
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_preserves_command_with_quotes_verbatim(self, mock_run, _mock_marker):
+        """The user-supplied command is embedded as-is, not shell-normalized.
+
+        Round-tripping through ``shlex.split``/``shlex.join`` would collapse
+        quoted arguments like ``echo "hello world"`` into ``echo hello world``
+        and break the command.
+        """
+        launch_command_in_tmux_session("gd/my-repo/echo hello world/1", 'echo "hello world"')
+        send_keys_argv = mock_run.call_args[0][0]
+        wrapped_script = send_keys_argv[4]
+        assert 'echo "hello world"' in wrapped_script
+        # The outer wrapping still uses shlex.quote so single-quote–bearing
+        # commands survive the tmux send-keys boundary intact.
+        assert wrapped_script.startswith("sh -lc ")
+
+
+def _inner_shell_script(mock_run) -> str:
+    """Return the script that ``sh -lc`` actually executes.
+
+    The wrapper sent to ``tmux send-keys`` is ``sh -lc <shlex.quote(script)>``;
+    parsing the wrapper as a shell line recovers the original script.
+    """
+    wrapped = mock_run.call_args[0][0][4]
+    return shlex.split(wrapped)[2]
+
+
+class TestCommandQuotingInCleanupScript:
+    """Lock down how user-supplied commands survive the inner ``sh -lc`` shell.
+
+    The user types something like::
+
+        gitdirector gd-tmux myrepo "echo \"hello world\""
+
+    The outer shell collapses the escapes and hands Python the string
+    ``echo "hello world"``. That string is embedded verbatim into a cleanup
+    script wrapped in ``sh -lc ...; tmux kill-session ...``. These tests
+    parse the wrapper back to the script and assert the user's command
+    appears exactly as intended, so the inner shell will execute it
+    correctly.
+    """
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_double_quoted_argument(self, mock_run, _mock_marker):
+        launch_command_in_tmux_session("gd/my-repo/echo/1", 'echo "hello world"')
+        script = _inner_shell_script(mock_run)
+        assert 'echo "hello world"' in script
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_single_quoted_argument(self, mock_run, _mock_marker):
+        """Single quotes inside the command must survive shlex.quote round-trip.
+
+        The outer wrapping uses ``shlex.quote`` which encodes embedded single
+        quotes as the ``'\"'\"'`` pattern. When the receiving shell parses
+        the wrapper it must recover the literal single-quote-bearing command.
+        """
+        launch_command_in_tmux_session("gd/my-repo/echo/1", "echo 'hello world'")
+        script = _inner_shell_script(mock_run)
+        assert "echo 'hello world'" in script
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_backslashes(self, mock_run, _mock_marker):
+        """Backslashes are preserved verbatim in the inner script.
+
+        The user's outer shell already collapsed any ``\\\\`` escapes, so
+        the Python command string is the literal sequence the inner shell
+        should see. The inner shell applies its own quote rules from there.
+        """
+        launch_command_in_tmux_session("gd/my-repo/echo/1", 'echo "C:\\\\Users"')
+        script = _inner_shell_script(mock_run)
+        assert 'echo "C:\\\\Users"' in script
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_mixed_quotes_and_backslashes(self, mock_run, _mock_marker):
+        launch_command_in_tmux_session(
+            "gd/my-repo/echo/1",
+            '''python -c "print('a\\\\\\\\b')"''',
+        )
+        script = _inner_shell_script(mock_run)
+        assert '''python -c "print('a\\\\\\\\b')"''' in script
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_shell_metacharacters(self, mock_run, _mock_marker):
+        """``;``, ``&&``, ``|``, ``>`` are part of the user command and must
+        be embedded verbatim — the inner shell interprets them.
+        """
+        for cmd in [
+            "echo a; echo b",
+            "true && echo yes",
+            "echo hi | wc -l",
+            "echo out > /tmp/gd_tmux_test_out",
+            "echo a; # comment with ; semicolons",
+        ]:
+            mock_run.reset_mock()
+            launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
+            script = _inner_shell_script(mock_run)
+            assert cmd in script, f"command {cmd!r} not preserved in script: {script!r}"
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_command_substitution(self, mock_run, _mock_marker):
+        """``$(...)`` and backticks are preserved — the inner shell expands them."""
+        for cmd in [
+            "echo $(date +%Y)",
+            "echo `date +%Y`",
+            "echo $HOME",
+        ]:
+            mock_run.reset_mock()
+            launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
+            script = _inner_shell_script(mock_run)
+            assert cmd in script, f"command {cmd!r} not preserved in script: {script!r}"
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_command_with_newlines(self, mock_run, _mock_marker):
+        """Newlines in the command are preserved as-is and will be treated by
+        the inner shell as command separators (since the script is parsed
+        as a single -c argument, embedded newlines are not honored by ``sh -c``
+        on every platform; we just assert the bytes are passed through).
+        """
+        cmd = "echo first\necho second"
+        launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
+        script = _inner_shell_script(mock_run)
+        assert "echo first" in script
+        assert "echo second" in script
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_session_name_does_not_break_quoted_purpose(self, mock_run, _mock_marker):
+        """The session name's ``purpose`` segment can contain spaces and
+        quotes — the cleanup script must still quote the *session name*,
+        not the purpose, so target lookups (e.g. ``tmux kill-session -t
+        =<session>``) use the exact full name.
+        """
+        launch_command_in_tmux_session('gd/my-repo/echo "hi"/1', 'echo "hi"')
+        script = _inner_shell_script(mock_run)
+        # The session name (containing a literal quote) appears as a
+        # shlex.quote–escaped argument to the kill-session / detach-client
+        # calls, never unquoted.
+        assert "tmux kill-session -t " in script
+        assert "tmux detach-client -s " in script
+        # The escaped form must be present; the unescaped literal would
+        # corrupt the shell parsing of the script.
+        assert shlex.quote('=gd/my-repo/echo "hi"/1') in script
 
 
 class TestMakeAgentReadyMarker:
