@@ -581,6 +581,46 @@ class TestContentPanelTone:
             )
             assert not content.has_class("--deleted")
 
+    async def test_horizontal_scroll_moves_pane_right_then_left(self, mocker):
+        from gitdirector import repo as repo_mod
+
+        # A diff with lines long enough to overflow a narrow viewport.
+        long_line = "x" * 200
+        long_diff = (
+            "diff --git a/long.py b/long.py\n"
+            "index 1234..5678 100644\n"
+            "--- a/long.py\n"
+            "+++ b/long.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            f"-{long_line}\n"
+            f"+{long_line}\n"
+        )
+        mocker.patch.object(
+            repo_mod.Repository,
+            "get_diff_against_head",
+            lambda self, **_kw: (True, long_diff, []),
+        )
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+            app.push_screen(screen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            screen = app.screen
+            scroll = screen.query_one("#diff-content-scroll")
+            scroll.focus()
+            await pilot.pause()
+            assert scroll.scroll_x == 0
+            assert scroll.max_scroll_x > 0, "content should overflow the viewport horizontally"
+            await pilot.press("l")
+            await pilot.pause()
+            assert scroll.scroll_x > 0, "l should scroll the content right"
+            await pilot.press("h")
+            await pilot.pause()
+            assert scroll.scroll_x == 0, "h should scroll the content back to the start"
+
 
 # ---------------------------------------------------------------------------
 # Integration with the action menu
