@@ -1,3 +1,5 @@
+import hashlib
+import os
 import shlex
 import shutil
 import subprocess
@@ -16,6 +18,7 @@ from .core import (
     _panel_pane_title,
     _protect_session,
     _resolved_panel_theme_name,
+    _run_tmux,
     _session_exists,
     _session_option_target,
     _session_tmux_config,
@@ -25,6 +28,16 @@ from .core import (
     make_temp_panel_session_name,
     sync_panel_tmux_config,
 )
+
+
+def _panel_client_lock_name(session_name: str) -> str:
+    digest = hashlib.sha1(session_name.encode("utf-8")).hexdigest()[:16]
+    return f"gitdirector-panel-clients-{digest}"
+
+
+def _panel_build_session_name(panel_name: str) -> str:
+    digest = hashlib.sha1(panel_name.encode("utf-8")).hexdigest()[:12]
+    return f"gd/temp/panel/build-{digest}-{os.getpid()}"
 
 
 def kill_panel_tmux_session(panel_name: str) -> bool:
@@ -470,23 +483,8 @@ def _panel_attach_fragment(session_name: str) -> str:
     quoted_session = shlex.quote(_session_option_target(session_name))
     quoted_attach_target = shlex.quote(f"={session_name}")
     default_window_target = shlex.quote(f"={session_name}:0")
-    return (
-        f"panel_window=$(tmux display-message -p -t {quoted_session} '#{{session_name}}:#{{window_index}}' 2>/dev/null || printf %s {default_window_target}); "
-        f"panel_clients=$(tmux show-options -q -v -t {quoted_session} {_PANEL_CLIENT_COUNT_OPTION} 2>/dev/null || printf '0'); "
-        'case "$panel_clients" in ""|*[!0-9]*) panel_clients=0 ;; esac; '
-        'if [ "$panel_clients" -eq 0 ]; then '
-        f"panel_prev_status=$(tmux show-options -q -v -t {quoted_session} status 2>/dev/null || printf 'on'); "
-        "panel_prev_border_status=$(tmux show-window-options -q -v -t \"$panel_window\" pane-border-status 2>/dev/null || printf 'off'); "
-        f'tmux set-option -q -t {quoted_session} {_PANEL_STATUS_RESTORE_OPTION} "$panel_prev_status" >/dev/null 2>&1 || true; '
-        f'tmux set-option -q -t {quoted_session} {_PANEL_BORDER_RESTORE_OPTION} "$panel_prev_border_status" >/dev/null 2>&1 || true; '
-        f'tmux set-option -q -t {quoted_session} {_PANEL_WINDOW_RESTORE_OPTION} "$panel_window" >/dev/null 2>&1 || true; '
-        "fi; "
-        "panel_clients=$((panel_clients + 1)); "
-        f'tmux set-option -q -t {quoted_session} {_PANEL_CLIENT_COUNT_OPTION} "$panel_clients" >/dev/null 2>&1 || true; '
-        f"tmux set-option -q -t {quoted_session} destroy-unattached off >/dev/null 2>&1 || true; "
-        f"tmux set-option -q -t {quoted_session} status off >/dev/null 2>&1 || true; "
-        'tmux set-window-option -q -t "$panel_window" pane-border-status off >/dev/null 2>&1 || true; '
-        f"env -u TMUX tmux attach-session -t {quoted_attach_target}; "
+    quoted_lock_name = shlex.quote(_panel_client_lock_name(session_name))
+    cleanup_fragment = (
         f"panel_clients=$(tmux show-options -q -v -t {quoted_session} {_PANEL_CLIENT_COUNT_OPTION} 2>/dev/null || printf '1'); "
         'case "$panel_clients" in ""|*[!0-9]*) panel_clients=1 ;; esac; '
         "panel_clients=$((panel_clients - 1)); "
@@ -504,6 +502,40 @@ def _panel_attach_fragment(session_name: str) -> str:
         f'tmux set-option -q -t {quoted_session} {_PANEL_CLIENT_COUNT_OPTION} "$panel_clients" >/dev/null 2>&1 || true; '
         "fi; "
     )
+    return (
+        f"panel_lock={quoted_lock_name}; "
+        "panel_lock_held=0; panel_attach_registered=0; panel_cleanup_done=0; "
+        'panel_lock_acquire() { tmux wait-for -L "$panel_lock" >/dev/null 2>&1 && panel_lock_held=1 || true; }; '
+        'panel_lock_release() { if [ "$panel_lock_held" = "1" ]; then tmux wait-for -U "$panel_lock" >/dev/null 2>&1 || true; panel_lock_held=0; fi; }; '
+        "panel_cleanup() { "
+        'if [ "$panel_cleanup_done" = "1" ]; then panel_lock_release; return; fi; '
+        'if [ "$panel_attach_registered" != "1" ]; then panel_lock_release; return; fi; '
+        "panel_cleanup_done=1; panel_lock_acquire; "
+        f"{cleanup_fragment}"
+        "panel_lock_release; "
+        "}; "
+        "trap panel_cleanup EXIT HUP INT TERM; "
+        "panel_lock_acquire; "
+        f"panel_window=$(tmux display-message -p -t {quoted_session} '=#{{session_name}}:#{{window_index}}' 2>/dev/null || printf %s {default_window_target}); "
+        f"panel_clients=$(tmux show-options -q -v -t {quoted_session} {_PANEL_CLIENT_COUNT_OPTION} 2>/dev/null || printf '0'); "
+        'case "$panel_clients" in ""|*[!0-9]*) panel_clients=0 ;; esac; '
+        'if [ "$panel_clients" -eq 0 ]; then '
+        f"panel_prev_status=$(tmux show-options -q -v -t {quoted_session} status 2>/dev/null || printf 'on'); "
+        "panel_prev_border_status=$(tmux show-window-options -q -v -t \"$panel_window\" pane-border-status 2>/dev/null || printf 'off'); "
+        f'tmux set-option -q -t {quoted_session} {_PANEL_STATUS_RESTORE_OPTION} "$panel_prev_status" >/dev/null 2>&1 || true; '
+        f'tmux set-option -q -t {quoted_session} {_PANEL_BORDER_RESTORE_OPTION} "$panel_prev_border_status" >/dev/null 2>&1 || true; '
+        f'tmux set-option -q -t {quoted_session} {_PANEL_WINDOW_RESTORE_OPTION} "$panel_window" >/dev/null 2>&1 || true; '
+        "fi; "
+        "panel_clients=$((panel_clients + 1)); "
+        f'tmux set-option -q -t {quoted_session} {_PANEL_CLIENT_COUNT_OPTION} "$panel_clients" >/dev/null 2>&1 || true; '
+        f"tmux set-option -q -t {quoted_session} destroy-unattached off >/dev/null 2>&1 || true; "
+        f"tmux set-option -q -t {quoted_session} status off >/dev/null 2>&1 || true; "
+        'tmux set-window-option -q -t "$panel_window" pane-border-status off >/dev/null 2>&1 || true; '
+        "panel_attach_registered=1; "
+        "panel_lock_release; "
+        f"env -u TMUX tmux attach-session -t {quoted_attach_target}; "
+        "panel_cleanup; trap - EXIT HUP INT TERM; "
+    )
 
 
 def cleanup_panel_attached_session(session_name: str, theme_name: str | None = None) -> None:
@@ -511,62 +543,73 @@ def cleanup_panel_attached_session(session_name: str, theme_name: str | None = N
         return
 
     session_target = _session_option_target(session_name)
-    raw_client_count = _tmux_option_value(session_target, _PANEL_CLIENT_COUNT_OPTION)
-    client_count = int(raw_client_count) if raw_client_count and raw_client_count.isdigit() else 0
+    lock_name = _panel_client_lock_name(session_name)
+    locked = False
+    try:
+        lock_result = _run_tmux(["wait-for", "-L", lock_name], check=False)
+        locked = lock_result.returncode == 0
 
-    if client_count > 1:
+        raw_client_count = _tmux_option_value(session_target, _PANEL_CLIENT_COUNT_OPTION)
+        client_count = (
+            int(raw_client_count) if raw_client_count and raw_client_count.isdigit() else 0
+        )
+
+        if client_count > 1:
+            subprocess.run(
+                [
+                    "tmux",
+                    "set-option",
+                    "-q",
+                    "-t",
+                    session_target,
+                    _PANEL_CLIENT_COUNT_OPTION,
+                    str(client_count - 1),
+                ],
+                check=False,
+            )
+            return
+
+        restore_status = _tmux_option_value(session_target, _PANEL_STATUS_RESTORE_OPTION) or "on"
+        restore_border = _tmux_option_value(session_target, _PANEL_BORDER_RESTORE_OPTION) or "off"
+        restore_window = _tmux_option_value(
+            session_target, _PANEL_WINDOW_RESTORE_OPTION
+        ) or _current_window_target(session_name)
+        exact_restore_window = (
+            restore_window if restore_window.startswith("=") else f"={restore_window}"
+        )
+
+        subprocess.run(
+            ["tmux", "set-option", "-q", "-t", session_target, "status", restore_status],
+            check=False,
+        )
         subprocess.run(
             [
                 "tmux",
-                "set-option",
+                "set-window-option",
                 "-q",
                 "-t",
-                session_target,
-                _PANEL_CLIENT_COUNT_OPTION,
-                str(client_count - 1),
+                exact_restore_window,
+                "pane-border-status",
+                restore_border,
             ],
             check=False,
         )
-        return
+        for option in (
+            _PANEL_CLIENT_COUNT_OPTION,
+            _PANEL_STATUS_RESTORE_OPTION,
+            _PANEL_BORDER_RESTORE_OPTION,
+            _PANEL_WINDOW_RESTORE_OPTION,
+        ):
+            subprocess.run(
+                ["tmux", "set-option", "-q", "-u", "-t", session_target, option],
+                check=False,
+            )
 
-    restore_status = _tmux_option_value(session_target, _PANEL_STATUS_RESTORE_OPTION) or "on"
-    restore_border = _tmux_option_value(session_target, _PANEL_BORDER_RESTORE_OPTION) or "off"
-    restore_window = _tmux_option_value(
-        session_target, _PANEL_WINDOW_RESTORE_OPTION
-    ) or _current_window_target(session_name)
-    exact_restore_window = (
-        restore_window if restore_window.startswith("=") else f"={restore_window}"
-    )
-
-    subprocess.run(
-        ["tmux", "set-option", "-q", "-t", session_target, "status", restore_status],
-        check=False,
-    )
-    subprocess.run(
-        [
-            "tmux",
-            "set-window-option",
-            "-q",
-            "-t",
-            exact_restore_window,
-            "pane-border-status",
-            restore_border,
-        ],
-        check=False,
-    )
-    for option in (
-        _PANEL_CLIENT_COUNT_OPTION,
-        _PANEL_STATUS_RESTORE_OPTION,
-        _PANEL_BORDER_RESTORE_OPTION,
-        _PANEL_WINDOW_RESTORE_OPTION,
-    ):
-        subprocess.run(
-            ["tmux", "set-option", "-q", "-u", "-t", session_target, option],
-            check=False,
-        )
-
-    if session_name.startswith("gd/"):
-        sync_panel_tmux_config(theme_name)
+        if session_name.startswith("gd/"):
+            sync_panel_tmux_config(theme_name)
+    finally:
+        if locked:
+            _run_tmux(["wait-for", "-U", lock_name], check=False)
 
 
 def _standalone_attach_fragment(session_name: str) -> str:
@@ -593,7 +636,8 @@ def _temp_panel_pane_command(temp_panel_session_name: str, session_name: str) ->
         f"tmux kill-session -t {quoted_temp_panel_target} >/dev/null 2>&1 || true; "
         "else "
         f"{missing_message}; "
-        "exec tail -f /dev/null; "
+        "sleep 3; "
+        f"tmux kill-session -t {quoted_temp_panel_target} >/dev/null 2>&1 || true; "
         "fi"
     )
     return f"sh -c {shlex.quote(script)}"
@@ -676,64 +720,82 @@ def rebuild_panel_tmux_session(
     theme_name = _resolved_panel_theme_name(theme_name)
     layout = resolve_panel_layout(layout_key, rows, cols)
     closed_panes = closed_panes or set()
+    build_session_name = _panel_build_session_name(panel_name)
 
     for session in panes.values():
         if session and _session_exists(session):
             _protect_session(session)
 
-    kill_panel_tmux_session(panel_name)
+    kill_tmux_session(build_session_name)
 
-    term_cols, term_lines = shutil.get_terminal_size()
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-n",
-            panel_name,
-            "-x",
-            str(term_cols),
-            "-y",
-            str(term_lines),
-            "-c",
-            str(Path.home()),
-            "cat",
-        ],
-        check=True,
-    )
-    _protect_session(session_name)
-    subprocess.run(
-        ["tmux", "set-window-option", "-t", f"={session_name}:0", "pane-border-status", "top"],
-        check=True,
-    )
-
-    pane_ids = _build_panel_layout(session_name, layout.rows, layout.cols, layout.key)
-    _equalize_panel_layout(session_name, pane_ids, layout)
-    _configure_panel_window(session_name, pane_ids, panes, theme_name)
-    _load_panel_tmux_config(panel_name, session_name, theme_name)
-    _ensure_panel_resize_tracking(session_name)
-    sync_panel_tmux_config(theme_name)
-    _ensure_panel_prefix_bindings()
-    total_panes = layout.total_panes
-    for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):
+    try:
+        term_cols, term_lines = shutil.get_terminal_size()
         subprocess.run(
             [
                 "tmux",
-                "respawn-pane",
-                "-k",
-                "-t",
-                pane_id,
-                _panel_pane_command(
-                    panel_name,
-                    pane_index,
-                    panes.get(pane_index),
-                    closed=pane_index in closed_panes,
-                ),
+                "new-session",
+                "-d",
+                "-s",
+                build_session_name,
+                "-n",
+                panel_name,
+                "-x",
+                str(term_cols),
+                "-y",
+                str(term_lines),
+                "-c",
+                str(Path.home()),
+                "cat",
             ],
             check=True,
         )
+        _protect_session(build_session_name)
+        subprocess.run(
+            [
+                "tmux",
+                "set-window-option",
+                "-t",
+                f"={build_session_name}:0",
+                "pane-border-status",
+                "top",
+            ],
+            check=True,
+        )
+
+        pane_ids = _build_panel_layout(build_session_name, layout.rows, layout.cols, layout.key)
+        _equalize_panel_layout(build_session_name, pane_ids, layout)
+        _configure_panel_window(build_session_name, pane_ids, panes, theme_name)
+        total_panes = layout.total_panes
+        for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):
+            subprocess.run(
+                [
+                    "tmux",
+                    "respawn-pane",
+                    "-k",
+                    "-t",
+                    pane_id,
+                    _panel_pane_command(
+                        panel_name,
+                        pane_index,
+                        panes.get(pane_index),
+                        closed=pane_index in closed_panes,
+                    ),
+                ],
+                check=True,
+            )
+
+        kill_panel_tmux_session(panel_name)
+        subprocess.run(
+            ["tmux", "rename-session", "-t", f"={build_session_name}", session_name],
+            check=True,
+        )
+        _protect_session(session_name)
+        _ensure_panel_resize_tracking(session_name)
+        sync_panel_tmux_config(theme_name)
+        _ensure_panel_prefix_bindings()
+    except Exception:
+        kill_tmux_session(build_session_name)
+        raise
 
     return session_name
 
@@ -752,48 +814,52 @@ def rebuild_temp_panel_tmux_session(
             check=False,
         )
 
-    term_cols, term_lines = shutil.get_terminal_size()
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            temp_panel_session_name,
-            "-n",
-            temp_panel_name,
-            "-x",
-            str(term_cols),
-            "-y",
-            str(term_lines),
-            "-c",
-            str(Path.home()),
-            "cat",
-        ],
-        check=True,
-    )
+    try:
+        term_cols, term_lines = shutil.get_terminal_size()
+        subprocess.run(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                temp_panel_session_name,
+                "-n",
+                temp_panel_name,
+                "-x",
+                str(term_cols),
+                "-y",
+                str(term_lines),
+                "-c",
+                str(Path.home()),
+                "cat",
+            ],
+            check=True,
+        )
 
-    _protect_session(temp_panel_session_name)
-    pane_ids = _build_panel_layout(temp_panel_session_name, 1, 1, "grid_1x1")
-    _configure_panel_window(
-        temp_panel_session_name,
-        pane_ids,
-        {1: session_name},
-        theme_name,
-        show_pane_number=False,
-    )
-    _load_panel_tmux_config(temp_panel_name, temp_panel_session_name, theme_name)
-    subprocess.run(
-        [
-            "tmux",
-            "respawn-pane",
-            "-k",
-            "-t",
-            pane_ids[0],
-            _temp_panel_pane_command(temp_panel_session_name, session_name),
-        ],
-        check=True,
-    )
+        _protect_session(temp_panel_session_name)
+        pane_ids = _build_panel_layout(temp_panel_session_name, 1, 1, "grid_1x1")
+        _configure_panel_window(
+            temp_panel_session_name,
+            pane_ids,
+            {1: session_name},
+            theme_name,
+            show_pane_number=False,
+        )
+        _load_panel_tmux_config(temp_panel_name, temp_panel_session_name, theme_name)
+        subprocess.run(
+            [
+                "tmux",
+                "respawn-pane",
+                "-k",
+                "-t",
+                pane_ids[0],
+                _temp_panel_pane_command(temp_panel_session_name, session_name),
+            ],
+            check=True,
+        )
+    except Exception:
+        kill_tmux_session(temp_panel_session_name)
+        raise
     return temp_panel_session_name
 
 

@@ -46,12 +46,6 @@ def show_help():
     ]:
         cmd_table.add_row(cmd, desc)
 
-    console.print(
-        " [dim]Sessions can carry a short description (e.g.[/dim]"
-        ' [white]"OpenCode: refactor auth"[/white] [dim]) — visible in the'
-        " Sessions tab; press[/dim] [white]d[/white] [dim]on a row to edit.[/dim]\n"
-    )
-
     console.print(cmd_table)
 
     console.print()

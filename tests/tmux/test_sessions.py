@@ -3,11 +3,12 @@
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
 from gitdirector.integrations.tmux import (
+    TmuxError,
     _is_persistent_panel_session,
     _is_temp_panel_session,
     _make_session_name,
@@ -238,21 +239,20 @@ class TestListRepoSessions:
 
 
 class TestListAllGdSessions:
-    @patch("gitdirector.integrations.tmux.core._get_session_repo_label", return_value=None)
-    @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
-    @patch("gitdirector.integrations.tmux.core._list_sessions")
-    def test_skips_non_gd_malformed_and_temp_panel_sessions(
-        self, mock_list, _mock_desc, _mock_label
-    ):
-        mock_list.return_value = [
-            "gd/alpha_abcd2/shell/1",
-            "other-session",
-            "gd/bad",
-            "gd/alpha_abcd2/shell/latest",
-            "gd/alpha_abcd2/shell/0",
-            "gd/beta_efgh2/claude/2",
-            "gd/temp/panel/alpha/shell/1",
-        ]
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_skips_non_gd_malformed_and_temp_panel_sessions(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                "gd/alpha_abcd2/shell/1\t\t\n"
+                "other-session\t\t\n"
+                "gd/bad\t\t\n"
+                "gd/alpha_abcd2/shell/latest\t\t\n"
+                "gd/alpha_abcd2/shell/0\t\t\n"
+                "gd/beta_efgh2/claude/2\t\t\n"
+                "gd/temp/panel/alpha/shell/1\t\t\n"
+            ),
+        )
 
         assert list_all_gd_sessions() == [
             {
@@ -271,11 +271,12 @@ class TestListAllGdSessions:
             },
         ]
 
-    @patch("gitdirector.integrations.tmux.core._get_session_repo_label", return_value="group_work")
-    @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
-    @patch("gitdirector.integrations.tmux.core._list_sessions")
-    def test_uses_stored_repo_label_when_present(self, mock_list, _mock_desc, _mock_label):
-        mock_list.return_value = ["gd/work_abcd2/shell/1"]
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_uses_stored_repo_label_when_present(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="gd/work_abcd2/shell/1\tgroup_work\t-\n",
+        )
 
         assert list_all_gd_sessions() == [
             {
@@ -324,7 +325,19 @@ class TestCreateTmuxSession:
         assert name == session_name
         assert mock_run.call_count == 2
         mock_run.assert_any_call(
-            ["tmux", "new-session", "-d", "-s", session_name, "-c", "/tmp/my-repo"],
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-x",
+                ANY,
+                "-y",
+                ANY,
+                "-c",
+                "/tmp/my-repo",
+            ],
             capture_output=True,
             text=True,
         )
@@ -349,7 +362,7 @@ class TestCreateTmuxSession:
             stderr="permission denied",
         )
 
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(TmuxError):
             create_tmux_session("r", Path("/tmp/r"))
 
         mock_sync.assert_not_called()
@@ -402,6 +415,10 @@ class TestCreateTmuxSession:
             "-d",
             "-s",
             session_name,
+            "-x",
+            ANY,
+            "-y",
+            ANY,
             "-c",
             "/tmp/my-repo",
         ]
@@ -631,11 +648,15 @@ class TestAttachTmuxSession:
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_inside_tmux_switches_client_to_temp_panel(self, mock_run, mock_sync, mock_rebuild):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")
-        mock_run.assert_called_once_with(
-            ["tmux", "switch-client", "-t", "=gd/temp/panel/repo/shell/1"]
-        )
+        assert mock_run.call_args_list[-1].args[0] == [
+            "tmux",
+            "switch-client",
+            "-t",
+            "=gd/temp/panel/repo/shell/1",
+        ]
         mock_sync.assert_called_once_with()
         mock_rebuild.assert_called_once_with("gd/repo/shell/1")
 
@@ -646,11 +667,15 @@ class TestAttachTmuxSession:
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_outside_tmux_attaches_to_temp_panel(self, mock_run, mock_sync, mock_rebuild):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/repo/shell/1")
-        mock_run.assert_called_once_with(
-            ["tmux", "attach-session", "-t", "=gd/temp/panel/repo/shell/1"]
-        )
+        assert mock_run.call_args_list[-1].args[0] == [
+            "tmux",
+            "attach-session",
+            "-t",
+            "=gd/temp/panel/repo/shell/1",
+        ]
         mock_sync.assert_called_once_with()
         mock_rebuild.assert_called_once_with("gd/repo/shell/1")
 
@@ -671,13 +696,17 @@ class TestAttachTmuxSession:
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_skip_config_sync_skips_outer_sync(self, mock_run, mock_sync, mock_rebuild):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/alpha/shell/1", skip_config_sync=True)
         mock_sync.assert_not_called()
         mock_rebuild.assert_called_once_with("gd/alpha/shell/1")
-        mock_run.assert_called_once_with(
-            ["tmux", "attach-session", "-t", "=gd/temp/panel/alpha/shell/1"]
-        )
+        assert mock_run.call_args_list[-1].args[0] == [
+            "tmux",
+            "attach-session",
+            "-t",
+            "=gd/temp/panel/alpha/shell/1",
+        ]
 
 
 class TestOpenInTmux:
@@ -690,4 +719,4 @@ class TestOpenInTmux:
         path = Path("/tmp/my-repo")
         open_in_tmux("my-repo", path)
         mock_create.assert_called_once_with("my-repo", path)
-        mock_attach.assert_called_once_with("gd/my-repo/shell/1")
+        mock_attach.assert_called_once_with("gd/my-repo/shell/1", skip_config_sync=True)

@@ -1531,7 +1531,9 @@ class TestAgentLoadingScreen:
     @patch("gitdirector.integrations.tmux.attach_tmux_session")
     @patch("subprocess.run")
     @patch("termios.tcflush")
-    def test_do_dismiss_attaches_and_clears_terminal(self, mock_tcflush, mock_run, mock_attach):
+    def test_do_dismiss_attaches_without_sending_control_keys(
+        self, mock_tcflush, mock_run, mock_attach
+    ):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         screen._ready_marker = MagicMock()
         screen.dismiss = MagicMock()
@@ -1548,8 +1550,9 @@ class TestAgentLoadingScreen:
         stdin = MagicMock()
         stdin.fileno.return_value = 7
 
-        with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
-            screen._do_dismiss()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
+                screen._do_dismiss()
 
         screen._ready_marker.unlink.assert_called_once_with()
         app._pause_session_status_tracking.assert_called_once_with()
@@ -1557,24 +1560,8 @@ class TestAgentLoadingScreen:
         assert stdout.write.call_args_list[0].args[0] == "\033[?1049h\033[H\033[2J\033[?25l"
         assert stdout.write.call_args_list[1].args[0] == "\033[?25h"
         assert stdout.flush.call_count == 2
-        assert mock_run.call_count == 2
-        assert mock_run.call_args_list[0].args[0] == [
-            "tmux",
-            "send-keys",
-            "-t",
-            "=gd/my-repo/copilot/1:",
-            "C-l",
-            "",
-        ]
-        assert mock_run.call_args_list[0].kwargs == {"check": False}
-        assert mock_run.call_args_list[1].args[0] == [
-            "tmux",
-            "clear-history",
-            "-t",
-            "=gd/my-repo/copilot/1:",
-        ]
-        assert mock_run.call_args_list[1].kwargs == {"check": False}
-        mock_attach.assert_called_once_with("gd/my-repo/copilot/1")
+        mock_run.assert_not_called()
+        mock_attach.assert_called_once_with("gd/my-repo/copilot/1", skip_config_sync=True)
         mock_tcflush.assert_called_once_with(7, termios.TCIFLUSH)
         app._resume_session_status_tracking.assert_called_once_with()
         screen.dismiss.assert_called_once_with(None)
@@ -1602,11 +1589,12 @@ class TestAgentLoadingScreen:
         stdin = MagicMock()
         stdin.fileno.return_value = 11
 
-        with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
-            screen._do_dismiss()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
+                screen._do_dismiss()
 
-        assert mock_run.call_count == 2
-        mock_attach.assert_called_once_with("gd/my-repo/copilot/1")
+        mock_run.assert_not_called()
+        mock_attach.assert_called_once_with("gd/my-repo/copilot/1", skip_config_sync=True)
         app._pause_session_status_tracking.assert_called_once_with()
         app._resume_session_status_tracking.assert_called_once_with()
         screen.dismiss.assert_called_once_with(None)

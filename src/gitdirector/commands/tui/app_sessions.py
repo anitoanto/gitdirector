@@ -279,8 +279,12 @@ class ConsoleSessionsMixin:
         from ...integrations.tmux import resolve_pane_status
 
         session_name = entry["session_name"]
-        bell = self._monitor.get_bell_state(session_name)
         tmux_info = self._session_statuses.get(session_name)
+        bell = (
+            bool(tmux_info.get("bell"))
+            if tmux_info is not None
+            else self._monitor.get_bell_state(session_name)
+        )
         if tmux_info is None:
             return "waiting" if bell else "running"
         last_content_change = self._monitor.get_last_content_change_time(session_name)

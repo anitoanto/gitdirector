@@ -71,6 +71,7 @@ class TestExactMatchAttachTmuxSession:
     def test_regular_session_switch_client_exact_temp_panel_target(
         self, mock_run, _mock_sync, _mock_rebuild
     ):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")
         target = mock_run.call_args[0][0][3]
@@ -89,6 +90,7 @@ class TestExactMatchAttachTmuxSession:
         mock_reflow,
         _mock_sync,
     ):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
@@ -110,6 +112,7 @@ class TestExactMatchAttachTmuxSession:
         mock_reflow,
         _mock_sync,
     ):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
@@ -194,6 +197,7 @@ class TestCleanupPanelAttachedSession:
             return result
 
         mock_run.side_effect = [
+            completed(),
             completed("1\n"),
             completed("on\n"),
             completed("off\n"),
@@ -204,11 +208,12 @@ class TestCleanupPanelAttachedSession:
             completed(),
             completed(),
             completed(),
+            completed(),
         ]
 
         cleanup_panel_attached_session("gd/repo/shell/1", theme_name="rose-pine")
 
-        assert mock_run.call_args_list[4].args[0] == [
+        assert mock_run.call_args_list[5].args[0] == [
             "tmux",
             "set-option",
             "-q",
@@ -217,7 +222,7 @@ class TestCleanupPanelAttachedSession:
             "status",
             "on",
         ]
-        assert mock_run.call_args_list[5].args[0] == [
+        assert mock_run.call_args_list[6].args[0] == [
             "tmux",
             "set-window-option",
             "-q",
@@ -240,11 +245,16 @@ class TestCleanupPanelAttachedSession:
         result = MagicMock()
         result.stdout = "3\n"
         result.returncode = 0
-        mock_run.side_effect = [result, MagicMock()]
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            result,
+            MagicMock(),
+            MagicMock(returncode=0),
+        ]
 
         cleanup_panel_attached_session("gd/repo/shell/1")
 
-        assert mock_run.call_args_list[1].args[0] == [
+        assert mock_run.call_args_list[2].args[0] == [
             "tmux",
             "set-option",
             "-q",
@@ -302,11 +312,16 @@ class TestExactMatchLaunchCommand:
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_send_keys_target_uses_equals(self, mock_run, _mock_marker):
+    def test_respawn_pane_target_uses_equals(self, mock_run, _mock_marker):
         launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
-        send_keys_args = mock_run.call_args[0][0]
-        assert send_keys_args[0:3] == ["tmux", "send-keys", "-t"]
-        assert send_keys_args[3] == "=gd/my-repo/copilot/1:"
+        respawn_args = mock_run.call_args[0][0]
+        assert respawn_args[0:5] == [
+            "tmux",
+            "respawn-pane",
+            "-k",
+            "-t",
+            "=gd/my-repo/copilot/1:",
+        ]
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -315,7 +330,7 @@ class TestExactMatchLaunchCommand:
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_cleanup_script_kill_session_uses_equals(self, mock_run, _mock_marker):
         launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
-        cleanup_cmd = mock_run.call_args[0][0][4]
+        cleanup_cmd = mock_run.call_args[0][0][-1]
         assert f"kill-session -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
 
 

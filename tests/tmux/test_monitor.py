@@ -36,9 +36,12 @@ class TestLaunchCommandInTmuxSession:
     def test_queues_cleanup_script(self, mock_run, _mock_marker):
         ready_marker = launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         cleanup_script = (
+            "clear; "
             "touch /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
-            "clear; copilot; status=$?; "
-            "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
+            "sh -lc copilot; status=$?; "
+            'if [ "$status" -eq 0 ]; then touch /tmp/gitdirector-agent.ready.done >/dev/null 2>&1 || true; '
+            "else printf '%s\\n' \"$status\" > /tmp/gitdirector-agent.ready.failed 2>/dev/null || true; "
+            "touch /tmp/gitdirector-agent.ready.done >/dev/null 2>&1 || true; fi; "
             f"tmux detach-client -s {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             "exit $status"
@@ -48,13 +51,13 @@ class TestLaunchCommandInTmuxSession:
         mock_run.assert_called_once_with(
             [
                 "tmux",
-                "send-keys",
+                "respawn-pane",
+                "-k",
                 "-t",
                 "=gd/my-repo/copilot/1:",
                 expected_command,
-                "Enter",
             ],
-            check=False,
+            capture_output=True,
         )
 
     @patch(
@@ -70,22 +73,28 @@ class TestLaunchCommandInTmuxSession:
         and break the command.
         """
         launch_command_in_tmux_session("gd/my-repo/echo hello world/1", 'echo "hello world"')
-        send_keys_argv = mock_run.call_args[0][0]
-        wrapped_script = send_keys_argv[4]
+        respawn_argv = mock_run.call_args[0][0]
+        wrapped_script = respawn_argv[-1]
         assert 'echo "hello world"' in wrapped_script
         # The outer wrapping still uses shlex.quote so single-quote–bearing
-        # commands survive the tmux send-keys boundary intact.
+        # commands survive the tmux command boundary intact.
         assert wrapped_script.startswith("sh -lc ")
 
 
 def _inner_shell_script(mock_run) -> str:
     """Return the script that ``sh -lc`` actually executes.
 
-    The wrapper sent to ``tmux send-keys`` is ``sh -lc <shlex.quote(script)>``;
-    parsing the wrapper as a shell line recovers the original script.
+    The wrapper passed to ``tmux respawn-pane`` is
+    ``sh -lc <shlex.quote(script)>``; parsing the wrapper as a shell line
+    recovers the original script.
     """
-    wrapped = mock_run.call_args[0][0][4]
+    wrapped = mock_run.call_args[0][0][-1]
     return shlex.split(wrapped)[2]
+
+
+def _assert_user_command_wrapped(mock_run, command: str) -> None:
+    script = _inner_shell_script(mock_run)
+    assert f"sh -lc {shlex.quote(command)}; status=$?;" in script
 
 
 class TestCommandQuotingInCleanupScript:
@@ -109,9 +118,9 @@ class TestCommandQuotingInCleanupScript:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_command_with_double_quoted_argument(self, mock_run, _mock_marker):
-        launch_command_in_tmux_session("gd/my-repo/echo/1", 'echo "hello world"')
-        script = _inner_shell_script(mock_run)
-        assert 'echo "hello world"' in script
+        cmd = 'echo "hello world"'
+        launch_command_in_tmux_session("gd/my-repo/echo/1", cmd)
+        _assert_user_command_wrapped(mock_run, cmd)
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -125,9 +134,9 @@ class TestCommandQuotingInCleanupScript:
         quotes as the ``'\"'\"'`` pattern. When the receiving shell parses
         the wrapper it must recover the literal single-quote-bearing command.
         """
-        launch_command_in_tmux_session("gd/my-repo/echo/1", "echo 'hello world'")
-        script = _inner_shell_script(mock_run)
-        assert "echo 'hello world'" in script
+        cmd = "echo 'hello world'"
+        launch_command_in_tmux_session("gd/my-repo/echo/1", cmd)
+        _assert_user_command_wrapped(mock_run, cmd)
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -141,9 +150,9 @@ class TestCommandQuotingInCleanupScript:
         the Python command string is the literal sequence the inner shell
         should see. The inner shell applies its own quote rules from there.
         """
-        launch_command_in_tmux_session("gd/my-repo/echo/1", 'echo "C:\\\\Users"')
-        script = _inner_shell_script(mock_run)
-        assert 'echo "C:\\\\Users"' in script
+        cmd = 'echo "C:\\\\Users"'
+        launch_command_in_tmux_session("gd/my-repo/echo/1", cmd)
+        _assert_user_command_wrapped(mock_run, cmd)
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -151,12 +160,9 @@ class TestCommandQuotingInCleanupScript:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_command_with_mixed_quotes_and_backslashes(self, mock_run, _mock_marker):
-        launch_command_in_tmux_session(
-            "gd/my-repo/echo/1",
-            '''python -c "print('a\\\\\\\\b')"''',
-        )
-        script = _inner_shell_script(mock_run)
-        assert '''python -c "print('a\\\\\\\\b')"''' in script
+        cmd = '''python -c "print('a\\\\\\\\b')"'''
+        launch_command_in_tmux_session("gd/my-repo/echo/1", cmd)
+        _assert_user_command_wrapped(mock_run, cmd)
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -176,8 +182,7 @@ class TestCommandQuotingInCleanupScript:
         ]:
             mock_run.reset_mock()
             launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
-            script = _inner_shell_script(mock_run)
-            assert cmd in script, f"command {cmd!r} not preserved in script: {script!r}"
+            _assert_user_command_wrapped(mock_run, cmd)
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -193,8 +198,7 @@ class TestCommandQuotingInCleanupScript:
         ]:
             mock_run.reset_mock()
             launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
-            script = _inner_shell_script(mock_run)
-            assert cmd in script, f"command {cmd!r} not preserved in script: {script!r}"
+            _assert_user_command_wrapped(mock_run, cmd)
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -209,9 +213,20 @@ class TestCommandQuotingInCleanupScript:
         """
         cmd = "echo first\necho second"
         launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
+        _assert_user_command_wrapped(mock_run, cmd)
+
+    @patch(
+        "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
+        return_value=Path("/tmp/gitdirector-agent.ready"),
+    )
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_exit_command_cannot_skip_outer_cleanup(self, mock_run, _mock_marker):
+        cmd = "exit 7"
+        launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
         script = _inner_shell_script(mock_run)
-        assert "echo first" in script
-        assert "echo second" in script
+
+        _assert_user_command_wrapped(mock_run, cmd)
+        assert script.index(f"sh -lc {shlex.quote(cmd)}") < script.index("tmux kill-session")
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -353,7 +368,7 @@ class TestResolvePaneCommand:
 class TestGetAllSessionStatuses:
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_empty_when_no_gd_panes_exist(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="other-session|bash|0|301\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout="other-session|bash|0|301|0\n")
 
         assert get_all_session_statuses() == {}
 
@@ -363,9 +378,9 @@ class TestGetAllSessionStatuses:
             MagicMock(
                 returncode=0,
                 stdout=(
-                    "gd/alpha/shell/1|zsh|0|101\n"
-                    "gd/beta/claude/1|bash|0|201\n"
-                    "other-session|bash|0|301\n"
+                    "gd/alpha/shell/1|zsh|0|101|0\n"
+                    "gd/beta/claude/1|bash|0|201|1\n"
+                    "other-session|bash|0|301|0\n"
                 ),
             ),
             MagicMock(
@@ -380,10 +395,12 @@ class TestGetAllSessionStatuses:
             "gd/alpha/shell/1": {
                 "command": "zsh",
                 "dead": False,
+                "bell": False,
             },
             "gd/beta/claude/1": {
                 "command": "claude",
                 "dead": False,
+                "bell": True,
             },
         }
 
@@ -393,18 +410,18 @@ class TestGetAllSessionStatuses:
             MagicMock(
                 returncode=0,
                 stdout=(
-                    "gd/panel/main|cat|0|101\n"
-                    "gd/temp/panel/repo/shell/1|zsh|0|201\n"
-                    "gd/repo/shell/1|zsh|0|301\n"
+                    "gd/panel/main|cat|0|101|0\n"
+                    "gd/temp/panel/repo/shell/1|zsh|0|201|0\n"
+                    "gd/repo/shell/1|zsh|0|301|0\n"
                 ),
             ),
-            MagicMock(returncode=0, stdout="301 1 301 301 zsh\n"),
         ]
 
         assert get_all_session_statuses() == {
             "gd/repo/shell/1": {
                 "command": "zsh",
                 "dead": False,
+                "bell": False,
             }
         }
 
@@ -418,9 +435,8 @@ class TestGetAllSessionStatuses:
         mock_run.side_effect = [
             MagicMock(
                 returncode=0,
-                stdout="gd/repo/shell/1|zsh|1|101\n",
+                stdout="gd/repo/shell/1|zsh|1|101|0\n",
             ),
-            MagicMock(returncode=0, stdout="101 1 101 101 zsh\n"),
         ]
         result = get_all_session_statuses()
         assert result["gd/repo/shell/1"]["dead"] is True
@@ -430,9 +446,8 @@ class TestGetAllSessionStatuses:
         mock_run.side_effect = [
             MagicMock(
                 returncode=0,
-                stdout="gd/repo/bad\ngd/repo/shell/1|zsh|0|101\n",
+                stdout="gd/repo/bad\ngd/repo/shell/1|zsh|0|101|0\n",
             ),
-            MagicMock(returncode=0, stdout="101 1 101 101 zsh\n"),
         ]
         result = get_all_session_statuses()
         assert len(result) == 1
@@ -443,9 +458,8 @@ class TestGetAllSessionStatuses:
         mock_run.side_effect = [
             MagicMock(
                 returncode=0,
-                stdout="gd/repo/shell/1|zsh|0|badnum\n",
+                stdout="gd/repo/shell/1|zsh|0|badnum|0\n",
             ),
-            MagicMock(returncode=0, stdout="101 1 101 101 zsh\n"),
         ]
         result = get_all_session_statuses()
         assert "gd/repo/shell/1" in result
@@ -455,7 +469,7 @@ class TestGetAllSessionStatuses:
         mock_run.side_effect = [
             MagicMock(
                 returncode=0,
-                stdout="gd/repo/copilot/1|bash|0|70539\n",
+                stdout="gd/repo/copilot/1|bash|0|70539|0\n",
             ),
             MagicMock(
                 returncode=0,
@@ -856,40 +870,46 @@ class TestTmuxMonitor:
     def test_poll_content_changes_detects_new_content(self, mock_capture):
         monitor = TmuxMonitor()
         mock_capture.return_value = "hello world"
-        monitor._poll_content_changes({"gd/repo/shell/1"})
-        assert monitor.get_last_content_change_time("gd/repo/shell/1") > 0.0
-        assert monitor._content_hashes["gd/repo/shell/1"] == _hash_content("hello world")
+        monitor._poll_content_changes({"gd/repo/claude/1"})
+        assert monitor.get_last_content_change_time("gd/repo/claude/1") > 0.0
+        assert monitor._content_hashes["gd/repo/claude/1"] == _hash_content("hello world")
 
     @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
     def test_poll_content_changes_ignores_same_content(self, mock_capture):
         monitor = TmuxMonitor()
         mock_capture.return_value = "static screen"
-        monitor._poll_content_changes({"gd/repo/shell/1"})
-        first_time = monitor.get_last_content_change_time("gd/repo/shell/1")
+        monitor._poll_content_changes({"gd/repo/claude/1"})
+        first_time = monitor.get_last_content_change_time("gd/repo/claude/1")
 
-        monitor._poll_content_changes({"gd/repo/shell/1"})
-        assert monitor.get_last_content_change_time("gd/repo/shell/1") == first_time
+        monitor._poll_content_changes({"gd/repo/claude/1"})
+        assert monitor.get_last_content_change_time("gd/repo/claude/1") == first_time
 
     @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
     def test_poll_content_changes_updates_on_change(self, mock_capture):
         monitor = TmuxMonitor()
         mock_capture.return_value = "screen v1"
-        monitor._poll_content_changes({"gd/repo/shell/1"})
-        first_time = monitor.get_last_content_change_time("gd/repo/shell/1")
+        monitor._poll_content_changes({"gd/repo/claude/1"})
+        first_time = monitor.get_last_content_change_time("gd/repo/claude/1")
 
         mock_capture.return_value = "screen v2"
-        monitor._poll_content_changes({"gd/repo/shell/1"})
-        assert monitor.get_last_content_change_time("gd/repo/shell/1") > first_time
+        monitor._poll_content_changes({"gd/repo/claude/1"})
+        assert monitor.get_last_content_change_time("gd/repo/claude/1") > first_time
 
     @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
     def test_poll_content_changes_skips_failed_capture(self, mock_capture):
         monitor = TmuxMonitor()
         mock_capture.return_value = None
+        monitor._poll_content_changes({"gd/repo/claude/1"})
+        assert monitor.get_last_content_change_time("gd/repo/claude/1") == 0.0
+
+    @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
+    def test_poll_content_changes_skips_non_agent_sessions(self, mock_capture):
+        monitor = TmuxMonitor()
         monitor._poll_content_changes({"gd/repo/shell/1"})
-        assert monitor.get_last_content_change_time("gd/repo/shell/1") == 0.0
+        mock_capture.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.monitor._list_sessions")
-    def test_sync_sessions_adds_removes_restarts_and_polls(self, mock_list_sessions):
+    def test_sync_sessions_removes_dead_readers_and_polls(self, mock_list_sessions):
         monitor = TmuxMonitor()
         monitor._running = True
         stale_reader = MagicMock()
@@ -925,7 +945,7 @@ class TestTmuxMonitor:
 
         monitor._sync_sessions()
 
-        assert set(added) == {"gd/new/shell/1", "gd/existing/shell/1"}
+        assert added == []
         assert set(removed) == {"gd/stale/shell/1", "gd/existing/shell/1"}
         monitor._poll_content_changes.assert_called_once_with(
             {"gd/new/shell/1", "gd/existing/shell/1"}
@@ -955,7 +975,7 @@ class TestTmuxMonitor:
 
         monitor._sync_sessions()
 
-        assert added == ["gd/repo/shell/1"]
+        assert added == []
         monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
 
     @patch("gitdirector.integrations.tmux.monitor.time.sleep")

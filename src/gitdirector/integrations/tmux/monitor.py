@@ -8,7 +8,14 @@ import threading
 import time
 from pathlib import Path
 
-from .core import _active_pane_target, _list_sessions, _parse_gd_session_name
+from .core import (
+    TmuxError,
+    _active_pane_target,
+    _list_sessions,
+    _parse_gd_session_name,
+    _run_tmux,
+    kill_tmux_session,
+)
 
 
 def _make_agent_ready_marker() -> Path:
@@ -23,43 +30,66 @@ def _make_agent_ready_marker() -> Path:
     return marker_path
 
 
+def _agent_done_marker(ready_marker: Path) -> Path:
+    return Path(f"{ready_marker}.done")
+
+
+def _agent_failed_marker(ready_marker: Path) -> Path:
+    return Path(f"{ready_marker}.failed")
+
+
 def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
     """Run *command* in *session_name* and self-destruct the session on exit.
 
-    The command is sent to the active pane via ``tmux send-keys``. When the
-    command exits, the wrapping shell detaches any attached client and kills
-    the session so the lifecycle matches a one-shot invocation.
+    The command is started by respawning the active pane, avoiding races with
+    the fresh session's interactive shell startup. When the command exits, the
+    wrapping shell detaches any attached client and kills the session so the
+    lifecycle matches a one-shot invocation.
 
-    A temporary marker path is returned (created and immediately removed) so
-    callers that need to wait on a startup signal (such as the TUI's agent
-    loading screen) can do so. Generic command callers can ignore the return
-    value.
+    A temporary marker path is returned so callers that need to wait on a
+    startup signal (such as the TUI's agent loading screen) can do so. The
+    marker is left for the caller to consume, which avoids fast-exit races.
     """
     ready_marker = _make_agent_ready_marker()
     ready_marker_quoted = shlex.quote(str(ready_marker))
+    done_marker = _agent_done_marker(ready_marker)
+    failed_marker = _agent_failed_marker(ready_marker)
+    done_marker_quoted = shlex.quote(str(done_marker))
+    failed_marker_quoted = shlex.quote(str(failed_marker))
     pane_target = _active_pane_target(session_name)
     quoted_session_target = shlex.quote(f"={session_name}")
+    command_script = f"sh -lc {shlex.quote(command)}"
     cleanup_script = (
-        f"touch {ready_marker_quoted} >/dev/null 2>&1 || true; "
         "clear; "
-        f"{command}; "
+        f"touch {ready_marker_quoted} >/dev/null 2>&1 || true; "
+        f"{command_script}; "
         "status=$?; "
-        f"rm -f {ready_marker_quoted} >/dev/null 2>&1 || true; "
+        f'if [ "$status" -eq 0 ]; then touch {done_marker_quoted} >/dev/null 2>&1 || true; '
+        f"else printf '%s\\n' \"$status\" > {failed_marker_quoted} 2>/dev/null || true; "
+        f"touch {done_marker_quoted} >/dev/null 2>&1 || true; fi; "
         f"tmux detach-client -s {quoted_session_target} >/dev/null 2>&1 || true; "
         f"tmux kill-session -t {quoted_session_target} >/dev/null 2>&1 || true; "
         "exit $status"
     )
-    subprocess.run(
+    result = _run_tmux(
         [
-            "tmux",
-            "send-keys",
+            "respawn-pane",
+            "-k",
             "-t",
             pane_target,
             f"sh -lc {shlex.quote(cleanup_script)}",
-            "Enter",
         ],
-        check=False,
     )
+    if isinstance(result.returncode, int) and result.returncode != 0:
+        kill_tmux_session(session_name)
+        for marker in (ready_marker, done_marker, failed_marker):
+            marker.unlink(missing_ok=True)
+        raise TmuxError(
+            "tmux respawn-pane failed",
+            args_list=list(result.args) if isinstance(result.args, list) else None,
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
     return ready_marker
 
 
@@ -196,7 +226,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}|#{pane_current_command}|#{pane_dead}|#{pane_pid}",
+            "#{session_name}|#{pane_current_command}|#{pane_dead}|#{pane_pid}|#{window_bell_flag}",
         ],
         capture_output=True,
         text=True,
@@ -204,15 +234,16 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
     if result.returncode != 0:
         return {}
 
-    pane_rows: list[tuple[str, str, bool, int]] = []
+    pane_rows: list[tuple[str, str, bool, int, bool, str]] = []
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("|", 3)
-        if len(parts) < 4:
+        parts = line.split("|", 4)
+        if len(parts) < 5:
             continue
         session_name = parts[0]
-        if _parse_gd_session_name(session_name) is None:
+        parsed = _parse_gd_session_name(session_name)
+        if parsed is None:
             continue
         try:
             pane_pid = int(parts[3])
@@ -224,19 +255,26 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
                 parts[1],
                 parts[2] == "1",
                 pane_pid,
+                parts[4] == "1",
+                parsed[1],
             )
         )
 
     if not pane_rows:
         return {}
 
-    children_by_parent, commands_by_pid, pgid_by_pid, tpgid_by_pid = _get_process_snapshot()
+    needs_process_snapshot = any(
+        purpose in _AGENT_PURPOSES and pane_pid > 0
+        for _session_name, _command, _dead, pane_pid, _bell, purpose in pane_rows
+    )
+    if needs_process_snapshot:
+        children_by_parent, commands_by_pid, pgid_by_pid, tpgid_by_pid = _get_process_snapshot()
+    else:
+        children_by_parent, commands_by_pid, pgid_by_pid, tpgid_by_pid = {}, {}, {}, {}
     statuses: dict[str, dict[str, object]] = {}
-    for session_name, command, dead, pane_pid in pane_rows:
+    for session_name, command, dead, pane_pid, bell, purpose in pane_rows:
         effective_command = command
-        if pane_pid > 0:
-            parts = session_name.split("/")
-            purpose = parts[2] if len(parts) >= 4 else ""
+        if needs_process_snapshot and pane_pid > 0 and purpose in _AGENT_PURPOSES:
             effective_command = _resolve_pane_command(
                 pane_pid,
                 purpose,
@@ -249,6 +287,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
         statuses[session_name] = {
             "command": effective_command,
             "dead": dead,
+            "bell": bell,
         }
     return statuses
 
@@ -456,9 +495,6 @@ class TmuxMonitor:
                 gd_sessions = {s for s in sessions if _parse_gd_session_name(s) is not None}
                 current = set(self._readers.keys())
 
-                for s in gd_sessions - current:
-                    self._add_reader(s)
-
                 for s in current - gd_sessions:
                     self._remove_reader(s)
 
@@ -466,7 +502,6 @@ class TmuxMonitor:
                     reader = self._readers.get(s)
                     if reader and not reader.is_alive():
                         self._remove_reader(s)
-                        self._add_reader(s)
 
                 self._poll_content_changes(gd_sessions)
             except Exception:
@@ -484,6 +519,9 @@ class TmuxMonitor:
 
     def _poll_content_changes(self, sessions: set[str]):
         for session_name in sessions:
+            parsed = _parse_gd_session_name(session_name)
+            if parsed is None or parsed[1] not in _AGENT_PURPOSES:
+                continue
             text = _capture_pane_text(session_name)
             if text is None:
                 continue
