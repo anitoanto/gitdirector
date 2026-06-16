@@ -63,13 +63,13 @@ class TestExactMatchAttachTmuxSession:
     """attach_tmux_session must use ``=`` for both switch-client and attach-session."""
 
     @patch(
-        "gitdirector.integrations.tmux.panels.rebuild_temp_panel_tmux_session",
+        "gitdirector.integrations.tmux.panels.ensure_temp_panel_tmux_session",
         return_value="gd/temp/panel/repo/shell/1",
     )
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_regular_session_switch_client_exact_temp_panel_target(
-        self, mock_run, _mock_sync, _mock_rebuild
+        self, mock_run, _mock_sync, _mock_ensure
     ):
         mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
@@ -197,7 +197,6 @@ class TestCleanupPanelAttachedSession:
             return result
 
         mock_run.side_effect = [
-            completed(),
             completed("1\n"),
             completed("on\n"),
             completed("off\n"),
@@ -213,7 +212,7 @@ class TestCleanupPanelAttachedSession:
 
         cleanup_panel_attached_session("gd/repo/shell/1", theme_name="rose-pine")
 
-        assert mock_run.call_args_list[5].args[0] == [
+        assert mock_run.call_args_list[4].args[0] == [
             "tmux",
             "set-option",
             "-q",
@@ -222,7 +221,7 @@ class TestCleanupPanelAttachedSession:
             "status",
             "on",
         ]
-        assert mock_run.call_args_list[6].args[0] == [
+        assert mock_run.call_args_list[5].args[0] == [
             "tmux",
             "set-window-option",
             "-q",
@@ -246,15 +245,13 @@ class TestCleanupPanelAttachedSession:
         result.stdout = "3\n"
         result.returncode = 0
         mock_run.side_effect = [
-            MagicMock(returncode=0),
             result,
             MagicMock(),
-            MagicMock(returncode=0),
         ]
 
         cleanup_panel_attached_session("gd/repo/shell/1")
 
-        assert mock_run.call_args_list[2].args[0] == [
+        assert mock_run.call_args_list[1].args[0] == [
             "tmux",
             "set-option",
             "-q",

@@ -354,7 +354,7 @@ def attach_tmux_session(
     """
     from .panels import (
         _ensure_panel_prefix_bindings,
-        rebuild_temp_panel_tmux_session,
+        ensure_temp_panel_tmux_session,
     )
 
     target_session = session_name
@@ -367,7 +367,7 @@ def attach_tmux_session(
     if _should_open_in_temp_panel(session_name):
         if not _session_exists(session_name):
             raise TmuxError(f"tmux session no longer exists: {session_name}")
-        target_session = rebuild_temp_panel_tmux_session(session_name)
+        target_session = ensure_temp_panel_tmux_session(session_name)
     elif _is_persistent_panel_session(target_session):
         if not _session_exists(target_session):
             raise TmuxError(f"tmux session no longer exists: {target_session}")
@@ -414,6 +414,17 @@ def _should_open_in_temp_panel(session_name: str) -> bool:
 
 
 def make_temp_panel_session_name(session_name: str) -> str:
+    """Return the deterministic temp panel session name for *session_name*.
+
+    The temp session is a 1:1 wrapper around an existing inner session,
+    so its name is derived directly from the inner session. Inner
+    session names are already unique (repo + purpose + incrementing
+    sequence), which makes the temp name unique by construction.
+
+    The temp session is reused across attaches (see
+    :func:`ensure_temp_panel_tmux_session`), so the same name must
+    always map to the same wrapper session for a given inner session.
+    """
     suffix = session_name[3:] if session_name.startswith("gd/") else session_name
     return f"gd/temp/panel/{suffix}"
 
