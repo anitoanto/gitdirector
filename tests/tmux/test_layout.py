@@ -493,45 +493,45 @@ class TestRebuildPanelTmuxSession:
         _mock_term_size,
     ):
         def assert_border_enabled_first(*args, **kwargs):
-            assert [call.args for call in mock_run.call_args_list] == [
-                (
-                    [
-                        "tmux",
-                        "new-session",
-                        "-d",
-                        "-s",
-                        "gd/panel/main",
-                        "-n",
-                        "Main",
-                        "-x",
-                        "80",
-                        "-y",
-                        "24",
-                        "-c",
-                        str(Path.home()),
-                        "cat",
-                    ],
-                ),
-                (
-                    [
-                        "tmux",
-                        "set-option",
-                        "-t",
-                        "=gd/panel/main:",
-                        "destroy-unattached",
-                        "off",
-                    ],
-                ),
-                (
-                    [
-                        "tmux",
-                        "set-window-option",
-                        "-t",
-                        "=gd/panel/main:0",
-                        "pane-border-status",
-                        "top",
-                    ],
-                ),
+            commands = [call.args[0] for call in mock_run.call_args_list]
+            new_session_command = next(
+                command for command in commands if command[1] == "new-session"
+            )
+            build_session_name = new_session_command[new_session_command.index("-s") + 1]
+            assert build_session_name.startswith("gd/temp/panel/build-")
+            assert commands[-3:] == [
+                [
+                    "tmux",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    build_session_name,
+                    "-n",
+                    "Main",
+                    "-x",
+                    "80",
+                    "-y",
+                    "24",
+                    "-c",
+                    str(Path.home()),
+                    "cat",
+                ],
+                [
+                    "tmux",
+                    "set-option",
+                    "-t",
+                    f"={build_session_name}:",
+                    "destroy-unattached",
+                    "off",
+                ],
+                [
+                    "tmux",
+                    "set-window-option",
+                    "-t",
+                    f"={build_session_name}:0",
+                    "pane-border-status",
+                    "top",
+                ],
             ]
             return ["%0", "%1", "%2", "%3"]
 
@@ -550,7 +550,7 @@ class TestRebuildPanelTmuxSession:
         mock_kill.assert_called_once_with("Main")
         mock_equalize.assert_called_once()
         mock_configure.assert_called_once()
-        mock_load.assert_called_once()
+        mock_load.assert_not_called()
         mock_sync.assert_called_once_with("rose-pine")
         mock_bindings.assert_called_once_with()
 

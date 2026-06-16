@@ -261,3 +261,41 @@ class TestGdTmuxCommandRunsInSession:
             finally:
                 _run_tmux("kill-server", check=False)
                 _cleanup_tmux_tmpdir(tmux_dir)
+
+    def test_command_with_trailing_comment_still_cleans_up(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A shell comment in the user command must not comment out cleanup."""
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            tmux_dir = _make_short_tmux_tmpdir()
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+
+            repo = home_dir / "demo"
+            repo.mkdir()
+            output_file = tmp_path / "captured_output"
+            sync_panel_tmux_config()
+
+            try:
+                session_name = create_tmux_session("demo", repo, purpose="shell")
+                cmd = f'printf "%s\\n" "comment safe" > "{output_file}"; # trailing comment'
+                launch_command_in_tmux_session(session_name, cmd)
+
+                assert _wait_for(
+                    lambda: (
+                        _run_tmux("has-session", "-t", f"={session_name}", check=False).returncode
+                        != 0
+                    ),
+                    timeout=5.0,
+                ), "session did not self-destruct after command with trailing comment"
+
+                assert output_file.exists()
+                assert output_file.read_text() == "comment safe\n"
+            finally:
+                _run_tmux("kill-server", check=False)
+                _cleanup_tmux_tmpdir(tmux_dir)

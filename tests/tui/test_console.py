@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
@@ -1075,7 +1074,7 @@ class TestGitDirectorConsoleDirectBranches:
                 with patch("termios.tcflush"):
                     app._suspend_and_attach("gd-test-session")
 
-        app._pause_session_status_tracking.assert_called_once_with()
+        app._pause_session_status_tracking.assert_called_once_with(wait=False)
         app._resume_session_status_tracking.assert_called_once_with()
 
     def test_suspend_and_attach_resumes_status_tracking_after_attach_error(self):
@@ -1083,6 +1082,7 @@ class TestGitDirectorConsoleDirectBranches:
         app._pause_session_status_tracking = MagicMock()
         app._resume_session_status_tracking = MagicMock()
         app._monitor = MagicMock()
+        app._update_status = MagicMock()
         app.suspend = MagicMock(
             return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
         )
@@ -1093,11 +1093,11 @@ class TestGitDirectorConsoleDirectBranches:
         ):
             with patch("sys.stdout"):
                 with patch("termios.tcflush"):
-                    with pytest.raises(RuntimeError, match="boom"):
-                        app._suspend_and_attach("gd-test-session")
+                    app._suspend_and_attach("gd-test-session")
 
-        app._pause_session_status_tracking.assert_called_once_with()
+        app._pause_session_status_tracking.assert_called_once_with(wait=False)
         app._resume_session_status_tracking.assert_called_once_with()
+        app._update_status.assert_called_once()
 
     def test_action_select_row_noops_when_sessions_table_empty(self):
         app = GitDirectorConsole()

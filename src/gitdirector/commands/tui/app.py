@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -401,10 +402,20 @@ class GitDirectorConsole(
             repo_label = self._get_selected_group_session_repo_label()
             if repo_label:
                 session_kwargs["repo_label"] = repo_label
-        session_name = create_tmux_session(path.name, path, **session_kwargs)
+        try:
+            session_name = create_tmux_session(path.name, path, **session_kwargs)
+        except Exception as exc:
+            logger.warning("tmux session creation failed: %s", exc)
+            self._update_status(f"tmux session creation failed: {exc}")
+            return
 
         if agent_cmd:
-            ready_marker = launch_command_in_tmux_session(session_name, agent_cmd)
+            try:
+                ready_marker = launch_command_in_tmux_session(session_name, agent_cmd)
+            except Exception as exc:
+                logger.warning("tmux agent launch failed: %s", exc)
+                self._update_status(f"tmux agent launch failed: {exc}")
+                return
             self.push_screen(
                 AgentLoadingScreen(agent_cmd, session_name, ready_marker),
                 callback=lambda _: self.set_timer(
@@ -450,18 +461,33 @@ class GitDirectorConsole(
             row_key=row_key,
         )
 
-        self._pause_session_status_tracking()
+        self._pause_session_status_tracking(wait=False)
         try:
-            with self.suspend():
-                sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-                sys.stdout.flush()
-                attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
-                sys.stdout.write("\033[?25h")
-                sys.stdout.flush()
+            try:
+                with self.suspend():
+                    entered_manual_alt_screen = False
+                    try:
+                        if not os.environ.get("TMUX"):
+                            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+                            sys.stdout.flush()
+                            entered_manual_alt_screen = True
+                        attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
+                    finally:
+                        if entered_manual_alt_screen:
+                            sys.stdout.write("\033[?25h")
+                            sys.stdout.flush()
+                        try:
+                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                        except (AttributeError, OSError):
+                            pass
+            except Exception as exc:
+                logger.warning("tmux attach failed: %s", exc)
                 try:
-                    termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                except (AttributeError, OSError):
+                    sys.stdout.write("\033[?25h\033[?1049l")
+                    sys.stdout.flush()
+                except Exception:
                     pass
+                self._update_status(f"tmux attach failed: {exc}")
         finally:
             self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
