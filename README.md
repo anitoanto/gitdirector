@@ -34,6 +34,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector autoclean`                      | Remove broken repository links from tracking           |
 | `gitdirector info PATH\|NAME [--full]`       | Show file statistics for a repository                  |
 | `gitdirector gd-tmux PATH\|NAME "command"`   | Create a gd tmux session and run a command in it       |
+| `gitdirector gd-capture SESSION`             | Print the scrollback of a live gd tmux session         |
 | `gitdirector help`                           | Show help                                              |
 
 ### link
@@ -65,6 +66,7 @@ Features:
     - **Attach existing session** — switch to any already-running tmux session
     - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
     - **Remove session** — kill a running tmux session
+- **Sessions tab** (press `2`) lists every active `gd/*` tmux session with its status, purpose, repository, **description**, and full session name. The description column is free-form text stored on the session (default `"-"`), with a width that scales to your terminal and wraps long text. Highlight a row and press `d` to edit its description.
 
 ### unlink
 
@@ -139,14 +141,23 @@ Opens a [tmux](https://github.com/tmux/tmux) session rooted at the repository di
 gitdirector gd-tmux my-repo "npm test"
 gitdirector gd-tmux /path/to/my-repo "make build"
 gitdirector gd-tmux my-repo 'echo "hello world"'
+gitdirector gd-tmux my-repo "opencode" --description "OpenCode: refactor auth middleware"
 ```
 
-Creates a new gd tmux session rooted at the given repository, runs the supplied command inside it, and attaches the session. The session is created using the same code path the TUI's **Launch AI agent** menu uses: it is a real `gd/{repo}/{command}/{N}` session, visible in the Sessions tab of `gitdirector console`, and it self-destructs when the command exits.
+Creates a new gd tmux session rooted at the given repository, runs the supplied command inside it, and returns immediately without attaching. The session is a real `gd/{repo}/shell/{N}` session, visible in the Sessions tab of `gitdirector console`, and it self-destructs when the command exits. `N` is allocated as one higher than the highest currently running matching shell session number.
 
 - `PATH|NAME` — accept either an absolute path to a tracked repository or its basename, with the same disambiguation rules as `gitdirector unlink`.
 - `"command"` — the shell command to run inside the new session. Pass it quoted so the shell hands the whole string to gitdirector; quotes and arguments are preserved verbatim.
+- `--description` / `-d` — optional. Free-text description stored on the session and shown in the Sessions tab. Accepts both `--description "text"` and `--description=text` forms. When omitted, the column displays `"-"`.
 
-The command is the same as opening the repo in the console, picking **Launch AI agent** from the action menu, and entering the command — but you can do it from any shell without entering the TUI first. The new session shows up in the Sessions tab immediately.
+The full session name (e.g. `gd/myrepo/shell/1`) is printed to stdout right after the background session is created, so scripts and agents can capture it for later use with `gd-capture`:
+
+```bash
+SESSION=$(gitdirector gd-tmux /path/to/repo opencode --description "OpenCode: refactor auth")
+gitdirector gd-capture "$SESSION" --lines 100
+```
+
+Use this from any shell to start a background command without entering the TUI first. The new session shows up in the Sessions tab immediately. Inside the TUI, highlight any session row and press `d` to edit its description.
 
 ### autoclean
 
@@ -156,20 +167,27 @@ gitdirector autoclean
 
 Scans the tracked repositories in `~/.gitdirector/config.yaml` for paths that no longer exist on disk and removes them from the config. Lists any broken links for review and asks for confirmation before deleting them.
 
-## Instructions for AI coding agents when the user is using GitDirector to manage their project
+### gd-capture
 
-When the user has GitDirector installed and is using it to track the repo you are working in, use `gitdirector gd-tmux` for every long-lived process — never run them in the foreground.
+```bash
+gitdirector gd-capture gd/myrepo/shell/1                # last 200 lines
+gitdirector gd-capture gd/myrepo/shell/1 --lines 50    # last 50 lines
+gitdirector gd-capture gd/myrepo/shell/1 --full        # entire scrollback
+```
 
-**`gd-tmux` rules — read these before launching anything:**
+Prints the current scrollback of a live `gd/*` tmux session to stdout (plain text, pipeable into `grep`/`less`/etc.). The argument is the full session name as shown in the TUI Sessions tab. It must match the `gd/<repo>/<purpose>/<N>` shape; sessions created by `gd-tmux` use `gd/<repo>/shell/<N>`.
 
-- **Never run a long-lived process in the foreground.** A dev server, bundler, watcher, backend API, database, long-running test, REPL, or build loop will block your shell for the rest of the session and the user will not be able to interact with you. Always go through `gd-tmux` so the process runs in a detached gd tmux session the user can monitor and tear down.
-- **Use the absolute path.** By-name lookup matches the directory name verbatim (case-sensitive, spaces and dots included) and is ambiguous when two tracked repos share a basename. When in doubt, `gitdirector list` and copy the absolute path.
-- **Quote the command as a single string.** It is handed to `sh -lc` inside the new session, so write it as one quoted string. `'echo "hi"'` (single-quote outer, double-quote inner) is the safest pattern for embedded double quotes.
-- **The session self-destructs** when the command exits (success or failure), so you do not need to clean it up.
-- **If you need to capture output**, redirect it in the command itself (`> /tmp/out 2>&1`) and read the file later — the session is gone once the command exits.
-- **To stop a running process**, kill the matching session: `gitdirector console` → Sessions tab, or `tmux kill-session -t =<session-name>`.
+**Only running sessions can be captured.** `gd-tmux` sessions self-destruct when their command exits (success or failure), so for any *finished* session you have to have redirected the command's own output to a file:
 
-If a command you need is not covered by GitDirector (e.g. a one-off diagnostic, an install step, a quick `ls`), plain shell is fine — GitDirector is the workflow, not a straitjacket.
+```bash
+gitdirector gd-tmux myrepo "make test 2>&1 | tee /tmp/run.log"
+```
+
+The session is gone the moment the command exits; the scrollback lives on only as the bytes the process actually wrote.
+
+## For AI coding agents
+
+If you are an AI coding agent (Claude Code, OpenCode, GitHub Copilot, Codex, Pi, or any other tool that drives a shell on the user's behalf), the rules for integrating with the user's GitDirector workflow — including `gd-tmux` background sessions, `gd-capture`, and the mandatory `--description` flag — live in [`LLMS.txt`](./LLMS.txt). Read that file end-to-end before running any commands.
 
 ## Configuration
 

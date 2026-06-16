@@ -4,11 +4,8 @@ These tests start a private tmux server, invoke the same code path the
 ``gd-tmux`` CLI command uses, and verify the user's command actually runs
 inside the new session with all quote/escape sequences preserved.
 
-The test exercises everything except the final ``attach_tmux_session`` step
-(which would block the test process on tmux attach). Skipping that step is
-the same shortcut ``test_integration.py`` already uses when probing session
-state, and the cleanup behaviour we want to verify is in the wrapped
-``sh -lc`` script, not in the attach path.
+The command runs in the background; cleanup behaviour is in the wrapped
+``sh -lc`` script.
 """
 
 from __future__ import annotations
@@ -16,7 +13,6 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-import uuid
 
 import pytest
 
@@ -72,12 +68,10 @@ class TestGdTmuxCommandRunsInSession:
             repo = home_dir / "demo"
             repo.mkdir()
             output_file = tmp_path / "captured_output"
-            suffix = uuid.uuid4().hex[:6]
-            purpose = f"echo-hello-world-{suffix}"
             sync_panel_tmux_config()
 
             try:
-                session_name = create_tmux_session("demo", repo, purpose=purpose)
+                session_name = create_tmux_session("demo", repo, purpose="shell")
                 assert (
                     _run_tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
                 )
@@ -120,12 +114,10 @@ class TestGdTmuxCommandRunsInSession:
             repo = home_dir / "demo"
             repo.mkdir()
             output_file = tmp_path / "captured_output"
-            suffix = uuid.uuid4().hex[:6]
-            purpose = f"with-single-quotes-{suffix}"
             sync_panel_tmux_config()
 
             try:
-                session_name = create_tmux_session("demo", repo, purpose=purpose)
+                session_name = create_tmux_session("demo", repo, purpose="shell")
                 cmd = f'printf \'%s\\n\' "don\'t worry" > "{output_file}"'
                 launch_command_in_tmux_session(session_name, cmd)
 
@@ -162,12 +154,10 @@ class TestGdTmuxCommandRunsInSession:
             repo = home_dir / "demo"
             repo.mkdir()
             output_file = tmp_path / "captured_output"
-            suffix = uuid.uuid4().hex[:6]
-            purpose = f"with-backslashes-{suffix}"
             sync_panel_tmux_config()
 
             try:
-                session_name = create_tmux_session("demo", repo, purpose=purpose)
+                session_name = create_tmux_session("demo", repo, purpose="shell")
                 # Python source ``\\\\`` -> string ``\\`` -> inner shell
                 # collapses ``\\`` to a single ``\`` inside double quotes.
                 cmd = f'echo "C:\\\\Users" > "{output_file}"'
@@ -209,12 +199,10 @@ class TestGdTmuxCommandRunsInSession:
             repo = home_dir / "My Repo"
             repo.mkdir()
             output_file = tmp_path / "captured_output"
-            suffix = uuid.uuid4().hex[:6]
-            purpose = f"with-space-{suffix}"
             sync_panel_tmux_config()
 
             try:
-                session_name = create_tmux_session("My Repo", repo, purpose=purpose)
+                session_name = create_tmux_session("My Repo", repo, purpose="shell")
                 assert (
                     _run_tmux("has-session", "-t", f"={session_name}", check=False).returncode == 0
                 )
@@ -257,12 +245,10 @@ class TestGdTmuxCommandRunsInSession:
 
             repo = home_dir / "demo"
             repo.mkdir()
-            suffix = uuid.uuid4().hex[:6]
-            purpose = f"failing-{suffix}"
             sync_panel_tmux_config()
 
             try:
-                session_name = create_tmux_session("demo", repo, purpose=purpose)
+                session_name = create_tmux_session("demo", repo, purpose="shell")
                 launch_command_in_tmux_session(session_name, "false")
 
                 assert _wait_for(

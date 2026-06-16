@@ -8,6 +8,7 @@ from .commands import (
     _path_text,
     _status_text,
     autoclean,
+    capture,
     cd,
     console,
     gd_tmux,
@@ -57,6 +58,7 @@ tui.register(cli)
 autoclean.register(cli)
 info.register(cli)
 gd_tmux.register(cli)
+capture.register(cli)
 
 
 def main():

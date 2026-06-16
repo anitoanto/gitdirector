@@ -61,16 +61,33 @@ def _list_sessions() -> list[str]:
     return [s for s in result.stdout.strip().split("\n") if s]
 
 
-def _next_n(prefix: str, sessions: list[str] | None = None) -> int:
-    if sessions is None:
-        sessions = _list_sessions()
-    max_n = 0
-    for s in sessions:
-        if s.startswith(prefix):
-            tail = s[len(prefix) :]
-            if tail.isdigit():
-                max_n = max(max_n, int(tail))
-    return max_n + 1
+def _session_name_segments(
+    repo_name: str | Path,
+    purpose: str,
+    *,
+    repo_path: Path | None = None,
+) -> tuple[str, str]:
+    if repo_path is None and isinstance(repo_name, Path):
+        repo_path = repo_name
+    repo_segment = (
+        _repo_session_name_segment(repo_path)
+        if repo_path is not None
+        else (_sanitize_repo_name(str(repo_name)) or "repo")
+    )
+    purpose_segment = _sanitize_repo_name(purpose) or "cmd"
+    return repo_segment, purpose_segment
+
+
+def _next_session_sequence(repo_segment: str, purpose_segment: str, sessions: list[str]) -> int:
+    max_sequence = 0
+    for session_name in sessions:
+        parsed = _parse_gd_session_name(session_name)
+        if parsed is None:
+            continue
+        parsed_repo, parsed_purpose, parsed_sequence = parsed
+        if parsed_repo == repo_segment and parsed_purpose == purpose_segment:
+            max_sequence = max(max_sequence, int(parsed_sequence))
+    return max_sequence + 1
 
 
 def _make_session_name(
@@ -78,6 +95,7 @@ def _make_session_name(
     purpose: str = "shell",
     *,
     repo_path: Path | None = None,
+    sessions: list[str] | None = None,
 ) -> str:
     """Generate the next sequential session name: gd/{repo}/{purpose}/{N}.
 
@@ -88,17 +106,15 @@ def _make_session_name(
     still embedded verbatim in the session's working command, so no
     information is lost — only the session-name label is normalized.
     """
-    if repo_path is None and isinstance(repo_name, Path):
-        repo_path = repo_name
-    clean = (
-        _repo_session_name_segment(repo_path)
-        if repo_path is not None
-        else _sanitize_repo_name(str(repo_name))
+    if sessions is None:
+        sessions = _list_sessions()
+    repo_segment, purpose_segment = _session_name_segments(
+        repo_name,
+        purpose,
+        repo_path=repo_path,
     )
-    clean_purpose = _sanitize_repo_name(purpose) or "cmd"
-    prefix = f"gd/{clean}/{clean_purpose}/"
-    n = _next_n(prefix)
-    return f"{prefix}{n}"
+    sequence = _next_session_sequence(repo_segment, purpose_segment, sessions)
+    return f"gd/{repo_segment}/{purpose_segment}/{sequence}"
 
 
 def _session_exists(session_name: str) -> bool:
@@ -150,7 +166,10 @@ def list_repo_sessions(repo_name: str | Path) -> list[str]:
 def list_all_gd_sessions() -> list[dict[str, str]]:
     """List all GitDirector tmux sessions (gd/ prefix).
 
-    Returns a list of dicts with keys: session_name, repo, repo_slug, purpose.
+    Returns a list of dicts with keys: session_name, repo, repo_slug,
+    purpose, description. The description is the user-set value stored in
+    the session's ``@gitdirector_description`` tmux option, or ``"-"``
+    when the option is unset.
     """
     sessions = _list_sessions()
     entries = []
@@ -162,25 +181,51 @@ def list_all_gd_sessions() -> list[dict[str, str]]:
         entries.append(
             {
                 "session_name": s,
-                "repo": _repo_label_from_segment(repo_slug),
+                "repo": _get_session_repo_label(s) or _repo_label_from_segment(repo_slug),
                 "repo_slug": repo_slug,
                 "purpose": purpose,
+                "description": _get_session_description(s),
             }
         )
     return entries
 
 
-def create_tmux_session(repo_name: str, path: Path, purpose: str = "shell") -> str:
-    """Create a new detached tmux session with a unique name and return it."""
-    for _ in range(10):
-        session_name = _make_session_name(repo_name, purpose, repo_path=path)
-        if not _session_exists(session_name):
+def create_tmux_session(
+    repo_name: str,
+    path: Path,
+    purpose: str = "shell",
+    *,
+    description: str | None = None,
+    repo_label: str | None = None,
+) -> str:
+    """Create a new detached tmux session with a unique name and return it.
+
+    The optional *description* is stored in the session's
+    ``@gitdirector_description`` tmux option so it can be displayed in
+    the TUI Sessions tab. A value of ``None`` or ``""`` leaves the option
+    unset (the next read returns the default ``"-"`` placeholder).
+    """
+    sessions = _list_sessions()
+    while True:
+        session_name = _make_session_name(repo_name, purpose, repo_path=path, sessions=sessions)
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session_name, "-c", str(path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
             break
-    subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session_name, "-c", str(path)],
-        check=True,
-    )
+
+        sessions = _list_sessions()
+        if session_name in sessions:
+            continue
+
+        result.check_returncode()
     _protect_session(session_name)
+    if repo_label is not None and repo_label.strip():
+        _set_session_repo_label(session_name, repo_label)
+    if description is not None and description.strip():
+        _set_session_description(session_name, description)
     sync_panel_tmux_config()
     return session_name
 
@@ -306,7 +351,144 @@ def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | N
     _, repo, purpose, sequence = parts
     if not repo or not purpose or not sequence:
         return None
+    if not sequence.isdigit() or int(sequence) <= 0:
+        return None
     return repo, purpose, sequence
+
+
+def capture_pane(
+    session_name: str,
+    *,
+    lines: int | None = None,
+    full: bool = False,
+) -> str | None:
+    """Return the current scrollback of *session_name*'s active pane.
+
+    Returns ``None`` when the session is not running, when tmux is not
+    installed, or when the capture fails for any other reason.
+
+    Exactly one of *lines* or *full* should be supplied. ``lines=N`` uses
+    ``tmux capture-pane -p -S -N`` to grab the last N lines from the
+    scrollback. ``full=True`` uses ``-S -`` to grab the entire visible
+    scrollback history. With neither, tmux's default (the currently
+    visible viewport) is returned.
+    """
+    if not _session_exists(session_name):
+        return None
+    cmd = ["tmux", "capture-pane", "-p", "-t", _active_pane_target(session_name)]
+    if full:
+        cmd.extend(["-S", "-"])
+    elif lines is not None and lines > 0:
+        cmd.extend(["-S", f"-{lines}"])
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+GD_DESCRIPTION_OPTION = "@gitdirector_description"
+GD_REPO_LABEL_OPTION = "@gitdirector_repo_label"
+GD_DEFAULT_DESCRIPTION = "-"
+
+
+def _get_session_repo_label(session_name: str) -> str | None:
+    result = subprocess.run(
+        [
+            "tmux",
+            "show-option",
+            "-t",
+            _session_option_target(session_name),
+            "-v",
+            "-q",
+            GD_REPO_LABEL_OPTION,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value or "\n" in value or "/" in value:
+        return None
+    return value
+
+
+def _set_session_repo_label(session_name: str, repo_label: str) -> None:
+    clean = (repo_label or "").strip()
+    if not clean:
+        return
+    subprocess.run(
+        [
+            "tmux",
+            "set-option",
+            "-t",
+            _session_option_target(session_name),
+            GD_REPO_LABEL_OPTION,
+            clean,
+        ],
+        capture_output=True,
+    )
+
+
+def _get_session_description(session_name: str) -> str:
+    """Return the user-set description for *session_name*.
+
+    Reads the ``@gitdirector_description`` session option. Returns the
+    default placeholder ("-") when the option is unset or the session is
+    unavailable.
+    """
+    result = subprocess.run(
+        [
+            "tmux",
+            "show-option",
+            "-t",
+            _session_option_target(session_name),
+            "-v",
+            "-q",
+            GD_DESCRIPTION_OPTION,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return GD_DEFAULT_DESCRIPTION
+    value = result.stdout.strip()
+    return value or GD_DEFAULT_DESCRIPTION
+
+
+def _set_session_description(session_name: str, description: str) -> None:
+    """Set the user-facing description for *session_name* in tmux.
+
+    Pass an empty string to clear the description (the next read will
+    return the default "-" placeholder). The change is applied directly
+    to the live session; ``sync_panel_tmux_config`` does not need to be
+    called.
+    """
+    clean = (description or "").strip()
+    if clean:
+        subprocess.run(
+            [
+                "tmux",
+                "set-option",
+                "-t",
+                _session_option_target(session_name),
+                GD_DESCRIPTION_OPTION,
+                clean,
+            ],
+            capture_output=True,
+        )
+    else:
+        subprocess.run(
+            [
+                "tmux",
+                "set-option",
+                "-u",
+                "-t",
+                _session_option_target(session_name),
+                GD_DESCRIPTION_OPTION,
+            ],
+            capture_output=True,
+        )
 
 
 def _panel_session_label(session_name: str | None) -> str | None:

@@ -105,17 +105,20 @@ SAMPLE_SESSIONS = [
         "repo": "alpha",
         "repo_slug": "alpha",
         "purpose": "shell",
+        "description": "-",
     },
     {
         "session_name": "gd/beta/claude/1",
         "repo": "beta",
         "repo_slug": "beta",
         "purpose": "claude",
+        "description": "-",
     },
     {
         "session_name": "gd/gamma/copilot/1",
         "repo": "gamma",
         "repo_slug": "gamma",
         "purpose": "copilot",
+        "description": "-",
     },
 ]
