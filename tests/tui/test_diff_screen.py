@@ -4,7 +4,7 @@ These tests cover:
 
 * Screen composition: header, body, hint, file list, content panel
 * Async loading: shows loading indicator, populates list, renders content
-* Navigation: j/k, n/p, J/K, ]/[
+* Navigation: j/k, J/K, ]/[, arrow keys
 * Focus switching: tab toggles between file list and diff scroll
 * Close: escape and q both dismiss
 * Refresh: r reloads the diff
@@ -141,8 +141,11 @@ class TestDiffReviewScreenCompose:
             assert content is not None
 
             hint = app.screen.query_one("#diff-hint", Static)
-            assert "tab" in hint.content.lower()
-            assert "esc" in hint.content.lower()
+            hint_text = hint.content.lower()
+            assert "tab" in hint_text
+            assert "esc" in hint_text
+            assert "brackets" in hint_text
+            assert "n/p" not in hint_text
 
     async def test_loading_indicator_shown_while_diff_loads(self):
         # The loading indicator is shown before the worker completes and then
@@ -271,7 +274,7 @@ class TestDiffReviewScreenNavigation:
             await pilot.press("k")
             assert files_list.index == 0
 
-    async def test_navigates_with_n_p(self, mocker):
+    async def test_n_p_do_not_navigate_files(self, mocker):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -279,8 +282,9 @@ class TestDiffReviewScreenNavigation:
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
+            assert files_list.index == 0
             await pilot.press("n")
-            assert files_list.index == 1
+            assert files_list.index == 0
             await pilot.press("p")
             assert files_list.index == 0
 
@@ -295,6 +299,20 @@ class TestDiffReviewScreenNavigation:
             await pilot.press("]")
             assert files_list.index == 1
             await pilot.press("[")
+            assert files_list.index == 0
+
+    async def test_arrow_keys_navigate_files_when_file_list_is_focused(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await self._setup_with_diff(app, mocker)
+            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            files_list.focus()
+            await pilot.pause()
+            assert files_list.index == 0
+            await pilot.press("right")
+            assert files_list.index == 1
+            await pilot.press("left")
             assert files_list.index == 0
 
     async def test_navigation_does_not_move_past_boundaries(self, mocker):
@@ -585,7 +603,7 @@ class TestContentPanelTone:
         from gitdirector import repo as repo_mod
 
         # A diff with lines long enough to overflow a narrow viewport.
-        long_line = "x" * 200
+        long_line = "x" * 320
         long_diff = (
             "diff --git a/long.py b/long.py\n"
             "index 1234..5678 100644\n"
@@ -614,12 +632,23 @@ class TestContentPanelTone:
             await pilot.pause()
             assert scroll.scroll_x == 0
             assert scroll.max_scroll_x > 0, "content should overflow the viewport horizontally"
+            assert scroll.max_scroll_x > 220, "scroll range should cover the full long line"
             await pilot.press("l")
             await pilot.pause()
             assert scroll.scroll_x > 0, "l should scroll the content right"
             await pilot.press("h")
             await pilot.pause()
             assert scroll.scroll_x == 0, "h should scroll the content back to the start"
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert screen.focused is scroll
+            await pilot.press("right")
+            await pilot.pause()
+            assert scroll.scroll_x > 0, "right arrow should scroll when diff pane is focused"
+            await pilot.press("left")
+            await pilot.pause()
+            assert scroll.scroll_x == 0, "left arrow should scroll back when diff pane is focused"
 
 
 # ---------------------------------------------------------------------------

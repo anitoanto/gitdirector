@@ -1171,7 +1171,7 @@ class TestSortMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 7
+            assert menu.option_count == 6
 
     async def test_title_shows_sort_by(self):
         screen = SortMenuScreen(0, False)
@@ -1244,7 +1244,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 4
+            assert menu.option_count == 5
 
     async def test_default_column_names(self):
         screen = SortMenuScreen(0, False)
@@ -1254,7 +1254,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 7
+            assert menu.option_count == 6
 
     async def test_toggle_on_custom_column(self):
         results: list = []
@@ -1630,22 +1630,19 @@ class TestRemoveFlow:
             mock_kill.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
-    @patch("gitdirector.integrations.tmux._sanitize_repo_name", side_effect=lambda x: x)
-    async def test_do_remove_updates_repo_row(self, _mock_sanitize, mock_kill):
+    async def test_do_remove_updates_session_entries(self, mock_kill):
         repos = [_make_info("my-repo", Path("/tmp/my-repo"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_cache[str(Path("/tmp/my-repo"))] = 2
             app._sessions_entries = [
                 {"session_name": "gd/my-repo/shell/1", "repo": "my-repo", "purpose": "shell"},
                 {"session_name": "gd/my-repo/shell/2", "repo": "my-repo", "purpose": "shell"},
             ]
             app._do_remove(True, "gd/my-repo/shell/1")
             mock_kill.assert_called_once_with("gd/my-repo/shell/1")
-            assert app._sessions_cache[str(Path("/tmp/my-repo"))] == 1
             assert len(app._sessions_entries) == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])

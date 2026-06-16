@@ -613,13 +613,16 @@ class TestGitDirectorConsolePanels:
             == 9
         )
 
-    def test_panel_delete_hotkey_removed(self):
-        assert all(binding.key != "d" for binding in GitDirectorConsole.BINDINGS)
+    def test_description_edit_binding_uses_d_key(self):
+        assert any(
+            binding.key == "d" and binding.action == "edit_session_description"
+            for binding in GitDirectorConsole.BINDINGS
+        )
 
     def test_tab_switch_hotkeys_hidden_from_footer(self):
         hidden_keys = {binding.key for binding in GitDirectorConsole.BINDINGS if not binding.show}
 
-        assert {"1", "2", "3"}.issubset(hidden_keys)
+        assert {"1", "2", "3", "4"}.issubset(hidden_keys)
 
     async def test_new_panel_footer_binding_only_shows_on_panels_tab(self):
         app = GitDirectorConsole()

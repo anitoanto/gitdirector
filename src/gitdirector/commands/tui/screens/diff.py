@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.markup import escape
 from textual import work
 from textual.app import ComposeResult
@@ -68,10 +69,8 @@ class DiffReviewScreen(ModalScreen[None]):
         Binding("shift+up", "cursor_page_up", "Shift+↑ page", show=False),
         Binding("page_down", "cursor_page_down", "PgDn", show=False),
         Binding("page_up", "cursor_page_up", "PgUp", show=False),
-        Binding("n", "next_file", "next file", show=False),
-        Binding("p", "prev_file", "prev file", show=False),
-        Binding("right", "next_file", "next", show=False),
-        Binding("left", "prev_file", "prev", show=False),
+        Binding("right", "cursor_right", "→", show=False),
+        Binding("left", "cursor_left", "←", show=False),
         Binding("]", "next_file", "]", show=False),
         Binding("[", "prev_file", "[", show=False),
         Binding("h", "scroll_left", "←", show=False),
@@ -245,13 +244,13 @@ class DiffReviewScreen(ModalScreen[None]):
                         yield Static("Loading diff\u2026", id="diff-loading-text")
                     yield Static("", id="diff-empty")
             yield Static(
-                "[bold]tab[/bold] switch panel    "
-                "[bold]j/k[/bold] scroll line    "
-                "[bold]J/K[/bold] scroll page    "
-                "[bold]h/l[/bold] scroll right/left    "
-                "[bold]n/p[/bold] next/prev file    "
-                "[bold]g[/bold] commit    "
-                "[bold]r[/bold] refresh    "
+                "[bold]tab[/bold] panel  "
+                "[bold]j/k[/bold] line  "
+                "[bold]J/K[/bold] page  "
+                "[bold]h/l[/bold] horizontal  "
+                "[bold]brackets[/bold] file  "
+                "[bold]g[/bold] commit  "
+                "[bold]r[/bold] refresh  "
                 "[bold]esc[/bold] close",
                 id="diff-hint",
             )
@@ -423,7 +422,8 @@ class DiffReviewScreen(ModalScreen[None]):
         file = self._files[index]
         try:
             content = self.query_one("#diff-content", Static)
-            content.update(render_file_diff(file, width=self._content_width()))
+            code_width = self._diff_code_width(file)
+            content.update(render_file_diff(file, width=code_width))
             # ``render_file_diff`` returns a Rich ``Group`` renderable,
             # which does not report a natural width to Textual's
             # measurement. Without an explicit width here, the Static
@@ -431,7 +431,7 @@ class DiffReviewScreen(ModalScreen[None]):
             # (``word_wrap=False``) get clipped instead of becoming
             # horizontally scrollable. Set the width to the renderable's
             # actual width so the container can scroll the overflow.
-            content.styles.width = self._content_width() + 6
+            content.styles.width = code_width + self._diff_gutter_width(file)
             self._apply_content_tone(file)
         except Exception:
             logger.debug("Failed to render diff content", exc_info=True)
@@ -468,6 +468,16 @@ class DiffReviewScreen(ModalScreen[None]):
             return min(160, width)
         except Exception:
             return 100
+
+    def _diff_code_width(self, file: ChangedFile) -> int:
+        longest_line = 0
+        for line in file.diff_text.splitlines() or [file.display_path]:
+            longest_line = max(longest_line, cell_len(line.expandtabs(4)))
+        return max(self._content_width(), longest_line)
+
+    def _diff_gutter_width(self, file: ChangedFile) -> int:
+        last_line = file.last_new_line or file.first_new_line or 1
+        return max(6, len(str(last_line)) + 4)
 
     def _current_file_index(self) -> int | None:
         try:
@@ -602,6 +612,18 @@ class DiffReviewScreen(ModalScreen[None]):
 
     def action_prev_file(self) -> None:
         self._move_file(-1)
+
+    def action_cursor_right(self) -> None:
+        if self._focus_target == _FOCUS_DIFF and self._files:
+            self.action_scroll_right()
+            return
+        self.action_next_file()
+
+    def action_cursor_left(self) -> None:
+        if self._focus_target == _FOCUS_DIFF and self._files:
+            self.action_scroll_left()
+            return
+        self.action_prev_file()
 
     def action_scroll_left(self) -> None:
         try:

@@ -3,13 +3,14 @@
 The command creates a gd tmux session for a tracked repository and runs a
 caller-supplied command inside it. The tests below cover the CLI surface —
 argument parsing, path/name resolution, the empty-command guard, the missing
-tmux integration case, and the wiring of the three tmux integration calls.
+tmux integration case, and the create/launch wiring.
 The tmux integration itself is exercised by the existing tmux/monitor tests;
 we mock it here so the CLI tests do not need a live tmux server.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -35,18 +36,24 @@ def _seed_repo(config, path: Path) -> None:
 
 @pytest.fixture
 def mock_tmux_integration(monkeypatch):
-    """Patch the three tmux functions imported by the gd-tmux command.
+    """Patch the tmux functions imported by the gd-tmux command.
 
-    ``create_tmux_session`` returns a name derived from its inputs (mirroring
-    the real function) so downstream assertions on the launch/attach calls
-    can use the same session name the production code would have generated.
+    ``create_tmux_session`` returns a parseable name derived from its repo and purpose
+    so downstream assertions on the launch call can use the same value returned by
+    the integration while still asserting the original command is passed through
+    verbatim.
 
     Returns a dict of MagicMock objects so individual tests can assert on
     call arguments.
     """
 
-    def fake_create(repo_name, path, purpose="shell"):
-        return f"gd/{repo_name}/{purpose}/1"
+    def clean_segment(value: str, fallback: str) -> str:
+        value = re.sub(r"[^a-z0-9-]", "-", value.lower())
+        value = re.sub(r"-+", "-", value).strip("-")
+        return value or fallback
+
+    def fake_create(repo_name, path, purpose="shell", description=None):
+        return f"gd/{clean_segment(repo_name, 'repo')}/{clean_segment(purpose, 'cmd')}/1"
 
     mocks = {
         "create_tmux_session": MagicMock(side_effect=fake_create),
@@ -76,14 +83,12 @@ class TestGdTmuxByName:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="pytest -q"
+            "myapp", repo, purpose="shell", description=None
         )
         mock_tmux_integration["launch_command_in_tmux_session"].assert_called_once_with(
-            "gd/myapp/pytest -q/1", "pytest -q"
+            "gd/myapp/shell/1", "pytest -q"
         )
-        mock_tmux_integration["attach_tmux_session"].assert_called_once_with(
-            "gd/myapp/pytest -q/1", skip_config_sync=True
-        )
+        mock_tmux_integration["attach_tmux_session"].assert_not_called()
 
     def test_command_with_quotes_preserved(
         self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
@@ -96,14 +101,12 @@ class TestGdTmuxByName:
 
         assert result.exit_code == 0, result.output
         # The command (with its quotes) is passed through verbatim to the
-        # launch function. The fake create_tmux_session echoes the purpose
-        # back into the session name, so we assert on that mirror — the
-        # important behaviour is that the original string is preserved.
+        # launch function while gd-tmux keeps the tmux session purpose as shell.
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "demo", repo, purpose='echo "hello world"'
+            "demo", repo, purpose="shell", description=None
         )
         mock_tmux_integration["launch_command_in_tmux_session"].assert_called_once_with(
-            'gd/demo/echo "hello world"/1', 'echo "hello world"'
+            "gd/demo/shell/1", 'echo "hello world"'
         )
 
 
@@ -119,7 +122,7 @@ class TestGdTmuxByPath:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="ls -la"
+            "myapp", repo, purpose="shell", description=None
         )
 
     def test_path_with_separator_routes_through_path_branch(
@@ -162,7 +165,7 @@ class TestGdTmuxWithSpaceInName:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "My Repo", repo, purpose="echo hi"
+            "My Repo", repo, purpose="shell", description=None
         )
 
     def test_runs_command_for_absolute_path_with_space(
@@ -176,7 +179,7 @@ class TestGdTmuxWithSpaceInName:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "My Repo", repo, purpose="echo hi"
+            "My Repo", repo, purpose="shell", description=None
         )
 
     def test_repo_name_with_space_does_not_collapse_to_basename(
@@ -195,6 +198,126 @@ class TestGdTmuxWithSpaceInName:
         assert result.exit_code != 0
         assert "No tracked repository named: My Repo" in result.output
         mock_tmux_integration["create_tmux_session"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# --description flag
+# ---------------------------------------------------------------------------
+
+
+class TestGdTmuxDescriptionFlag:
+    def test_description_long_flag_passes_value(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest", "--description=ready to ship"])
+
+        assert result.exit_code == 0, result.output
+        mock_tmux_integration["create_tmux_session"].assert_called_once_with(
+            "myapp", repo, purpose="shell", description="ready to ship"
+        )
+
+    def test_description_short_flag_passes_value(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest", "-d", "wip feature"])
+
+        assert result.exit_code == 0, result.output
+        mock_tmux_integration["create_tmux_session"].assert_called_once_with(
+            "myapp", repo, purpose="shell", description="wip feature"
+        )
+
+    def test_description_defaults_to_none(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest"])
+
+        assert result.exit_code == 0, result.output
+        mock_tmux_integration["create_tmux_session"].assert_called_once_with(
+            "myapp", repo, purpose="shell", description=None
+        )
+
+    def test_description_supports_spaces(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(
+            cli, ["gd-tmux", "myapp", "pytest", "--description", "ready to ship"]
+        )
+
+        assert result.exit_code == 0, result.output
+        mock_tmux_integration["create_tmux_session"].assert_called_once_with(
+            "myapp", repo, purpose="shell", description="ready to ship"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Session name output — callers (humans, agents) need the name to pass to
+# `gitdirector gd-capture` later, so it is printed to stdout right after
+# the background session is created.
+# ---------------------------------------------------------------------------
+
+
+class TestGdTmuxPrintsSessionName:
+    def test_session_name_is_printed_to_stdout(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest -q"])
+
+        assert result.exit_code == 0, result.output
+        assert "gd/myapp/shell/1" in result.output
+
+    def test_output_is_captureable_by_shell(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        """The session name on stdout must be cleanly captureable by
+        ``SESSION=$(gitdirector gd-tmux ...)`` — no leading prefix, label,
+        or trailing junk that would break shell substitution.
+        """
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest"])
+
+        assert result.exit_code == 0, result.output
+        # The output should contain the bare session name on a line of
+        # its own. ``runner.invoke`` may or may not add a trailing newline;
+        # a regex anchored to a line is the safest assertion.
+        match = re.search(r"^gd/myapp/shell/1\s*$", result.output, re.MULTILINE)
+        assert match is not None, f"expected bare session name in output: {result.output!r}"
+
+    def test_does_not_attach_after_launch(
+        self, gd_tmux_cli, config, mock_tmux_integration, tmp_path
+    ):
+        """gd-tmux launches the command in the background and returns."""
+        runner, _ = gd_tmux_cli
+        repo = tmp_path / "myapp"
+        _seed_repo(config, repo)
+
+        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest"])
+
+        assert result.exit_code == 0, result.output
+        assert "gd/myapp/shell/1" in result.output
+        mock_tmux_integration["attach_tmux_session"].assert_not_called()
 
 
 # ---------------------------------------------------------------------------

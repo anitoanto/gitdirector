@@ -34,10 +34,23 @@ def show_help():
         ("console", "Interactive TUI for browsing and opening repositories"),
         ("autoclean", "Remove broken repository links from tracking"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
-        ('gd-tmux PATH|NAME "cmd"', "Create a gd tmux session and run a command in it"),
+        (
+            'gd-tmux PATH|NAME "cmd" [--description "..."]',
+            "Create a gd tmux session and run a command in it",
+        ),
+        (
+            "gd-capture SESSION [--lines N] [--full]",
+            "Print the current scrollback of a live gd tmux session",
+        ),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)
+
+    console.print(
+        " [dim]Sessions can carry a short description (e.g.[/dim]"
+        ' [white]"OpenCode: refactor auth"[/white] [dim]) — visible in the'
+        " Sessions tab; press[/dim] [white]d[/white] [dim]on a row to edit.[/dim]\n"
+    )
 
     console.print(cmd_table)
 

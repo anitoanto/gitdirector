@@ -16,6 +16,7 @@ from .panel_view import PanelViewScreen, PaneWidget
 from .panels import Panel, PanelStore
 from .screens import SortMenuScreen
 from .screens.diff import DiffReviewScreen
+from .screens.groups import GroupActionMenuScreen
 from .screens.panels import (
     AgentLoadingScreen,
     ConfirmScreen,
@@ -42,6 +43,7 @@ __all__ = [
     "DiffReviewScreen",
     "GitCommandResultScreen",
     "GitOperationsMenuScreen",
+    "GroupActionMenuScreen",
     "_DEFAULT_PANELS_SORT_COLUMN",
     "GitDirectorConsole",
     "PaneWidget",

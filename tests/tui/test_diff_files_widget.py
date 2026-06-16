@@ -452,7 +452,7 @@ class TestDiffUpdatesOnSelection:
             second = content.content
             assert first is not second
 
-    async def test_content_updates_on_n_press(self, mocker):
+    async def test_content_does_not_update_on_n_press(self, mocker):
         from gitdirector import repo as repo_mod
 
         mocker.patch.object(
@@ -478,7 +478,7 @@ class TestDiffUpdatesOnSelection:
             await pilot.press("n")
             await pilot.pause()
             second = content.content
-            assert first is not second
+            assert first is second
 
     async def test_content_updates_on_bracket_press(self, mocker):
         from gitdirector import repo as repo_mod
