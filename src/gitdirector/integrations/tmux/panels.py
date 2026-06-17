@@ -3,6 +3,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from ...ui_theme import resolve_panel_theme
@@ -60,6 +61,32 @@ def _tmux_option_value(target: str, option: str, *, window: bool = False) -> str
         return None
     value = result.stdout.strip()
     return value or None
+
+
+def _respawn_pane(pane_id: str, command: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    args = ["tmux", "respawn-pane", "-k", "-t", pane_id, command]
+    last_result = None
+    for attempt in range(4):
+        result = subprocess.run(args, check=False, capture_output=True, text=True)
+        last_result = result
+        returncode = result.returncode if isinstance(result.returncode, int) else 0
+        stderr = result.stderr if isinstance(result.stderr, str) else ""
+        if returncode == 0 or "fork failed" not in stderr.lower():
+            break
+        time.sleep(0.05 * (attempt + 1))
+
+    if last_result is None:
+        raise RuntimeError("tmux respawn-pane was not run")
+
+    returncode = last_result.returncode if isinstance(last_result.returncode, int) else 0
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode,
+            last_result.args,
+            output=last_result.stdout,
+            stderr=last_result.stderr,
+        )
+    return last_result
 
 
 def _split_panel_row(start_target: str, cols: int) -> None:
@@ -743,21 +770,14 @@ def rebuild_panel_tmux_session(
         _configure_panel_window(build_session_name, pane_ids, panes, theme_name)
         total_panes = layout.total_panes
         for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):
-            subprocess.run(
-                [
-                    "tmux",
-                    "respawn-pane",
-                    "-k",
-                    "-t",
-                    pane_id,
-                    _panel_pane_command(
-                        panel_name,
-                        pane_index,
-                        panes.get(pane_index),
-                        closed=pane_index in closed_panes,
-                    ),
-                ],
-                check=True,
+            _respawn_pane(
+                pane_id,
+                _panel_pane_command(
+                    panel_name,
+                    pane_index,
+                    panes.get(pane_index),
+                    closed=pane_index in closed_panes,
+                ),
             )
 
         kill_panel_tmux_session(panel_name)
@@ -814,15 +834,9 @@ def _respawn_temp_panel_pane(
     if pane_id is None:
         _create_temp_panel_tmux_session(session_name, _resolved_panel_theme_name(None))
         return
-    result = subprocess.run(
-        [
-            "tmux",
-            "respawn-pane",
-            "-k",
-            "-t",
-            pane_id,
-            _temp_panel_pane_command(temp_panel_session_name, session_name),
-        ],
+    result = _respawn_pane(
+        pane_id,
+        _temp_panel_pane_command(temp_panel_session_name, session_name),
         check=False,
     )
     if result.returncode != 0:
@@ -897,16 +911,9 @@ def _create_temp_panel_tmux_session(
             show_pane_number=False,
         )
         _load_panel_tmux_config(temp_panel_name, temp_panel_session_name, theme_name)
-        subprocess.run(
-            [
-                "tmux",
-                "respawn-pane",
-                "-k",
-                "-t",
-                pane_id,
-                _temp_panel_pane_command(temp_panel_session_name, session_name),
-            ],
-            check=True,
+        _respawn_pane(
+            pane_id,
+            _temp_panel_pane_command(temp_panel_session_name, session_name),
         )
     except Exception:
         kill_tmux_session(temp_panel_session_name)

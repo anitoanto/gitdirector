@@ -451,6 +451,7 @@ class FileTileList(ListView):
         self._pending_index: int | None = None
         self._pending_retry_count = 0
         self._PENDING_RETRY_LIMIT = 50
+        self._SCROLL_RETRY_LIMIT = 10
 
     def set_files(self, files: list[ChangedFile], repo_dir: str = "") -> None:
         self._repo_dir = repo_dir
@@ -500,6 +501,17 @@ class FileTileList(ListView):
             pass
         self._update_selection()
         self.post_message(self.FileSelected(self.selected_file()))
+        self._ensure_index_visible(new)
+
+    def _ensure_index_visible(self, index: int | None, attempt: int = 0) -> None:
+        if index is None or index != self.index or not self._is_valid_index(index):
+            return
+        selected_widget = self._nodes[index]
+        if selected_widget.region:
+            self.scroll_to_widget(selected_widget, animate=False, immediate=True)
+            return
+        if attempt < self._SCROLL_RETRY_LIMIT:
+            self.call_after_refresh(self._ensure_index_visible, index, attempt + 1)
 
     def _update_selection(self) -> None:
         for i, child in enumerate(self.children):

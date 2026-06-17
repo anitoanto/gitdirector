@@ -32,7 +32,7 @@ from gitdirector.commands.tui.panels import get_create_panel_layouts
 from gitdirector.commands.tui.screens import PanelActionMenuScreen, _render_grid_preview
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 
-from .conftest import _make_info, _mock_manager
+from .conftest import _make_info, _mock_manager, _wait_for_animated_scroll
 
 
 class TestConfirmScreen:
@@ -454,22 +454,22 @@ class TestPullResultScreen:
             assert scroll.scroll_y == 0
 
             await pilot.press("down")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             after_down = scroll.scroll_y
             assert after_down > 0
 
             await pilot.press("j")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             after_j = scroll.scroll_y
             assert after_j > after_down
 
             await pilot.press("up")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             after_up = scroll.scroll_y
             assert after_up < after_j
 
             await pilot.press("k")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             assert scroll.scroll_y <= after_up
 
 

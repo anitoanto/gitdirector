@@ -29,7 +29,7 @@ from gitdirector.commands.tui import (
 )
 from gitdirector.commands.tui.screens.diff_files import FileTileList
 
-from .conftest import _make_info, _mock_manager
+from .conftest import _make_info, _mock_manager, _wait_for_refresh
 
 
 @pytest.fixture(autouse=True)
@@ -634,20 +634,20 @@ class TestContentPanelTone:
             assert scroll.max_scroll_x > 0, "content should overflow the viewport horizontally"
             assert scroll.max_scroll_x > 220, "scroll range should cover the full long line"
             await pilot.press("l")
-            await pilot.pause()
+            await _wait_for_refresh(scroll)
             assert scroll.scroll_x > 0, "l should scroll the content right"
             await pilot.press("h")
-            await pilot.pause()
+            await _wait_for_refresh(scroll)
             assert scroll.scroll_x == 0, "h should scroll the content back to the start"
 
             await pilot.press("tab")
             await pilot.pause()
             assert screen.focused is scroll
             await pilot.press("right")
-            await pilot.pause()
+            await _wait_for_refresh(scroll)
             assert scroll.scroll_x > 0, "right arrow should scroll when diff pane is focused"
             await pilot.press("left")
-            await pilot.pause()
+            await _wait_for_refresh(scroll)
             assert scroll.scroll_x == 0, "left arrow should scroll back when diff pane is focused"
 
 
