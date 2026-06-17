@@ -148,7 +148,9 @@ class TestPanelPaneTitles:
         content = config_path.read_text()
         assert "set-option -t =gd/panel/main: status-position bottom" in content
         assert "set-window-option -t =gd/panel/main:0 pane-border-lines heavy" in content
-        mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
+        mock_run.assert_called_once_with(
+            ["tmux", "source-file", str(config_path)], capture_output=True
+        )
 
     @patch("gitdirector.integrations.tmux.core._session_exists", side_effect=[True, False])
     @patch("gitdirector.commands.tui.panels.PanelStore")
@@ -180,7 +182,9 @@ class TestPanelPaneTitles:
         assert "# theme: nord" in content
         assert "set-option -t =gd/panel/main: status-position bottom" in content
         assert "set-option -t =gd/panel/me2: status-position bottom" in content
-        mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
+        mock_run.assert_called_once_with(
+            ["tmux", "source-file", str(config_path)], capture_output=True
+        )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_writes_regular_sessions(self, mock_run, tmp_path):
@@ -205,7 +209,9 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/my-repo/shell/1: status-left" in content
         assert "SHELL" in content
         assert "set-window-option -t =gd/my-repo/shell/1:2 pane-border-style" in content
-        mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
+        mock_run.assert_called_once_with(
+            ["tmux", "source-file", str(config_path)], capture_output=True
+        )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_skips_source_when_no_live_sessions(self, mock_run, tmp_path):
@@ -254,7 +260,9 @@ class TestPanelPaneTitles:
 
         assert written_path == config_path
         assert config_path.exists()
-        mock_run.assert_called_once_with(["tmux", "source-file", str(config_path)], check=True)
+        mock_run.assert_called_once_with(
+            ["tmux", "source-file", str(config_path)], capture_output=True
+        )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_configure_panel_window_sets_titles_with_slugs(self, mock_run):

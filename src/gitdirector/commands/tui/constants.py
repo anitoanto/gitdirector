@@ -31,11 +31,18 @@ _SORT_COLUMN_NAMES = {
     2: "Branch",
     3: "Changes",
     4: "Last Commit",
-    5: "Sessions",
-    6: "Path",
+    5: "Path",
 }
 
 _DEFAULT_SORT_COLUMN = 0
+
+_GROUPS_SORT_COLUMN_NAMES = {
+    0: "Group",
+    1: "Repositories",
+    2: "Path",
+}
+
+_DEFAULT_GROUPS_SORT_COLUMN = 0
 
 _STATUS_ORDER = {
     RepoStatus.UP_TO_DATE: 0,
@@ -50,9 +57,18 @@ _SESSIONS_SORT_COLUMN_NAMES = {
     1: "Session",
     2: "Repository",
     3: "Session Name",
+    4: "Description",
 }
 
 _DEFAULT_SESSIONS_SORT_COLUMN = 3
+
+# Column indexes for the Sessions tab. Kept here so the TUI mixins and
+# the action handlers can refer to the same source of truth.
+_SESSIONS_COL_STATUS = 0
+_SESSIONS_COL_PURPOSE = 1
+_SESSIONS_COL_REPO = 2
+_SESSIONS_COL_SESSION_NAME = 3
+_SESSIONS_COL_DESCRIPTION = 4
 
 _SESSION_STATUS_POLL_INTERVAL_SECS = 10
 

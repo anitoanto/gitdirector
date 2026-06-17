@@ -11,11 +11,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.markup import escape
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import ListItem, LoadingIndicator, Static
 
@@ -41,6 +42,15 @@ _FOCUS_FILES = "files"
 _FOCUS_DIFF = "diff"
 
 
+class _DiffContentScroll(Vertical, can_focus=True):
+    """Bidirectional scroll container for the diff panel.
+
+    ``VerticalScroll`` only scrolls vertically, so long diff lines
+    (``word_wrap=False``) get clipped on the right. This container
+    scrolls in both directions so the user can pan to see overflow.
+    """
+
+
 class DiffReviewScreen(ModalScreen[None]):
     """Two-pane modal showing the uncommitted diff for a single repository."""
 
@@ -59,12 +69,12 @@ class DiffReviewScreen(ModalScreen[None]):
         Binding("shift+up", "cursor_page_up", "Shift+↑ page", show=False),
         Binding("page_down", "cursor_page_down", "PgDn", show=False),
         Binding("page_up", "cursor_page_up", "PgUp", show=False),
-        Binding("n", "next_file", "next file", show=False),
-        Binding("p", "prev_file", "prev file", show=False),
-        Binding("right", "next_file", "next", show=False),
-        Binding("left", "prev_file", "prev", show=False),
+        Binding("right", "cursor_right", "→", show=False),
+        Binding("left", "cursor_left", "←", show=False),
         Binding("]", "next_file", "]", show=False),
         Binding("[", "prev_file", "[", show=False),
+        Binding("h", "scroll_left", "←", show=False),
+        Binding("l", "scroll_right", "→", show=False),
         Binding("g", "commit", "g commit", show=True),
         Binding("r", "refresh", "r refresh", show=True),
     ]
@@ -151,10 +161,14 @@ class DiffReviewScreen(ModalScreen[None]):
         border: none;
         background: #0d1117;
         padding: 0 0;
+        overflow-x: auto;
+        overflow-y: auto;
         scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
     }
     #diff-content {
-        width: 1fr;
+        width: auto;
+        height: auto;
         color: #c9d1d9;
         background: #0d1117;
         padding: 0 0;
@@ -223,19 +237,20 @@ class DiffReviewScreen(ModalScreen[None]):
                 with Vertical(id="diff-files-pane"):
                     yield FileTileList(id="diff-files-list")
                 with Vertical(id="diff-content-pane"):
-                    with VerticalScroll(id="diff-content-scroll"):
+                    with _DiffContentScroll(id="diff-content-scroll"):
                         yield Static(id="diff-content")
                     with Vertical(id="diff-loading"):
                         yield LoadingIndicator()
                         yield Static("Loading diff\u2026", id="diff-loading-text")
                     yield Static("", id="diff-empty")
             yield Static(
-                "[bold]tab[/bold] switch panel    "
-                "[bold]j/k[/bold] scroll line    "
-                "[bold]J/K[/bold] scroll page    "
-                "[bold]n/p[/bold] next/prev file    "
-                "[bold]g[/bold] commit    "
-                "[bold]r[/bold] refresh    "
+                "[bold]tab[/bold] panel  "
+                "[bold]j/k[/bold] line  "
+                "[bold]J/K[/bold] page  "
+                "[bold]h/l[/bold] horizontal  "
+                "[bold]brackets[/bold] file  "
+                "[bold]g[/bold] commit  "
+                "[bold]r[/bold] refresh  "
                 "[bold]esc[/bold] close",
                 id="diff-hint",
             )
@@ -362,11 +377,6 @@ class DiffReviewScreen(ModalScreen[None]):
 
         files_list.set_files(self._files, repo_dir=str(self.repo_path))
         self._show_content()
-        # The file list's first item is selected by default (index 0) via
-        # a deferred call inside ``set_files``. Rendering the diff for that
-        # item needs to happen AFTER the index is set, so we defer it
-        # until the next refresh cycle.
-        self.call_after_refresh(self._render_selected_file)
         self._update_summary()
         self._apply_focus()
 
@@ -404,11 +414,24 @@ class DiffReviewScreen(ModalScreen[None]):
             return
         index = self._current_file_index()
         if index is None:
-            return
+            # No selection yet (e.g. a caller invoked us before the
+            # list's deferred initial selection has run). Fall back to
+            # the first file so the panel is never blank when we have
+            # content to show.
+            index = 0
         file = self._files[index]
         try:
             content = self.query_one("#diff-content", Static)
-            content.update(render_file_diff(file, width=self._content_width()))
+            code_width = self._diff_code_width(file)
+            content.update(render_file_diff(file, width=code_width))
+            # ``render_file_diff`` returns a Rich ``Group`` renderable,
+            # which does not report a natural width to Textual's
+            # measurement. Without an explicit width here, the Static
+            # collapses to the scroll container's width and long lines
+            # (``word_wrap=False``) get clipped instead of becoming
+            # horizontally scrollable. Set the width to the renderable's
+            # actual width so the container can scroll the overflow.
+            content.styles.width = code_width + self._diff_gutter_width(file)
             self._apply_content_tone(file)
         except Exception:
             logger.debug("Failed to render diff content", exc_info=True)
@@ -445,6 +468,16 @@ class DiffReviewScreen(ModalScreen[None]):
             return min(160, width)
         except Exception:
             return 100
+
+    def _diff_code_width(self, file: ChangedFile) -> int:
+        longest_line = 0
+        for line in file.diff_text.splitlines() or [file.display_path]:
+            longest_line = max(longest_line, cell_len(line.expandtabs(4)))
+        return max(self._content_width(), longest_line)
+
+    def _diff_gutter_width(self, file: ChangedFile) -> int:
+        last_line = file.last_new_line or file.first_new_line or 1
+        return max(6, len(str(last_line)) + 4)
 
     def _current_file_index(self) -> int | None:
         try:
@@ -579,6 +612,34 @@ class DiffReviewScreen(ModalScreen[None]):
 
     def action_prev_file(self) -> None:
         self._move_file(-1)
+
+    def action_cursor_right(self) -> None:
+        if self._focus_target == _FOCUS_DIFF and self._files:
+            self.action_scroll_right()
+            return
+        self.action_next_file()
+
+    def action_cursor_left(self) -> None:
+        if self._focus_target == _FOCUS_DIFF and self._files:
+            self.action_scroll_left()
+            return
+        self.action_prev_file()
+
+    def action_scroll_left(self) -> None:
+        try:
+            scroll = self.query_one("#diff-content-scroll")
+        except Exception:
+            return
+        step = max(1, self.app.size.width // 8)
+        scroll.scroll_to(scroll.scroll_x - step, None, animate=False)
+
+    def action_scroll_right(self) -> None:
+        try:
+            scroll = self.query_one("#diff-content-scroll")
+        except Exception:
+            return
+        step = max(1, self.app.size.width // 8)
+        scroll.scroll_to(scroll.scroll_x + step, None, animate=False)
 
     def action_commit(self) -> None:
         """Stage all changes, then ask for a commit message + action.

@@ -32,7 +32,7 @@ from gitdirector.commands.tui.panels import get_create_panel_layouts
 from gitdirector.commands.tui.screens import PanelActionMenuScreen, _render_grid_preview
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 
-from .conftest import _make_info, _mock_manager
+from .conftest import _make_info, _mock_manager, _wait_for_animated_scroll
 
 
 class TestConfirmScreen:
@@ -454,22 +454,22 @@ class TestPullResultScreen:
             assert scroll.scroll_y == 0
 
             await pilot.press("down")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             after_down = scroll.scroll_y
             assert after_down > 0
 
             await pilot.press("j")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             after_j = scroll.scroll_y
             assert after_j > after_down
 
             await pilot.press("up")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             after_up = scroll.scroll_y
             assert after_up < after_j
 
             await pilot.press("k")
-            await pilot.pause()
+            await _wait_for_animated_scroll(pilot, scroll)
             assert scroll.scroll_y <= after_up
 
 
@@ -1171,7 +1171,7 @@ class TestSortMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 7
+            assert menu.option_count == 6
 
     async def test_title_shows_sort_by(self):
         screen = SortMenuScreen(0, False)
@@ -1244,7 +1244,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 4
+            assert menu.option_count == 5
 
     async def test_default_column_names(self):
         screen = SortMenuScreen(0, False)
@@ -1254,7 +1254,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 7
+            assert menu.option_count == 6
 
     async def test_toggle_on_custom_column(self):
         results: list = []
@@ -1531,7 +1531,9 @@ class TestAgentLoadingScreen:
     @patch("gitdirector.integrations.tmux.attach_tmux_session")
     @patch("subprocess.run")
     @patch("termios.tcflush")
-    def test_do_dismiss_attaches_and_clears_terminal(self, mock_tcflush, mock_run, mock_attach):
+    def test_do_dismiss_attaches_without_sending_control_keys(
+        self, mock_tcflush, mock_run, mock_attach
+    ):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         screen._ready_marker = MagicMock()
         screen.dismiss = MagicMock()
@@ -1548,8 +1550,9 @@ class TestAgentLoadingScreen:
         stdin = MagicMock()
         stdin.fileno.return_value = 7
 
-        with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
-            screen._do_dismiss()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
+                screen._do_dismiss()
 
         screen._ready_marker.unlink.assert_called_once_with()
         app._pause_session_status_tracking.assert_called_once_with()
@@ -1557,24 +1560,8 @@ class TestAgentLoadingScreen:
         assert stdout.write.call_args_list[0].args[0] == "\033[?1049h\033[H\033[2J\033[?25l"
         assert stdout.write.call_args_list[1].args[0] == "\033[?25h"
         assert stdout.flush.call_count == 2
-        assert mock_run.call_count == 2
-        assert mock_run.call_args_list[0].args[0] == [
-            "tmux",
-            "send-keys",
-            "-t",
-            "=gd/my-repo/copilot/1:",
-            "C-l",
-            "",
-        ]
-        assert mock_run.call_args_list[0].kwargs == {"check": False}
-        assert mock_run.call_args_list[1].args[0] == [
-            "tmux",
-            "clear-history",
-            "-t",
-            "=gd/my-repo/copilot/1:",
-        ]
-        assert mock_run.call_args_list[1].kwargs == {"check": False}
-        mock_attach.assert_called_once_with("gd/my-repo/copilot/1")
+        mock_run.assert_not_called()
+        mock_attach.assert_called_once_with("gd/my-repo/copilot/1", skip_config_sync=True)
         mock_tcflush.assert_called_once_with(7, termios.TCIFLUSH)
         app._resume_session_status_tracking.assert_called_once_with()
         screen.dismiss.assert_called_once_with(None)
@@ -1602,11 +1589,12 @@ class TestAgentLoadingScreen:
         stdin = MagicMock()
         stdin.fileno.return_value = 11
 
-        with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
-            screen._do_dismiss()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
+                screen._do_dismiss()
 
-        assert mock_run.call_count == 2
-        mock_attach.assert_called_once_with("gd/my-repo/copilot/1")
+        mock_run.assert_not_called()
+        mock_attach.assert_called_once_with("gd/my-repo/copilot/1", skip_config_sync=True)
         app._pause_session_status_tracking.assert_called_once_with()
         app._resume_session_status_tracking.assert_called_once_with()
         screen.dismiss.assert_called_once_with(None)
@@ -1630,22 +1618,19 @@ class TestRemoveFlow:
             mock_kill.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
-    @patch("gitdirector.integrations.tmux._sanitize_repo_name", side_effect=lambda x: x)
-    async def test_do_remove_updates_repo_row(self, _mock_sanitize, mock_kill):
+    async def test_do_remove_updates_session_entries(self, mock_kill):
         repos = [_make_info("my-repo", Path("/tmp/my-repo"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_cache[str(Path("/tmp/my-repo"))] = 2
             app._sessions_entries = [
                 {"session_name": "gd/my-repo/shell/1", "repo": "my-repo", "purpose": "shell"},
                 {"session_name": "gd/my-repo/shell/2", "repo": "my-repo", "purpose": "shell"},
             ]
             app._do_remove(True, "gd/my-repo/shell/1")
             mock_kill.assert_called_once_with("gd/my-repo/shell/1")
-            assert app._sessions_cache[str(Path("/tmp/my-repo"))] == 1
             assert len(app._sessions_entries) == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
