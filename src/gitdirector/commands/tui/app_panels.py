@@ -45,8 +45,13 @@ def _render_panel_preview(panel: Panel, live_sessions: set[str] | None = None) -
     return render_panel_layout_preview(panel.layout, labels=labels, cell_width=1, cell_height=1)
 
 
-def _panel_row_height(panel: Panel, live_sessions: set[str] | None = None) -> int:
-    return len(_render_panel_preview(panel, live_sessions).splitlines()) + 2
+def _panel_row_height(
+    panel: Panel,
+    live_sessions: set[str] | None = None,
+    *,
+    preview: str | None = None,
+) -> int:
+    return len((preview or _render_panel_preview(panel, live_sessions)).splitlines()) + 2
 
 
 def _panel_row_cell(value: str) -> str:
@@ -163,7 +168,7 @@ class ConsolePanelsMixin:
                     _panel_row_cell(panel.layout_display_label),
                     _panel_row_cell(panes_label),
                     _panel_row_cell(status_label),
-                    height=_panel_row_height(panel, live_sessions),
+                    height=_panel_row_height(panel, live_sessions, preview=preview),
                     key=panel.name,
                 )
 

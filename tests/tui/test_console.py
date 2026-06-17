@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
@@ -146,7 +145,7 @@ class TestGitDirectorConsole:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as _:
             table = app.query_one("#repo-table", DataTable)
-            assert len(table.columns) == 7
+            assert len(table.columns) == 6
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch("gitdirector.commands.tui.ActionMenuScreen")
@@ -192,7 +191,7 @@ class TestGitDirectorConsole:
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[{"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"}],
     )
-    async def test_sessions_column_shows_count(self, _mock_sessions):
+    async def test_repo_load_does_not_query_session_counts(self, mock_sessions):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
@@ -201,7 +200,8 @@ class TestGitDirectorConsole:
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
             row_key = str(repos[0].path)
-            assert table.get_cell(row_key, app._col_keys[5]) == "1"
+            assert table.get_cell(row_key, app._col_keys[5]) == str(repos[0].path)
+            mock_sessions.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_row_data_reflects_status(self, _mock_sessions):
@@ -228,7 +228,7 @@ class TestGitDirectorConsole:
             assert table.get_cell(row_key, ck[2]) == "develop"
             assert table.get_cell(row_key, ck[3]) == "staged"
             assert table.get_cell(row_key, ck[4]) == "5 min ago"
-            assert table.get_cell(row_key, ck[5]) == "—"
+            assert table.get_cell(row_key, ck[5]) == str(repos[0].path)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_multiple_repos_status(self, _mock_sessions):
@@ -364,6 +364,7 @@ class TestGitDirectorConsoleActionRouting:
                 "alpha",
                 Path("/tmp/alpha"),
                 purpose="copilot",
+                description=None,
             )
             mock_launch_command.assert_called_once_with("gd/alpha/copilot/1", "copilot")
             mock_loading_screen.assert_called_once_with(
@@ -775,16 +776,15 @@ class TestGitDirectorConsoleDirectBranches:
 
     def test_update_row_ignores_table_errors(self):
         app = GitDirectorConsole()
-        app._sessions_cache = {}
-        app._col_keys = ("repo", "sync", "branch", "changes", "last", "sessions", "path")
+        app._col_keys = ("repo", "sync", "branch", "changes", "last", "path")
         table = MagicMock()
         table.update_cell.side_effect = RuntimeError("boom")
         app.query_one = MagicMock(return_value=table)
         info = _make_info("alpha", Path("/tmp/alpha"))
 
-        app._update_row(info, 2)
+        app._update_row(info)
 
-        assert app._sessions_cache[str(info.path)] == 2
+        table.update_cell.assert_called_once()
 
     def test_action_tab_sessions_ignored_while_restore_pending(self):
         app = GitDirectorConsole()
@@ -1074,7 +1074,7 @@ class TestGitDirectorConsoleDirectBranches:
                 with patch("termios.tcflush"):
                     app._suspend_and_attach("gd-test-session")
 
-        app._pause_session_status_tracking.assert_called_once_with()
+        app._pause_session_status_tracking.assert_called_once_with(wait=False)
         app._resume_session_status_tracking.assert_called_once_with()
 
     def test_suspend_and_attach_resumes_status_tracking_after_attach_error(self):
@@ -1082,6 +1082,7 @@ class TestGitDirectorConsoleDirectBranches:
         app._pause_session_status_tracking = MagicMock()
         app._resume_session_status_tracking = MagicMock()
         app._monitor = MagicMock()
+        app._update_status = MagicMock()
         app.suspend = MagicMock(
             return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
         )
@@ -1092,11 +1093,11 @@ class TestGitDirectorConsoleDirectBranches:
         ):
             with patch("sys.stdout"):
                 with patch("termios.tcflush"):
-                    with pytest.raises(RuntimeError, match="boom"):
-                        app._suspend_and_attach("gd-test-session")
+                    app._suspend_and_attach("gd-test-session")
 
-        app._pause_session_status_tracking.assert_called_once_with()
+        app._pause_session_status_tracking.assert_called_once_with(wait=False)
         app._resume_session_status_tracking.assert_called_once_with()
+        app._update_status.assert_called_once()
 
     def test_action_select_row_noops_when_sessions_table_empty(self):
         app = GitDirectorConsole()
@@ -1153,7 +1154,9 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_open_tmux()
 
-        mock_create.assert_called_once_with("alpha", Path("/tmp/alpha"), purpose="shell")
+        mock_create.assert_called_once_with(
+            "alpha", Path("/tmp/alpha"), purpose="shell", description=None
+        )
         app._suspend_and_attach.assert_called_once_with(
             "gd/alpha/shell/1", Path("/tmp/alpha"), skip_config_sync=True
         )
@@ -1209,7 +1212,6 @@ class TestGitDirectorConsoleDirectBranches:
         app = GitDirectorConsole()
         result = object()
         app._results = {"/tmp/alpha": result}
-        app._sessions_cache = {"/tmp/alpha": 1}
         app._load_repos = MagicMock()
         app._load_sessions = MagicMock()
         app._active_tab = "sessions"
@@ -1217,7 +1219,6 @@ class TestGitDirectorConsoleDirectBranches:
         app.action_refresh()
 
         assert app._results == {"/tmp/alpha": result}
-        assert app._sessions_cache == {"/tmp/alpha": 1}
         app._load_repos.assert_not_called()
         app._load_sessions.assert_called_once_with()
 
@@ -1306,47 +1307,45 @@ class TestTUIEdgeCases:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("tmux error")
     )
-    async def test_load_repos_handles_session_exception(self, _mock_sessions):
-        import pytest
-        from textual.worker import WorkerFailed
-
+    async def test_load_repos_does_not_query_session_counts(self, mock_sessions):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
-        with pytest.raises(WorkerFailed):
-            async with app.run_test(size=(120, 30)) as pilot:
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            assert table.row_count == 1
+            mock_sessions.assert_not_called()
 
     def test_sort_key_func_all_columns(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
-        app._sessions_cache = {"/tmp/a": 2, "/tmp/b": 1}
         infos = [
             _make_info("a", Path("/tmp/a"), branch="main", last_commit_timestamp=2),
             _make_info("b", Path("/tmp/b"), branch="dev", last_commit_timestamp=1),
         ]
-        for col in range(7):
+        for col in range(6):
             app._sort_column = col
             app._sort_reverse = False
             sorted_infos = sorted(infos, key=app._sort_key_func())
             assert isinstance(sorted_infos, list)
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("fail"))
-    async def test_sessions_cache_error_handling(self, _mock_sessions):
-        import pytest
-        from textual.worker import WorkerFailed
-
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", side_effect=Exception("fail"))
+    async def test_refresh_repo_for_path_does_not_query_sessions(self, mock_sessions):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
-        with pytest.raises(WorkerFailed):
-            async with app.run_test(size=(120, 30)):
-                await app.workers.wait_for_complete()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._refresh_repo_for_path(Path("/tmp/alpha"))
+            await app.workers.wait_for_complete()
+            mock_sessions.assert_not_called()
 
 
 class TestRefreshRepoForPath:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd/alpha/shell/1"])
-    async def test_refresh_updates_results_and_row(self, _mock_list):
+    async def test_refresh_updates_results_and_row(self, mock_list):
         repos = [_make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")]
         updated_info = _make_info(
             "alpha",
@@ -1375,9 +1374,10 @@ class TestRefreshRepoForPath:
             assert table.get_cell(row_key, ck[1]) == "behind"
             assert table.get_cell(row_key, ck[2]) == "develop"
             assert table.get_cell(row_key, ck[3]) == "staged"
-            assert table.get_cell(row_key, ck[5]) == "1"
+            assert table.get_cell(row_key, ck[5]) == row_key
             assert app._results[row_key].status == RepoStatus.BEHIND
             app.manager.get_repository_status.assert_any_call(Path("/tmp/alpha"), fetch=True)
+            mock_list.assert_not_called()
 
 
 class TestReposStatusBarEscHint:

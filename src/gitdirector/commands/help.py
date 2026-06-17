@@ -29,12 +29,19 @@ def show_help():
         ("unlink PATH|NAME [--discover]", "Unlink a repository or all repos under a path"),
         ("list", "List all tracked repositories"),
         ("status", "Show status summary and per-repo details"),
-        ("pull", "Pull latest changes for all tracked repositories"),
+        ("pull [--yes]", "Pull latest changes for all tracked repositories"),
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
         ("autoclean", "Remove broken repository links from tracking"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
-        ('gd-tmux PATH|NAME "cmd"', "Create a gd tmux session and run a command in it"),
+        (
+            'gd-tmux PATH|NAME "cmd" [--description "..."]',
+            "Create a gd tmux session and run a command in it",
+        ),
+        (
+            "gd-capture SESSION [--lines N] [--full]",
+            "Print the current scrollback of a live gd tmux session",
+        ),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

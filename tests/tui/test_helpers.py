@@ -44,7 +44,7 @@ class TestStatusLabel:
 
 class TestSortConstants:
     def test_sort_column_names_count(self):
-        assert len(_SORT_COLUMN_NAMES) == 7
+        assert len(_SORT_COLUMN_NAMES) == 6
 
     def test_status_order_covers_all(self):
         for s in RepoStatus:

@@ -17,7 +17,6 @@ from textual.widgets import Footer, Static
 from ...integrations.tmux import (
     _embedded_tmux_attach_command,
     _panel_session_label,
-    cleanup_panel_attached_session,
 )
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .panels import Panel, PanelStore
@@ -209,11 +208,6 @@ class PaneWidget(Widget):
     def stop_terminal(self) -> None:
         if self._terminal:
             self._terminal.stop()
-            if self.session_name and self._panel_name:
-                cleanup_panel_attached_session(
-                    self.session_name,
-                    theme_name=self._theme_name,
-                )
 
     def watch_pane_focused(self, focused: bool) -> None:
         self._apply_border_style(focused)

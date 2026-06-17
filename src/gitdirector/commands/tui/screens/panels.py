@@ -229,6 +229,8 @@ class AgentLoadingScreen(ModalScreen[None]):
         self._agent_cmd = agent_cmd
         self._session_name = session_name
         self._ready_marker = ready_marker
+        self._done_marker = Path(f"{ready_marker}.done")
+        self._failed_marker = Path(f"{ready_marker}.failed")
         self._dismissed = False
         self._start_time = 0.0
 
@@ -267,18 +269,18 @@ class AgentLoadingScreen(ModalScreen[None]):
         self._do_dismiss()
 
     def _do_dismiss(self) -> None:
-        import subprocess
+        import os
         import sys
         import termios
 
         from ....integrations.tmux import attach_tmux_session
 
         session_name = self._session_name
-        pane_target = f"={session_name}:"
-        try:
-            self._ready_marker.unlink()
-        except FileNotFoundError:
-            pass
+        for marker in (self._ready_marker, self._done_marker, self._failed_marker):
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
 
         app = self.app
         app._pause_session_status_tracking()
@@ -286,22 +288,30 @@ class AgentLoadingScreen(ModalScreen[None]):
         try:
             try:
                 with app.suspend():
-                    sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-                    sys.stdout.flush()
-                    subprocess.run(["tmux", "send-keys", "-t", pane_target, "C-l", ""], check=False)
-                    subprocess.run(["tmux", "clear-history", "-t", pane_target], check=False)
-                    attach_tmux_session(session_name)
-                    sys.stdout.write("\033[?25h")
-                    sys.stdout.flush()
+                    entered_manual_alt_screen = False
                     try:
-                        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                    except (AttributeError, OSError):
-                        pass
+                        if not os.environ.get("TMUX"):
+                            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+                            sys.stdout.flush()
+                            entered_manual_alt_screen = True
+                        attach_tmux_session(session_name, skip_config_sync=True)
+                    finally:
+                        if entered_manual_alt_screen:
+                            sys.stdout.write("\033[?25h")
+                            sys.stdout.flush()
+                        try:
+                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                        except (AttributeError, OSError):
+                            pass
             except Exception as exc:
                 # Headless / agent environments can't actually attach to tmux.
                 # We must still restore the terminal and dismiss the modal so
                 # the user is not left looking at a stuck spinner.
                 logger.warning("tmux attach failed (headless environment?): %s", exc)
+                try:
+                    app._update_status(f"tmux attach failed: {exc}")
+                except Exception:
+                    pass
                 try:
                     sys.stdout.write("\033[?25h\033[?1049l")
                     sys.stdout.flush()
