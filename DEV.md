@@ -62,7 +62,13 @@ uv run pytest
 ## Format
 
 ```bash
-uv run black src/ tests/
+uv run ruff format src/ tests/
+```
+
+## Format Check
+
+```bash
+uv run ruff format --check src/ tests/
 ```
 
 ## Lint
@@ -75,6 +81,6 @@ uv run ruff check src/ tests/
 
 1. Bump `version` in `pyproject.toml`
 2. Run `uv sync`
-3. Run `uv run black --check src/ tests/`, `uv run ruff check src/ tests/`, and `uv run pytest`
+3. Run `uv run ruff format --check src/ tests/`, `uv run ruff check src/ tests/`, and `uv run pytest`
 4. Merge with main, tag that commit with `release-v<version>`, and let GitHub Actions run the shared checks, build, and publish to PyPI.
 5. Update `Formula/gitdirector.rb` to the new published PyPI sdist URL and sha256 after the release is live.

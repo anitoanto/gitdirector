@@ -462,6 +462,7 @@ class TestHelpCommand:
         result = runner.invoke(cli, ["help"])
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
+        assert "pull [--yes]" in result.output
 
     def test_no_args_shows_help(self, runner):
         result = runner.invoke(cli, [])
