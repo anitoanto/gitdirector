@@ -25,7 +25,7 @@ Always setup the `.venv` correctly before running any commands or tests.
    ```bash
    uv run gitdirector help
    uv run pytest
-   uv run black src/
+   uv run ruff format src/
    ```
 
 3. **Never manually activate the virtual environment** - `uv` handles this automatically
@@ -39,6 +39,7 @@ Always setup the `.venv` correctly before running any commands or tests.
 
 - **[DEV.md](DEV.md)** — Developer commands: setup, run, test, format, lint
 - **[README.md](README.md)** — Project overview, installation, usage, and configuration
+- **[LLMS.md](LLMS.md)** — GitDirector workflow rules for AI coding agents
 
 ## Code Style
 
