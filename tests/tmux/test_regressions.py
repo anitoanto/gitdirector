@@ -1,8 +1,11 @@
 """Regression guards for exact-match tmux targets and cleanup behavior."""
 
 import shlex
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from gitdirector.integrations.tmux import (
     _capture_pane_text,
@@ -12,6 +15,7 @@ from gitdirector.integrations.tmux import (
     _ensure_panel_resize_tracking,
     _panel_attach_fragment,
     _panel_pane_command,
+    _respawn_pane,
     _session_exists,
     _tmux_theme_config,
     attach_tmux_session,
@@ -299,6 +303,35 @@ class TestExactMatchPanelPaneCommand:
         assert "printf '%s\\n' '' UNASSIGNED" in script
         assert "Panel: Dev" not in cmd
         assert "Pane 1: unassigned" not in cmd
+
+
+class TestRespawnPane:
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_retries_transient_fork_failure(self, mock_run, mock_sleep):
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=1, stderr="respawn pane failed: fork failed: Device not configured"
+            ),
+            MagicMock(returncode=0, stderr=""),
+        ]
+
+        _respawn_pane("%1", "cat")
+
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once_with(0.05)
+
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_does_not_retry_non_fork_failure(self, mock_run, mock_sleep):
+        mock_run.return_value = MagicMock(returncode=1, stderr="no such pane")
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            _respawn_pane("%1", "cat")
+
+        assert exc_info.value.returncode == 1
+        assert mock_run.call_count == 1
+        mock_sleep.assert_not_called()
 
 
 class TestExactMatchLaunchCommand:
