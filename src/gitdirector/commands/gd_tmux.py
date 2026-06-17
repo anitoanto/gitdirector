@@ -51,7 +51,14 @@ def register(cli: click.Group):
     @cli.command()
     @click.argument("target", metavar="PATH|NAME")
     @click.argument("command")
-    def gd_tmux(target: str, command: str):
+    @click.option(
+        "--description",
+        "-d",
+        "description",
+        default=None,
+        help="Description stored on the session and shown in the TUI Sessions tab.",
+    )
+    def gd_tmux(target: str, command: str, description: str | None):
         """Create a gd tmux session for a repository and run a command in it."""
         if not command.strip():
             console.print("\n  [red]Command must not be empty.[/red]\n")
@@ -63,7 +70,7 @@ def register(cli: click.Group):
 
         try:
             from ..integrations.tmux import (
-                attach_tmux_session,
+                TmuxError,
                 create_tmux_session,
                 launch_command_in_tmux_session,
             )
@@ -74,6 +81,12 @@ def register(cli: click.Group):
             )
             raise SystemExit(1)
 
-        session_name = create_tmux_session(repo_path.name, repo_path, purpose=command)
-        launch_command_in_tmux_session(session_name, command)
-        attach_tmux_session(session_name, skip_config_sync=True)
+        try:
+            session_name = create_tmux_session(
+                repo_path.name, repo_path, purpose="shell", description=description
+            )
+            click.echo(session_name)
+            launch_command_in_tmux_session(session_name, command)
+        except TmuxError as exc:
+            console.print(f"\n  [red]tmux command failed:[/red] {exc}\n")
+            raise SystemExit(1)

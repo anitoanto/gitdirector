@@ -24,7 +24,7 @@ from gitdirector.commands.tui.screens.diff_files import (
     selection_colors,
 )
 
-from .conftest import _mock_manager
+from .conftest import _mock_manager, _wait_for_deferred_scroll
 
 # ---------------------------------------------------------------------------
 # Pure-Python: selection_colors
@@ -452,7 +452,7 @@ class TestDiffUpdatesOnSelection:
             second = content.content
             assert first is not second
 
-    async def test_content_updates_on_n_press(self, mocker):
+    async def test_content_does_not_update_on_n_press(self, mocker):
         from gitdirector import repo as repo_mod
 
         mocker.patch.object(
@@ -478,7 +478,7 @@ class TestDiffUpdatesOnSelection:
             await pilot.press("n")
             await pilot.pause()
             second = content.content
-            assert first is not second
+            assert first is second
 
     async def test_content_updates_on_bracket_press(self, mocker):
         from gitdirector import repo as repo_mod
@@ -614,7 +614,7 @@ class TestFileListScrolling:
             # Jump to the last item; the list must scroll to keep
             # it visible (scroll_offset.y should advance past zero).
             files_list.index = 19
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.scroll_offset.y > 0
             # And the scroll position should be near the maximum.
             assert files_list.scroll_offset.y == files_list.max_scroll_y
@@ -637,11 +637,11 @@ class TestFileListScrolling:
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.index = 19
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             # Now jump back to the first item; the scroll should
             # come back to zero.
             files_list.index = 0
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.scroll_offset.y == 0
 
     async def test_bracket_nav_scrolls_to_bottom(self, mocker):
@@ -665,7 +665,7 @@ class TestFileListScrolling:
             await pilot.pause()
             for _ in range(20):
                 await pilot.press("]")
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.index == 19
             assert files_list.scroll_offset.y > 0
 

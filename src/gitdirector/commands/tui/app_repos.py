@@ -47,18 +47,6 @@ class ConsoleReposMixin:
         done = 0
         self.call_from_thread(self._update_status, f"Checking {total} repositories…")
 
-        from ...integrations.tmux import (
-            _repo_session_name_segment,
-            _sanitize_repo_name,
-            list_all_gd_sessions,
-        )
-
-        all_sessions = list_all_gd_sessions()
-        sessions_by_repo: dict[str, int] = {}
-        for entry in all_sessions:
-            repo_slug = entry.get("repo_slug", entry["repo"])
-            sessions_by_repo[repo_slug] = sessions_by_repo.get(repo_slug, 0) + 1
-
         executor = ThreadPoolExecutor(max_workers=self.manager.config.max_workers)
         self._repo_status_executor = executor
         try:
@@ -78,13 +66,7 @@ class ConsoleReposMixin:
                     break
                 self._results[str(info.path)] = info
                 done += 1
-                repo_slug = _repo_session_name_segment(info.path)
-                sessions_count = sessions_by_repo.get(
-                    repo_slug,
-                    sessions_by_repo.get(_sanitize_repo_name(info.path.name), 0),
-                )
-                self._sessions_cache[str(info.path)] = sessions_count
-                self.call_from_thread(self._update_row, info, sessions_count)
+                self.call_from_thread(self._update_row, info)
                 remaining = total - done
                 if shutdown_requested():
                     break
@@ -126,7 +108,6 @@ class ConsoleReposMixin:
                 "... ... ... ...",
                 "... ... ... ...",
                 "... ... ... ... ... ...",
-                "...",
                 str(path),
                 key=str(path),
             )
@@ -141,8 +122,7 @@ class ConsoleReposMixin:
                 restore_focus=restore_focus,
             )
 
-    def _update_row(self, info: RepositoryInfo, sessions: int = 0) -> None:
-        self._sessions_cache[str(info.path)] = sessions
+    def _update_row(self, info: RepositoryInfo) -> None:
         table = self.query_one("#repo-table", DataTable)
         row_key = str(info.path)
         ck = self._col_keys
@@ -151,7 +131,6 @@ class ConsoleReposMixin:
             table.update_cell(row_key, ck[2], info.branch or "—")
             table.update_cell(row_key, ck[3], _changes_label(info))
             table.update_cell(row_key, ck[4], info.last_updated or "—")
-            table.update_cell(row_key, ck[5], str(sessions) if sessions > 0 else "—")
         except Exception:
             logger.debug("Failed to update repo row %s", row_key, exc_info=True)
 
@@ -171,8 +150,6 @@ class ConsoleReposMixin:
         if col == 4:
             return lambda info: info.last_commit_timestamp or 0
         if col == 5:
-            return lambda info: self._sessions_cache.get(str(info.path), 0)
-        if col == 6:
             return lambda info: str(info.path).lower()
         return lambda info: info.name.lower()
 
@@ -203,14 +180,12 @@ class ConsoleReposMixin:
         infos.sort(key=self._sort_key_func(), reverse=self._sort_reverse)
 
         for info in infos:
-            sessions = self._sessions_cache.get(str(info.path), 0)
             table.add_row(
                 info.name,
                 _STATUS_LABEL.get(info.status, "unknown"),
                 info.branch or "—",
                 _changes_label(info),
                 info.last_updated or "—",
-                str(sessions) if sessions > 0 else "—",
                 str(info.path),
                 key=str(info.path),
             )
@@ -261,7 +236,8 @@ class ConsoleReposMixin:
             self._load_sessions()
         elif self._active_tab == "panels":
             self._load_panels()
+        elif self._active_tab == "groups":
+            self._load_groups()
         else:
             self._results.clear()
-            self._sessions_cache.clear()
             self._load_repos()

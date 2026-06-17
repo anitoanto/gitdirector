@@ -7,6 +7,7 @@ import fcntl
 import os
 import pty
 import re
+import signal
 import struct
 import termios
 
@@ -54,11 +55,11 @@ class _Emulator:
         self._data_or_disconnect: str | None = None
         self._run_task: asyncio.Task | None = None
         self._send_task: asyncio.Task | None = None
-        self._fd = self._open_pty(command)
+        self._pid, self._fd = self._open_pty(command)
         self._p_out = os.fdopen(self._fd, "w+b", 0)
         self._reader_installed = False
 
-    def _open_pty(self, command: str) -> int:
+    def _open_pty(self, command: str) -> tuple[int, int]:
         import shlex
         from pathlib import Path
 
@@ -68,7 +69,7 @@ class _Emulator:
             env = dict(os.environ)
             env.update(TERM="xterm-256color", HOME=str(Path.home()))
             os.execvpe(argv[0], argv, env)
-        return fd
+        return pid, fd
 
     def start(self) -> None:
         self._run_task = asyncio.create_task(self._run())
@@ -89,6 +90,15 @@ class _Emulator:
             self._p_out.close()
         except Exception:
             pass
+        if self._pid > 0:
+            try:
+                os.kill(self._pid, signal.SIGHUP)
+            except OSError:
+                pass
+            try:
+                os.waitpid(self._pid, os.WNOHANG)
+            except OSError:
+                pass
 
     def resize(self, nrow: int, ncol: int) -> None:
         self.nrow = nrow
@@ -165,6 +175,7 @@ class TerminalWidget(Widget, can_focus=True):
     _started = reactive(False)
 
     _RESIZE_DEBOUNCE_SECONDS = 0.08
+    _RENDER_DEBOUNCE_SECONDS = 1 / 30
 
     def __init__(self, command: str, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -178,6 +189,8 @@ class TerminalWidget(Widget, can_focus=True):
         self._mouse_tracking = False
         self._pending_tty_size: tuple[int, int] | None = None
         self._tty_resize_timer = None
+        self._pending_output: list[str] = []
+        self._render_timer = None
         self._applied_tty_size: tuple[int, int] | None = None
         self._current_size: tuple[int, int] | None = None
 
@@ -197,6 +210,13 @@ class TerminalWidget(Widget, can_focus=True):
             except Exception:
                 pass
             self._tty_resize_timer = None
+        if self._render_timer is not None:
+            try:
+                self._render_timer.stop()
+            except Exception:
+                pass
+            self._render_timer = None
+        self._pending_output.clear()
         self._pending_tty_size = None
         if self._recv_task:
             self._recv_task.cancel()
@@ -271,25 +291,42 @@ class TerminalWidget(Widget, can_focus=True):
                     self._current_size = (nrow, ncol)
                     self._render_console = Console(**_render_console_kwargs(ncol))
                 elif cmd == "stdout":
-                    chars = msg[1]
-                    for m in _RE_ANSI_SEQUENCE.finditer(chars):
-                        seq = m.group(0)
-                        if seq.startswith(_DECSET_PREFIX):
-                            if "1000h" in seq:
-                                self._mouse_tracking = True
-                            if "1000l" in seq:
-                                self._mouse_tracking = False
-                    try:
-                        self._stream.feed(chars)
-                    except Exception:
-                        pass
-                    self._render_screen()
-                    self.refresh()
+                    self._queue_output(msg[1])
                 elif cmd == "disconnect":
+                    self._flush_pending_output()
                     self.post_message(self.Disconnected())
                     break
         except asyncio.CancelledError:
             pass
+
+    def _queue_output(self, chars: str) -> None:
+        self._pending_output.append(chars)
+        if self._render_timer is None:
+            self._render_timer = self.set_timer(
+                self._RENDER_DEBOUNCE_SECONDS,
+                self._flush_pending_output,
+            )
+
+    def _flush_pending_output(self) -> None:
+        self._render_timer = None
+        if not self._pending_output or self._stream is None:
+            self._pending_output.clear()
+            return
+        chars = "".join(self._pending_output)
+        self._pending_output.clear()
+        for match in _RE_ANSI_SEQUENCE.finditer(chars):
+            seq = match.group(0)
+            if seq.startswith(_DECSET_PREFIX):
+                if "1000h" in seq:
+                    self._mouse_tracking = True
+                if "1000l" in seq:
+                    self._mouse_tracking = False
+        try:
+            self._stream.feed(chars)
+        except Exception:
+            pass
+        self._render_screen()
+        self.refresh()
 
     def _render_screen(self) -> None:
         if not self._screen:
