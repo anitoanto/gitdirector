@@ -4,11 +4,17 @@ import click
 
 from ..manager import RepositoryManager
 from . import console
+from .completion import complete_repository_names
 
 
 def register(cli: click.Group):
     @cli.command()
-    @click.argument("target", metavar="PATH|NAME", type=click.Path(exists=False))
+    @click.argument(
+        "target",
+        metavar="PATH|NAME",
+        type=click.Path(exists=False),
+        shell_complete=complete_repository_names,
+    )
     @click.option("--discover", is_flag=True, help="Recursively discover repositories to unlink")
     def unlink(target: str, discover: bool):
         manager = RepositoryManager()
