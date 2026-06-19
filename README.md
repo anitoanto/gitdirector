@@ -35,6 +35,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector info PATH\|NAME [--full]`                     | Show file statistics for a repository                  |
 | `gitdirector gd-tmux PATH\|NAME "command" [--description TEXT]` | Create a gd tmux session and run a command in it       |
 | `gitdirector gd-capture SESSION [--lines N] [--full]`      | Print the scrollback of a live gd tmux session         |
+| `gitdirector completion SHELL`                             | Print shell completion setup for bash, zsh, or fish    |
 | `gitdirector help`                                         | Show help                                              |
 
 ### link
@@ -222,6 +223,16 @@ theme: rose-pine # optional, default rose-pine
 - Python 3.10+
 - Git
 - [tmux](https://github.com/tmux/tmux) ≥ 3.2a (for `gitdirector cd`, `gitdirector console` sessions, `gitdirector gd-tmux`, and `gitdirector gd-capture`)
+
+## Shell completion
+
+Generate shell completions for `bash`, `zsh`, or `fish`. Completion includes subcommands, options, and linked repository names for repo-target commands.
+
+```bash
+eval "$(gitdirector completion bash)"
+eval "$(gitdirector completion zsh)"
+gitdirector completion fish | source
+```
 
 ## License
 

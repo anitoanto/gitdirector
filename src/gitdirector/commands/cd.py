@@ -2,11 +2,12 @@ import click
 
 from ..manager import RepositoryManager
 from . import console
+from .completion import complete_repository_names
 
 
 def register(cli: click.Group):
     @cli.command()
-    @click.argument("name")
+    @click.argument("name", shell_complete=complete_repository_names)
     def cd(name: str):
         """Open or switch to a tmux session rooted at a tracked repository."""
         manager = RepositoryManager()

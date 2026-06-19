@@ -5,6 +5,7 @@ import click
 from ..manager import RepositoryManager
 from ..storage import normalize_repository_path
 from . import console
+from .completion import complete_repository_names
 
 
 def _resolve_repo(target: str) -> Path | None:
@@ -49,7 +50,7 @@ def _resolve_repo(target: str) -> Path | None:
 
 def register(cli: click.Group):
     @cli.command()
-    @click.argument("target", metavar="PATH|NAME")
+    @click.argument("target", metavar="PATH|NAME", shell_complete=complete_repository_names)
     @click.argument("command")
     @click.option(
         "--description",

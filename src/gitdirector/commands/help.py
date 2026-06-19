@@ -42,6 +42,7 @@ def show_help():
             "gd-capture SESSION [--lines N] [--full]",
             "Print the current scrollback of a live gd tmux session",
         ),
+        ("completion SHELL", "Print shell completion setup for bash, zsh, or fish"),
         ("help", "Show this help message"),
     ]:
         cmd_table.add_row(cmd, desc)

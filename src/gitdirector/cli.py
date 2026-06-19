@@ -10,6 +10,7 @@ from .commands import (
     autoclean,
     capture,
     cd,
+    completion,
     console,
     gd_tmux,
     help,
@@ -42,7 +43,8 @@ class _HelpGroup(click.Group):
 @click.group(cls=_HelpGroup, invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
-    print_update_notice()
+    if not ctx.resilient_parsing and ctx.invoked_subcommand != "completion":
+        print_update_notice()
     if ctx.invoked_subcommand is None:
         show_help()
 
@@ -59,6 +61,7 @@ autoclean.register(cli)
 info.register(cli)
 gd_tmux.register(cli)
 capture.register(cli)
+completion.register(cli)
 
 
 def main():
