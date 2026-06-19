@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from rich.text import Text
 from textual.containers import VerticalScroll
-from textual.widgets import Input, LoadingIndicator, OptionList, Static
+from textual.widgets import DataTable, Input, LoadingIndicator, OptionList, Static
 
 from gitdirector.commands.tui import (
     _SESSIONS_SORT_COLUMN_NAMES,
@@ -1664,7 +1664,11 @@ class TestRemoveFlow:
             await app.workers.wait_for_complete()
             await pilot.pause()
             selected = app._get_selected_path()
-            assert selected == Path("/tmp/alpha")
+            assert selected == Path("/tmp")
+
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=1)
+            assert app._get_selected_path() == Path("/tmp/alpha")
 
 
 class TestListAllGdSessions:

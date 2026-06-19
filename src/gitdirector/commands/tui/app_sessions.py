@@ -270,9 +270,10 @@ class ConsoleSessionsMixin:
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)
             try:
-                shown = self.query_one("#repo-table", DataTable).row_count
+                self.query_one("#repo-table", DataTable)
             except NoMatches:
                 return
+            shown = getattr(self, "_visible_repo_count", total)
             self._update_status(self._build_loaded_status(shown, total))
 
     def _resolve_session_status(self, entry: dict[str, str]) -> str:

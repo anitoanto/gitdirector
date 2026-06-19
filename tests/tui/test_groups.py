@@ -5,10 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, OptionList, Static, TabbedContent
+from textual.widgets._footer import FooterKey
 
 from gitdirector.commands.tui import GitDirectorConsole, GroupActionMenuScreen
-from gitdirector.commands.tui.app_groups import detect_repo_groups
+from gitdirector.commands.tui.app_groups import detect_repo_groups, group_row_key
 
 from .conftest import _make_info, _mock_manager
 
@@ -31,24 +34,40 @@ class TestRepoGroupDetection:
         assert detect_repo_groups([Path("/tmp/work/api")]) == []
 
 
-class TestGroupsTab:
-    async def test_groups_table_exists(self):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)):
-            table = app.query_one("#groups-table", DataTable)
-            assert len(table.columns) == 3
-
-    async def test_key_4_switches_to_groups(self):
+class TestRepositoryGroups:
+    async def test_groups_table_removed_from_top_level_tabs(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("4")
             await pilot.pause()
-            tabs = app.query_one("#tabs", TabbedContent)
-            assert tabs.active == "groups"
 
-    async def test_groups_table_populates_from_linked_repo_parents(self):
+            tabs = app.query_one("#tabs", TabbedContent)
+            assert tabs.active == "repos"
+            with pytest.raises(NoMatches):
+                app.query_one("#groups-table", DataTable)
+
+    async def test_toggle_group_footer_binding_shows_on_repos_tab(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+
+            assert any(
+                binding.key == "space" and binding.description == "Toggle Group"
+                for binding in app.query(FooterKey)
+            )
+
+            await pilot.press("3")
+            await pilot.pause()
+
+            assert not any(
+                binding.key == "space" and binding.description == "Toggle Group"
+                for binding in app.query(FooterKey)
+            )
+
+    async def test_repo_table_populates_group_headers_from_linked_repo_parents(self):
         repos = [
             _make_info("alpha", Path("/tmp/work/alpha")),
             _make_info("beta", Path("/tmp/work/beta")),
@@ -60,45 +79,96 @@ class TestGroupsTab:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app.action_tab_groups()
-            await pilot.pause()
 
-            table = app.query_one("#groups-table", DataTable)
-            assert table.row_count == 1
-            row_key = str(Path("/tmp/work"))
-            assert table.get_cell(row_key, app._groups_col_keys[0]) == "work"
-            assert table.get_cell(row_key, app._groups_col_keys[1]) == "2: alpha, beta"
-            assert table.get_cell(row_key, app._groups_col_keys[2]) == row_key
+            table = app.query_one("#repo-table", DataTable)
+            group_key = group_row_key(Path("/tmp/work"))
+            assert table.row_count == 4
+            assert "work" in str(table.get_cell(group_key, app._col_keys[0]))
+            assert "2 repos" in str(table.get_cell(group_key, app._col_keys[1]))
+            assert table.get_cell(group_key, app._col_keys[5]) == "/tmp/work"
+            assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
+            assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"
+            assert table.get_cell("/tmp/other/solo", app._col_keys[0]) == "solo"
+            assert "[space] toggle group" in app.query_one("#status-bar", Static).content
+
+            table.move_cursor(row=0)
             assert app._get_selected_path() == Path("/tmp/work")
+            assert app._get_selected_group().name == "work"
 
-    async def test_repositories_column_wraps_long_group_members(self):
+    async def test_group_rows_can_collapse_and_expand(self):
         repos = [
-            _make_info(
-                "astro-blog-starter-template", Path("/tmp/templates/astro-blog-starter-template")
-            ),
-            _make_info(
-                "browser-extension-template", Path("/tmp/templates/browser-extension-template")
-            ),
-            _make_info("caddy-template", Path("/tmp/templates/caddy-template")),
-            _make_info("grafana-template", Path("/tmp/templates/grafana-template")),
+            _make_info("alpha", Path("/tmp/work/alpha")),
+            _make_info("beta", Path("/tmp/work/beta")),
         ]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
 
-        async with app.run_test(size=(80, 30)) as pilot:
+        async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app.action_tab_groups()
+
+            table = app.query_one("#repo-table", DataTable)
+            assert table.row_count == 3
+            table.move_cursor(row=0)
+
+            app.action_toggle_group()
             await pilot.pause()
 
-            table = app.query_one("#groups-table", DataTable)
-            row_key = str(Path("/tmp/templates"))
-            cell = table.get_cell(row_key, app._groups_col_keys[1])
-            width = table.columns[app._groups_col_keys[1]].width
+            assert table.row_count == 1
+            group_key = group_row_key(Path("/tmp/work"))
+            assert "▸" in str(table.get_cell(group_key, app._col_keys[0]))
 
-            assert "\n" in cell
-            assert table.get_row_height(row_key) > 1
-            assert all(len(line) <= width for line in cell.splitlines())
+            app.action_toggle_group()
+            await pilot.pause()
+
+            assert table.row_count == 3
+            assert "▾" in str(table.get_cell(group_key, app._col_keys[0]))
+
+    async def test_group_toggle_during_loading_preserves_loaded_status_cells(self):
+        repos = [
+            _make_info("alpha", Path("/tmp/work/alpha")),
+            _make_info("beta", Path("/tmp/work/beta")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._repo_paths = [repo.path for repo in repos]
+            app._groups_entries = detect_repo_groups(app._repo_paths)
+            app._results = {str(repos[0].path): repos[0]}
+            app._populate_initial_rows()
+
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=0)
+            app.action_toggle_group()
+            app.action_toggle_group()
+            await pilot.pause()
+
+            assert table.get_cell("/tmp/work/alpha", app._col_keys[1]) != "... ... ... ..."
+            assert table.get_cell("/tmp/work/beta", app._col_keys[1]) == "... ... ... ..."
+
+    async def test_search_by_group_name_shows_group_repositories(self):
+        repos = [
+            _make_info("alpha", Path("/tmp/work/alpha")),
+            _make_info("beta", Path("/tmp/work/beta")),
+            _make_info("solo", Path("/tmp/other/solo")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._search_query = "work"
+            app._apply_filter_and_sort()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            assert table.row_count == 3
+            assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
+            assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"
 
     async def test_action_show_menu_uses_group_action_screen(self):
         repos = [
@@ -111,8 +181,8 @@ class TestGroupsTab:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app.action_tab_groups()
-            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=0)
             app.push_screen = MagicMock()
 
             with patch("gitdirector.commands.tui.app.GroupActionMenuScreen") as mock_screen:
@@ -133,8 +203,8 @@ class TestGroupsTab:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app.action_tab_groups()
-            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=0)
             app._suspend_and_attach = MagicMock()
 
             app.action_open_tmux()
