@@ -28,7 +28,6 @@ from .app_repos import ConsoleReposMixin
 from .app_sessions import ConsoleSessionsMixin
 from .app_ui import ConsoleUIHelpersMixin
 from .constants import (
-    _DEFAULT_GROUPS_SORT_COLUMN,
     _DEFAULT_PANELS_SORT_COLUMN,
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
@@ -134,14 +133,6 @@ class GitDirectorConsole(
         padding: 2 4;
         content-align: center middle;
     }
-    #no-groups-message {
-        height: 1fr;
-        display: none;
-        align: center middle;
-        color: $text-muted;
-        padding: 2 4;
-        content-align: center middle;
-    }
     .search-indicator {
         dock: top;
         height: 1;
@@ -192,7 +183,7 @@ class GitDirectorConsole(
         Binding("1", "tab_repos", "Repos", show=False),
         Binding("2", "tab_sessions", "Sessions", show=False),
         Binding("3", "tab_panels", "Panels", show=False),
-        Binding("4", "tab_groups", "Groups", show=False),
+        Binding("space", "toggle_group", "Toggle Group", show=True),
         Binding("n", "new_panel", "New Panel", show=True),
     ]
 
@@ -216,8 +207,9 @@ class GitDirectorConsole(
         self._panels_sort_reverse: bool = False
         self._panels_live_sessions: set[str] = set()
         self._groups_entries = []
-        self._groups_sort_column: int = _DEFAULT_GROUPS_SORT_COLUMN
-        self._groups_sort_reverse: bool = False
+        self._collapsed_groups: set[str] = set()
+        self._visible_repo_count: int = 0
+        self._visible_group_count: int = 0
         self._repos_stale: bool = False
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
@@ -263,14 +255,6 @@ class GitDirectorConsole(
                     "No panels created.  Press [bold]n[/bold] to create a new panel.",
                     id="no-panels-message",
                 )
-            with TabPane("[4] Groups", id="groups"):
-                yield Static("", id="groups-search-indicator", classes="search-indicator")
-                yield DataTable(id="groups-table", cursor_type="row")
-                yield Static(
-                    "No repository groups detected.  Link at least two repositories under "
-                    "the same parent directory.",
-                    id="no-groups-message",
-                )
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
             yield Input(placeholder="type to filter…", id="search-bar")
@@ -291,9 +275,6 @@ class GitDirectorConsole(
         self._panels_col_keys = panels_table.add_columns(
             "Map", "Name", "TMUX", "Layout", "Panes", "Status"
         )
-        groups_table = self.query_one("#groups-table", DataTable)
-        self._groups_col_keys = groups_table.add_columns("Group", "Repositories", "Path")
-        self._apply_groups_repositories_column_width()
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(
@@ -398,7 +379,7 @@ class GitDirectorConsole(
         launch_tab = self._active_tab
         purpose = agent_cmd if agent_cmd else "shell"
         session_kwargs = {"purpose": purpose, "description": description}
-        if launch_tab == "groups":
+        if launch_tab == "repos" and self._selected_repo_row_is_group():
             repo_label = self._get_selected_group_session_repo_label()
             if repo_label:
                 session_kwargs["repo_label"] = repo_label
@@ -448,12 +429,15 @@ class GitDirectorConsole(
         self._monitor.clear_bell(session_name)
         restore_tab = self._active_tab
         self._resume_target_tab = restore_tab
-        self._resume_refresh_path = path if restore_tab == "repos" else None
-        row_key = row_key or (
-            self._get_selected_row_key(self._get_active_table())
-            if restore_tab == "panels"
-            else None
+        selected_repo_group = restore_tab == "repos" and self._selected_repo_row_is_group()
+        self._resume_refresh_path = (
+            path if restore_tab == "repos" and not selected_repo_group else None
         )
+        if row_key is None and restore_tab in {"panels", "repos"}:
+            try:
+                row_key = self._get_selected_row_key(self._get_active_table())
+            except Exception:
+                row_key = None
         self._capture_resume_selection(
             restore_tab,
             session_name=session_name,
@@ -497,9 +481,12 @@ class GitDirectorConsole(
 
     def _refresh_after_session_launch(self, path: Path, launch_tab: str) -> None:
         if launch_tab == "repos":
-            self._refresh_repo_for_path(path)
-        elif launch_tab == "groups":
-            self._load_groups()
+            if str(path) in self._results:
+                self._refresh_repo_for_path(path)
+            elif len(self._results) < len(self._repo_paths):
+                self._populate_initial_rows()
+            else:
+                self._apply_filter_and_sort()
         elif launch_tab == "sessions":
             self._load_sessions()
 
@@ -525,20 +512,19 @@ class GitDirectorConsole(
         path = self._get_selected_path()
         if path is None:
             return
-        if self._active_tab == "groups":
+        if self._active_tab == "repos":
             group = self._get_selected_group()
-            if group is None:
+            if group is not None:
+                self.push_screen(
+                    GroupActionMenuScreen(
+                        group.name,
+                        group.path,
+                        group.repo_count,
+                        group.repo_names,
+                    ),
+                    callback=self._handle_menu_action,
+                )
                 return
-            self.push_screen(
-                GroupActionMenuScreen(
-                    group.name,
-                    group.path,
-                    group.repo_count,
-                    group.repo_names,
-                ),
-                callback=self._handle_menu_action,
-            )
-            return
         info = self._results.get(str(path))
         branch = info.branch if info else None
         self.push_screen(
@@ -548,6 +534,8 @@ class GitDirectorConsole(
 
     def action_show_git_menu(self) -> None:
         if self._active_tab != "repos":
+            return
+        if self._selected_repo_row_is_group():
             return
         path = self._get_selected_path()
         if path is None:
@@ -568,6 +556,8 @@ class GitDirectorConsole(
 
     def action_show_info(self) -> None:
         if self._active_tab != "repos":
+            return
+        if self._selected_repo_row_is_group():
             return
         path = self._get_selected_path()
         if path is None:
@@ -610,9 +600,6 @@ class GitDirectorConsole(
         self._apply_sessions_description_column_width()
         if self._active_tab == "sessions" and self._sessions_entries:
             self._apply_sessions_filter_and_sort()
-        self._apply_groups_repositories_column_width()
-        if self._active_tab == "groups" and self._groups_entries:
-            self._apply_groups_filter_and_sort()
 
     @work(thread=True)
     def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
@@ -636,7 +623,9 @@ class GitDirectorConsole(
     def _push_info_screen(self, name: str, path: Path, result) -> None:
         self.push_screen(RepoInfoScreen(name, path))
         total = len(self._results)
-        shown = self.query_one("#repo-table", DataTable).row_count
+        shown = getattr(self, "_visible_repo_count", total)
+        if shown == 0 and total > 0:
+            shown = self.query_one("#repo-table", DataTable).row_count
         self._update_status(self._build_loaded_status(shown, total))
 
     def _handle_git_menu_action(self, action: str | None, path: Path) -> None:

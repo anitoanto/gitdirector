@@ -68,7 +68,8 @@ class TestSearch:
             assert not container.display
             assert app._search_query == ""
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 2
+            assert table.row_count == 3
+            assert app._visible_repo_count == 2
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_filters_by_name(self, _mock_sessions):
@@ -86,7 +87,8 @@ class TestSearch:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 1
+            assert table.row_count == 2
+            assert app._visible_repo_count == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_filters_by_branch(self, _mock_sessions):
@@ -103,7 +105,8 @@ class TestSearch:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 1
+            assert table.row_count == 2
+            assert app._visible_repo_count == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_filters_by_path(self, _mock_sessions):
@@ -121,6 +124,7 @@ class TestSearch:
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
             assert table.row_count == 1
+            assert app._visible_repo_count == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_case_insensitive(self, _mock_sessions):
@@ -137,7 +141,8 @@ class TestSearch:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 1
+            assert table.row_count == 2
+            assert app._visible_repo_count == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_no_match(self, _mock_sessions):
@@ -190,11 +195,13 @@ class TestEscapeClearsFilter:
             app._search_query = "alpha"
             app._apply_filter_and_sort()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 1
+            assert table.row_count == 2
+            assert app._visible_repo_count == 1
             await pilot.press("escape")
             await pilot.pause()
             assert app._search_query == ""
-            assert table.row_count == 2
+            assert table.row_count == 3
+            assert app._visible_repo_count == 2
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_escape_clears_active_filter_sessions(self, _mock):

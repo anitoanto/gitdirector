@@ -57,7 +57,7 @@ Opens a full interactive TUI dashboard.
 Features:
 
 - Live table with sync state, branch, changes, last commit, and active tmux sessions
-- Tabs for `[1] Repositories`, `[2] Sessions`, `[3] Panels`, and `[4] Groups`
+- Tabs for `[1] Repositories`, `[2] Sessions`, and `[3] Panels`
 - `j`/`k` or arrow keys to navigate
 - `/` to filter the active tab
 - `s` to sort the active table
@@ -70,9 +70,9 @@ Features:
     - **Attach existing session** — switch to any already-running tmux session
     - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
     - **Remove session** — kill a running tmux session
+- **Repository groups** appear directly in the Repositories tab when linked repositories share the same parent directory. Group rows can be expanded/collapsed with `space`; press `enter` on a group to start, attach, remove, or launch AI-agent sessions rooted at that parent directory.
 - **Sessions tab** (press `2`) lists every active `gd/*` tmux session with its status, purpose, repository, **description**, and full session name. The description column is free-form text stored on the session (default `"-"`), with a width that scales to your terminal and wraps long text. Highlight a row and press `d` to edit its description.
 - **Panels tab** (press `3`) manages reusable tmux panel layouts. Press `n` to create a panel, or `enter` on a panel to open, reconfigure, rename, or delete it.
-- **Groups tab** (press `4`) automatically groups linked repositories that share the same parent directory. Press `enter` on a group to start or attach group-scoped sessions.
 
 ### unlink
 

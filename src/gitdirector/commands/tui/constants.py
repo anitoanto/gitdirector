@@ -36,14 +36,6 @@ _SORT_COLUMN_NAMES = {
 
 _DEFAULT_SORT_COLUMN = 0
 
-_GROUPS_SORT_COLUMN_NAMES = {
-    0: "Group",
-    1: "Repositories",
-    2: "Path",
-}
-
-_DEFAULT_GROUPS_SORT_COLUMN = 0
-
 _STATUS_ORDER = {
     RepoStatus.UP_TO_DATE: 0,
     RepoStatus.AHEAD: 1,

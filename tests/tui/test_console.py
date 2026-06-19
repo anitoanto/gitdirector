@@ -52,7 +52,8 @@ class TestGitDirectorConsole:
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 2
+            assert table.row_count == 3
+            assert app._visible_repo_count == 2
 
     async def test_quit_binding(self):
         app = GitDirectorConsole()
@@ -266,7 +267,8 @@ class TestGitDirectorConsoleSearchAndSort:
             app._apply_filter_and_sort()
 
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 1
+            assert table.row_count == 2
+            assert app._visible_repo_count == 1
             status = app.query_one("#status-bar", Static).content
             assert "filter: 'beta'" in status
 

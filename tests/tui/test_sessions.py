@@ -738,7 +738,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=1)
+            table.move_cursor(row=2)
             await pilot.pause()
 
             with patch("gitdirector.integrations.tmux.attach_tmux_session"):
@@ -821,7 +821,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=2)
+            table.move_cursor(row=3)
             await pilot.pause()
 
             app._capture_resume_selection("repos")
@@ -833,7 +833,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert table.cursor_coordinate.row == 1
+            assert table.cursor_coordinate.row == 2
             assert str(row_key.value) == str(repos[1].path)
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
@@ -850,7 +850,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             await pilot.pause()
 
             app._sort_reverse = True
@@ -859,7 +859,7 @@ class TestTabRestorationAfterSuspend:
 
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == str(repos[0].path)
-            assert table.cursor_coordinate.row == 2
+            assert table.cursor_coordinate.row == 3
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)

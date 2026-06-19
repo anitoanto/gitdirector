@@ -13,7 +13,6 @@ from textual.widgets import DataTable, Input, Static, TabbedContent
 from textual.widgets.data_table import RowDoesNotExist
 
 from .constants import (
-    _GROUPS_SORT_COLUMN_NAMES,
     _PANELS_SORT_COLUMN_NAMES,
     _SESSIONS_SORT_COLUMN_NAMES,
 )
@@ -56,14 +55,11 @@ class ConsoleUIHelpersMixin:
             return
         self.query_one("#tabs", TabbedContent).active = "panels"
 
-    def action_tab_groups(self) -> None:
-        if self._resume_target_tab is not None and self._resume_target_tab != "groups":
-            return
-        self.query_one("#tabs", TabbedContent).active = "groups"
-
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "new_panel":
             return self._active_tab == "panels"
+        if action == "toggle_group":
+            return self._active_tab == "repos"
         if action in {"show_git_menu", "show_info"}:
             return self._active_tab == "repos"
         return super().check_action(action, parameters)
@@ -105,8 +101,6 @@ class ConsoleUIHelpersMixin:
             self._load_sessions()
         elif tab_id == "panels":
             self._load_panels()
-        elif tab_id == "groups":
-            self._load_groups()
         elif tab_id == "repos":
             if self._repos_stale:
                 self._repos_stale = False
@@ -115,9 +109,10 @@ class ConsoleUIHelpersMixin:
             else:
                 total = len(self._results)
                 try:
-                    shown = self.query_one("#repo-table", DataTable).row_count
+                    self.query_one("#repo-table", DataTable)
                 except NoMatches:
                     return
+                shown = getattr(self, "_visible_repo_count", total)
                 self._update_status(self._build_loaded_status(shown, total))
 
     def _handle_app_resume(self, _app: App) -> None:
@@ -158,10 +153,6 @@ class ConsoleUIHelpersMixin:
             self._load_panels()
             self.query_one("#panels-table", DataTable).focus()
             self._restore_resume_selection("panels")
-        elif restore_tab == "groups":
-            self._load_groups()
-            self.query_one("#groups-table", DataTable).focus()
-            self._restore_resume_selection("groups")
         else:
             self.query_one("#repo-table", DataTable).focus()
             self._restore_resume_selection("repos")
@@ -182,7 +173,6 @@ class ConsoleUIHelpersMixin:
         repo_ind = self.query_one("#repo-search-indicator", Static)
         sess_ind = self.query_one("#sessions-search-indicator", Static)
         panel_ind = self.query_one("#panels-search-indicator", Static)
-        group_ind = self.query_one("#groups-search-indicator", Static)
         if self._search_query:
             escaped_query = escape(self._search_query)
             text = (
@@ -192,23 +182,23 @@ class ConsoleUIHelpersMixin:
             repo_ind.update(text)
             sess_ind.update(text)
             panel_ind.update(text)
-            group_ind.update(text)
             repo_ind.display = True
             sess_ind.display = True
             panel_ind.display = True
-            group_ind.display = True
         else:
             repo_ind.display = False
             sess_ind.display = False
             panel_ind.display = False
-            group_ind.display = False
 
     def _get_selected_path(self) -> Path | None:
-        selector = "#groups-table" if self._active_tab == "groups" else "#repo-table"
-        table = self.query_one(selector, DataTable)
+        table = self._get_active_table()
         row_key = self._get_selected_row_key(table)
         if row_key is None:
             return None
+        if self._active_tab == "repos":
+            group_path = self._group_path_from_row_key(row_key)
+            if group_path is not None:
+                return group_path
         return Path(row_key)
 
     def _get_selected_row_key(self, table: DataTable) -> str | None:
@@ -226,8 +216,6 @@ class ConsoleUIHelpersMixin:
             return "#sessions-table"
         if tab_id == "panels":
             return "#panels-table"
-        if tab_id == "groups":
-            return "#groups-table"
         return "#repo-table"
 
     def _capture_resume_selection(
@@ -246,7 +234,10 @@ class ConsoleUIHelpersMixin:
             elif tab_id == "panels":
                 self._resume_selection_key = row_key
             else:
-                self._resume_selection_key = str(path) if path is not None else row_key
+                if self._row_key_is_group(row_key):
+                    self._resume_selection_key = row_key
+                else:
+                    self._resume_selection_key = str(path) if path is not None else row_key
             return
 
         table = self.query_one(self._table_selector_for_tab(tab_id), DataTable)
@@ -256,9 +247,12 @@ class ConsoleUIHelpersMixin:
         elif tab_id == "panels":
             self._resume_selection_key = row_key or self._get_selected_row_key(table)
         else:
-            self._resume_selection_key = (
-                str(path) if path is not None else row_key or self._get_selected_row_key(table)
-            )
+            if self._row_key_is_group(row_key):
+                self._resume_selection_key = row_key
+            else:
+                self._resume_selection_key = (
+                    str(path) if path is not None else row_key or self._get_selected_row_key(table)
+                )
 
     def _clear_resume_selection(self) -> None:
         self._resume_selection_tab = None
@@ -337,8 +331,6 @@ class ConsoleUIHelpersMixin:
             return self.query_one("#sessions-table", DataTable)
         if self._active_tab == "panels":
             return self.query_one("#panels-table", DataTable)
-        if self._active_tab == "groups":
-            return self.query_one("#groups-table", DataTable)
         return self.query_one("#repo-table", DataTable)
 
     def action_cursor_down(self) -> None:
@@ -362,8 +354,6 @@ class ConsoleUIHelpersMixin:
             self._apply_sessions_filter_and_sort()
         elif self._active_tab == "panels":
             self._apply_panels_filter_and_sort()
-        elif self._active_tab == "groups":
-            self._apply_groups_filter_and_sort()
         else:
             self._apply_filter_and_sort()
 
@@ -412,15 +402,6 @@ class ConsoleUIHelpersMixin:
                     _PANELS_SORT_COLUMN_NAMES,
                 ),
                 callback=self._handle_panels_sort_selection,
-            )
-        elif self._active_tab == "groups":
-            self.push_screen(
-                SortMenuScreen(
-                    self._groups_sort_column,
-                    self._groups_sort_reverse,
-                    _GROUPS_SORT_COLUMN_NAMES,
-                ),
-                callback=self._handle_groups_sort_selection,
             )
         else:
             self.push_screen(
