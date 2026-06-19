@@ -42,6 +42,18 @@ gitdirector gd-capture "$SESSION" --lines 200
 gitdirector gd-tmux /path/to/repo "make test 2>&1 | tee /tmp/run.log" --description "Tests: make test"
 ```
 
-To stop a running process, kill the matching session from `gitdirector console` in the Sessions tab, or run `tmux kill-session -t =<session-name>`.
+## Sending Input With `gd-send`
+
+- Use `gitdirector gd-send <session-name> "text"` to paste text into a live gd session.
+- Use `gitdirector gd-send <session-name> "command" --enter` to paste text and press Enter.
+- Use `gitdirector gd-send <session-name> --key C-c` to send Ctrl-C to the foreground process.
+- To stop a running process, send Ctrl-C first. Do not kill the tmux session unless Ctrl-C fails, the process ignores it, or the user explicitly asks you to remove the session.
+
+Examples:
+
+```bash
+gitdirector gd-send gd/myrepo/shell/1 "npm test" --enter
+gitdirector gd-send gd/myrepo/shell/1 --key C-c
+```
 
 If a command is short-lived and will not block your shell, plain shell is fine. GitDirector is for long-lived processes the user needs to monitor or stop later.

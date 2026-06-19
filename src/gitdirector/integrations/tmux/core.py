@@ -501,6 +501,44 @@ def capture_pane(
     return result.stdout
 
 
+def send_key_to_session(session_name: str, key: str) -> bool:
+    if not _session_exists(session_name):
+        return False
+    result = subprocess.run(
+        ["tmux", "send-keys", "-t", _active_pane_target(session_name), key],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -> bool:
+    if not _session_exists(session_name):
+        return False
+
+    buffer_name = f"gitdirector-send-{os.getpid()}"
+    load_result = subprocess.run(
+        ["tmux", "load-buffer", "-b", buffer_name, "-"],
+        input=text,
+        capture_output=True,
+        text=True,
+    )
+    if load_result.returncode != 0:
+        return False
+
+    paste_result = subprocess.run(
+        ["tmux", "paste-buffer", "-b", buffer_name, "-t", _active_pane_target(session_name)],
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], capture_output=True, text=True)
+    if paste_result.returncode != 0:
+        return False
+    if enter:
+        return send_key_to_session(session_name, "Enter")
+    return True
+
+
 GD_DESCRIPTION_OPTION = "@gitdirector_description"
 GD_REPO_LABEL_OPTION = "@gitdirector_repo_label"
 GD_DEFAULT_DESCRIPTION = "-"
