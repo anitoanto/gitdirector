@@ -12,6 +12,7 @@ from .commands import (
     cd,
     completion,
     console,
+    gd_send,
     gd_tmux,
     help,
     info,
@@ -61,6 +62,7 @@ autoclean.register(cli)
 info.register(cli)
 gd_tmux.register(cli)
 capture.register(cli)
+gd_send.register(cli)
 completion.register(cli)
 
 
