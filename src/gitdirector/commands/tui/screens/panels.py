@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from ..panels import (
     render_panel_layout_preview,
     resolve_panel_layout,
 )
+from ..terminal_caps import strip_unsupported_css as _safe_css
 from ._shared import ConfirmScreen, SortMenuScreen  # re-export for backward compat
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AgentLoadingScreen",
@@ -44,10 +48,12 @@ class PanelActionMenuScreen(ModalScreen[str]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "PanelActionMenuScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + """
+        " }"
+        + _MODAL_CSS
+        + """
     PanelActionMenuScreen #menu-container {
         width: 72;
         padding: 1 1;
@@ -145,7 +151,7 @@ class RenamePanelScreen(ModalScreen[str | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = (
+    CSS = _safe_css(
         "RenamePanelScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }" + _MODAL_CSS
@@ -189,7 +195,7 @@ class AgentLoadingScreen(ModalScreen[None]):
     _MIN_WAIT = 1.0
     _MAX_WAIT = 15.0
 
-    DEFAULT_CSS = """
+    DEFAULT_CSS = _safe_css("""
     AgentLoadingScreen {
         align: center middle;
         background: $panel 80%;
@@ -216,13 +222,15 @@ class AgentLoadingScreen(ModalScreen[None]):
         padding: 1 1 1 1;
         color: $text-muted;
     }
-    """
+    """)
 
     def __init__(self, agent_cmd: str, session_name: str, ready_marker: Path) -> None:
         super().__init__()
         self._agent_cmd = agent_cmd
         self._session_name = session_name
         self._ready_marker = ready_marker
+        self._done_marker = Path(f"{ready_marker}.done")
+        self._failed_marker = Path(f"{ready_marker}.failed")
         self._dismissed = False
         self._start_time = 0.0
 
@@ -261,38 +269,60 @@ class AgentLoadingScreen(ModalScreen[None]):
         self._do_dismiss()
 
     def _do_dismiss(self) -> None:
-        import subprocess
+        import os
         import sys
         import termios
 
         from ....integrations.tmux import attach_tmux_session
 
         session_name = self._session_name
-        pane_target = f"={session_name}:"
-        try:
-            self._ready_marker.unlink()
-        except FileNotFoundError:
-            pass
+        for marker in (self._ready_marker, self._done_marker, self._failed_marker):
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
 
         app = self.app
         app._pause_session_status_tracking()
 
         try:
-            with app.suspend():
-                sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-                sys.stdout.flush()
-                subprocess.run(["tmux", "send-keys", "-t", pane_target, "C-l", ""], check=False)
-                subprocess.run(["tmux", "clear-history", "-t", pane_target], check=False)
-                attach_tmux_session(session_name)
-                sys.stdout.write("\033[?25h")
-                sys.stdout.flush()
+            try:
+                with app.suspend():
+                    entered_manual_alt_screen = False
+                    try:
+                        if not os.environ.get("TMUX"):
+                            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
+                            sys.stdout.flush()
+                            entered_manual_alt_screen = True
+                        attach_tmux_session(session_name, skip_config_sync=True)
+                    finally:
+                        if entered_manual_alt_screen:
+                            sys.stdout.write("\033[?25h")
+                            sys.stdout.flush()
+                        try:
+                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+                        except (AttributeError, OSError):
+                            pass
+            except Exception as exc:
+                # Headless / agent environments can't actually attach to tmux.
+                # We must still restore the terminal and dismiss the modal so
+                # the user is not left looking at a stuck spinner.
+                logger.warning("tmux attach failed (headless environment?): %s", exc)
                 try:
-                    termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                except (AttributeError, OSError):
+                    app._update_status(f"tmux attach failed: {exc}")
+                except Exception:
+                    pass
+                try:
+                    sys.stdout.write("\033[?25h\033[?1049l")
+                    sys.stdout.flush()
+                except Exception:
                     pass
         finally:
-            app._arm_resume_new_panel_guard(app._active_tab)
-            app._resume_session_status_tracking()
+            try:
+                app._arm_resume_new_panel_guard(app._active_tab)
+                app._resume_session_status_tracking()
+            except Exception:
+                logger.debug("Failed to resume session status tracking", exc_info=True)
 
         self.dismiss(None)
 
@@ -310,7 +340,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         ("ctrl+o", "submit", "Create panel"),
     ]
 
-    CSS = (
+    CSS = _safe_css(
         "CreatePanelScreen {"
         " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
         " }"
@@ -910,9 +940,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def _sync_session_menu_highlight(self) -> None:
         current = self._pane_assignments.get(self._selected_pane_index)
         oid = current if current in self._session_option_ids else "__clear__"
-        self.query_one("#pane-session-menu", OptionList).highlighted = (
-            self._session_option_ids.index(oid)
-        )
+        self.query_one(
+            "#pane-session-menu", OptionList
+        ).highlighted = self._session_option_ids.index(oid)
 
     def _commit_highlighted_slot_selection(self) -> None:
         focused = self.focused

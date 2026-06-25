@@ -2,10 +2,8 @@ class Gitdirector < Formula
   include Language::Python::Virtualenv
   desc "A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place."
   homepage "https://github.com/anitoanto/gitdirector"
-  url "https://github.com/anitoanto/gitdirector.git",
-      origin: "https://github.com/anitoanto/gitdirector.git",
-      tag:      "v1.1.2",
-      revision: "40fa165ef75b786580e15a1cf694933411780df5"
+  url "https://files.pythonhosted.org/packages/61/5f/1a81b5c03b3da66d3d9ce96d6ebcd1b7dd452a2ee944713f98d3ba43b4cd/gitdirector-1.5.2.tar.gz"
+  sha256 "fd1a06451ddc977cbe958291ef5447f9703fcbd561d10a93ba6dd743cbe6bbe4"
   license "MIT"
 
   depends_on "python@3.12"

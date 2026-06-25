@@ -462,11 +462,100 @@ class TestHelpCommand:
         result = runner.invoke(cli, ["help"])
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
+        assert "pull [--yes]" in result.output
 
     def test_no_args_shows_help(self, runner):
         result = runner.invoke(cli, [])
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
+
+
+class TestCompletionCommand:
+    def test_completion_zsh_outputs_setup_script(self, runner):
+        result = runner.invoke(cli, ["completion", "zsh"])
+
+        assert result.exit_code == 0
+        assert "#compdef gitdirector" in result.output
+        assert "_GITDIRECTOR_COMPLETE=zsh_complete" in result.output
+
+    def test_completion_unknown_shell_fails(self, runner):
+        result = runner.invoke(cli, ["completion", "powershell"])
+
+        assert result.exit_code == 2
+        assert "Invalid value" in result.output
+
+    def test_completion_output_does_not_include_update_notice(self, runner):
+        with patch(
+            "gitdirector.version_check.get_update_notice",
+            return_value="Update available: v1.5.0 (current v1.4.2)",
+        ):
+            result = runner.invoke(cli, ["completion", "fish"])
+
+        assert result.exit_code == 0
+        assert "Update available" not in result.output
+        assert "_GITDIRECTOR_COMPLETE=fish_complete" in result.output
+
+    def test_shell_completion_lists_subcommands(self, runner):
+        result = runner.invoke(
+            cli,
+            [],
+            env={
+                "_GITDIRECTOR_COMPLETE": "bash_complete",
+                "COMP_WORDS": "gitdirector ",
+                "COMP_CWORD": "1",
+            },
+            prog_name="gitdirector",
+        )
+
+        assert result.exit_code == 0
+        assert "plain,link" in result.output
+        assert "plain,completion" in result.output
+        assert "plain,gd-tmux" in result.output
+
+    def test_shell_completion_lists_linked_repo_names(self, runner, tmp_path):
+        manager = _mock_manager()
+        manager.config.repositories = [
+            tmp_path / "api-service",
+            tmp_path / "app-web",
+            tmp_path / "docs",
+        ]
+
+        with patch("gitdirector.commands.completion.Config", return_value=manager.config):
+            result = runner.invoke(
+                cli,
+                [],
+                env={
+                    "_GITDIRECTOR_COMPLETE": "bash_complete",
+                    "COMP_WORDS": "gitdirector cd a",
+                    "COMP_CWORD": "2",
+                },
+                prog_name="gitdirector",
+            )
+
+        assert result.exit_code == 0
+        assert "plain,api-service" in result.output
+        assert "plain,app-web" in result.output
+        assert "plain,docs" not in result.output
+
+    def test_shell_completion_lists_repo_names_for_gd_tmux_target(self, runner, tmp_path):
+        manager = _mock_manager()
+        manager.config.repositories = [tmp_path / "backend", tmp_path / "frontend"]
+
+        with patch("gitdirector.commands.completion.Config", return_value=manager.config):
+            result = runner.invoke(
+                cli,
+                [],
+                env={
+                    "_GITDIRECTOR_COMPLETE": "bash_complete",
+                    "COMP_WORDS": "gitdirector gd-tmux b",
+                    "COMP_CWORD": "2",
+                },
+                prog_name="gitdirector",
+            )
+
+        assert result.exit_code == 0
+        assert "plain,backend" in result.output
+        assert "plain,frontend" not in result.output
 
 
 class TestCdCommand:
