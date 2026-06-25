@@ -24,7 +24,7 @@ from gitdirector.commands.tui.screens.diff_files import (
     selection_colors,
 )
 
-from .conftest import _mock_manager
+from .conftest import _mock_manager, _wait_for_deferred_scroll
 
 # ---------------------------------------------------------------------------
 # Pure-Python: selection_colors
@@ -452,7 +452,7 @@ class TestDiffUpdatesOnSelection:
             second = content.content
             assert first is not second
 
-    async def test_content_updates_on_n_press(self, mocker):
+    async def test_content_does_not_update_on_n_press(self, mocker):
         from gitdirector import repo as repo_mod
 
         mocker.patch.object(
@@ -478,7 +478,7 @@ class TestDiffUpdatesOnSelection:
             await pilot.press("n")
             await pilot.pause()
             second = content.content
-            assert first is not second
+            assert first is second
 
     async def test_content_updates_on_bracket_press(self, mocker):
         from gitdirector import repo as repo_mod
@@ -583,7 +583,7 @@ class TestFileListScrolling:
         out = []
         for i in range(count):
             out.append(f"diff --git a/file{i}.py b/file{i}.py\n")
-            out.append(f"index {i:04x}..{i+1:04x} 100644\n")
+            out.append(f"index {i:04x}..{i + 1:04x} 100644\n")
             out.append(f"--- a/file{i}.py\n")
             out.append(f"+++ b/file{i}.py\n")
             out.append("@@ -1 +1 @@\n")
@@ -614,7 +614,7 @@ class TestFileListScrolling:
             # Jump to the last item; the list must scroll to keep
             # it visible (scroll_offset.y should advance past zero).
             files_list.index = 19
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.scroll_offset.y > 0
             # And the scroll position should be near the maximum.
             assert files_list.scroll_offset.y == files_list.max_scroll_y
@@ -637,11 +637,11 @@ class TestFileListScrolling:
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.index = 19
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             # Now jump back to the first item; the scroll should
             # come back to zero.
             files_list.index = 0
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.scroll_offset.y == 0
 
     async def test_bracket_nav_scrolls_to_bottom(self, mocker):
@@ -665,7 +665,7 @@ class TestFileListScrolling:
             await pilot.pause()
             for _ in range(20):
                 await pilot.press("]")
-            await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.index == 19
             assert files_list.scroll_offset.y > 0
 
@@ -727,3 +727,46 @@ class TestFocusBorderTint:
             assert content_pane.has_class("--files-focused")
             assert not files_pane.has_class("--diff-focused")
             assert not content_pane.has_class("--diff-focused")
+
+
+class TestSetFilesRegression:
+    """Regression tests for the empty-list and unbounded-retry fix.
+
+    Previously, ``set_files([])`` left ``_suppress_watch=True`` forever
+    so the user could never change selection, and
+    ``_apply_initial_selection`` re-queued itself unboundedly.
+    """
+
+    def test_empty_list_clears_suppress_watch(self):
+        from textual.app import App
+
+        class _MiniApp(App):
+            pass
+
+        app = _MiniApp()
+        with app._context():  # required for widget construction
+            fl = FileTileList()
+            fl.set_files([])
+            assert fl._suppress_watch is False
+            assert fl._pending_index is None
+
+    def test_apply_initial_selection_bounded_by_retry_limit(self):
+        from textual.app import App
+
+        class _MiniApp(App):
+            pass
+
+        app = _MiniApp()
+        with app._context():
+            fl = FileTileList()
+            # Set a pending index that will never be satisfied because
+            # the list has 0 nodes.
+            fl._pending_index = 0
+            fl._pending_retry_count = 0
+            fl._suppress_watch = True
+            # Call repeatedly: should bail out at the retry limit
+            # rather than re-queue forever.
+            for _ in range(fl._PENDING_RETRY_LIMIT + 5):
+                fl._apply_initial_selection()
+            assert fl._pending_index is None
+            assert fl._suppress_watch is False

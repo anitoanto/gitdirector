@@ -18,6 +18,22 @@ _LOADING_STATUS_MARKERS = (" remaining...", " done, ")
 _MAX_TUI_SETTLE_ROUNDS = 10
 
 
+async def _wait_for_refresh(widget, timeout: float = 5.0) -> None:
+    refreshed = asyncio.Event()
+    widget.call_after_refresh(refreshed.set)
+    await asyncio.wait_for(refreshed.wait(), timeout=timeout)
+
+
+async def _wait_for_deferred_scroll(widget) -> None:
+    await _wait_for_refresh(widget)
+    await _wait_for_refresh(widget)
+
+
+async def _wait_for_animated_scroll(pilot, widget) -> None:
+    await _wait_for_refresh(widget)
+    await pilot.wait_for_scheduled_animations()
+
+
 def _status_is_loading(app) -> bool:
     if app is None:
         return False
@@ -105,17 +121,20 @@ SAMPLE_SESSIONS = [
         "repo": "alpha",
         "repo_slug": "alpha",
         "purpose": "shell",
+        "description": "-",
     },
     {
         "session_name": "gd/beta/claude/1",
         "repo": "beta",
         "repo_slug": "beta",
         "purpose": "claude",
+        "description": "-",
     },
     {
         "session_name": "gd/gamma/copilot/1",
         "repo": "gamma",
         "repo_slug": "gamma",
         "purpose": "copilot",
+        "description": "-",
     },
 ]

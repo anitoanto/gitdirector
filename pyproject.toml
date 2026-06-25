@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "gitdirector"
-version = "1.5.0"
+version = "1.6.0"
 description = "A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place."
 readme = "README.md"
 license = { text = "MIT" }
@@ -41,7 +41,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "black>=23.0",
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
@@ -64,7 +63,6 @@ managed = true
 
 [dependency-groups]
 dev = [
-    "black>=23.0",
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
@@ -72,10 +70,6 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.1.0",
 ]
-
-[tool.black]
-line-length = 100
-target-version = ["py310", "py311", "py312"]
 
 [tool.ruff]
 line-length = 100

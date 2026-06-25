@@ -8,14 +8,24 @@ from ...repo import RepositoryInfo, RepoStatus
 
 _STATUS_LABEL = {
     RepoStatus.UP_TO_DATE: "up to date",
-    RepoStatus.BEHIND: "behind",
-    RepoStatus.AHEAD: "ahead",
-    RepoStatus.DIVERGED: "diverged",
-    RepoStatus.UNKNOWN: "unknown",
+    RepoStatus.BEHIND: "[bold yellow]behind[/bold yellow]",
+    RepoStatus.AHEAD: "[bold yellow]ahead[/bold yellow]",
+    RepoStatus.DIVERGED: "[bold yellow]diverged[/bold yellow]",
+    RepoStatus.UNKNOWN: "[bold yellow]unknown[/bold yellow]",
 }
 
 
 def _changes_label(info: RepositoryInfo) -> str:
+    if info.staged and info.unstaged:
+        return "[bold yellow]staged+unstaged[/bold yellow]"
+    if info.staged:
+        return "[bold yellow]staged[/bold yellow]"
+    if info.unstaged:
+        return "[bold yellow]unstaged[/bold yellow]"
+    return "—"
+
+
+def _changes_sort_key(info: RepositoryInfo) -> str:
     if info.staged and info.unstaged:
         return "staged+unstaged"
     if info.staged:
@@ -31,8 +41,7 @@ _SORT_COLUMN_NAMES = {
     2: "Branch",
     3: "Changes",
     4: "Last Commit",
-    5: "Sessions",
-    6: "Path",
+    5: "Path",
 }
 
 _DEFAULT_SORT_COLUMN = 0
@@ -50,11 +59,20 @@ _SESSIONS_SORT_COLUMN_NAMES = {
     1: "Session",
     2: "Repository",
     3: "Session Name",
+    4: "Description",
 }
 
 _DEFAULT_SESSIONS_SORT_COLUMN = 3
 
-_SESSION_STATUS_POLL_INTERVAL_SECS = 10
+# Column indexes for the Sessions tab. Kept here so the TUI mixins and
+# the action handlers can refer to the same source of truth.
+_SESSIONS_COL_STATUS = 0
+_SESSIONS_COL_PURPOSE = 1
+_SESSIONS_COL_REPO = 2
+_SESSIONS_COL_SESSION_NAME = 3
+_SESSIONS_COL_DESCRIPTION = 4
+
+_SESSION_STATUS_POLL_INTERVAL_SECS = 3
 
 _PANELS_SORT_COLUMN_NAMES = {
     0: "Name",

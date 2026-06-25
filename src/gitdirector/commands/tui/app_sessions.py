@@ -13,10 +13,42 @@ from .constants import (
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _SESSION_STATUS_LABEL,
     _SESSION_STATUS_ORDER,
+    _SESSIONS_COL_DESCRIPTION,
     _SESSIONS_SORT_COLUMN_NAMES,
 )
+from .table_text import resolve_wrapped_column_width, wrap_table_cell_text
 
 logger = logging.getLogger(__name__)
+
+_MIN_SESSIONS_DESCRIPTION_WIDTH = 12
+_MAX_SESSIONS_DESCRIPTION_WIDTH = 48
+_SESSIONS_DESCRIPTION_WIDTH_DIVISOR = 3
+
+
+def _resolve_sessions_description_width(screen_width: int) -> int:
+    """Return the max width (in cells) for the description column.
+
+    The width scales with the available screen size: roughly
+    ``screen_width / 3`` with a sensible floor and ceiling so the column
+    never collapses or eats the whole table.
+    """
+    if screen_width <= 0:
+        return _MIN_SESSIONS_DESCRIPTION_WIDTH
+    return resolve_wrapped_column_width(
+        screen_width,
+        min_width=_MIN_SESSIONS_DESCRIPTION_WIDTH,
+        max_width=_MAX_SESSIONS_DESCRIPTION_WIDTH,
+        divisor=_SESSIONS_DESCRIPTION_WIDTH_DIVISOR,
+    )
+
+
+def _wrap_session_description(text: str, max_width: int) -> str:
+    """Wrap *text* to *max_width* cells, preserving any existing newlines.
+
+    Empty/placeholder values pass through untouched so callers don't
+    have to special-case "-".
+    """
+    return wrap_table_cell_text(text, max_width)
 
 
 class ConsoleSessionsMixin:
@@ -34,11 +66,30 @@ class ConsoleSessionsMixin:
         self._sessions_entries = entries
         self._apply_sessions_filter_and_sort()
 
+    def _apply_sessions_description_column_width(self) -> None:
+        try:
+            table = self.query_one("#sessions-table", DataTable)
+        except NoMatches:
+            return
+        col_keys = getattr(self, "_sess_col_keys", None)
+        if not col_keys or len(col_keys) <= _SESSIONS_COL_DESCRIPTION:
+            return
+        col_key = col_keys[_SESSIONS_COL_DESCRIPTION]
+        width = _resolve_sessions_description_width(self.size.width)
+        try:
+            column = table.columns[col_key]
+        except (KeyError, IndexError):
+            return
+        column.auto_width = False
+        column.width = width
+
     def _apply_sessions_filter_and_sort(self) -> None:
         try:
             table = self.query_one("#sessions-table", DataTable)
         except NoMatches:
             return
+        self._apply_sessions_description_column_width()
+        description_width = _resolve_sessions_description_width(self.size.width)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -60,6 +111,7 @@ class ConsoleSessionsMixin:
                 if query in entry["session_name"].lower()
                 or query in entry["repo"].lower()
                 or query in entry["purpose"].lower()
+                or query in entry.get("description", "").lower()
             ]
 
         for entry in entries:
@@ -70,6 +122,7 @@ class ConsoleSessionsMixin:
             1: lambda entry: entry["purpose"].lower(),
             2: lambda entry: entry["repo"].lower(),
             3: lambda entry: entry["session_name"].lower(),
+            4: lambda entry: entry.get("description", "").lower(),
         }
         key_func = sort_keys.get(
             self._sessions_sort_column,
@@ -85,11 +138,15 @@ class ConsoleSessionsMixin:
             no_msg.display = False
             for entry in entries:
                 status = entry.get("status", "running")
+                description = _wrap_session_description(
+                    entry.get("description", "-"), description_width
+                )
                 table.add_row(
                     _SESSION_STATUS_LABEL.get(status, "● running"),
                     entry["purpose"],
                     entry["repo"],
                     entry["session_name"],
+                    description,
                     key=entry["session_name"],
                 )
 
@@ -213,26 +270,33 @@ class ConsoleSessionsMixin:
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)
             try:
-                shown = self.query_one("#repo-table", DataTable).row_count
+                self.query_one("#repo-table", DataTable)
             except NoMatches:
                 return
+            shown = getattr(self, "_visible_repo_count", total)
             self._update_status(self._build_loaded_status(shown, total))
 
     def _resolve_session_status(self, entry: dict[str, str]) -> str:
         from ...integrations.tmux import resolve_pane_status
 
         session_name = entry["session_name"]
-        bell = self._monitor.get_bell_state(session_name)
         tmux_info = self._session_statuses.get(session_name)
+        bell = (
+            bool(tmux_info.get("bell"))
+            if tmux_info is not None
+            else self._monitor.get_bell_state(session_name)
+        )
         if tmux_info is None:
             return "waiting" if bell else "running"
+        last_output = self._monitor.get_last_output_time(session_name)
         last_content_change = self._monitor.get_last_content_change_time(session_name)
         return resolve_pane_status(
             entry["purpose"],
             str(tmux_info["command"]),
             bool(tmux_info["dead"]),
             bell=bell,
-            last_output_time=last_content_change,
+            last_output_time=last_output,
+            last_content_change_time=last_content_change,
         )
 
     def _update_session_status_cells(self) -> None:

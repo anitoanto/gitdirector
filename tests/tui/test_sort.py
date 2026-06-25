@@ -31,9 +31,9 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/alpha")
-            table.move_cursor(row=2)
+            table.move_cursor(row=3)
             assert app._get_selected_path() == Path("/tmp/gamma")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -53,9 +53,9 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/gamma")
-            table.move_cursor(row=2)
+            table.move_cursor(row=3)
             assert app._get_selected_path() == Path("/tmp/alpha")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -75,11 +75,11 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
-            assert app._get_selected_path() == Path("/tmp/a")
             table.move_cursor(row=1)
-            assert app._get_selected_path() == Path("/tmp/b")
+            assert app._get_selected_path() == Path("/tmp/a")
             table.move_cursor(row=2)
+            assert app._get_selected_path() == Path("/tmp/b")
+            table.move_cursor(row=3)
             assert app._get_selected_path() == Path("/tmp/c")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -99,7 +99,7 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/b")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -134,11 +134,11 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
-            assert app._get_selected_path() == Path("/tmp/old")
             table.move_cursor(row=1)
-            assert app._get_selected_path() == Path("/tmp/mid")
+            assert app._get_selected_path() == Path("/tmp/old")
             table.move_cursor(row=2)
+            assert app._get_selected_path() == Path("/tmp/mid")
+            table.move_cursor(row=3)
             assert app._get_selected_path() == Path("/tmp/new")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -167,9 +167,9 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
-            assert app._get_selected_path() == Path("/tmp/new")
             table.move_cursor(row=1)
+            assert app._get_selected_path() == Path("/tmp/new")
+            table.move_cursor(row=2)
             assert app._get_selected_path() == Path("/tmp/old")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -196,7 +196,7 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/no-ts")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -218,10 +218,11 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 3
-            table.move_cursor(row=0)
+            assert table.row_count == 4
+            assert app._visible_repo_count == 3
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/alpha-api")
-            table.move_cursor(row=2)
+            table.move_cursor(row=3)
             assert app._get_selected_path() == Path("/tmp/gamma-api")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -283,13 +284,15 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 2
+            assert table.row_count == 3
+            assert app._visible_repo_count == 2
             app._sort_column = 0
             app._sort_reverse = True
             app._apply_filter_and_sort()
             await pilot.pause()
-            assert table.row_count == 2
-            table.move_cursor(row=0)
+            assert table.row_count == 3
+            assert app._visible_repo_count == 2
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/gamma-api")
 
 

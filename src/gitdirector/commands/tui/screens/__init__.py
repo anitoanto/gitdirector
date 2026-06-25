@@ -22,6 +22,7 @@ from .commit import (
     StageFilesConfirmScreen,
 )
 from .diff import DiffReviewScreen
+from .groups import GroupActionMenuScreen
 from .panels import (
     AgentLoadingScreen,
     CreatePanelScreen,
@@ -37,7 +38,7 @@ from .repos import (
     PullResultScreen,
     RepoInfoScreen,
 )
-from .sessions import RemoveSessionScreen, SelectSessionScreen
+from .sessions import EditSessionDescriptionScreen, RemoveSessionScreen, SelectSessionScreen
 
 __all__ = [
     "ActionMenuScreen",
@@ -48,8 +49,10 @@ __all__ = [
     "ConfirmScreen",
     "CreatePanelScreen",
     "DiffReviewScreen",
+    "EditSessionDescriptionScreen",
     "GitCommandResultScreen",
     "GitOperationsMenuScreen",
+    "GroupActionMenuScreen",
     "PanelActionMenuScreen",
     "PullLoadingScreen",
     "PullResultScreen",

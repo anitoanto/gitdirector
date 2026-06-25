@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent
 
 from gitdirector.commands.tui import GitDirectorConsole, SortMenuScreen
+from gitdirector.commands.tui.app_sessions import _MAX_SESSIONS_DESCRIPTION_WIDTH
 
 from .conftest import SAMPLE_SESSIONS, _make_info, _mock_manager
 
@@ -24,7 +25,7 @@ class TestSessionsTab:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as _:
             table = app.query_one("#sessions-table", DataTable)
-            assert len(table.columns) == 4
+            assert len(table.columns) == 5
 
     async def test_tab_switching_via_action(self):
         app = GitDirectorConsole()
@@ -204,7 +205,12 @@ class TestSessionsTab:
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
-            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {
+                "session_name": "gd/alpha/shell/1",
+                "repo": "alpha",
+                "purpose": "shell",
+                "description": "-",
+            },
         ],
     )
     async def test_sessions_table_cell_values(self, _mock):
@@ -221,6 +227,7 @@ class TestSessionsTab:
             assert table.get_cell(row_key, ck[1]) == "shell"
             assert table.get_cell(row_key, ck[2]) == "alpha"
             assert table.get_cell(row_key, ck[3]) == "gd/alpha/shell/1"
+            assert table.get_cell(row_key, ck[4]) == "-"
 
 
 class TestSessionsSearchAndSort:
@@ -446,7 +453,7 @@ class TestSessionsSearchAndSort:
             await pilot.pause()
             assert isinstance(app.screen, SortMenuScreen)
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 4
+            assert menu.option_count == 5
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_search_on_sessions_tab_via_input(self, _mock):
@@ -731,7 +738,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=1)
+            table.move_cursor(row=2)
             await pilot.pause()
 
             with patch("gitdirector.integrations.tmux.attach_tmux_session"):
@@ -814,7 +821,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=2)
+            table.move_cursor(row=3)
             await pilot.pause()
 
             app._capture_resume_selection("repos")
@@ -826,7 +833,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert table.cursor_coordinate.row == 1
+            assert table.cursor_coordinate.row == 2
             assert str(row_key.value) == str(repos[1].path)
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
@@ -843,7 +850,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             await pilot.pause()
 
             app._sort_reverse = True
@@ -852,7 +859,7 @@ class TestTabRestorationAfterSuspend:
 
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == str(repos[0].path)
-            assert table.cursor_coordinate.row == 2
+            assert table.cursor_coordinate.row == 3
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
@@ -1134,7 +1141,6 @@ class TestRemoveSessionUpdatesTable:
             assert table.row_count == 3
             _mock_kill.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["gd/alpha/shell/1"])
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
@@ -1142,25 +1148,187 @@ class TestRemoveSessionUpdatesTable:
             {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
         ],
     )
-    async def test_do_remove_updates_repo_table_session_count(
-        self, _mock_list_all, _mock_kill, _mock_list_repo
-    ):
+    async def test_do_remove_updates_sessions_table_only(self, _mock_list_all, _mock_kill):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sessions_cache[str(Path("/tmp/alpha"))] = 1
-            app._update_row(repos[0], 1)
-            await pilot.pause()
-            table = app.query_one("#repo-table", DataTable)
-            ck = app._col_keys
-            assert table.get_cell(str(Path("/tmp/alpha")), ck[5]) == "1"
             app._sessions_entries = [
                 {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
             ]
             app._do_remove(True, "gd/alpha/shell/1")
             await pilot.pause()
-            assert table.get_cell(str(Path("/tmp/alpha")), ck[5]) == "—"
-            assert app._sessions_cache[str(Path("/tmp/alpha"))] == 0
+            assert app._sessions_entries == []
+            _mock_kill.assert_called_once_with("gd/alpha/shell/1")
+
+
+class TestSessionDescription:
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_description_column_uses_placeholder_when_unset(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            ck = app._sess_col_keys
+            assert table.get_cell("gd/alpha/shell/1", ck[4]) == "-"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_search_matches_description(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_entries[0]["description"] = "alpha only"
+            app._sessions_entries[1]["description"] = "shared"
+            app._sessions_entries[2]["description"] = "shared"
+            app._search_query = "alpha only"
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 1
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/alpha/shell/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_sort_sessions_by_description(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            for index, entry in enumerate(app._sessions_entries):
+                entry["description"] = ["zebra", "alpha", "mango"][index]
+            app._sessions_sort_column = 4
+            app._sessions_sort_reverse = False
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            table.move_cursor(row=0)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            assert str(row_key.value) == "gd/beta/claude/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_long_description_wraps_to_max_width(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            long_text = "this is a long description that should wrap over multiple lines"
+            for entry in app._sessions_entries:
+                entry["description"] = long_text
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            ck = app._sess_col_keys
+            cell_value = table.get_cell("gd/alpha/shell/1", ck[4])
+            assert "\n" in cell_value
+            for line in cell_value.split("\n"):
+                assert len(line) <= _MAX_SESSIONS_DESCRIPTION_WIDTH
+
+    def test_resolve_sessions_description_width_scales_with_screen(self):
+        from gitdirector.commands.tui.app_sessions import (
+            _MIN_SESSIONS_DESCRIPTION_WIDTH,
+            _resolve_sessions_description_width,
+        )
+
+        assert _resolve_sessions_description_width(60) < _resolve_sessions_description_width(160)
+        assert _resolve_sessions_description_width(60) >= _MIN_SESSIONS_DESCRIPTION_WIDTH
+        assert _resolve_sessions_description_width(60) <= _MAX_SESSIONS_DESCRIPTION_WIDTH
+        assert _resolve_sessions_description_width(160) <= _MAX_SESSIONS_DESCRIPTION_WIDTH
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_description_column_uses_resolved_width(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            from gitdirector.commands.tui.app_sessions import (
+                _resolve_sessions_description_width,
+            )
+
+            table = app.query_one("#sessions-table", DataTable)
+            ck = app._sess_col_keys
+            assert table.columns[ck[4]].width == _resolve_sessions_description_width(app.size.width)
+
+    @patch("gitdirector.integrations.tmux._set_session_description")
+    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_d_key_opens_description_editor(self, _mock_list, _mock_get_desc, _mock_set_desc):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            table.focus()
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            from gitdirector.commands.tui.screens.sessions import (
+                EditSessionDescriptionScreen,
+            )
+
+            assert isinstance(app.screen, EditSessionDescriptionScreen)
+
+    @patch("gitdirector.integrations.tmux._set_session_description")
+    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_handle_description_edit_persists_value(
+        self, _mock_list, _mock_get_desc, mock_set_desc
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._handle_description_edit("gd/alpha/shell/1", "  ready to ship  ")
+            await pilot.pause()
+            mock_set_desc.assert_called_once_with("gd/alpha/shell/1", "  ready to ship  ")
+            matching = [e for e in app._sessions_entries if e["session_name"] == "gd/alpha/shell/1"]
+            assert matching[0]["description"] == "  ready to ship  "
+
+    @patch("gitdirector.integrations.tmux._set_session_description")
+    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_handle_description_edit_empty_resets_to_placeholder(
+        self, _mock_list, _mock_get_desc, mock_set_desc
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._handle_description_edit("gd/alpha/shell/1", "")
+            await pilot.pause()
+            mock_set_desc.assert_called_once_with("gd/alpha/shell/1", "")
+            matching = [e for e in app._sessions_entries if e["session_name"] == "gd/alpha/shell/1"]
+            assert matching[0]["description"] == "-"
+
+    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    async def test_action_edit_session_description_noop_on_other_tabs(
+        self, _mock_list, _mock_get_desc
+    ):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.push_screen = MagicMock()
+            app.action_tab_repos()
+            await pilot.pause()
+            app.action_edit_session_description()
+            app.push_screen.assert_not_called()

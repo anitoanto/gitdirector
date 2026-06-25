@@ -1,8 +1,11 @@
 """Regression guards for exact-match tmux targets and cleanup behavior."""
 
 import shlex
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from gitdirector.integrations.tmux import (
     _capture_pane_text,
@@ -12,12 +15,13 @@ from gitdirector.integrations.tmux import (
     _ensure_panel_resize_tracking,
     _panel_attach_fragment,
     _panel_pane_command,
+    _respawn_pane,
     _session_exists,
     _tmux_theme_config,
     attach_tmux_session,
     cleanup_panel_attached_session,
     kill_tmux_session,
-    launch_agent_in_tmux_session,
+    launch_command_in_tmux_session,
 )
 
 
@@ -63,14 +67,15 @@ class TestExactMatchAttachTmuxSession:
     """attach_tmux_session must use ``=`` for both switch-client and attach-session."""
 
     @patch(
-        "gitdirector.integrations.tmux.panels.rebuild_temp_panel_tmux_session",
+        "gitdirector.integrations.tmux.panels.ensure_temp_panel_tmux_session",
         return_value="gd/temp/panel/repo/shell/1",
     )
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_regular_session_switch_client_exact_temp_panel_target(
-        self, mock_run, _mock_sync, _mock_rebuild
+        self, mock_run, _mock_sync, _mock_ensure
     ):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")
         target = mock_run.call_args[0][0][3]
@@ -89,6 +94,7 @@ class TestExactMatchAttachTmuxSession:
         mock_reflow,
         _mock_sync,
     ):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
@@ -110,6 +116,7 @@ class TestExactMatchAttachTmuxSession:
         mock_reflow,
         _mock_sync,
     ):
+        mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/panel/dev")
         target = mock_run.call_args[0][0][3]
@@ -167,9 +174,9 @@ class TestExactMatchPanelAttachFragment:
             if " -t " in part:
                 target = part.split(" -t ")[1].split()[0]
                 unquoted = target.strip("'\"")
-                assert unquoted.startswith("=") or unquoted.startswith(
-                    "$"
-                ), f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                assert unquoted.startswith("=") or unquoted.startswith("$"), (
+                    f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
+                )
 
 
 class TestCleanupPanelAttachedSession:
@@ -198,6 +205,7 @@ class TestCleanupPanelAttachedSession:
             completed("on\n"),
             completed("off\n"),
             completed("gd/repo/shell/1:2\n"),
+            completed(),
             completed(),
             completed(),
             completed(),
@@ -240,7 +248,10 @@ class TestCleanupPanelAttachedSession:
         result = MagicMock()
         result.stdout = "3\n"
         result.returncode = 0
-        mock_run.side_effect = [result, MagicMock()]
+        mock_run.side_effect = [
+            result,
+            MagicMock(),
+        ]
 
         cleanup_panel_attached_session("gd/repo/shell/1")
 
@@ -294,19 +305,53 @@ class TestExactMatchPanelPaneCommand:
         assert "Pane 1: unassigned" not in cmd
 
 
-class TestExactMatchLaunchAgent:
-    """launch_agent_in_tmux_session must use exact session and pane targets."""
+class TestRespawnPane:
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_retries_transient_fork_failure(self, mock_run, mock_sleep):
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=1, stderr="respawn pane failed: fork failed: Device not configured"
+            ),
+            MagicMock(returncode=0, stderr=""),
+        ]
+
+        _respawn_pane("%1", "cat")
+
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once_with(0.05)
+
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_does_not_retry_non_fork_failure(self, mock_run, mock_sleep):
+        mock_run.return_value = MagicMock(returncode=1, stderr="no such pane")
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            _respawn_pane("%1", "cat")
+
+        assert exc_info.value.returncode == 1
+        assert mock_run.call_count == 1
+        mock_sleep.assert_not_called()
+
+
+class TestExactMatchLaunchCommand:
+    """launch_command_in_tmux_session must use exact session and pane targets."""
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_send_keys_target_uses_equals(self, mock_run, _mock_marker):
-        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
-        send_keys_args = mock_run.call_args[0][0]
-        assert send_keys_args[0:3] == ["tmux", "send-keys", "-t"]
-        assert send_keys_args[3] == "=gd/my-repo/copilot/1:"
+    def test_respawn_pane_target_uses_equals(self, mock_run, _mock_marker):
+        launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        respawn_args = mock_run.call_args[0][0]
+        assert respawn_args[0:5] == [
+            "tmux",
+            "respawn-pane",
+            "-k",
+            "-t",
+            "=gd/my-repo/copilot/1:",
+        ]
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -314,8 +359,8 @@ class TestExactMatchLaunchAgent:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_cleanup_script_kill_session_uses_equals(self, mock_run, _mock_marker):
-        launch_agent_in_tmux_session("gd/my-repo/copilot/1", "copilot")
-        cleanup_cmd = mock_run.call_args[0][0][4]
+        launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
+        cleanup_cmd = mock_run.call_args[0][0][-1]
         assert f"kill-session -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
 
 
@@ -432,6 +477,6 @@ class TestExactMatchSourceCodeAudit:
                         violations.append(
                             f"Line {node.lineno}: f-string '-t' target starts with a variable (should prefix '=')"
                         )
-        assert (
-            violations == []
-        ), "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        assert violations == [], (
+            "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
+        )

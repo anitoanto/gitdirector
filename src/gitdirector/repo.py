@@ -1,7 +1,9 @@
 import os
 import re
+import shlex
 import signal
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -33,7 +35,9 @@ _AUTH_ERROR_RE = re.compile(
     r"|unable to access"
     r"|returned error: 40[13]"
     r"|invalid credentials"
-    r"|logon failed",
+    r"|logon failed"
+    r"|repository not found"
+    r"|support for password authentication was removed",
     re.IGNORECASE,
 )
 
@@ -57,6 +61,40 @@ def _classify_remote_error(stderr: str) -> str | None:
 
 def _is_no_commits_error(stderr: str) -> bool:
     return _NO_COMMITS_RE.search(stderr) is not None
+
+
+def _is_auth_error(stderr: str) -> bool:
+    return _AUTH_ERROR_RE.search(stderr) is not None
+
+
+def _github_credentials_from_config() -> tuple[str, str] | None:
+    from .config import Config
+
+    try:
+        config = Config()
+    except Exception:
+        return None
+    if not config.github_username or not config.github_PAT:
+        return None
+    return config.github_username, config.github_PAT
+
+
+def _add_env_git_config(env: dict[str, str], key: str, value: str) -> None:
+    try:
+        index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        index = 0
+    env[f"GIT_CONFIG_KEY_{index}"] = key
+    env[f"GIT_CONFIG_VALUE_{index}"] = value
+    env["GIT_CONFIG_COUNT"] = str(index + 1)
+
+
+def _apply_github_auth_env(env: dict[str, str], username: str, token: str) -> None:
+    helper = f"!{shlex.quote(sys.executable)} -m gitdirector.github_credential_helper"
+    _add_env_git_config(env, "credential.helper", "")
+    _add_env_git_config(env, "credential.helper", helper)
+    env["GITDIRECTOR_GITHUB_USERNAME"] = username
+    env["GITDIRECTOR_GITHUB_PAT"] = token
 
 
 def _register_running_git_process(process: subprocess.Popen) -> None:
@@ -147,11 +185,24 @@ class Repository:
         for process in processes:
             _kill_running_git_process(process)
 
-    def _run_git(self, *args: str, _strip: bool = True, _timeout: int = 30) -> tuple[int, str, str]:
+    def _git_env(self, *, github_auth: tuple[str, str] | None = None) -> dict[str, str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
         if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
             env["GIT_SSH_COMMAND"] = "ssh -o ConnectTimeout=10"
+        if github_auth is not None:
+            username, token = github_auth
+            _apply_github_auth_env(env, username, token)
+        return env
+
+    def _run_git_once(
+        self,
+        *args: str,
+        _strip: bool,
+        _timeout: int,
+        _github_auth: tuple[str, str] | None = None,
+    ) -> tuple[int, str, str, str]:
+        env = self._git_env(github_auth=_github_auth)
         command = ["git", "-C", str(self.path)] + list(args)
         try:
             if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
@@ -163,12 +214,13 @@ class Repository:
                     env=env,
                     stdin=subprocess.DEVNULL,
                 )
-                return _normalize_git_result(
+                code, out, err = _normalize_git_result(
                     result.returncode,
                     result.stdout,
                     result.stderr,
                     strip_stdout=_strip,
                 )
+                return code, out, err, result.stderr.strip()
 
             process = subprocess.Popen(
                 command,
@@ -180,9 +232,9 @@ class Repository:
                 start_new_session=True,
             )
         except subprocess.TimeoutExpired:
-            return 1, "", "git command timed out"
+            return 1, "", "git command timed out", "git command timed out"
         except FileNotFoundError:
-            return 1, "", "git not found"
+            return 1, "", "git not found", "git not found"
 
         _register_running_git_process(process)
         try:
@@ -193,16 +245,34 @@ class Repository:
                 process.communicate(timeout=1)
             except subprocess.TimeoutExpired:
                 pass
-            return 1, "", "git command timed out"
+            return 1, "", "git command timed out", "git command timed out"
         finally:
             _unregister_running_git_process(process)
 
-        return _normalize_git_result(
+        code, out, err = _normalize_git_result(
             process.returncode if process.returncode is not None else 1,
             stdout,
             stderr,
             strip_stdout=_strip,
         )
+        return code, out, err, stderr.strip()
+
+    def _run_git(self, *args: str, _strip: bool = True, _timeout: int = 30) -> tuple[int, str, str]:
+        code, out, err, raw_err = self._run_git_once(*args, _strip=_strip, _timeout=_timeout)
+        if code == 0 or not _is_auth_error(raw_err or err):
+            return code, out, err
+
+        github_auth = _github_credentials_from_config()
+        if github_auth is None:
+            return code, out, err
+
+        retry_code, retry_out, retry_err, _ = self._run_git_once(
+            *args,
+            _strip=_strip,
+            _timeout=_timeout,
+            _github_auth=github_auth,
+        )
+        return retry_code, retry_out, retry_err
 
     def get_current_branch(self) -> Optional[str]:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")

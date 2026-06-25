@@ -96,8 +96,7 @@ class TestPaneWidget:
         assert pane.styles.border.top[0] == "round"
         assert pane.styles.border.top[1] == Color.parse(theme.border_inactive)
 
-    @patch("gitdirector.commands.tui.panel_view.cleanup_panel_attached_session")
-    def test_stop_terminal_cleans_up_panel_attached_session(self, mock_cleanup):
+    def test_stop_terminal_stops_embedded_terminal(self):
         pane = PaneWidget(
             2,
             "gd/my-repo/copilot/3",
@@ -109,10 +108,6 @@ class TestPaneWidget:
         pane.stop_terminal()
 
         pane._terminal.stop.assert_called_once_with()
-        mock_cleanup.assert_called_once_with(
-            "gd/my-repo/copilot/3",
-            theme_name="rose-pine",
-        )
 
 
 class TestPanelViewScreen:
@@ -613,8 +608,11 @@ class TestGitDirectorConsolePanels:
             == 9
         )
 
-    def test_panel_delete_hotkey_removed(self):
-        assert all(binding.key != "d" for binding in GitDirectorConsole.BINDINGS)
+    def test_description_edit_binding_uses_d_key(self):
+        assert any(
+            binding.key == "d" and binding.action == "edit_session_description"
+            for binding in GitDirectorConsole.BINDINGS
+        )
 
     def test_tab_switch_hotkeys_hidden_from_footer(self):
         hidden_keys = {binding.key for binding in GitDirectorConsole.BINDINGS if not binding.show}
