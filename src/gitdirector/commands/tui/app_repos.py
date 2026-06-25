@@ -18,6 +18,7 @@ from .constants import (
     _STATUS_LABEL,
     _STATUS_ORDER,
     _changes_label,
+    _changes_sort_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ class ConsoleReposMixin:
         if col == 2:
             return lambda info: (info.branch or "").lower()
         if col == 3:
-            return lambda info: _changes_label(info)
+            return lambda info: _changes_sort_key(info)
         if col == 4:
             return lambda info: info.last_commit_timestamp or 0
         if col == 5:

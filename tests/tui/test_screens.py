@@ -241,7 +241,7 @@ class TestGitOperationsMenuScreen:
 
             assert "my-repo" in title.content
             assert "main" in branch_label.content
-            assert menu.option_count == 5
+            assert menu.option_count == 6
 
     async def test_select_status(self):
         results: list[str | None] = []
@@ -322,6 +322,25 @@ class TestGitOperationsMenuScreen:
             await pilot.pause()
 
             assert results == ["pull"]
+
+    async def test_select_push(self):
+        results: list[str | None] = []
+        screen = GitOperationsMenuScreen("my-repo", branch="main")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen, callback=lambda value: results.append(value))
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert results == ["push"]
 
 
 class TestPanelActionMenuScreen:

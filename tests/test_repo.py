@@ -85,6 +85,69 @@ class TestRunGit:
         assert code == 1
         assert "not found" in err
 
+    def test_auth_failure_retries_with_configured_github_credentials(
+        self, fake_git_repo, config, mocker, monkeypatch
+    ):
+        monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+        monkeypatch.delenv("GITDIRECTOR_GITHUB_USERNAME", raising=False)
+        monkeypatch.delenv("GITDIRECTOR_GITHUB_PAT", raising=False)
+        config.github_username = "octocat"
+        config.github_PAT = "ghp_secret"
+        config.save()
+        run_git = mocker.patch(
+            "subprocess.run",
+            side_effect=[
+                _make_run_result(
+                    128,
+                    "",
+                    "fatal: could not read Username for 'https://github.com': "
+                    "terminal prompts disabled\n",
+                ),
+                _make_run_result(0, "pushed\n", ""),
+            ],
+        )
+        repo = Repository(fake_git_repo)
+
+        code, out, err = repo._run_git("push")
+
+        assert code == 0
+        assert out == "pushed"
+        assert err == ""
+        assert run_git.call_count == 2
+        first_env = run_git.call_args_list[0].kwargs["env"]
+        retry_env = run_git.call_args_list[1].kwargs["env"]
+        retry_command = run_git.call_args_list[1].args[0]
+        assert "GITDIRECTOR_GITHUB_PAT" not in first_env
+        assert retry_env["GITDIRECTOR_GITHUB_USERNAME"] == "octocat"
+        assert retry_env["GITDIRECTOR_GITHUB_PAT"] == "ghp_secret"
+        assert retry_env["GIT_CONFIG_COUNT"] == "2"
+        assert retry_env["GIT_CONFIG_KEY_0"] == "credential.helper"
+        assert retry_env["GIT_CONFIG_VALUE_0"] == ""
+        assert retry_env["GIT_CONFIG_KEY_1"] == "credential.helper"
+        assert "gitdirector.github_credential_helper" in retry_env["GIT_CONFIG_VALUE_1"]
+        assert "ghp_secret" not in " ".join(retry_command)
+
+    def test_auth_failure_without_configured_github_credentials_does_not_retry(
+        self, fake_git_repo, mocker
+    ):
+        mocker.patch("gitdirector.repo._github_credentials_from_config", return_value=None)
+        run_git = mocker.patch(
+            "subprocess.run",
+            return_value=_make_run_result(
+                128,
+                "",
+                "fatal: could not read Username for 'https://github.com': "
+                "terminal prompts disabled\n",
+            ),
+        )
+        repo = Repository(fake_git_repo)
+
+        code, _, err = repo._run_git("push")
+
+        assert code == 128
+        assert "authentication failed" in err
+        run_git.assert_called_once()
+
     def test_running_git_commands_can_be_killed(self, fake_git_repo, mocker):
         started = threading.Event()
         killed = threading.Event()

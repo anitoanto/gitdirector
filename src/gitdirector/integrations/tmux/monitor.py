@@ -108,9 +108,10 @@ _SHELL_COMMANDS = frozenset(
 
 _AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex", "pi"})
 
-_SILENCE_THRESHOLD_SECS = 11
+_SILENCE_THRESHOLD_SECS = 10
+_OUTPUT_ACTIVITY_GRACE_SECS = 4.0
 _BELL_GRACE_SECS = 1.0
-_CONTENT_POLL_SECS = 10
+_CONTENT_POLL_SECS = 3
 _CONTROL_MODE_STOP_WAIT_SECS = 2.0
 
 
@@ -127,11 +128,14 @@ def _get_process_snapshot() -> tuple[
     dict[int, int],
     dict[int, int],
 ]:
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,pgid=,tpgid=,args="],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,tpgid=,args="],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return {}, {}, {}, {}
     if result.returncode != 0:
         return {}, {}, {}, {}
 
@@ -226,7 +230,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}|#{pane_current_command}|#{pane_dead}|#{pane_pid}|#{window_bell_flag}",
+            "#{session_name}|#{pane_current_command}|#{pane_dead}|#{pane_pid}|#{window_bell_flag}|#{pane_active}",
         ],
         capture_output=True,
         text=True,
@@ -234,11 +238,11 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
     if result.returncode != 0:
         return {}
 
-    pane_rows: list[tuple[str, str, bool, int, bool, str]] = []
+    pane_rows: list[tuple[str, str, bool, int, bool, str, bool]] = []
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("|", 4)
+        parts = line.split("|", 5)
         if len(parts) < 5:
             continue
         session_name = parts[0]
@@ -257,6 +261,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
                 pane_pid,
                 parts[4] == "1",
                 parsed[1],
+                len(parts) < 6 or parts[5] == "1",
             )
         )
 
@@ -264,17 +269,19 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
         return {}
 
     needs_process_snapshot = any(
-        purpose in _AGENT_PURPOSES and pane_pid > 0
-        for _session_name, _command, _dead, pane_pid, _bell, purpose in pane_rows
+        pane_pid > 0
+        for _session_name, _command, _dead, pane_pid, _bell, _purpose, _active in pane_rows
     )
     if needs_process_snapshot:
         children_by_parent, commands_by_pid, pgid_by_pid, tpgid_by_pid = _get_process_snapshot()
     else:
         children_by_parent, commands_by_pid, pgid_by_pid, tpgid_by_pid = {}, {}, {}, {}
     statuses: dict[str, dict[str, object]] = {}
-    for session_name, command, dead, pane_pid, bell, purpose in pane_rows:
+    for session_name, command, dead, pane_pid, bell, purpose, active in pane_rows:
+        if session_name in statuses and not active:
+            continue
         effective_command = command
-        if needs_process_snapshot and pane_pid > 0 and purpose in _AGENT_PURPOSES:
+        if needs_process_snapshot and pane_pid > 0:
             effective_command = _resolve_pane_command(
                 pane_pid,
                 purpose,
@@ -299,6 +306,7 @@ def resolve_pane_status(
     *,
     bell: bool = False,
     last_output_time: float = 0.0,
+    last_content_change_time: float = 0.0,
 ) -> str:
     """Determine pane status from tmux and monitor info.
 
@@ -308,12 +316,16 @@ def resolve_pane_status(
         return "waiting"
     if dead:
         return "idle"
+    now = time.time()
     clean_cmd = command.lstrip("-")
     is_shell = clean_cmd in _SHELL_COMMANDS
     if is_shell:
+        if last_output_time > 0 and now - last_output_time < _OUTPUT_ACTIVITY_GRACE_SECS:
+            return "running"
         return "idle"
-    if purpose in _AGENT_PURPOSES and clean_cmd in _AGENT_PURPOSES and last_output_time > 0:
-        elapsed = time.time() - last_output_time
+    last_change = last_content_change_time or last_output_time
+    if purpose in _AGENT_PURPOSES and clean_cmd == purpose and last_change > 0:
+        elapsed = now - last_change
         if elapsed >= _SILENCE_THRESHOLD_SECS:
             return "idle"
     return "running"
@@ -502,6 +514,9 @@ class TmuxMonitor:
                     reader = self._readers.get(s)
                     if reader and not reader.is_alive():
                         self._remove_reader(s)
+
+                for s in gd_sessions - set(self._readers.keys()):
+                    self._add_reader(s)
 
                 self._poll_content_changes(gd_sessions)
             except Exception:

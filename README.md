@@ -62,7 +62,7 @@ Features:
 - `/` to filter the active tab
 - `s` to sort the active table
 - `i` to show repository info (file count, lines, tokens, max depth, top file types)
-- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, and pull
+- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, pull, and push
 - `r` to refresh all statuses
 - Press `enter` on any repository to open an action menu:
     - **New tmux session** — create and attach a session for the repository
@@ -229,7 +229,18 @@ repositories:
     - /path/to/repo2
 max_workers: 10 # optional, valid range 1-32, default 10
 theme: rose-pine # optional, default rose-pine
+github_username: your-github-username # optional
+github_PAT: github_pat_or_classic_pat # optional
 ```
+
+### GitHub PAT fallback
+
+GitDirector first runs git commands using your normal local git credentials. If a git command fails with an authentication error and both `github_username` and `github_PAT` are configured, GitDirector retries the command with a temporary Git credential helper for `https://github.com` remotes.
+
+- This only applies to HTTPS GitHub remotes.
+- SSH remotes still use your normal SSH key/agent setup.
+- The PAT is stored in plaintext in `~/.gitdirector/config.yaml`; use an appropriately scoped token and protect that file.
+- The PAT is not passed on the command line or shown in TUI command output.
 
 ### Available Themes
 

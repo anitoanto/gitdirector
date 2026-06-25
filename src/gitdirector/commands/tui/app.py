@@ -62,6 +62,18 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+_NO_UPSTREAM_PUSH_MARKERS = (
+    "no upstream",
+    "set up a tracking branch",
+    "has no upstream",
+)
+
+
+def _is_no_upstream_push_error(message: str) -> bool:
+    message_lower = message.lower()
+    return any(marker in message_lower for marker in _NO_UPSTREAM_PUSH_MARKERS)
+
+
 class GitDirectorConsole(
     ConsolePanelsMixin,
     ConsoleSessionsMixin,
@@ -170,10 +182,14 @@ class GitDirectorConsole(
         Binding("q", "quit", "Quit", show=True),
         Binding("enter", "select_row", "Open", show=False),
         Binding("j", "cursor_down", "Down", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
+        Binding("up", "cursor_up", "Up", show=False),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("h", "cursor_left", "Left", show=False),
+        Binding("left", "cursor_left", "Left", show=False),
         Binding("l", "cursor_right", "Right", show=False),
+        Binding("right", "cursor_right", "Right", show=False),
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
         Binding("g", "show_git_menu", "Git", show=True),
@@ -258,7 +274,11 @@ class GitDirectorConsole(
         with Horizontal(id="search-container"):
             yield Static("/ search:", id="search-label")
             yield Input(placeholder="type to filter…", id="search-bar")
-        yield Static(self._compose_status_message(self._status_message), id="status-bar")
+        yield Static(
+            self._compose_status_message(self._status_message),
+            id="status-bar",
+            markup=False,
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -641,6 +661,8 @@ class GitDirectorConsole(
             self._show_repo_git_branches(path)
         elif action == "remotes":
             self._show_repo_git_remotes(path)
+        elif action == "push":
+            self._prompt_repo_push(path)
 
     def _show_repo_git_output(
         self,
@@ -719,6 +741,90 @@ class GitDirectorConsole(
             success_status="remotes shown",
             failure_status="remotes failed",
         )
+
+    def _prompt_repo_push(self, path: Path) -> None:
+        try:
+            Repository(path)
+        except Exception as exc:
+            message = str(exc)
+            self._update_status(f"{path.name}: {message}")
+            self.push_screen(
+                PullResultScreen(path.name, None, False, message, operation="Push"),
+                callback=lambda action: self._handle_git_result_dismissal(action, path),
+            )
+            return
+
+        command = "git push"
+        self.push_screen(
+            ConfirmScreen(f"Push '{escape(path.name)}' to remote?\n[dim]{escape(command)}[/dim]"),
+            callback=lambda confirmed: self._do_push_repo(confirmed, path, command),
+        )
+
+    def _do_push_repo(self, confirmed: bool, path: Path, command: str) -> None:
+        if not confirmed:
+            return
+        self._update_status(f"Pushing {path.name}: {command}")
+        loading_screen = PullLoadingScreen(path.name, command, verb="Pushing")
+        self.push_screen(loading_screen)
+        self._push_repo(path, command, loading_screen)
+
+    def _push_repository(self, path: Path, command: str) -> tuple[str, bool, str, str]:
+        repo = Repository(path)
+        ok, message = repo.push()
+        if not ok and _is_no_upstream_push_error(message):
+            branch = repo.get_current_branch()
+            command = f"git push -u origin {branch}" if branch else "git push -u origin <branch>"
+            ok, message = repo.push(set_upstream=True)
+        return path.name, ok, message, command
+
+    @work(thread=True)
+    def _push_repo(self, path: Path, command: str, loading_screen: PullLoadingScreen) -> None:
+        worker = self._current_worker_or_none()
+        if self._background_shutdown_requested(worker):
+            return
+
+        try:
+            result = self._push_repository(path, command)
+        except Exception as exc:
+            logger.exception("push worker crashed")
+            error_result = (path.name, False, f"Push failed: {exc}", command)
+            if self._background_shutdown_requested(worker):
+                return
+            try:
+                self.call_from_thread(self._show_push_result, loading_screen, path, error_result)
+            except Exception:
+                logger.debug("Failed to post push error to UI", exc_info=True)
+            return
+
+        if self._background_shutdown_requested(worker):
+            return
+        try:
+            self.call_from_thread(self._show_push_result, loading_screen, path, result)
+        except Exception:
+            logger.debug("Failed to post push result to UI", exc_info=True)
+
+    def _show_push_result(
+        self,
+        loading_screen: PullLoadingScreen,
+        path: Path,
+        result: tuple[str, bool, str, str],
+    ) -> None:
+        repo_name, ok, message, command = result
+        loading_screen.dismiss(None)
+        self.push_screen(
+            PullResultScreen(
+                repo_name,
+                command,
+                ok,
+                message,
+                operation="Push",
+                empty_success="Push completed.",
+            ),
+            callback=lambda action: self._handle_git_result_dismissal(action, path),
+        )
+        self._update_status(f"{repo_name}: {'push completed' if ok else 'push failed'}")
+        if ok:
+            self._refresh_repo_for_path(path)
 
     def _prompt_repo_pull(self, path: Path) -> None:
         try:

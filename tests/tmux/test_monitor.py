@@ -945,7 +945,7 @@ class TestTmuxMonitor:
 
         monitor._sync_sessions()
 
-        assert added == []
+        assert set(added) == {"gd/new/shell/1", "gd/existing/shell/1"}
         assert set(removed) == {"gd/stale/shell/1", "gd/existing/shell/1"}
         monitor._poll_content_changes.assert_called_once_with(
             {"gd/new/shell/1", "gd/existing/shell/1"}
@@ -975,7 +975,7 @@ class TestTmuxMonitor:
 
         monitor._sync_sessions()
 
-        assert added == []
+        assert added == ["gd/repo/shell/1"]
         monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
 
     @patch("gitdirector.integrations.tmux.monitor.time.sleep")
