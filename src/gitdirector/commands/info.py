@@ -5,6 +5,7 @@ import click
 from ..info import RepoInfoResult, gather_repo_info
 from ..manager import RepositoryManager
 from . import console
+from .completion import complete_repository_names
 
 
 def _render_info_cli(result: RepoInfoResult, name: str, path: Path) -> None:
@@ -35,7 +36,7 @@ def _render_info_cli(result: RepoInfoResult, name: str, path: Path) -> None:
 
 def register(cli: click.Group):
     @cli.command()
-    @click.argument("target", metavar="PATH|NAME")
+    @click.argument("target", metavar="PATH|NAME", shell_complete=complete_repository_names)
     @click.option(
         "--full",
         is_flag=True,

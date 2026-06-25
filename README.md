@@ -35,6 +35,8 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector info PATH\|NAME [--full]`                     | Show file statistics for a repository                  |
 | `gitdirector gd-tmux PATH\|NAME "command" [--description TEXT]` | Create a gd tmux session and run a command in it       |
 | `gitdirector gd-capture SESSION [--lines N] [--full]`      | Print the scrollback of a live gd tmux session         |
+| `gitdirector gd-send SESSION [TEXT] [--enter\|--key C-c]` | Send text or Ctrl-C to a live gd tmux session          |
+| `gitdirector completion SHELL`                             | Print shell completion setup for bash, zsh, or fish    |
 | `gitdirector help`                                         | Show help                                              |
 
 ### link
@@ -55,12 +57,12 @@ Opens a full interactive TUI dashboard.
 Features:
 
 - Live table with sync state, branch, changes, last commit, and active tmux sessions
-- Tabs for `[1] Repositories`, `[2] Sessions`, `[3] Panels`, and `[4] Groups`
+- Tabs for `[1] Repositories`, `[2] Sessions`, and `[3] Panels`
 - `j`/`k` or arrow keys to navigate
 - `/` to filter the active tab
 - `s` to sort the active table
 - `i` to show repository info (file count, lines, tokens, max depth, top file types)
-- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, and pull
+- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, pull, and push
 - `r` to refresh all statuses
 - Press `enter` on any repository to open an action menu:
     - **New tmux session** — create and attach a session for the repository
@@ -68,9 +70,9 @@ Features:
     - **Attach existing session** — switch to any already-running tmux session
     - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
     - **Remove session** — kill a running tmux session
+- **Repository groups** appear directly in the Repositories tab when linked repositories share the same parent directory. Group rows can be expanded/collapsed with `space`; press `enter` on a group to start, attach, remove, or launch AI-agent sessions rooted at that parent directory.
 - **Sessions tab** (press `2`) lists every active `gd/*` tmux session with its status, purpose, repository, **description**, and full session name. The description column is free-form text stored on the session (default `"-"`), with a width that scales to your terminal and wraps long text. Highlight a row and press `d` to edit its description.
 - **Panels tab** (press `3`) manages reusable tmux panel layouts. Press `n` to create a panel, or `enter` on a panel to open, reconfigure, rename, or delete it.
-- **Groups tab** (press `4`) automatically groups linked repositories that share the same parent directory. Press `enter` on a group to start or attach group-scoped sessions.
 
 ### unlink
 
@@ -197,6 +199,22 @@ gitdirector gd-tmux myrepo "make test 2>&1 | tee /tmp/run.log"
 
 The session is gone the moment the command exits; the scrollback lives on only as the bytes the process actually wrote.
 
+### gd-send
+
+```bash
+gitdirector gd-send gd/myrepo/opencode/1 "continue and run the tests"
+gitdirector gd-send gd/myrepo/shell/1 "npm test" --enter
+gitdirector gd-send gd/myrepo/shell/1 --key C-c
+```
+
+Sends input to a live `gd/*` tmux session. The session argument must be the full session name shown in the TUI Sessions tab, for example `gd/myrepo/shell/1`.
+
+- `TEXT` is pasted into the active pane. It does not press Enter unless `--enter` is provided.
+- `--enter` presses Enter after pasting `TEXT`, useful for running shell commands.
+- `--key C-c` sends Ctrl-C to the active pane, useful for stopping a running foreground process without killing the tmux session.
+
+Accepted `--key` values: `C-c`.
+
 ## For AI coding agents
 
 If you are an AI coding agent (Claude Code, OpenCode, GitHub Copilot, Codex, Pi, or any other tool that drives a shell on the user's behalf), the rules for integrating with the user's GitDirector workflow — including `gd-tmux` background sessions, `gd-capture`, and the mandatory `--description` flag — live in [`LLMS.md`](./LLMS.md). Read that file end-to-end before running any commands.
@@ -211,7 +229,18 @@ repositories:
     - /path/to/repo2
 max_workers: 10 # optional, valid range 1-32, default 10
 theme: rose-pine # optional, default rose-pine
+github_username: your-github-username # optional
+github_PAT: github_pat_or_classic_pat # optional
 ```
+
+### GitHub PAT fallback
+
+GitDirector first runs git commands using your normal local git credentials. If a git command fails with an authentication error and both `github_username` and `github_PAT` are configured, GitDirector retries the command with a temporary Git credential helper for `https://github.com` remotes.
+
+- This only applies to HTTPS GitHub remotes.
+- SSH remotes still use your normal SSH key/agent setup.
+- The PAT is stored in plaintext in `~/.gitdirector/config.yaml`; use an appropriately scoped token and protect that file.
+- The PAT is not passed on the command line or shown in TUI command output.
 
 ### Available Themes
 
@@ -221,7 +250,17 @@ theme: rose-pine # optional, default rose-pine
 
 - Python 3.10+
 - Git
-- [tmux](https://github.com/tmux/tmux) ≥ 3.2a (for `gitdirector cd`, `gitdirector console` sessions, `gitdirector gd-tmux`, and `gitdirector gd-capture`)
+- [tmux](https://github.com/tmux/tmux) ≥ 3.2a (for `gitdirector cd`, `gitdirector console` sessions, `gitdirector gd-tmux`, `gitdirector gd-capture`, and `gitdirector gd-send`)
+
+## Shell completion
+
+Generate shell completions for `bash`, `zsh`, or `fish`. Completion includes subcommands, options, and linked repository names for repo-target commands.
+
+```bash
+eval "$(gitdirector completion bash)"
+eval "$(gitdirector completion zsh)"
+gitdirector completion fish | source
+```
 
 ## License
 

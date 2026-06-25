@@ -11,6 +11,7 @@ from .constants import (
     _STATUS_LABEL,
     _STATUS_ORDER,
     _changes_label,
+    _changes_sort_key,
 )
 from .panel_view import PanelViewScreen, PaneWidget
 from .panels import Panel, PanelStore
@@ -67,5 +68,6 @@ __all__ = [
     "_STATUS_LABEL",
     "_STATUS_ORDER",
     "_changes_label",
+    "_changes_sort_key",
     "register",
 ]

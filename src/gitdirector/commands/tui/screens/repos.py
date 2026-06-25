@@ -83,6 +83,7 @@ class GitOperationsMenuScreen(ModalScreen[str]):
                     "[white]↓[/white] [bold]Pull[/bold] [dim]git pull --ff-only[/dim]",
                     id="pull",
                 ),
+                Option("[white]↑[/white] [bold]Push[/bold] [dim]git push[/dim]", id="push"),
                 id="action-menu",
             )
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
@@ -269,15 +270,25 @@ class PullResultScreen(ModalScreen[str | None]):
     """
     )
 
-    def __init__(self, repo_name: str, command: str | None, ok: bool, output: str) -> None:
+    def __init__(
+        self,
+        repo_name: str,
+        command: str | None,
+        ok: bool,
+        output: str,
+        *,
+        operation: str = "Pull",
+        empty_success: str = "Already up to date.",
+    ) -> None:
         super().__init__()
         self.repo_name = repo_name
         self.command = command
         self.ok = ok
-        self.output = output.strip() or ("Already up to date." if ok else "No output.")
+        self.operation = operation
+        self.output = output.strip() or (empty_success if ok else "No output.")
 
     def compose(self) -> ComposeResult:
-        status_text = "Pull completed" if self.ok else "Pull failed"
+        status_text = f"{self.operation} completed" if self.ok else f"{self.operation} failed"
         status_style = "green" if self.ok else "red"
 
         with Vertical(id="pull-result-container"):
@@ -348,15 +359,19 @@ class PullLoadingScreen(ModalScreen[None]):
     }
     """)
 
-    def __init__(self, repo_name: str, command: str) -> None:
+    def __init__(self, repo_name: str, command: str, *, verb: str = "Pulling") -> None:
         super().__init__()
         self.repo_name = repo_name
         self.command = command
+        self.verb = verb
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pull-loading-container"):
             yield LoadingIndicator()
-            yield Static(f"Pulling [bold]{escape(self.repo_name)}[/bold]", id="pull-loading-title")
+            yield Static(
+                f"{escape(self.verb)} [bold]{escape(self.repo_name)}[/bold]",
+                id="pull-loading-title",
+            )
             yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-loading-command")
             yield Static("please wait...", id="pull-loading-hint")
 

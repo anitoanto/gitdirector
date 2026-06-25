@@ -270,9 +270,10 @@ class ConsoleSessionsMixin:
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)
             try:
-                shown = self.query_one("#repo-table", DataTable).row_count
+                self.query_one("#repo-table", DataTable)
             except NoMatches:
                 return
+            shown = getattr(self, "_visible_repo_count", total)
             self._update_status(self._build_loaded_status(shown, total))
 
     def _resolve_session_status(self, entry: dict[str, str]) -> str:
@@ -287,13 +288,15 @@ class ConsoleSessionsMixin:
         )
         if tmux_info is None:
             return "waiting" if bell else "running"
+        last_output = self._monitor.get_last_output_time(session_name)
         last_content_change = self._monitor.get_last_content_change_time(session_name)
         return resolve_pane_status(
             entry["purpose"],
             str(tmux_info["command"]),
             bool(tmux_info["dead"]),
             bell=bell,
-            last_output_time=last_content_change,
+            last_output_time=last_output,
+            last_content_change_time=last_content_change,
         )
 
     def _update_session_status_cells(self) -> None:

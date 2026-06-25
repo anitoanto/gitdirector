@@ -52,7 +52,8 @@ class TestGitDirectorConsole:
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 2
+            assert table.row_count == 3
+            assert app._visible_repo_count == 2
 
     async def test_quit_binding(self):
         app = GitDirectorConsole()
@@ -93,6 +94,89 @@ class TestGitDirectorConsole:
             table = app.query_one("#repo-table", DataTable)
             await pilot.press("j")
             await pilot.press("k")
+            assert table.cursor_coordinate.row == 0
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_arrow_keys_navigate_repos_tab(self, _mock_sessions):
+        repos = [
+            _make_info("alpha", Path("/tmp/alpha")),
+            _make_info("beta", Path("/tmp/beta")),
+            _make_info("gamma", Path("/tmp/gamma")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            assert app.focused != table
+            await pilot.press("down")
+            assert table.cursor_coordinate.row == 1
+            await pilot.press("up")
+            assert table.cursor_coordinate.row == 0
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {
+                "session_name": "gd/alpha/shell/1",
+                "repo": "alpha",
+                "repo_slug": "alpha",
+                "purpose": "shell",
+                "description": "-",
+            },
+            {
+                "session_name": "gd/beta/claude/1",
+                "repo": "beta",
+                "repo_slug": "beta",
+                "purpose": "claude",
+                "description": "-",
+            },
+            {
+                "session_name": "gd/gamma/copilot/1",
+                "repo": "gamma",
+                "repo_slug": "gamma",
+                "purpose": "copilot",
+                "description": "-",
+            },
+        ],
+    )
+    async def test_arrow_keys_navigate_sessions_tab(self, _mock_sessions):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 3
+            assert app.focused != table
+            await pilot.press("down")
+            assert table.cursor_coordinate.row == 1
+            await pilot.press("up")
+            assert table.cursor_coordinate.row == 0
+
+    async def test_arrow_keys_navigate_panels_tab(self):
+        from gitdirector.commands.tui import Panel
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app._panels_entries = [
+            Panel(name="Alpha", rows=1, cols=1, panes={1: None}),
+            Panel(name="Beta", rows=1, cols=1, panes={1: None}),
+            Panel(name="Gamma", rows=1, cols=1, panes={1: None}),
+        ]
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._active_tab = "panels"
+            app._apply_panels_filter_and_sort()
+            await pilot.pause()
+            table = app.query_one("#panels-table", DataTable)
+            assert table.row_count == 3
+            assert app.focused != table
+            await pilot.press("down")
+            assert table.cursor_coordinate.row == 1
+            await pilot.press("up")
             assert table.cursor_coordinate.row == 0
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -139,6 +223,16 @@ class TestGitDirectorConsole:
             status_text = app.query_one("#status-bar", Static).content
             assert "No repositories linked" in status_text
             assert "Update available: v1.5.0 (current v1.4.2)" in status_text
+
+    async def test_status_bar_treats_raw_errors_as_plain_text(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            message = "tmux attach failed: [/]"
+            app._update_status(message)
+            status_text = app.query_one("#status-bar", Static).content
+            assert status_text.startswith(message)
 
     async def test_table_columns_created(self):
         app = GitDirectorConsole()
@@ -224,9 +318,9 @@ class TestGitDirectorConsole:
             table = app.query_one("#repo-table", DataTable)
             row_key = str(repos[0].path)
             ck = app._col_keys
-            assert table.get_cell(row_key, ck[1]) == "behind"
+            assert table.get_cell(row_key, ck[1]) == "[bold yellow]behind[/bold yellow]"
             assert table.get_cell(row_key, ck[2]) == "develop"
-            assert table.get_cell(row_key, ck[3]) == "staged"
+            assert table.get_cell(row_key, ck[3]) == "[bold yellow]staged[/bold yellow]"
             assert table.get_cell(row_key, ck[4]) == "5 min ago"
             assert table.get_cell(row_key, ck[5]) == str(repos[0].path)
 
@@ -266,7 +360,8 @@ class TestGitDirectorConsoleSearchAndSort:
             app._apply_filter_and_sort()
 
             table = app.query_one("#repo-table", DataTable)
-            assert table.row_count == 1
+            assert table.row_count == 2
+            assert app._visible_repo_count == 1
             status = app.query_one("#status-bar", Static).content
             assert "filter: 'beta'" in status
 
@@ -399,6 +494,15 @@ class TestGitDirectorConsoleActionRouting:
 
         app._prompt_repo_pull.assert_called_once_with(path)
 
+    def test_handle_git_menu_action_push_routes_to_prompt(self):
+        path = Path("/tmp/alpha")
+        app = GitDirectorConsole()
+        app._prompt_repo_push = MagicMock()
+
+        app._handle_git_menu_action("push", path)
+
+        app._prompt_repo_push.assert_called_once_with(path)
+
     def test_handle_git_menu_action_status_routes_to_show_repo_git_status(self):
         path = Path("/tmp/alpha")
         app = GitDirectorConsole()
@@ -520,6 +624,39 @@ class TestGitDirectorConsoleActionRouting:
         assert screen.ok is True
         assert "origin" in screen.output
         app._update_status.assert_called_once_with("alpha: remotes shown")
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_prompt_repo_push_pushes_confirm_screen(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        mock_repo_cls.return_value = MagicMock()
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+
+        app._prompt_repo_push(path)
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, ConfirmScreen)
+        assert "Push 'alpha' to remote" in screen.message
+        assert "git push" in screen.message
+        assert callable(app.push_screen.call_args.kwargs["callback"])
+
+    @patch("gitdirector.commands.tui.app.Repository")
+    def test_push_repository_falls_back_to_set_upstream(self, mock_repo_cls):
+        path = Path("/tmp/alpha")
+        repo = MagicMock()
+        repo.push.side_effect = [
+            (False, "fatal: The current branch main has no upstream branch."),
+            (True, "To origin"),
+        ]
+        repo.get_current_branch.return_value = "main"
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+
+        result = app._push_repository(path, "git push")
+
+        assert result == ("alpha", True, "To origin", "git push -u origin main")
+        repo.push.assert_any_call()
+        repo.push.assert_any_call(set_upstream=True)
 
     def test_handle_git_result_dismissal_reopens_git_menu_on_back(self):
         path = Path("/tmp/alpha")
@@ -649,6 +786,63 @@ class TestGitDirectorConsoleActionRouting:
 
         loading_screen.dismiss.assert_called_once_with(None)
         app._update_status.assert_called_once_with("alpha: pull failed")
+        app._refresh_repo_for_path.assert_not_called()
+
+    def test_do_push_repo_pushes_loading_screen_and_starts_worker(self):
+        path = Path("/tmp/alpha")
+        command = "git push"
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._push_repo = MagicMock()
+        app._update_status = MagicMock()
+
+        app._do_push_repo(True, path, command)
+
+        loading_screen = app.push_screen.call_args.args[0]
+        assert isinstance(loading_screen, PullLoadingScreen)
+        assert loading_screen.verb == "Pushing"
+        app._update_status.assert_called_once_with(f"Pushing alpha: {command}")
+        app._push_repo.assert_called_once_with(path, command, loading_screen)
+
+    def test_show_push_result_pushes_modal_and_refreshes(self):
+        path = Path("/tmp/alpha")
+        loading_screen = MagicMock()
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+        app._refresh_repo_for_path = MagicMock()
+
+        app._show_push_result(
+            loading_screen,
+            path,
+            ("alpha", True, "To origin", "git push"),
+        )
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, PullResultScreen)
+        assert screen.command == "git push"
+        assert screen.ok is True
+        assert screen.operation == "Push"
+        loading_screen.dismiss.assert_called_once_with(None)
+        app._update_status.assert_called_once_with("alpha: push completed")
+        app._refresh_repo_for_path.assert_called_once_with(path)
+
+    def test_show_push_result_does_not_refresh_after_failure(self):
+        path = Path("/tmp/alpha")
+        loading_screen = MagicMock()
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+        app._update_status = MagicMock()
+        app._refresh_repo_for_path = MagicMock()
+
+        app._show_push_result(
+            loading_screen,
+            path,
+            ("alpha", False, "fatal: rejected", "git push"),
+        )
+
+        loading_screen.dismiss.assert_called_once_with(None)
+        app._update_status.assert_called_once_with("alpha: push failed")
         app._refresh_repo_for_path.assert_not_called()
 
 
@@ -1371,9 +1565,9 @@ class TestRefreshRepoForPath:
             table = app.query_one("#repo-table", DataTable)
             ck = app._col_keys
             row_key = str(Path("/tmp/alpha"))
-            assert table.get_cell(row_key, ck[1]) == "behind"
+            assert table.get_cell(row_key, ck[1]) == "[bold yellow]behind[/bold yellow]"
             assert table.get_cell(row_key, ck[2]) == "develop"
-            assert table.get_cell(row_key, ck[3]) == "staged"
+            assert table.get_cell(row_key, ck[3]) == "[bold yellow]staged[/bold yellow]"
             assert table.get_cell(row_key, ck[5]) == row_key
             assert app._results[row_key].status == RepoStatus.BEHIND
             app.manager.get_repository_status.assert_any_call(Path("/tmp/alpha"), fetch=True)
