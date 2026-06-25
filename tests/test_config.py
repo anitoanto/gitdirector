@@ -17,11 +17,18 @@ class TestConfigInit:
         assert config.repositories == []
         assert config.max_workers == Config.DEFAULT_MAX_WORKERS
         assert config.theme == Config.DEFAULT_THEME
+        assert config.github_username is None
+        assert config.github_PAT is None
 
     def test_loads_existing_config(self, config_dir, monkeypatch):
         config_dir.mkdir(parents=True, exist_ok=True)
         config_file = config_dir / "config.yaml"
-        data = {"repositories": ["/tmp/repo-a", "/tmp/repo-b"], "max_workers": 4}
+        data = {
+            "repositories": ["/tmp/repo-a", "/tmp/repo-b"],
+            "max_workers": 4,
+            "github_username": "octocat",
+            "github_PAT": "ghp_secret",
+        }
         config_file.write_text(yaml.dump(data))
 
         monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
@@ -31,6 +38,8 @@ class TestConfigInit:
         assert cfg.repositories[0] == Path("/tmp/repo-a")
         assert cfg.repositories[1] == Path("/tmp/repo-b")
         assert cfg.max_workers == 4
+        assert cfg.github_username == "octocat"
+        assert cfg.github_PAT == "ghp_secret"
 
     def test_loads_empty_yaml_file(self, config_dir, monkeypatch):
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +143,38 @@ class TestConfigTheme:
         monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
         cfg = Config()
         assert cfg.theme == Config.DEFAULT_THEME
+
+
+class TestConfigGitHubAuth:
+    def test_saves_github_auth(self, config):
+        config.github_username = "octocat"
+        config.github_PAT = "ghp_secret"
+        config.save()
+
+        data = yaml.safe_load(config.config_file.read_text())
+        assert data["github_username"] == "octocat"
+        assert data["github_PAT"] == "ghp_secret"
+
+    def test_preserves_github_auth_when_repositories_change(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.dump(
+                {
+                    "repositories": ["/tmp/repo-a"],
+                    "github_username": "octocat",
+                    "github_PAT": "ghp_secret",
+                }
+            )
+        )
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+        cfg = Config()
+
+        cfg.add_repository(Path("/tmp/repo-b"))
+
+        data = yaml.safe_load(cfg.config_file.read_text())
+        assert data["repositories"] == ["/tmp/repo-a", "/tmp/repo-b"]
+        assert data["github_username"] == "octocat"
+        assert data["github_PAT"] == "ghp_secret"
 
 
 class TestConfigSaveRoundtrip:
