@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import logging
 import os
 import pty
 import re
 import signal
 import struct
 import termios
+import weakref
 
 import pyte
 from pyte.screens import Char
@@ -24,8 +26,93 @@ from textual.widget import Widget
 
 from .terminal_caps import host_color_system, no_color_requested
 
+logger = logging.getLogger(__name__)
+
 _RE_ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _DECSET_PREFIX = "\x1b[?"
+
+_EMULATOR_TERM_WAIT_SECONDS = 2.0
+_EMULATOR_KILL_WAIT_SECONDS = 2.0
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return True if *pid* still exists (no signal delivery)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _reap_zombie(pid: int) -> bool:
+    """Non-blocking reap. Returns True if *pid* was reaped."""
+    try:
+        waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+        return waited_pid == pid
+    except ChildProcessError:
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_and_reap(pid: int) -> None:
+    """Reliably terminate *pid* and reap the zombie.
+
+    Sequence: SIGTERM → wait up to ``_EMULATOR_TERM_WAIT_SECONDS`` →
+    SIGKILL → blocking ``waitpid``. The blocking wait is the critical
+    step — without it the kernel keeps the zombie (and its slave PTY
+    fd) alive until something else reaps it.
+    """
+    import time as _time
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _reap_zombie(pid)
+        return
+    except OSError as exc:
+        logger.debug("SIGTERM to pid %s failed: %s", pid, exc)
+
+    term_deadline = _time.monotonic() + _EMULATOR_TERM_WAIT_SECONDS
+    while _time.monotonic() < term_deadline:
+        if not _pid_is_alive(pid) or _reap_zombie(pid):
+            return
+        _time.sleep(0.05)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        _reap_zombie(pid)
+        return
+    except OSError as exc:
+        logger.debug("SIGKILL to pid %s failed: %s", pid, exc)
+
+    kill_deadline = _time.monotonic() + _EMULATOR_KILL_WAIT_SECONDS
+    while _time.monotonic() < kill_deadline:
+        if _reap_zombie(pid):
+            return
+        _time.sleep(0.05)
+
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        return
+    except OSError as exc:
+        logger.warning("blocking waitpid for pid %s failed: %s", pid, exc)
+
+
+def _finalize_emulator(pid: int, fd: int) -> None:
+    """Best-effort cleanup when ``_Emulator`` is GC'd without ``stop``."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    if pid > 0:
+        _terminate_and_reap(pid)
 
 
 def _render_console_kwargs(width: int) -> dict:
@@ -44,7 +131,16 @@ def _render_console_kwargs(width: int) -> dict:
 
 
 class _Emulator:
-    """Manages a pty subprocess and async I/O queues."""
+    """Manages a pty subprocess and async I/O queues.
+
+    Owns one PTY per instance. :meth:`stop` always terminates the child
+    (SIGTERM then SIGKILL) and **blocking** ``os.waitpid`` so the kernel
+    reaps the zombie and releases the slave end of the PTY. A
+    ``weakref.finalize`` backup runs ``stop`` if the instance is garbage
+    collected without ``stop`` having been called explicitly — the PTY is
+    only freed when both the master and slave fds close, and a forgotten
+    instance would otherwise leak the slave indefinitely.
+    """
 
     def __init__(self, command: str) -> None:
         self.ncol = 80
@@ -58,6 +154,8 @@ class _Emulator:
         self._pid, self._fd = self._open_pty(command)
         self._p_out = os.fdopen(self._fd, "w+b", 0)
         self._reader_installed = False
+        self._stopped = False
+        self._finalizer = weakref.finalize(self, _finalize_emulator, self._pid, self._fd)
 
     def _open_pty(self, command: str) -> tuple[int, int]:
         import shlex
@@ -76,13 +174,17 @@ class _Emulator:
         self._send_task = asyncio.create_task(self._send_data())
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         if self._run_task:
             self._run_task.cancel()
         if self._send_task:
             self._send_task.cancel()
         if self._reader_installed:
             try:
-                asyncio.get_running_loop().remove_reader(self._fd)
+                loop = asyncio.get_running_loop()
+                loop.remove_reader(self._fd)
             except (RuntimeError, ValueError):
                 pass
             self._reader_installed = False
@@ -91,14 +193,10 @@ class _Emulator:
         except Exception:
             pass
         if self._pid > 0:
-            try:
-                os.kill(self._pid, signal.SIGHUP)
-            except OSError:
-                pass
-            try:
-                os.waitpid(self._pid, os.WNOHANG)
-            except OSError:
-                pass
+            _terminate_and_reap(self._pid)
+        self._finalizer.detach()
+        self._pid = 0
+        self._fd = -1
 
     def resize(self, nrow: int, ncol: int) -> None:
         self.nrow = nrow
@@ -295,6 +393,10 @@ class TerminalWidget(Widget, can_focus=True):
                 elif cmd == "disconnect":
                     self._flush_pending_output()
                     self.post_message(self.Disconnected())
+                    if self._emulator is not None:
+                        self._emulator.stop()
+                        self._emulator = None
+                    self._started = False
                     break
         except asyncio.CancelledError:
             pass

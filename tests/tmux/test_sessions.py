@@ -614,11 +614,14 @@ class TestEnsureTempPanelTmuxSession:
             call for call in mock_run.call_args_list if call.args[0][:2] == ["tmux", "new-session"]
         ]
         assert new_session_calls == []
-        # The pane command keeps the temp session alive (tail -f /dev/null)
-        # for the next attach, but kills it if the inner session has gone
-        # away (e.g. the user exited the session with `exit` / Ctrl-D).
+        # remain-on-exit keeps the temp session reusable without a live
+        # placeholder process. The command still kills the wrapper if the
+        # inner session has gone away (e.g. `exit` / Ctrl-D).
         pane_command = respawn_call.args[0][5]
-        assert "tail -f /dev/null" in pane_command
+        assert "read -r" not in pane_command
+        assert "while :" not in pane_command
+        assert "tail -f /dev/null" not in pane_command
+        assert pane_command.endswith("'exit 0'") or "exit 0" in pane_command
         assert "kill-session" in pane_command
         assert "=gd/my-repo/shell/1" in pane_command
         assert "=gd/temp/panel/my-repo/shell/1" in pane_command
