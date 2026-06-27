@@ -320,7 +320,7 @@ class GitDirectorConsole(
 
         self._shutdown_requested = True
         self._pause_session_status_tracking(wait=False)
-        self._monitor.stop(wait=False)
+        self._monitor.stop(wait=True)
 
         executor = self._repo_status_executor
         self._repo_status_executor = None
@@ -368,7 +368,7 @@ class GitDirectorConsole(
             session_name = self._get_selected_row_key(table)
             if session_name is None:
                 return
-            self._suspend_and_attach(session_name)
+            self._show_attach_loading_screen(session_name)
         elif self._active_tab == "panels":
             self._open_selected_panel_menu()
         else:
@@ -377,7 +377,7 @@ class GitDirectorConsole(
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "sessions-table":
             session_name = str(event.row_key.value)
-            self._suspend_and_attach(session_name)
+            self._show_attach_loading_screen(session_name)
         elif event.data_table.id == "panels-table":
             self._open_selected_panel_menu()
         else:
@@ -394,7 +394,11 @@ class GitDirectorConsole(
         if path is None:
             return
 
-        from ...integrations.tmux import create_tmux_session, launch_command_in_tmux_session
+        from ...integrations.tmux import (
+            create_tmux_session,
+            kill_tmux_session,
+            launch_command_in_tmux_session,
+        )
 
         launch_tab = self._active_tab
         purpose = agent_cmd if agent_cmd else "shell"
@@ -410,27 +414,69 @@ class GitDirectorConsole(
             self._update_status(f"tmux session creation failed: {exc}")
             return
 
+        def refresh_after_launch(_value: object) -> None:
+            self.set_timer(
+                0.2,
+                lambda: self._refresh_after_session_launch(path, launch_tab),
+            )
+
         if agent_cmd:
             try:
                 ready_marker = launch_command_in_tmux_session(session_name, agent_cmd)
             except Exception as exc:
                 logger.warning("tmux agent launch failed: %s", exc)
+                kill_tmux_session(session_name)
                 self._update_status(f"tmux agent launch failed: {exc}")
                 return
             self.push_screen(
                 AgentLoadingScreen(agent_cmd, session_name, ready_marker),
-                callback=lambda _: self.set_timer(
-                    0.2,
-                    lambda: self._refresh_after_session_launch(path, launch_tab),
-                ),
+                callback=refresh_after_launch,
             )
         else:
-            # create_tmux_session already called sync_panel_tmux_config, so skip
-            # the redundant sync in attach_tmux_session. Without this skip the
-            # sync re-lists every tmux session, rewrites gd-tmux.conf, and runs
-            # `tmux source-file` between the manual screen clear and tmux's
-            # first redraw — long enough to expose a visible empty alt-screen.
-            self._suspend_and_attach(session_name, path, skip_config_sync=True)
+            self._show_attach_loading_screen(
+                session_name,
+                path,
+                skip_config_sync=True,
+                callback=refresh_after_launch,
+            )
+
+    def _show_attach_loading_screen(
+        self,
+        session_name: str,
+        path: Path | None = None,
+        row_key: str | None = None,
+        *,
+        skip_config_sync: bool = False,
+        callback: Callable[[object], None] | None = None,
+    ) -> None:
+        from ...integrations.tmux import _parse_gd_session_name
+
+        title = "session"
+        loading_hint = "waiting for session to initialize\u2026"
+        parsed = _parse_gd_session_name(session_name)
+        if parsed is not None:
+            _repo, purpose, _sequence = parsed
+            title = purpose
+            if purpose != "shell":
+                loading_hint = "waiting for agent to initialize\u2026"
+
+        def attach() -> None:
+            self._suspend_and_attach(
+                session_name,
+                path,
+                row_key=row_key,
+                skip_config_sync=skip_config_sync,
+            )
+
+        self.push_screen(
+            AgentLoadingScreen(
+                title,
+                session_name,
+                loading_hint=loading_hint,
+                on_attach=attach,
+            ),
+            callback=callback,
+        )
 
     def _suspend_and_attach(
         self,
@@ -526,7 +572,7 @@ class GitDirectorConsole(
 
     def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""
-        self._suspend_and_attach(session_name, path)
+        self._show_attach_loading_screen(session_name, path)
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()
@@ -963,9 +1009,10 @@ class GitDirectorConsole(
 
     def _do_remove(self, confirmed: bool, session_name: str) -> None:
         if confirmed:
-            from ...integrations.tmux import kill_tmux_session
+            from ...integrations.tmux import kill_tmux_session, sync_panel_tmux_config
 
             kill_tmux_session(session_name)
+            sync_panel_tmux_config()
 
             self._sessions_entries = [
                 e for e in self._sessions_entries if e["session_name"] != session_name
@@ -987,7 +1034,7 @@ def _run_console() -> None:
         else:
             monitor = getattr(app, "_monitor", None)
             if monitor is not None:
-                monitor.stop(wait=False)
+                monitor.stop(wait=True)
 
 
 def register(cli: click.Group):

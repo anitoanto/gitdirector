@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
+
+logger = logging.getLogger(__name__)
 
 _UP = 1
 _RIGHT = 2
@@ -556,6 +559,19 @@ class PanelStore:
         for panel_name in panel_names:
             kill_panel_tmux_session(panel_name)
 
+    def _cleanup_inner_panel_sessions(self, session_names: list[str]) -> None:
+        if not session_names:
+            return
+        from ...integrations.tmux import cleanup_panel_attached_session
+
+        for session_name in session_names:
+            try:
+                cleanup_panel_attached_session(session_name)
+            except Exception:
+                logger.debug(
+                    "inner panel session cleanup failed for %s", session_name, exc_info=True
+                )
+
     @property
     def panels(self) -> list[Panel]:
         return list(self._panels)
@@ -589,9 +605,11 @@ class PanelStore:
     def delete(self, name: str) -> bool:
         for i, p in enumerate(self._panels):
             if p.name == name:
+                inner_sessions = [s for s in p.panes.values() if s]
                 self._panels.pop(i)
                 self._save()
                 self._kill_panel_sessions([name])
+                self._cleanup_inner_panel_sessions(inner_sessions)
                 return True
         return False
 
@@ -628,8 +646,10 @@ class PanelStore:
         panel.layout_key = layout.key
         panel.panes = self._normalize_panes(layout, source_panes)
         panel.closed_panes = set()
+        inner_sessions = [s for s in panel.panes.values() if s]
         self._save()
         self._kill_panel_sessions([name])
+        self._cleanup_inner_panel_sessions(inner_sessions)
         return True
 
     def update_pane(

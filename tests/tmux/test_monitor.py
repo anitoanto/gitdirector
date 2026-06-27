@@ -44,6 +44,8 @@ class TestLaunchCommandInTmuxSession:
             "touch /tmp/gitdirector-agent.ready.done >/dev/null 2>&1 || true; fi; "
             f"tmux detach-client -s {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
+            "rm -f /tmp/gitdirector-agent.ready /tmp/gitdirector-agent.ready.done "
+            "/tmp/gitdirector-agent.ready.failed >/dev/null 2>&1 || true; "
             "exit $status"
         )
         expected_command = f"sh -lc {shlex.quote(cleanup_script)}"
@@ -945,11 +947,49 @@ class TestTmuxMonitor:
 
         monitor._sync_sessions()
 
-        assert set(added) == {"gd/new/shell/1", "gd/existing/shell/1"}
+        assert set(added) == {"gd/new/shell/1"}
         assert set(removed) == {"gd/stale/shell/1", "gd/existing/shell/1"}
+        assert monitor._reader_failure_backoff["gd/existing/shell/1"] > time.time()
         monitor._poll_content_changes.assert_called_once_with(
             {"gd/new/shell/1", "gd/existing/shell/1"}
         )
+
+    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
+    def test_sync_sessions_skips_reader_retry_during_backoff(self, mock_list_sessions):
+        monitor = TmuxMonitor()
+        monitor._running = True
+        monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() + 60
+        mock_list_sessions.return_value = ["gd/repo/shell/1"]
+
+        monitor._add_reader = MagicMock()
+        monitor._poll_content_changes = MagicMock(
+            side_effect=lambda sessions: setattr(monitor, "_running", False)
+        )
+
+        monitor._sync_sessions()
+
+        monitor._add_reader.assert_not_called()
+        monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
+
+    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
+    def test_sync_sessions_clears_backoff_after_successful_reader_start(self, mock_list_sessions):
+        monitor = TmuxMonitor()
+        monitor._running = True
+        monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() - 1
+        mock_list_sessions.return_value = ["gd/repo/shell/1"]
+
+        def add_reader(session_name: str):
+            monitor._readers[session_name] = MagicMock(is_alive=MagicMock(return_value=True))
+
+        monitor._add_reader = MagicMock(side_effect=add_reader)
+        monitor._poll_content_changes = MagicMock(
+            side_effect=lambda sessions: setattr(monitor, "_running", False)
+        )
+
+        monitor._sync_sessions()
+
+        monitor._add_reader.assert_called_once_with("gd/repo/shell/1")
+        assert "gd/repo/shell/1" not in monitor._reader_failure_backoff
 
     @patch("gitdirector.integrations.tmux.monitor._list_sessions")
     def test_sync_sessions_skips_panel_and_temp_wrapper_sessions(self, mock_list_sessions):
