@@ -649,13 +649,20 @@ def _standalone_attach_fragment(session_name: str) -> str:
     )
 
 
-def _temp_panel_pane_command(temp_panel_session_name: str, session_name: str) -> str:
+def _temp_panel_pane_command(
+    temp_panel_session_name: str,
+    session_name: str,
+    *,
+    attach_delay_seconds: float = 0.0,
+) -> str:
     quoted_session_target = shlex.quote(f"={session_name}")
     quoted_temp_panel_target = shlex.quote(f"={temp_panel_session_name}")
     missing_message = _printf_lines_command([f"Missing session: {session_name}"])
+    delay_fragment = f"sleep {attach_delay_seconds}; " if attach_delay_seconds > 0 else ""
     script = (
         "clear; "
         f"if tmux has-session -t {quoted_session_target} >/dev/null 2>&1; then "
+        f"{delay_fragment}"
         f"{_panel_attach_fragment(session_name)}"
         "else "
         f"{missing_message}; "
@@ -882,6 +889,8 @@ def rebuild_panel_tmux_session(
 def ensure_temp_panel_tmux_session(
     session_name: str,
     theme_name: str | None = None,
+    *,
+    attach_delay_seconds: float = 0.0,
 ) -> str:
     """Return the temp panel session name for *session_name*, reusing it if alive.
 
@@ -898,10 +907,18 @@ def ensure_temp_panel_tmux_session(
     """
     temp_panel_session_name = make_temp_panel_session_name(session_name)
     if _session_exists(temp_panel_session_name):
-        _respawn_temp_panel_pane(temp_panel_session_name, session_name)
+        _respawn_temp_panel_pane(
+            temp_panel_session_name,
+            session_name,
+            attach_delay_seconds=attach_delay_seconds,
+        )
         _settle_temp_panel_attach()
         return temp_panel_session_name
-    return _create_temp_panel_tmux_session(session_name, theme_name)
+    return _create_temp_panel_tmux_session(
+        session_name,
+        theme_name,
+        attach_delay_seconds=attach_delay_seconds,
+    )
 
 
 def _settle_temp_panel_attach() -> None:
@@ -911,6 +928,8 @@ def _settle_temp_panel_attach() -> None:
 def _respawn_temp_panel_pane(
     temp_panel_session_name: str,
     session_name: str,
+    *,
+    attach_delay_seconds: float = 0.0,
 ) -> None:
     """Re-run the attach command in the first pane of the temp session.
 
@@ -920,16 +939,28 @@ def _respawn_temp_panel_pane(
     """
     pane_id = _first_pane_id(temp_panel_session_name)
     if pane_id is None:
-        _create_temp_panel_tmux_session(session_name, _resolved_panel_theme_name(None))
+        _create_temp_panel_tmux_session(
+            session_name,
+            _resolved_panel_theme_name(None),
+            attach_delay_seconds=attach_delay_seconds,
+        )
         return
     result = _respawn_pane(
         pane_id,
-        _temp_panel_pane_command(temp_panel_session_name, session_name),
+        _temp_panel_pane_command(
+            temp_panel_session_name,
+            session_name,
+            attach_delay_seconds=attach_delay_seconds,
+        ),
         check=False,
     )
     if result.returncode != 0:
         kill_tmux_session(temp_panel_session_name)
-        _create_temp_panel_tmux_session(session_name, _resolved_panel_theme_name(None))
+        _create_temp_panel_tmux_session(
+            session_name,
+            _resolved_panel_theme_name(None),
+            attach_delay_seconds=attach_delay_seconds,
+        )
 
 
 def _first_pane_id(temp_panel_session_name: str) -> str | None:
@@ -954,6 +985,8 @@ def _first_pane_id(temp_panel_session_name: str) -> str | None:
 def _create_temp_panel_tmux_session(
     session_name: str,
     theme_name: str | None = None,
+    *,
+    attach_delay_seconds: float = 0.0,
 ) -> str:
     temp_panel_session_name = make_temp_panel_session_name(session_name)
     temp_panel_name = _temp_panel_display_name(session_name)
@@ -1001,7 +1034,11 @@ def _create_temp_panel_tmux_session(
         _load_panel_tmux_config(temp_panel_name, temp_panel_session_name, theme_name)
         _respawn_pane(
             pane_id,
-            _temp_panel_pane_command(temp_panel_session_name, session_name),
+            _temp_panel_pane_command(
+                temp_panel_session_name,
+                session_name,
+                attach_delay_seconds=attach_delay_seconds,
+            ),
         )
         _settle_temp_panel_attach()
     except Exception:

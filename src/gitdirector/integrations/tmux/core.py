@@ -403,6 +403,7 @@ def attach_tmux_session(
     session_name: str,
     *,
     skip_config_sync: bool = False,
+    attach_delay_seconds: float = 0.0,
 ) -> bool:
     """Attach to an existing tmux session, blocking until detach/exit.
 
@@ -428,7 +429,10 @@ def attach_tmux_session(
     if _should_open_in_temp_panel(session_name):
         if not _session_exists(session_name):
             raise TmuxError(f"tmux session no longer exists: {session_name}")
-        target_session = ensure_temp_panel_tmux_session(session_name)
+        target_session = ensure_temp_panel_tmux_session(
+            session_name,
+            attach_delay_seconds=attach_delay_seconds,
+        )
     elif _is_persistent_panel_session(target_session):
         if not _session_exists(target_session):
             raise TmuxError(f"tmux session no longer exists: {target_session}")

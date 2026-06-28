@@ -1306,7 +1306,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_action_select_row_uses_loading_screen_for_selected_session(self):
+    def test_action_select_row_reattaches_selected_session_with_inner_delay(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
         row_key = MagicMock()
@@ -1317,41 +1317,26 @@ class TestGitDirectorConsoleDirectBranches:
         table.cursor_coordinate = MagicMock()
         app.query_one = MagicMock(return_value=table)
         app._suspend_and_attach = MagicMock()
-        app.push_screen = MagicMock()
 
         app.action_select_row()
 
-        screen = app.push_screen.call_args.args[0]
-        assert isinstance(screen, AgentLoadingScreen)
-        assert screen._agent_cmd == "shell"
-        assert screen._loading_hint == "waiting for session to initialize…"
-
-        screen._on_attach()
         app._suspend_and_attach.assert_called_once_with(
-            "gd/alpha/shell/1", None, row_key=None, skip_config_sync=False
+            "gd/alpha/shell/1",
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
         )
 
-    def test_on_data_table_row_selected_uses_loading_screen_for_agent_session(self):
+    def test_on_data_table_row_selected_reattaches_agent_session_with_inner_delay(self):
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
-        app.push_screen = MagicMock()
         event = MagicMock()
         event.data_table.id = "sessions-table"
         event.row_key.value = "gd/alpha/copilot/1"
 
         app.on_data_table_row_selected(event)
 
-        screen = app.push_screen.call_args.args[0]
-        assert isinstance(screen, AgentLoadingScreen)
-        assert screen._agent_cmd == "copilot"
-        assert screen._loading_hint == "waiting for agent to initialize…"
-
-        screen._on_attach()
         app._suspend_and_attach.assert_called_once_with(
             "gd/alpha/copilot/1",
-            None,
-            row_key=None,
-            skip_config_sync=False,
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
         )
 
     def test_action_select_row_on_repos_opens_menu(self):
@@ -1418,24 +1403,16 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_attach_to_session_uses_loading_screen(self):
+    def test_attach_to_session_reuses_temp_attach_with_inner_delay(self):
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
-        app.push_screen = MagicMock()
 
         app._attach_to_session("gd/alpha/copilot/1", Path("/tmp/alpha"))
 
-        screen = app.push_screen.call_args.args[0]
-        assert isinstance(screen, AgentLoadingScreen)
-        assert screen._agent_cmd == "copilot"
-        assert screen._loading_hint == "waiting for agent to initialize…"
-
-        screen._on_attach()
         app._suspend_and_attach.assert_called_once_with(
             "gd/alpha/copilot/1",
             Path("/tmp/alpha"),
-            row_key=None,
-            skip_config_sync=False,
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
         )
 
     @patch("gitdirector.commands.tui.app.ActionMenuScreen")
