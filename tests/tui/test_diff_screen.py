@@ -252,82 +252,95 @@ class TestDiffReviewScreenLoading:
 
 
 class TestDiffReviewScreenNavigation:
-    async def _setup_with_diff(self, app, mocker):
+    async def _setup_with_diff(self, app, mocker, pilot):
         _patch_repo_methods(mocker, diff_text=SAMPLE_DIFF, untracked=[])
         screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
         app.push_screen(screen)
         await app.workers.wait_for_complete()
         await app.workers.wait_for_complete()
-        return screen
+        await pilot.pause()
+        await pilot.pause()
+        files_list = app.screen.query_one("#diff-files-list", FileTileList)
+        for _ in range(50):
+            if files_list.index is not None:
+                break
+            await pilot.pause()
+        assert files_list.index is not None, "diff file list did not initialise"
+        return screen, files_list
 
     async def test_navigates_with_j_k(self, mocker):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            await self._setup_with_diff(app, mocker)
-            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            _screen, files_list = await self._setup_with_diff(app, mocker, pilot)
             files_list.focus()
             await pilot.pause()
             assert files_list.index == 0
             await pilot.press("j")
+            await pilot.pause()
             assert files_list.index == 1
             await pilot.press("k")
+            await pilot.pause()
             assert files_list.index == 0
 
     async def test_n_p_do_not_navigate_files(self, mocker):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            await self._setup_with_diff(app, mocker)
-            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            _screen, files_list = await self._setup_with_diff(app, mocker, pilot)
             files_list.focus()
             await pilot.pause()
             assert files_list.index == 0
             await pilot.press("n")
+            await pilot.pause()
             assert files_list.index == 0
             await pilot.press("p")
+            await pilot.pause()
             assert files_list.index == 0
 
     async def test_navigates_with_brackets(self, mocker):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            await self._setup_with_diff(app, mocker)
-            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            _screen, files_list = await self._setup_with_diff(app, mocker, pilot)
             files_list.focus()
             await pilot.pause()
             await pilot.press("]")
+            await pilot.pause()
             assert files_list.index == 1
             await pilot.press("[")
+            await pilot.pause()
             assert files_list.index == 0
 
     async def test_arrow_keys_navigate_files_when_file_list_is_focused(self, mocker):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            await self._setup_with_diff(app, mocker)
-            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            _screen, files_list = await self._setup_with_diff(app, mocker, pilot)
             files_list.focus()
             await pilot.pause()
             assert files_list.index == 0
             await pilot.press("right")
+            await pilot.pause()
             assert files_list.index == 1
             await pilot.press("left")
+            await pilot.pause()
             assert files_list.index == 0
 
     async def test_navigation_does_not_move_past_boundaries(self, mocker):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            await self._setup_with_diff(app, mocker)
-            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            _screen, files_list = await self._setup_with_diff(app, mocker, pilot)
             files_list.focus()
             await pilot.pause()
             for _ in range(5):
                 await pilot.press("k")
+            await pilot.pause()
             assert files_list.index == 0
             for _ in range(5):
                 await pilot.press("j")
+            await pilot.pause()
             assert files_list.index == 1
 
 

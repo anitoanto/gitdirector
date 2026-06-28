@@ -368,7 +368,10 @@ class GitDirectorConsole(
             session_name = self._get_selected_row_key(table)
             if session_name is None:
                 return
-            self._show_attach_loading_screen(session_name)
+            self._suspend_and_attach(
+                session_name,
+                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+            )
         elif self._active_tab == "panels":
             self._open_selected_panel_menu()
         else:
@@ -377,7 +380,10 @@ class GitDirectorConsole(
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "sessions-table":
             session_name = str(event.row_key.value)
-            self._show_attach_loading_screen(session_name)
+            self._suspend_and_attach(
+                session_name,
+                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+            )
         elif event.data_table.id == "panels-table":
             self._open_selected_panel_menu()
         else:
@@ -485,6 +491,7 @@ class GitDirectorConsole(
         row_key: str | None = None,
         *,
         skip_config_sync: bool = False,
+        attach_delay_seconds: float = 0.0,
     ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
@@ -521,7 +528,11 @@ class GitDirectorConsole(
                             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
                             sys.stdout.flush()
                             entered_manual_alt_screen = True
-                        attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
+                        attach_tmux_session(
+                            session_name,
+                            skip_config_sync=skip_config_sync,
+                            attach_delay_seconds=attach_delay_seconds,
+                        )
                     finally:
                         if entered_manual_alt_screen:
                             sys.stdout.write("\033[?25h")
@@ -572,7 +583,11 @@ class GitDirectorConsole(
 
     def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""
-        self._show_attach_loading_screen(session_name, path)
+        self._suspend_and_attach(
+            session_name,
+            path,
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()
