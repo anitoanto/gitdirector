@@ -614,10 +614,14 @@ class TestFileListScrolling:
             # Jump to the last item; the list must scroll to keep
             # it visible (scroll_offset.y should advance past zero).
             files_list.index = 19
-            await _wait_for_deferred_scroll(files_list)
+            target_y = files_list.max_scroll_y
+            for _ in range(20):
+                if files_list.scroll_offset.y == target_y and target_y > 0:
+                    break
+                await pilot.pause()
             assert files_list.scroll_offset.y > 0
             # And the scroll position should be near the maximum.
-            assert files_list.scroll_offset.y == files_list.max_scroll_y
+            assert files_list.scroll_offset.y == target_y
 
     async def test_scrolling_back_keeps_selected_tile_visible(self, mocker):
         from gitdirector import repo as repo_mod

@@ -614,14 +614,38 @@ class TestEnsureTempPanelTmuxSession:
             call for call in mock_run.call_args_list if call.args[0][:2] == ["tmux", "new-session"]
         ]
         assert new_session_calls == []
-        # The pane command keeps the temp session alive (tail -f /dev/null)
-        # for the next attach, but kills it if the inner session has gone
-        # away (e.g. the user exited the session with `exit` / Ctrl-D).
+        # remain-on-exit keeps the temp session reusable without a live
+        # placeholder process. The command still kills the wrapper if the
+        # inner session has gone away (e.g. `exit` / Ctrl-D).
         pane_command = respawn_call.args[0][5]
-        assert "tail -f /dev/null" in pane_command
+        assert "read -r" not in pane_command
+        assert "while :" not in pane_command
+        assert "tail -f /dev/null" not in pane_command
+        assert pane_command.endswith("'exit 0'") or "exit 0" in pane_command
         assert "kill-session" in pane_command
         assert "=gd/my-repo/shell/1" in pane_command
         assert "=gd/temp/panel/my-repo/shell/1" in pane_command
+        assert "sleep " not in pane_command
+
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
+    def test_reuses_existing_temp_panel_with_inner_attach_delay(
+        self,
+        _mock_exists,
+        mock_run,
+    ):
+        list_panes_result = MagicMock(returncode=0, stdout="%42\n")
+        respawn_result = MagicMock(returncode=0)
+        mock_run.side_effect = [list_panes_result, respawn_result]
+
+        ensure_temp_panel_tmux_session(
+            "gd/my-repo/shell/1",
+            "rose-pine",
+            attach_delay_seconds=1.0,
+        )
+
+        pane_command = mock_run.call_args_list[1].args[0][5]
+        assert "sleep 1.0;" in pane_command
 
     @patch("gitdirector.integrations.tmux.panels._create_temp_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.panels.subprocess.run")
@@ -638,7 +662,11 @@ class TestEnsureTempPanelTmuxSession:
         session_name = ensure_temp_panel_tmux_session("gd/my-repo/shell/1", "rose-pine")
 
         assert session_name == "gd/temp/panel/my-repo/shell/1"
-        mock_create.assert_called_once_with("gd/my-repo/shell/1", ANY)
+        mock_create.assert_called_once_with(
+            "gd/my-repo/shell/1",
+            ANY,
+            attach_delay_seconds=0.0,
+        )
 
     @patch("gitdirector.integrations.tmux.panels._create_temp_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
@@ -660,7 +688,11 @@ class TestEnsureTempPanelTmuxSession:
 
         assert session_name == "gd/temp/panel/my-repo/shell/1"
         mock_kill.assert_called_once_with("gd/temp/panel/my-repo/shell/1")
-        mock_create.assert_called_once_with("gd/my-repo/shell/1", ANY)
+        mock_create.assert_called_once_with(
+            "gd/my-repo/shell/1",
+            ANY,
+            attach_delay_seconds=0.0,
+        )
 
 
 class TestKillTmuxSession:
@@ -706,7 +738,7 @@ class TestAttachTmuxSession:
             "=gd/temp/panel/repo/shell/1",
         ]
         mock_sync.assert_called_once_with()
-        mock_ensure.assert_called_once_with("gd/repo/shell/1")
+        mock_ensure.assert_called_once_with("gd/repo/shell/1", attach_delay_seconds=0.0)
 
     @patch(
         "gitdirector.integrations.tmux.panels.ensure_temp_panel_tmux_session",
@@ -725,7 +757,7 @@ class TestAttachTmuxSession:
             "=gd/temp/panel/repo/shell/1",
         ]
         mock_sync.assert_called_once_with()
-        mock_ensure.assert_called_once_with("gd/repo/shell/1")
+        mock_ensure.assert_called_once_with("gd/repo/shell/1", attach_delay_seconds=0.0)
 
     @patch("gitdirector.integrations.tmux.panels.ensure_temp_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
@@ -748,7 +780,26 @@ class TestAttachTmuxSession:
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/alpha/shell/1", skip_config_sync=True)
         mock_sync.assert_not_called()
-        mock_ensure.assert_called_once_with("gd/alpha/shell/1")
+        mock_ensure.assert_called_once_with("gd/alpha/shell/1", attach_delay_seconds=0.0)
+        assert mock_run.call_args_list[-1].args[0] == [
+            "tmux",
+            "attach-session",
+            "-t",
+            "=gd/temp/panel/alpha/shell/1",
+        ]
+
+    @patch(
+        "gitdirector.integrations.tmux.panels.ensure_temp_panel_tmux_session",
+        return_value="gd/temp/panel/alpha/shell/1",
+    )
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_passes_inner_attach_delay_to_temp_panel(self, mock_run, mock_sync, mock_ensure):
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch.dict("os.environ", {}, clear=True):
+            attach_tmux_session("gd/alpha/shell/1", attach_delay_seconds=1.0)
+        mock_sync.assert_called_once_with()
+        mock_ensure.assert_called_once_with("gd/alpha/shell/1", attach_delay_seconds=1.0)
         assert mock_run.call_args_list[-1].args[0] == [
             "tmux",
             "attach-session",
