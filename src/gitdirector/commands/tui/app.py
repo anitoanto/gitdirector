@@ -88,6 +88,9 @@ class GitDirectorConsole(
         background: $surface;
         overflow: hidden;
     }
+    HeaderTitle {
+        padding: 0 10 0 8;
+    }
     #status-bar {
         dock: bottom;
         height: 1;
@@ -194,7 +197,7 @@ class GitDirectorConsole(
         Binding("s", "sort", "Sort", show=True),
         Binding("g", "show_git_menu", "Git", show=True),
         Binding("i", "show_info", "Info", show=True),
-        Binding("d", "edit_session_description", "Description", show=False),
+        Binding("d", "edit_session_description", "Description", show=True),
         Binding("escape", "close_search", show=False),
         Binding("1", "tab_repos", "Repos", show=False),
         Binding("2", "tab_sessions", "Sessions", show=False),
@@ -246,7 +249,7 @@ class GitDirectorConsole(
         self._repo_status_executor: ThreadPoolExecutor | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield Header(show_clock=True, icon="☰")
         with TabbedContent(id="tabs"):
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")

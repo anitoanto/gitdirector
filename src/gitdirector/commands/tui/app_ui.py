@@ -62,6 +62,8 @@ class ConsoleUIHelpersMixin:
             return self._active_tab == "repos"
         if action in {"show_git_menu", "show_info"}:
             return self._active_tab == "repos"
+        if action == "edit_session_description":
+            return self._active_tab == "sessions"
         return super().check_action(action, parameters)
 
     def _arm_resume_new_panel_guard(self, restore_tab: str) -> None:

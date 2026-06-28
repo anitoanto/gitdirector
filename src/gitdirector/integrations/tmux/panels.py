@@ -734,7 +734,7 @@ def _panel_pane_command(
     elif closed:
         script = f"clear; {closed_message}; exit 0"
     else:
-        script = f"clear; {_printf_lines_command(['', 'UNASSIGNED'])}; exit 0"
+        script = "clear; exit 0"
     return f"sh -c {shlex.quote(script)}"
 
 
