@@ -1523,11 +1523,11 @@ class TestAgentLoadingScreen:
         screen._do_dismiss.assert_not_called()
 
         screen._dismissed = False
-        mock_monotonic.return_value = 100.5
+        mock_monotonic.return_value = 100.1
         screen._check_ready()
         screen._ready_marker.exists.assert_not_called()
 
-        mock_monotonic.return_value = 101.5
+        mock_monotonic.return_value = 100.5
         screen._ready_marker.exists.return_value = False
         screen._check_ready()
 

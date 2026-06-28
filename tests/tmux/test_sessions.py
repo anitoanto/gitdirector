@@ -641,11 +641,11 @@ class TestEnsureTempPanelTmuxSession:
         ensure_temp_panel_tmux_session(
             "gd/my-repo/shell/1",
             "rose-pine",
-            attach_delay_seconds=1.0,
+            attach_delay_seconds=0.2,
         )
 
         pane_command = mock_run.call_args_list[1].args[0][5]
-        assert "sleep 1.0;" in pane_command
+        assert "sleep 0.2;" in pane_command
 
     @patch("gitdirector.integrations.tmux.panels._create_temp_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.panels.subprocess.run")

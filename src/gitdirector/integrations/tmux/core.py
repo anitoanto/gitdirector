@@ -410,7 +410,7 @@ def attach_tmux_session(
     When *skip_config_sync* is true the leading ``sync_panel_tmux_config`` call
     is omitted. Callers that just created the session (and therefore triggered
     a sync moments ago) should set this to avoid a visible flicker: the sync
-    re-lists every tmux session, rewrites the gd-tmux.conf file, and runs
+    re-lists every tmux session, rewrites the tmux_design.conf file, and runs
     ``tmux source-file``, which together take long enough to expose a brief
     empty alt-screen between the manual screen clear and tmux's first redraw.
     """
@@ -760,8 +760,8 @@ def _panel_window_status_format() -> str:
     return " #{pane_index}:#{pane_title} "
 
 
-def _gd_tmux_config_path() -> Path:
-    return Path.home() / ".gitdirector" / "gd-tmux.conf"
+def _tmux_design_config_path() -> Path:
+    return Path.home() / ".gitdirector" / "tmux_design.conf"
 
 
 def _session_badge_text(session_name: str) -> str:
@@ -896,7 +896,7 @@ def _load_panel_tmux_config(
     session_name: str,
     theme_name: str | None = None,
 ) -> Path:
-    config_path = _gd_tmux_config_path()
+    config_path = _tmux_design_config_path()
     config_path.parent.mkdir(exist_ok=True)
     atomic_write_text(config_path, _panel_tmux_config(panel_name, session_name, theme_name))
     _run_tmux(["source-file", str(config_path)], check=True)
@@ -1011,7 +1011,7 @@ def _live_repo_tmux_sessions() -> list[str]:
 
 def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     resolved_theme = _resolved_panel_theme_name(theme_name)
-    config_path = _gd_tmux_config_path()
+    config_path = _tmux_design_config_path()
     config_path.parent.mkdir(exist_ok=True)
     live_panel_sessions = _live_panel_sessions()
     live_repo_sessions = _live_repo_tmux_sessions()

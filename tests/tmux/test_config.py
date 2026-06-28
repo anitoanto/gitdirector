@@ -136,10 +136,10 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_load_panel_tmux_config_writes_and_sources_file(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
 
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             written_path = _load_panel_tmux_config("Main", "gd/panel/main", "nord")
 
@@ -164,9 +164,9 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_writes_all_live_sessions(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch(
                 "gitdirector.integrations.tmux.core._live_panel_sessions",
@@ -188,9 +188,9 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_writes_regular_sessions(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]):
                 with patch(
@@ -215,9 +215,9 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_skips_source_when_no_live_sessions(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]):
                 with patch(
@@ -239,13 +239,13 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_ignores_source_file_failure(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         mock_run.side_effect = __import__("subprocess").CalledProcessError(
             1, ["tmux", "source-file", str(config_path)]
         )
 
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]):
                 with patch(
