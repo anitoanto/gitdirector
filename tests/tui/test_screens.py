@@ -1491,6 +1491,24 @@ class TestAgentLoadingScreen:
         assert screen._timeout_timer is timeout_timer
         mock_monotonic.assert_called_once_with()
 
+    @patch("gitdirector.commands.tui.screens.panels.time.monotonic", return_value=42.0)
+    def test_on_mount_without_ready_marker_uses_min_wait_timer(self, mock_monotonic):
+        screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1")
+        timeout_timer = MagicMock()
+        screen.set_interval = MagicMock()
+        screen.set_timer = MagicMock(return_value=timeout_timer)
+        screen.call_after_refresh = MagicMock()
+
+        screen.on_mount()
+
+        assert screen._start_time == 42.0
+        screen.set_interval.assert_not_called()
+        screen.set_timer.assert_called_once_with(screen._MIN_WAIT, screen._force_dismiss)
+        screen.call_after_refresh.assert_not_called()
+        assert screen._poll_timer is None
+        assert screen._timeout_timer is timeout_timer
+        mock_monotonic.assert_called_once_with()
+
     @patch("gitdirector.commands.tui.screens.panels.time.monotonic")
     def test_check_ready_waits_for_minimum_time_and_marker(self, mock_monotonic):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
@@ -1545,6 +1563,15 @@ class TestAgentLoadingScreen:
 
         assert screen._dismissed is True
         screen._poll_timer.stop.assert_called_once_with()
+        screen._do_dismiss.assert_called_once_with()
+
+    def test_force_dismiss_without_ready_marker_skips_poll_timer(self):
+        screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1")
+        screen._do_dismiss = MagicMock()
+
+        screen._force_dismiss()
+
+        assert screen._dismissed is True
         screen._do_dismiss.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.attach_tmux_session")

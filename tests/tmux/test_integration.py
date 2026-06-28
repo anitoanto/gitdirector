@@ -90,8 +90,134 @@ class TestPanelExitIntegration:
                 assert not any(
                     name.startswith(f"gd/temp/panel/{panel_name}/") for name in sessions_after
                 )
-                assert "1|tail" in pane_commands
-                assert any(line.startswith("2|") and line != "2|tail" for line in pane_commands)
+                assert "1|tail" not in pane_commands
+                assert any(line.startswith("2|") for line in pane_commands)
+            finally:
+                subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
+                _cleanup_tmux_tmpdir(tmux_dir)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+class TestPanelRebuildOrphanIntegration:
+    """Real-tmux regression tests for the orphan-session lifecycle.
+
+    Reproduces the user's report: a panel with multiple panes going through
+    reconfigure/rebuild must not leave stray sessions behind and must
+    tolerate tmux's ``.`` -> ``_`` munging of session names.
+    """
+
+    def test_reconfigure_does_not_leak_orphan_session(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            tmux_dir = _make_short_tmux_tmpdir()
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+
+            suffix = uuid.uuid4().hex[:8]
+            base_a = f"gd/repro-base-a-{suffix}"
+            base_b = f"gd/repro-base-b-{suffix}"
+            base_c = f"gd/repro-base-c-{suffix}"
+            panel_name = f"repro-{suffix}"
+
+            def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["tmux", *args],
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
+
+            try:
+                for s in (base_a, base_b, base_c):
+                    run_tmux("new-session", "-d", "-s", s, "-n", "a")
+                    run_tmux("set-option", "-t", f"={s}:", "destroy-unattached", "off")
+
+                rebuild_panel_tmux_session(
+                    panel_name,
+                    2,
+                    2,
+                    {1: base_a, 2: base_b, 3: base_c},
+                    layout_key="tall_left",
+                )
+
+                before = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+                assert not any("orphaned" in name for name in before), (
+                    f"Initial build leaked an orphan: {before}"
+                )
+
+                rebuild_panel_tmux_session(
+                    panel_name,
+                    2,
+                    2,
+                    {1: base_a, 2: base_b, 3: base_c},
+                    layout_key="wide_bottom",
+                )
+
+                after = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+                orphans = [name for name in after if "orphaned" in name]
+                assert orphans == [], f"Reconfigure leaked orphan sessions: {orphans!r}"
+                assert f"gd/panel/{panel_name}" in after, (
+                    f"Reconfigure lost the panel session: {after}"
+                )
+                for s in (base_a, base_b, base_c):
+                    assert s in after, f"Reconfigure killed inner session {s}"
+            finally:
+                subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
+                _cleanup_tmux_tmpdir(tmux_dir)
+
+    def test_three_session_two_row_layout_creates_no_orphan(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Mirror of the user's reported scenario: 3 sessions, 2 rows,
+        first row 2 sessions — must not leave an orphan after reconfigure.
+        """
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            home_dir.mkdir()
+            tmux_dir = _make_short_tmux_tmpdir()
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+
+            suffix = uuid.uuid4().hex[:8]
+            inner = [f"gd/browser-extension-template-{suffix}/opencode/{n}" for n in (1, 2, 3)]
+            panel_name = "asd"
+
+            def run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["tmux", *args],
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
+
+            try:
+                for s in inner:
+                    run_tmux("new-session", "-d", "-s", s, "-n", "w")
+                    run_tmux("set-option", "-t", f"={s}:", "destroy-unattached", "off")
+
+                rebuild_panel_tmux_session(
+                    panel_name,
+                    2,
+                    2,
+                    {1: inner[0], 2: inner[1], 3: inner[2]},
+                    layout_key="tall_left",
+                )
+
+                after = run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+                orphans = [name for name in after if "orphaned" in name]
+                assert orphans == [], f"Orphan leaked: {orphans!r}"
+                assert f"gd/panel/{panel_name}" in after
+                for s in inner:
+                    assert s in after, f"Inner session killed: {s}"
             finally:
                 subprocess.run(["tmux", "kill-server"], capture_output=True, text=True, check=False)
                 _cleanup_tmux_tmpdir(tmux_dir)

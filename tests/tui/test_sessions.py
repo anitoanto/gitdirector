@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent
 
-from gitdirector.commands.tui import GitDirectorConsole, SortMenuScreen
+from gitdirector.commands.tui import AgentLoadingScreen, GitDirectorConsole, SortMenuScreen
 from gitdirector.commands.tui.app_sessions import _MAX_SESSIONS_DESCRIPTION_WIDTH
 
 from .conftest import SAMPLE_SESSIONS, _make_info, _mock_manager
@@ -128,7 +128,10 @@ class TestSessionsTab:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1")
+            app._suspend_and_attach.assert_called_once_with(
+                "gd/alpha/shell/1",
+                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+            )
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_sessions_no_sessions_status(self, _mock):
