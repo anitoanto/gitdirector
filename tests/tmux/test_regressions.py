@@ -508,10 +508,11 @@ class TestOrphanSessionNameTmuxSafe:
 
     def test_rebuild_panel_uses_underscore_in_orphan_name(self):
         """Source-level guarantee that we don't regress to ``.orphaned-``."""
-        source = Path(
-            "/Users/anitoanto/Documents/Sync_Github/Project GitDirector/gitdirector/"
-            "src/gitdirector/integrations/tmux/panels.py"
-        ).read_text()
+        source_path = (
+            Path(__file__).resolve().parents[2] / "src/gitdirector/integrations/tmux/panels.py"
+        )
+        assert source_path.is_file(), f"panels.py not found at {source_path}"
+        source = source_path.read_text()
         assert ".orphaned-" not in source, (
             "rebuild_panel_tmux_session must use '_orphaned-' so tmux does not munge it"
         )
