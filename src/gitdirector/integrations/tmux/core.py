@@ -289,7 +289,8 @@ def create_tmux_session(
     unset (the next read returns the default ``"-"`` placeholder).
     """
     sessions = _list_sessions()
-    while True:
+    max_attempts = 5
+    for _attempt in range(max_attempts):
         session_name = _make_session_name(repo_name, purpose, repo_path=path, sessions=sessions)
         result = _run_tmux(
             [
@@ -316,6 +317,10 @@ def create_tmux_session(
             returncode=result.returncode,
             stderr=result.stderr,
         )
+    else:
+        raise TmuxError(
+            f"tmux new-session failed after {max_attempts} attempts to allocate a unique name"
+        )
     try:
         _protect_session(session_name)
         if repo_label is not None and repo_label.strip():
@@ -330,18 +335,75 @@ def create_tmux_session(
 
 
 def kill_tmux_session(session_name: str) -> bool:
-    """Kill a tmux session. Returns True on success."""
+    """Kill a tmux session by its **full exact name**. Returns True on success.
+
+    The argument MUST be a complete session name (e.g. ``gd/repo/shell/1``).
+    Anything else is rejected with ``ValueError`` — partial names, glob
+    patterns, empty strings, names already prefixed with ``=``, or names
+    containing the tmux target separator ``:`` would otherwise be unsafe
+    to forward to ``tmux kill-session -t <target>``. tmux's ``-t`` flag
+    uses prefix matching by default; without the ``=`` exact-match
+    prefix, ``tmux kill-session -t gd/repo/shell/1`` would also kill
+    ``gd/repo/shell/10``, ``gd/repo/shell/100``, etc.
+
+    Failures are logged at debug level so callers can distinguish "session
+    didn't exist" from "tmux server crashed" without needing to wrap the
+    call. Most callers are happy with the boolean return.
+    """
+    _validate_session_name_for_kill(session_name)
     try:
         result = _run_tmux(["kill-session", "-t", f"={session_name}"])
+        if result.returncode != 0:
+            logger.debug(
+                "tmux kill-session %s exited %s: %s",
+                session_name,
+                result.returncode,
+                (result.stderr or b"").decode(errors="replace").strip()
+                if isinstance(result.stderr, (bytes, bytearray))
+                else (result.stderr or "").strip(),
+            )
         return result.returncode == 0
-    except TmuxError:
+    except TmuxError as exc:
+        logger.debug("tmux kill-session %s failed: %s", session_name, exc)
         return False
+
+
+def _validate_session_name_for_kill(session_name: str) -> None:
+    """Reject inputs that could kill more sessions than intended.
+
+    Enforced invariants:
+      * non-empty string
+      * already namespaced under ``gd/`` (anything else is not ours to kill)
+      * has at least one path segment after ``gd/`` (i.e. not just ``gd/``)
+      * does not start with ``=`` (would produce a malformed target)
+      * does not contain tmux target separators (``:``, ``.``) which
+        would be interpreted as ``session:window`` or session-id syntax
+      * does not contain tmux glob/wildcard characters (``*``, ``?``,
+        ``[``, ``]``) which would broaden the match
+    """
+    if not isinstance(session_name, str) or not session_name:
+        raise ValueError("kill_tmux_session requires a non-empty full session name")
+    if not session_name.startswith("gd/"):
+        raise ValueError(f"kill_tmux_session refused non-gd session name: {session_name!r}")
+    if len(session_name) <= 3 or session_name == "gd/":
+        raise ValueError(
+            f"kill_tmux_session refused underspecified gd session name: {session_name!r}"
+        )
+    if session_name.startswith("="):
+        raise ValueError(f"kill_tmux_session refused already-prefixed target: {session_name!r}")
+    forbidden = (":", "*", "?", "[", "]")
+    for char in forbidden:
+        if char in session_name:
+            raise ValueError(
+                f"kill_tmux_session refused session name containing {char!r}: {session_name!r}"
+            )
 
 
 def attach_tmux_session(
     session_name: str,
     *,
     skip_config_sync: bool = False,
+    attach_delay_seconds: float = 0.0,
 ) -> bool:
     """Attach to an existing tmux session, blocking until detach/exit.
 
@@ -367,7 +429,10 @@ def attach_tmux_session(
     if _should_open_in_temp_panel(session_name):
         if not _session_exists(session_name):
             raise TmuxError(f"tmux session no longer exists: {session_name}")
-        target_session = ensure_temp_panel_tmux_session(session_name)
+        target_session = ensure_temp_panel_tmux_session(
+            session_name,
+            attach_delay_seconds=attach_delay_seconds,
+        )
     elif _is_persistent_panel_session(target_session):
         if not _session_exists(target_session):
             raise TmuxError(f"tmux session no longer exists: {target_session}")
@@ -384,7 +449,11 @@ def attach_tmux_session(
 def open_in_tmux(repo_name: str, path: Path) -> None:
     """Create and attach to a new tmux session rooted at *path*."""
     session_name = create_tmux_session(repo_name, path)
-    attach_tmux_session(session_name, skip_config_sync=True)
+    try:
+        attach_tmux_session(session_name, skip_config_sync=True)
+    except BaseException:
+        kill_tmux_session(session_name)
+        raise
 
 
 def _sanitize_panel_name(name: str) -> str:

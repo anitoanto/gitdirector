@@ -783,6 +783,43 @@ class TestGitDirectorConsolePanels:
         app._open_panel.assert_called_once_with("Main")
         app._update_status.assert_not_called()
 
+    @patch("gitdirector.integrations.tmux._protect_session")
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=True)
+    def test_open_panel_attaches_immediately(self, _mock_exists, mock_protect):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = Panel(name="Main", rows=1, cols=1, panes={1: None})
+        app._suspend_and_attach = MagicMock()
+
+        app._open_panel("Main")
+
+        mock_protect.assert_called_once_with("gd/panel/main")
+        app._suspend_and_attach.assert_called_once_with("gd/panel/main", row_key="Main")
+
+    @patch(
+        "gitdirector.integrations.tmux.rebuild_panel_tmux_session",
+        return_value="gd/panel/main",
+    )
+    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    def test_open_panel_rebuilds_without_inner_delay(self, _mock_exists, mock_rebuild):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        panel = Panel(name="Main", rows=1, cols=1, panes={1: "gd/alpha/shell/1"})
+        app._panel_store.get.return_value = panel
+        app._suspend_and_attach = MagicMock()
+
+        app._open_panel("Main")
+
+        mock_rebuild.assert_called_once_with(
+            "Main",
+            1,
+            1,
+            {1: "gd/alpha/shell/1"},
+            closed_panes=set(),
+            layout_key="grid_1x1",
+        )
+        app._suspend_and_attach.assert_called_once_with("gd/panel/main", row_key="Main")
+
     @patch(
         "gitdirector.integrations.tmux._list_sessions",
         return_value=[

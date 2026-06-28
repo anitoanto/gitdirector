@@ -17,6 +17,8 @@ from textual.widgets import Footer, Static
 from ...integrations.tmux import (
     _embedded_tmux_attach_command,
     _panel_session_label,
+    kill_tmux_session,
+    make_temp_panel_session_name,
 )
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .panels import Panel, PanelStore
@@ -431,7 +433,20 @@ class PanelViewScreen(Screen[None]):
     def action_detach(self) -> None:
         for pane in self._pane_widgets.values():
             pane.stop_terminal()
+        self._cleanup_temp_panel_wrappers()
         self.dismiss(None)
+
+    def on_unmount(self) -> None:
+        for pane in self._pane_widgets.values():
+            pane.stop_terminal()
+        self._cleanup_temp_panel_wrappers()
+
+    def _cleanup_temp_panel_wrappers(self) -> None:
+        for session_name in self._panel.panes.values():
+            if not session_name:
+                continue
+            wrapper = make_temp_panel_session_name(session_name)
+            kill_tmux_session(wrapper)
 
     def _build_status_text(self) -> str:
         theme = self._panel_theme()

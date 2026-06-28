@@ -291,6 +291,14 @@ class TestPanelPaneTitles:
             "set-window-option",
             "-t",
             "=gd/panel/main:0",
+            "remain-on-exit",
+            "on",
+        ] in commands
+        assert [
+            "tmux",
+            "set-window-option",
+            "-t",
+            "=gd/panel/main:0",
             "pane-border-style",
             f"fg={theme.border_inactive}",
         ] in commands

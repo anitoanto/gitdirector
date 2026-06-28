@@ -9,6 +9,7 @@ from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
 from gitdirector.commands.tui import (
+    AgentLoadingScreen,
     ConfirmScreen,
     GitCommandResultScreen,
     GitDirectorConsole,
@@ -61,7 +62,7 @@ class TestGitDirectorConsole:
         app._monitor = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("q")
-        app._monitor.stop.assert_called_once_with(wait=False)
+        app._monitor.stop.assert_called_once_with(wait=True)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_cursor_down_binding(self, _mock_sessions):
@@ -1248,7 +1249,7 @@ class TestGitDirectorConsoleDirectBranches:
                 app.action_quit()
 
         app._pause_session_status_tracking.assert_called_once_with(wait=False)
-        app._monitor.stop.assert_called_once_with(wait=False)
+        app._monitor.stop.assert_called_once_with(wait=True)
         executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
         mock_cancel_all.assert_called_once_with()
         mock_kill_git.assert_called_once_with()
@@ -1299,13 +1300,13 @@ class TestGitDirectorConsoleDirectBranches:
         table = MagicMock()
         table.row_count = 0
         app.query_one = MagicMock(return_value=table)
-        app._suspend_and_attach = MagicMock()
+        app.push_screen = MagicMock()
 
         app.action_select_row()
 
-        app._suspend_and_attach.assert_not_called()
+        app.push_screen.assert_not_called()
 
-    def test_action_select_row_attaches_selected_session(self):
+    def test_action_select_row_reattaches_selected_session_with_inner_delay(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
         row_key = MagicMock()
@@ -1319,7 +1320,24 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_select_row()
 
-        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1")
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/shell/1",
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
+
+    def test_on_data_table_row_selected_reattaches_agent_session_with_inner_delay(self):
+        app = GitDirectorConsole()
+        app._suspend_and_attach = MagicMock()
+        event = MagicMock()
+        event.data_table.id = "sessions-table"
+        event.row_key.value = "gd/alpha/copilot/1"
+
+        app.on_data_table_row_selected(event)
+
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/copilot/1",
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
 
     def test_action_select_row_on_repos_opens_menu(self):
         app = GitDirectorConsole()
@@ -1341,18 +1359,30 @@ class TestGitDirectorConsoleDirectBranches:
         app.action_show_menu.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.create_tmux_session", return_value="gd/alpha/shell/1")
-    def test_action_open_tmux_shell_attaches_to_new_session(self, mock_create):
+    def test_action_open_tmux_shell_uses_loading_screen(self, mock_create):
         app = GitDirectorConsole()
         app._get_selected_path = MagicMock(return_value=Path("/tmp/alpha"))
         app._suspend_and_attach = MagicMock()
+        app.push_screen = MagicMock()
 
         app.action_open_tmux()
 
         mock_create.assert_called_once_with(
             "alpha", Path("/tmp/alpha"), purpose="shell", description=None
         )
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, AgentLoadingScreen)
+        assert screen._agent_cmd == "shell"
+        assert screen._ready_marker is None
+        assert screen._loading_hint == "waiting for session to initialize…"
+
+        screen._on_attach()
         app._suspend_and_attach.assert_called_once_with(
-            "gd/alpha/shell/1", Path("/tmp/alpha"), skip_config_sync=True
+            "gd/alpha/shell/1",
+            Path("/tmp/alpha"),
+            row_key=None,
+            skip_config_sync=True,
         )
 
     def test_action_open_tmux_without_selection_is_noop(self):
@@ -1373,13 +1403,17 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_attach_to_session_delegates_to_suspend_and_attach(self):
+    def test_attach_to_session_reuses_temp_attach_with_inner_delay(self):
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
 
-        app._attach_to_session("gd/alpha/shell/1", Path("/tmp/alpha"))
+        app._attach_to_session("gd/alpha/copilot/1", Path("/tmp/alpha"))
 
-        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/copilot/1",
+            Path("/tmp/alpha"),
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
 
     @patch("gitdirector.commands.tui.app.ActionMenuScreen")
     def test_action_show_menu_uses_selected_repo_metadata(self, mock_screen_cls):
@@ -1439,7 +1473,7 @@ class TestGitDirectorConsoleDirectBranches:
             except RuntimeError:
                 pass
 
-        mock_stop.assert_called_once_with(wait=False)
+        mock_stop.assert_called_once_with(wait=True)
 
 
 class TestBuildLoadedStatus:
