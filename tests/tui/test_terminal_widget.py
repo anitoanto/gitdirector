@@ -283,19 +283,37 @@ class TestMouseHandlers:
         ev.stop.assert_called_once_with()
         ev.prevent_default.assert_called_once_with()
 
-    def test_mouse_down_ignored_when_mouse_tracking_on(self, widget):
+    def test_mouse_down_starts_selection_when_mouse_tracking_on(self, widget):
         widget._mouse_tracking = True
         widget._render_screen = MagicMock()
         widget.refresh = MagicMock()
+        widget.capture_mouse = MagicMock()
         widget.on_mouse_down(self._event(3, 2))
-        assert widget._selecting is False
-        assert widget._sel_start is None
+        assert widget._selecting is True
+        assert widget._sel_start == (2, 3)
 
     def test_mouse_down_ignored_for_non_left_button(self, widget):
         widget._render_screen = MagicMock()
         widget.refresh = MagicMock()
         widget.on_mouse_down(self._event(3, 2, button=2))
         assert widget._selecting is False
+
+    def test_mouse_tracking_detects_sgr_mouse_mode(self, widget):
+        widget._pending_output = ["\x1b[?1006h"]
+        widget._render_timer = None
+        widget._render_screen = MagicMock()
+        widget.refresh = MagicMock()
+        widget._flush_pending_output()
+        assert widget._mouse_tracking is True
+
+    def test_mouse_tracking_detects_sgr_mouse_mode_off(self, widget):
+        widget._mouse_tracking = True
+        widget._pending_output = ["\x1b[?1006l"]
+        widget._render_timer = None
+        widget._render_screen = MagicMock()
+        widget.refresh = MagicMock()
+        widget._flush_pending_output()
+        assert widget._mouse_tracking is False
 
 
 class TestBindings:
