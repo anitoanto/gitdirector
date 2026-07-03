@@ -454,8 +454,11 @@ class GitDirectorConsole(
                 kill_tmux_session(session_name)
                 self._update_status(f"tmux agent launch failed: {exc}")
                 return
-            self.push_screen(
-                AgentLoadingScreen(agent_cmd, session_name, ready_marker),
+            self._show_attach_loading_screen(
+                session_name,
+                path,
+                ready_marker=ready_marker,
+                skip_config_sync=True,
                 callback=refresh_after_launch,
             )
         else:
@@ -471,6 +474,7 @@ class GitDirectorConsole(
         session_name: str,
         path: Path | None = None,
         row_key: str | None = None,
+        ready_marker: Path | None = None,
         *,
         skip_config_sync: bool = False,
         callback: Callable[[object], None] | None = None,
@@ -498,6 +502,7 @@ class GitDirectorConsole(
             AgentLoadingScreen(
                 title,
                 session_name,
+                ready_marker,
                 loading_hint=loading_hint,
                 on_attach=attach,
             ),

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _RE_ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _DECSET_PREFIX = "\x1b[?"
+_MOUSE_TRACKING_MODES = ("1000", "1002", "1003", "1006", "1015")
 
 _EMULATOR_TERM_WAIT_SECONDS = 2.0
 _EMULATOR_KILL_WAIT_SECONDS = 2.0
@@ -466,9 +467,9 @@ class TerminalWidget(Widget, can_focus=True):
         for match in _RE_ANSI_SEQUENCE.finditer(chars):
             seq = match.group(0)
             if seq.startswith(_DECSET_PREFIX):
-                if "1000h" in seq:
+                if seq.endswith("h") and any(mode in seq for mode in _MOUSE_TRACKING_MODES):
                     self._mouse_tracking = True
-                if "1000l" in seq:
+                if seq.endswith("l") and any(mode in seq for mode in _MOUSE_TRACKING_MODES):
                     self._mouse_tracking = False
         try:
             self._stream.feed(chars)
@@ -726,7 +727,7 @@ class TerminalWidget(Widget, can_focus=True):
         return (row, col)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        if self._screen is None or self._mouse_tracking or event.button != 1:
+        if self._screen is None or event.button != 1:
             return
         clamped = self._clamp_to_screen(event.x, event.y)
         if clamped is None:
