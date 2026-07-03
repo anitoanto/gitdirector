@@ -8,8 +8,10 @@ import logging
 import os
 import pty
 import re
+import shutil
 import signal
 import struct
+import subprocess
 import termios
 import weakref
 
@@ -19,6 +21,7 @@ from rich.console import Console
 from rich.style import Style
 from rich.text import Text
 from textual import events
+from textual.binding import Binding
 from textual.message import Message
 from textual.reactive import reactive
 from textual.strip import Strip
@@ -33,6 +36,31 @@ _DECSET_PREFIX = "\x1b[?"
 
 _EMULATOR_TERM_WAIT_SECONDS = 2.0
 _EMULATOR_KILL_WAIT_SECONDS = 2.0
+
+
+def _copy_to_system_clipboard(text: str) -> bool:
+    for command in (
+        ["pbcopy"],
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["clip.exe"],
+    ):
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            subprocess.run(
+                command,
+                input=text,
+                text=True,
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("%s clipboard copy failed: %s", command[0], exc)
+            continue
+        return True
+    return False
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -263,12 +291,27 @@ class TerminalWidget(Widget, can_focus=True):
         def __init__(self) -> None:
             super().__init__()
 
+    class Copied(Message):
+        """Posted after text has been copied to the OS clipboard."""
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
     DEFAULT_CSS = """
     TerminalWidget {
         height: 1fr;
         width: 1fr;
     }
     """
+
+    BINDINGS = [
+        Binding("y", "copy_visible", "Copy", show=False, priority=True),
+    ]
+    """``y`` is intercepted (priority=True) so it reaches this widget's
+    copy action even when other widgets inside the pane would otherwise
+    handle it. Acts as a fallback to mouse-drag selection (always copies
+    the visible pane contents)."""
 
     _started = reactive(False)
 
@@ -291,6 +334,10 @@ class TerminalWidget(Widget, can_focus=True):
         self._render_timer = None
         self._applied_tty_size: tuple[int, int] | None = None
         self._current_size: tuple[int, int] | None = None
+        self._sel_start: tuple[int, int] | None = None
+        self._sel_end: tuple[int, int] | None = None
+        self._selecting: bool = False
+        self._suppress_next_click: bool = False
 
     def start(self) -> None:
         if self._started:
@@ -496,6 +543,105 @@ class TerminalWidget(Widget, can_focus=True):
             return Strip.from_lines([segments], cell_length=cell_length)[0]
         return Strip.blank(cell_length)
 
+    def _selection_rect(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        """Return a normalized ``((row, col), (row, col))`` rect, or None."""
+        if self._sel_start is None or self._sel_end is None:
+            return None
+        r1, c1 = self._sel_start
+        r2, c2 = self._sel_end
+        if (r1, c1) > (r2, c2):
+            r1, c1, r2, c2 = r2, c2, r1, c1
+        return ((r1, c1), (r2, c2))
+
+    @staticmethod
+    def _cell_in_rect(row: int, col: int, rect: tuple[tuple[int, int], tuple[int, int]]) -> bool:
+        (r1, c1), (r2, c2) = rect
+        if row < r1 or row > r2:
+            return False
+        if row == r1 and row == r2:
+            return c1 <= col <= c2
+        if row == r1:
+            return col >= c1
+        if row == r2:
+            return col <= c2
+        return True
+
+    def _extract_text(
+        self,
+        rect: tuple[tuple[int, int], tuple[int, int]] | None,
+        *,
+        full_rows: bool,
+    ) -> str:
+        """Extract text from the pyte screen.
+
+        When ``rect`` is None and ``full_rows`` is True the whole screen
+        is returned. When ``rect`` is set, only its rectangle is returned
+        — all rows between start and end inclusive, but each row is
+        clipped to the column range. Trailing whitespace is stripped
+        from each row.
+        """
+        if self._screen is None:
+            return ""
+        if rect is None and not full_rows:
+            return ""
+        last_col = self._screen.columns - 1
+        lines: list[str] = []
+        if rect is None:
+            rows_to_emit = range(self._screen.lines)
+            col_start, col_end = 0, last_col
+        else:
+            (r1, c1), (r2, c2) = rect
+            row_start, row_end = min(r1, r2), max(r1, r2)
+            rows_to_emit = range(row_start, row_end + 1)
+            col_start, col_end = min(c1, c2), max(c1, c2)
+
+        for r in rows_to_emit:
+            row = self._screen.buffer[r]
+            chars = [row[c].data for c in range(col_start, col_end + 1)]
+            lines.append("".join(chars).rstrip())
+        while lines and lines[-1] == "":
+            lines.pop()
+        return "\n".join(lines)
+
+    def _visible_text(self) -> str:
+        return self._extract_text(None, full_rows=True)
+
+    def _selection_text(self) -> str:
+        return self._extract_text(self._selection_rect(), full_rows=False)
+
+    def _copy_text(self, text: str) -> None:
+        if not text:
+            return
+        if not _copy_to_system_clipboard(text):
+            try:
+                self.app.copy_to_clipboard(text)
+            except Exception as exc:
+                logger.debug("copy_to_clipboard failed: %s", exc)
+                try:
+                    self.notify("Clipboard not supported in this terminal", severity="warning")
+                except Exception:
+                    pass
+                return
+        self.post_message(self.Copied(text))
+
+    def _clear_selection(self) -> None:
+        if self._sel_start is None and self._sel_end is None and not self._selecting:
+            return
+        self._sel_start = None
+        self._sel_end = None
+        self._selecting = False
+        self._render_screen()
+        self.refresh()
+
+    def action_copy_visible(self) -> None:
+        """Copy the current selection if any, otherwise the visible pane."""
+        if self._screen is None:
+            return
+        if self._sel_start is not None or self._sel_end is not None:
+            self._copy_text(self._selection_text())
+            return
+        self._copy_text(self._visible_text())
+
     def on_key(self, event: events.Key) -> None:
         if not self._emulator or not self._started:
             return
@@ -559,11 +705,62 @@ class TerminalWidget(Widget, can_focus=True):
             asyncio.create_task(self._emulator.recv_queue.put(("stdin", char)))
 
     def on_click(self, event: events.Click) -> None:
+        if self._suppress_next_click:
+            self._suppress_next_click = False
+            event.stop()
+            event.prevent_default()
+            return
         if not self._emulator or not self._mouse_tracking:
             return
         asyncio.create_task(
             self._emulator.recv_queue.put(("click", event.x, event.y, event.button))
         )
+
+    def _clamp_to_screen(self, x: int | float, y: int | float) -> tuple[int, int] | None:
+        if self._screen is None:
+            return None
+        if self._screen.lines < 1 or self._screen.columns < 1:
+            return None
+        row = max(0, min(int(y), self._screen.lines - 1))
+        col = max(0, min(int(x), self._screen.columns - 1))
+        return (row, col)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if self._screen is None or self._mouse_tracking or event.button != 1:
+            return
+        clamped = self._clamp_to_screen(event.x, event.y)
+        if clamped is None:
+            return
+        self._selecting = True
+        self._sel_start = clamped
+        self._sel_end = clamped
+        event.stop()
+        event.prevent_default()
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if not self._selecting or self._screen is None:
+            return
+        event.stop()
+        event.prevent_default()
+        clamped = self._clamp_to_screen(event.x, event.y)
+        if clamped is None or clamped == self._sel_end:
+            return
+        self._sel_end = clamped
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if not self._selecting or event.button != 1:
+            return
+        event.stop()
+        event.prevent_default()
+        self._suppress_next_click = True
+        self.release_mouse()
+        clamped = self._clamp_to_screen(event.x, event.y)
+        if clamped is not None:
+            self._sel_end = clamped
+        text = self._selection_text()
+        self._selecting = False
+        self._copy_text(text)
 
     def on_scroll_up(self, event: events.ScrollUp) -> None:
         if not self._emulator or not self._mouse_tracking:

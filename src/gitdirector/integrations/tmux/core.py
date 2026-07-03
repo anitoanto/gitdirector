@@ -865,6 +865,7 @@ def _tmux_theme_config(
     lines.extend(
         [
             f"set-option -t {quoted_session} mouse on",
+            f"set-option -t {quoted_session} set-clipboard on",
             f'set-option -t {quoted_session} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
             f'set-option -t {quoted_session} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
             f'set-window-option -t {quoted_window} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',

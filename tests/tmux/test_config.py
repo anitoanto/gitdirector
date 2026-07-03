@@ -114,6 +114,7 @@ class TestPanelPaneTitles:
 
         assert "set-option -t =gd/my-repo/shell/1: status-left" in config
         assert "set-option -t =gd/my-repo/shell/1: mouse on" in config
+        assert "set-option -t =gd/my-repo/shell/1: set-clipboard on" in config
         assert "SHELL" in config
         assert "my-repo/shell/1" in config
         assert "window-status-current-format ' #I:#W '" in config
@@ -133,6 +134,15 @@ class TestPanelPaneTitles:
         assert "COPILOT" in config
         assert "my-repo/copilot/1" in config
         assert "pane-border-status top" not in config
+        assert "set-clipboard on" in config
+
+    def test_panel_tmux_config_emits_set_clipboard_on(self):
+        with patch(
+            "gitdirector.integrations.tmux.core._current_window_target",
+            return_value="gd/panel/main:0",
+        ):
+            config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
+        assert "set-option -t =gd/panel/main: set-clipboard on" in config
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_load_panel_tmux_config_writes_and_sources_file(self, mock_run, tmp_path):
