@@ -73,7 +73,7 @@ Features:
 - **Review Diff** (from the `g` Git menu) — open a two-pane viewer for uncommitted changes (left: file list with GitHub-style status pills and +/- counts; right: per-file unified diff with GitHub-dark syntax highlighting, line numbers, and green/red backgrounds for added/removed lines). Navigate files with `j`/`k`, `n`/`p`, `g`/`G`, or `]`/`[`. Switch the focused panel with `tab`. `r` refreshes, `esc` closes.
 - **Repository groups** appear directly in the Repositories tab when linked repositories share the same parent directory. Group rows can be expanded/collapsed with `space`; press `enter` on a group to start, attach, remove, or launch AI-agent sessions rooted at that parent directory.
 - **Sessions tab** (press `2`) lists every active `gd/*` tmux session with its status, purpose, repository, **description**, and full session name. The description column is free-form text stored on the session (default `"-"`), with a width that scales to your terminal and wraps long text. Highlight a row and press `d` to edit its description.
-- **Panels tab** (press `3`) manages reusable tmux panel layouts. Press `n` to create a panel, or `enter` on a panel to open, reconfigure, rename, or delete it.
+- **Panels tab** (press `3`) manages reusable tmux panel layouts. Press `n` to create a panel, or `enter` on a panel to open, reconfigure, rename, or delete it. Inside a panel you can **drag with the mouse to select text and copy it to the OS clipboard** on release; pressing `y` copies the entire visible pane as a fallback. GitDirector prefers native clipboard tools such as `pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`, and falls back to OSC 52 when needed.
 
 ### unlink
 
