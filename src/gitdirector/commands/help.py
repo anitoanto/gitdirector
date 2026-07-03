@@ -33,6 +33,7 @@ def show_help():
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
         ("autoclean", "Remove broken repository links from tracking"),
+        ("reset [--yes]", "Kill all sessions and panels, wipe ~/.gitdirector, recreate config"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
         (
             'gd-tmux PATH|NAME "cmd" [--description "..."]',

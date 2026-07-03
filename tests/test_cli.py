@@ -478,6 +478,66 @@ class TestCompletionCommand:
         assert "#compdef gitdirector" in result.output
         assert "_GITDIRECTOR_COMPLETE=zsh_complete" in result.output
 
+    def test_completion_zsh_includes_compinit_bootstrap(self, runner):
+        """The eval'd script must load compinit so `compdef` is defined.
+
+        Without this bootstrap, fresh zsh shells that haven't loaded
+        compinit yet report ``command not found: compdef`` when the
+        user runs ``eval "$(gitdirector completion zsh)"``.
+        """
+        result = runner.invoke(cli, ["completion", "zsh"])
+
+        assert result.exit_code == 0
+        assert "autoload -U +X compinit" in result.output
+        assert "typeset -f compdef" in result.output
+        assert result.output.index("#compdef gitdirector") < result.output.index(
+            "autoload -U +X compinit"
+        )
+
+    def test_completion_zsh_bootstrap_appears_before_function(self, runner):
+        result = runner.invoke(cli, ["completion", "zsh"])
+
+        assert result.exit_code == 0
+        bootstrap_idx = result.output.index("autoload -U +X compinit")
+        function_idx = result.output.index("_gitdirector_completion() {")
+        assert bootstrap_idx < function_idx
+
+    def test_completion_zsh_eval_works_without_prior_compinit(self, runner, tmp_path):
+        """End-to-end: eval the zsh output in a shell that never loaded compinit.
+
+        Spawns ``zsh -f`` (no rc files) and evaluates the output.
+        Without the bootstrap this raises ``compdef: command not found``.
+        """
+        import shutil
+        import subprocess
+
+        if not shutil.which("zsh"):
+            pytest.skip("zsh is not installed on this system")
+
+        result = runner.invoke(cli, ["completion", "zsh"])
+        assert result.exit_code == 0
+
+        script = tmp_path / "completion.zsh"
+        script.write_text(result.output)
+        proc = subprocess.run(
+            ["zsh", "-f", "-c", f'source "{script}" && echo OK'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0, (
+            f"zsh eval failed.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+        assert "OK" in proc.stdout
+        assert "command not found" not in proc.stderr
+
+    def test_completion_bash_output_is_unchanged(self, runner):
+        """The bash bootstrap should NOT be injected — bash is not patched."""
+        result = runner.invoke(cli, ["completion", "bash"])
+
+        assert result.exit_code == 0
+        assert "autoload -U +X compinit" not in result.output
+
     def test_completion_unknown_shell_fails(self, runner):
         result = runner.invoke(cli, ["completion", "powershell"])
 

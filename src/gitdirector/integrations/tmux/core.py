@@ -368,6 +368,37 @@ def kill_tmux_session(session_name: str) -> bool:
         return False
 
 
+def kill_all_gd_sessions() -> list[str]:
+    """Kill every ``gd/*`` tmux session and return the names that were killed.
+
+    Uses :func:`list_all_gd_sessions` to enumerate, then forwards each entry
+    through :func:`kill_tmux_session` so the same exact-match and ``gd/``
+    prefix guarantees apply. Names that fail to kill (already gone, server
+    crashed mid-iteration) are silently skipped — this is best-effort cleanup,
+    not a hard guarantee, so a partially-stale list is acceptable.
+
+    Returns the list of session names that were successfully killed, which
+    callers can use to print a summary. Returns an empty list when tmux is
+    not running or no ``gd/*`` sessions exist.
+    """
+    try:
+        entries = list_all_gd_sessions()
+    except (TmuxError, OSError, ValueError):
+        logger.debug("Failed to enumerate GitDirector tmux sessions", exc_info=True)
+        return []
+
+    killed: list[str] = []
+    for entry in entries:
+        session_name = entry["session_name"]
+        try:
+            if kill_tmux_session(session_name):
+                killed.append(session_name)
+        except ValueError:
+            logger.debug("Refusing to kill unexpected session name during reset: %s", session_name)
+            continue
+    return killed
+
+
 def _validate_session_name_for_kill(session_name: str) -> None:
     """Reject inputs that could kill more sessions than intended.
 

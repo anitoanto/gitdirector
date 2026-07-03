@@ -313,6 +313,8 @@ def _setup_status_mocks(
                         filename = line[3:].strip() if len(line) > 3 else ""
                         if x == "?" and y == "?":
                             v2 += f"? {filename}\n"
+                        elif x == "!":
+                            v2 += f"! {filename}\n"
                         else:
                             v2_x = x if x != " " else "."
                             v2_y = y if y != " " else "."
@@ -424,11 +426,35 @@ class TestGetStatusChanges:
         assert info.staged is True
         assert info.unstaged is True
 
-    def test_untracked_files_ignored(self, fake_git_repo, mocker):
+    def test_untracked_files_marked_unstaged(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, porcelain="?? newfile.py\n")
         info = Repository(fake_git_repo).get_status()
         assert info.staged is False
+        assert info.unstaged is True
+        assert info.unstaged_files == ["newfile.py"]
+
+    def test_untracked_and_staged_change(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, porcelain="M  a.py\n?? newfile.py\n")
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is True
+        assert info.staged_files == ["a.py"]
+        assert info.unstaged is True
+        assert info.unstaged_files == ["newfile.py"]
+
+    def test_multiple_untracked_files(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, porcelain="?? a.py\n?? b.py\n")
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is False
+        assert info.unstaged is True
+        assert info.unstaged_files == ["a.py", "b.py"]
+
+    def test_ignored_files_ignored(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, porcelain="! ignored.py\n")
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is False
         assert info.unstaged is False
+        assert info.staged_files is None
+        assert info.unstaged_files is None
 
     def test_clean_working_tree(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, porcelain="")

@@ -123,6 +123,7 @@ class GitDirectorConsole(
         overflow-x: auto;
         overflow-y: auto;
         padding: 0 1;
+        scrollbar-size-horizontal: 0;
     }
     #no-repos-message {
         height: 1fr;
@@ -298,6 +299,7 @@ class GitDirectorConsole(
         self._panels_col_keys = panels_table.add_columns(
             "Map", "Name", "TMUX", "Layout", "Panes", "Status"
         )
+        self._disable_tabs_widget_arrow_keybindings()
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(
@@ -307,6 +309,21 @@ class GitDirectorConsole(
         self._set_session_status_tracking_running(False)
         self._load_update_notice()
         self._load_repos()
+
+    def _disable_tabs_widget_arrow_keybindings(self) -> None:
+        """Remove the ``left``/``right`` bindings from every Tabs widget.
+
+        The ``Tabs`` widget binds ``left``/``right`` to ``previous_tab``/``next_tab``
+        so it can switch tabs when focused. We want those keys to scroll the
+        active table horizontally instead, so strip the bindings on the
+        underlying ContentTabs instances. Users can still switch tabs with the
+        ``1``/``2``/``3`` number keys (and ``tab``/``shift+tab``).
+        """
+        from textual.widgets._tabs import Tabs
+
+        for tabs_widget in self.query(Tabs):
+            tabs_widget._bindings.key_to_bindings.pop("left", None)
+            tabs_widget._bindings.key_to_bindings.pop("right", None)
 
     def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
         return self._shutdown_requested or (worker is not None and worker.is_cancelled)
@@ -727,6 +744,8 @@ class GitDirectorConsole(
             self._show_repo_git_remotes(path)
         elif action == "push":
             self._prompt_repo_push(path)
+        elif action == "review_diff":
+            self._open_review_diff(path)
 
     def _show_repo_git_output(
         self,
@@ -999,8 +1018,6 @@ class GitDirectorConsole(
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
             self._attach_to_session(session_name, path)
-        elif action == "review_diff":
-            self._open_review_diff()
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
@@ -1009,8 +1026,9 @@ class GitDirectorConsole(
                     callback=self._handle_remove_selection,
                 )
 
-    def _open_review_diff(self) -> None:
-        path = self._get_selected_path()
+    def _open_review_diff(self, path: Path | None = None) -> None:
+        if path is None:
+            path = self._get_selected_path()
         if path is None:
             return
         info = self._results.get(str(path))

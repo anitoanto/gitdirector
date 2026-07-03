@@ -32,6 +32,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector pull [--yes]`                                 | Pull latest changes for all tracked repositories       |
 | `gitdirector cd NAME`                                      | Open or switch to a tmux session for a repository      |
 | `gitdirector autoclean`                                    | Remove broken repository links from tracking           |
+| `gitdirector reset [--yes]`                                | Kill all sessions and panels, wipe ~/.gitdirector, and recreate the config |
 | `gitdirector info PATH\|NAME [--full]`                     | Show file statistics for a repository                  |
 | `gitdirector gd-tmux PATH\|NAME "command" [--description TEXT]` | Create a gd tmux session and run a command in it       |
 | `gitdirector gd-capture SESSION [--lines N] [--full]`      | Print the scrollback of a live gd tmux session         |
@@ -62,14 +63,14 @@ Features:
 - `/` to filter the active tab
 - `s` to sort the active table
 - `i` to show repository info (file count, lines, tokens, max depth, top file types)
-- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, pull, and push
+- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, pull, push, and a **Diff Viewer** section with **Review Diff** for uncommitted changes
 - `r` to refresh all statuses
 - Press `enter` on any repository to open an action menu:
     - **New tmux session** — create and attach a session for the repository
-    - **Review Diff** — open a two-pane viewer for uncommitted changes (left: file list with GitHub-style status pills and +/- counts; right: per-file unified diff with GitHub-dark syntax highlighting, line numbers, and green/red backgrounds for added/removed lines). Navigate files with `j`/`k`, `n`/`p`, `g`/`G`, or `]`/`[`. Switch the focused panel with `tab`. `r` refreshes, `esc` closes.
     - **Attach existing session** — switch to any already-running tmux session
     - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
     - **Remove session** — kill a running tmux session
+- **Review Diff** (from the `g` Git menu) — open a two-pane viewer for uncommitted changes (left: file list with GitHub-style status pills and +/- counts; right: per-file unified diff with GitHub-dark syntax highlighting, line numbers, and green/red backgrounds for added/removed lines). Navigate files with `j`/`k`, `n`/`p`, `g`/`G`, or `]`/`[`. Switch the focused panel with `tab`. `r` refreshes, `esc` closes.
 - **Repository groups** appear directly in the Repositories tab when linked repositories share the same parent directory. Group rows can be expanded/collapsed with `space`; press `enter` on a group to start, attach, remove, or launch AI-agent sessions rooted at that parent directory.
 - **Sessions tab** (press `2`) lists every active `gd/*` tmux session with its status, purpose, repository, **description**, and full session name. The description column is free-form text stored on the session (default `"-"`), with a width that scales to your terminal and wraps long text. Highlight a row and press `d` to edit its description.
 - **Panels tab** (press `3`) manages reusable tmux panel layouts. Press `n` to create a panel, or `enter` on a panel to open, reconfigure, rename, or delete it.
@@ -181,6 +182,15 @@ gitdirector autoclean
 
 Scans the tracked repositories in `~/.gitdirector/config.yaml` for paths that no longer exist on disk and removes them from the config. Lists any broken links for review and asks for confirmation before deleting them.
 
+### reset
+
+```bash
+gitdirector reset          # asks for confirmation
+gitdirector reset --yes    # skip the confirmation prompt
+```
+
+Destructive cleanup. Kills every `gd/*` tmux session (regular sessions and panels), wipes the entire `~/.gitdirector/` directory, and recreates an empty `config.yaml` with defaults. Useful when the local state is corrupted or you want to start fresh — all linked repositories, panel layouts, version-check cache, and tmux theme files are removed in one step.
+
 ### gd-capture
 
 ```bash
@@ -221,7 +231,7 @@ If you are an AI coding agent (Claude Code, OpenCode, GitHub Copilot, Codex, Pi,
 
 ## Configuration
 
-Config is stored at `~/.gitdirector/config.yaml`.
+Main config is stored at `~/.gitdirector/config.yaml`:
 
 ```yaml
 repositories:
@@ -229,6 +239,11 @@ repositories:
     - /path/to/repo2
 max_workers: 10 # optional, valid range 1-32, default 10
 theme: rose-pine # optional, default rose-pine
+```
+
+Secrets (GitHub credentials) are stored in a separate file at `~/.gitdirector/secrets.yaml`:
+
+```yaml
 github_username: your-github-username # optional
 github_PAT: github_pat_or_classic_pat # optional
 ```
@@ -239,7 +254,7 @@ GitDirector first runs git commands using your normal local git credentials. If 
 
 - This only applies to HTTPS GitHub remotes.
 - SSH remotes still use your normal SSH key/agent setup.
-- The PAT is stored in plaintext in `~/.gitdirector/config.yaml`; use an appropriately scoped token and protect that file.
+- The PAT is stored in plaintext in `~/.gitdirector/secrets.yaml`; use an appropriately scoped token and protect that file.
 - The PAT is not passed on the command line or shown in TUI command output.
 
 ### Available Themes
@@ -260,6 +275,12 @@ Generate shell completions for `bash`, `zsh`, or `fish`. Completion includes sub
 eval "$(gitdirector completion bash)"
 eval "$(gitdirector completion zsh)"
 gitdirector completion fish | source
+```
+
+The `zsh` script auto-loads `compinit` if `compdef` is not yet available, so the `eval` form works in fresh shells. For the fastest setup (no subprocess on every `TAB`), write the script to a file in your `$fpath` (commonly `~/.zsh/completions/_gitdirector`) and let `compinit` autoload it:
+
+```bash
+gitdirector completion zsh > "${fpath[1]}/_gitdirector"
 ```
 
 ## License

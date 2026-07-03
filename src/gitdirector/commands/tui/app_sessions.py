@@ -147,6 +147,7 @@ class ConsoleSessionsMixin:
                     entry["repo"],
                     entry["session_name"],
                     description,
+                    height=None,
                     key=entry["session_name"],
                 )
 
