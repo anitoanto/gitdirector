@@ -69,6 +69,16 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/panel/main: status-position bottom" in config
         assert "set-option -t =gd/panel/main: status-left" in config
         assert "set-option -t =gd/panel/main: status-right" in config
+        assert "if-shell 'infocmp tmux-256color >/dev/null 2>&1'" in config
+        assert "default-terminal tmux-256color" in config
+        assert "default-terminal screen-256color" in config
+        assert "'terminal-features[90]' '*:RGB'" in config
+        assert "'terminal-overrides[90]' '*:Tc'" in config
+        assert "set-environment -u -t =gd/panel/main: NO_COLOR" in config
+        assert "set-environment -t =gd/panel/main: COLORTERM truecolor" in config
+        assert "set-environment -t =gd/panel/main: FORCE_COLOR 3" in config
+        assert "set-environment -t =gd/panel/main: CLICOLOR_FORCE 1" in config
+        assert "set-environment -t =gd/panel/main: CLAUDE_CODE_TMUX_TRUECOLOR 1" in config
         assert "set-option -t =gd/panel/main: mouse on" in config
         assert "window-status-current-format ' #{pane_index}:#{pane_title} '" in config
         assert f'message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"' in config
@@ -113,6 +123,15 @@ class TestPanelPaneTitles:
         config = _session_tmux_config("gd/my-repo/shell/1", "rose-pine")
 
         assert "set-option -t =gd/my-repo/shell/1: status-left" in config
+        assert "default-terminal tmux-256color" in config
+        assert "default-terminal screen-256color" in config
+        assert "'terminal-features[90]' '*:RGB'" in config
+        assert "'terminal-overrides[90]' '*:Tc'" in config
+        assert "set-environment -u -t =gd/my-repo/shell/1: NO_COLOR" in config
+        assert "set-environment -t =gd/my-repo/shell/1: COLORTERM truecolor" in config
+        assert "set-environment -t =gd/my-repo/shell/1: FORCE_COLOR 3" in config
+        assert "set-environment -t =gd/my-repo/shell/1: CLICOLOR_FORCE 1" in config
+        assert "set-environment -t =gd/my-repo/shell/1: CLAUDE_CODE_TMUX_TRUECOLOR 1" in config
         assert "set-option -t =gd/my-repo/shell/1: mouse on" in config
         assert "set-option -t =gd/my-repo/shell/1: set-clipboard on" in config
         assert "SHELL" in config

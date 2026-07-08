@@ -48,7 +48,11 @@ class TestLaunchCommandInTmuxSession:
             "/tmp/gitdirector-agent.ready.failed >/dev/null 2>&1 || true; "
             "exit $status"
         )
-        expected_command = f"sh -lc {shlex.quote(cleanup_script)}"
+        expected_command = (
+            "env -u NO_COLOR TERM=tmux-256color COLORTERM=truecolor "
+            "FORCE_COLOR=3 CLICOLOR_FORCE=1 CLAUDE_CODE_TMUX_TRUECOLOR=1 "
+            f"sh -lc {shlex.quote(cleanup_script)}"
+        )
         assert ready_marker == Path("/tmp/gitdirector-agent.ready")
         mock_run.assert_called_once_with(
             [
@@ -80,18 +84,24 @@ class TestLaunchCommandInTmuxSession:
         assert 'echo "hello world"' in wrapped_script
         # The outer wrapping still uses shlex.quote so single-quote–bearing
         # commands survive the tmux command boundary intact.
-        assert wrapped_script.startswith("sh -lc ")
+        assert wrapped_script.startswith(
+            "env -u NO_COLOR TERM=tmux-256color COLORTERM=truecolor "
+            "FORCE_COLOR=3 CLICOLOR_FORCE=1 CLAUDE_CODE_TMUX_TRUECOLOR=1 sh -lc "
+        )
 
 
 def _inner_shell_script(mock_run) -> str:
     """Return the script that ``sh -lc`` actually executes.
 
     The wrapper passed to ``tmux respawn-pane`` is
-    ``sh -lc <shlex.quote(script)>``; parsing the wrapper as a shell line
-    recovers the original script.
+    ``env ... sh -lc <shlex.quote(script)>``; parsing the wrapper as a
+    shell line recovers the original script.
     """
     wrapped = mock_run.call_args[0][0][-1]
-    return shlex.split(wrapped)[2]
+    parts = shlex.split(wrapped)
+    shell_index = parts.index("sh")
+    assert parts[shell_index + 1] == "-lc"
+    return parts[shell_index + 2]
 
 
 def _assert_user_command_wrapped(mock_run, command: str) -> None:

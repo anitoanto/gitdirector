@@ -6,7 +6,13 @@ import pyte
 import pytest
 from textual.app import App, ComposeResult
 
-from gitdirector.commands.tui.terminal_widget import TerminalWidget, _Emulator
+from gitdirector.commands.tui.terminal_widget import (
+    TerminalWidget,
+    _Emulator,
+    _normalize_colon_color_sgr,
+    _render_console_kwargs,
+    _TerminalScreen,
+)
 
 
 def _make_widget_with_screen(ncol: int = 20, nrow: int = 5) -> TerminalWidget:
@@ -16,6 +22,7 @@ def _make_widget_with_screen(ncol: int = 20, nrow: int = 5) -> TerminalWidget:
     widget._selecting = False
     widget._suppress_next_click = False
     widget._mouse_tracking = False
+    widget._ansi_tail = ""
     widget._screen = pyte.Screen(ncol, nrow)
     widget._stream = pyte.Stream(widget._screen)
     return widget
@@ -23,6 +30,18 @@ def _make_widget_with_screen(ncol: int = 20, nrow: int = 5) -> TerminalWidget:
 
 def _write(widget: TerminalWidget, text: str) -> None:
     widget._stream.feed(text)
+
+
+def _char_from_ansi(text: str):
+    screen = pyte.Screen(5, 1)
+    stream = pyte.Stream(screen)
+    stream.feed(text)
+    return screen.buffer[0][0]
+
+
+def _rgb(color) -> tuple[int, int, int]:
+    triplet = color.triplet
+    return (triplet.red, triplet.green, triplet.blue)
 
 
 class TestEmulatorCleanup:
@@ -46,6 +65,200 @@ class TestEmulatorCleanup:
         emulator._finalizer.detach.assert_called_once_with()
         assert emulator._pid == 0
         assert emulator._fd == -1
+
+
+class TestTerminalColorRendering:
+    def test_truecolor_foreground_becomes_rich_color(self):
+        style = TerminalWidget._char_to_style(_char_from_ansi("\x1b[38;2;255;0;128mX"))
+
+        assert _rgb(style.color) == (255, 0, 128)
+
+    def test_truecolor_background_becomes_rich_color(self):
+        style = TerminalWidget._char_to_style(_char_from_ansi("\x1b[48;2;4;5;6mX"))
+
+        assert _rgb(style.bgcolor) == (4, 5, 6)
+
+    def test_256_color_hex_from_pyte_becomes_rich_color(self):
+        style = TerminalWidget._char_to_style(_char_from_ansi("\x1b[38;5;196mX"))
+
+        assert _rgb(style.color) == (255, 0, 0)
+
+    def test_bright_pyte_color_name_becomes_rich_color(self):
+        style = TerminalWidget._char_to_style(_char_from_ansi("\x1b[91mX"))
+
+        assert style.color.name == "bright_red"
+        assert style.color.number == 9
+
+    def test_brown_pyte_color_name_becomes_rich_yellow(self):
+        style = TerminalWidget._char_to_style(_char_from_ansi("\x1b[33mX"))
+
+        assert style.color.name == "yellow"
+
+    def test_bright_background_pyte_color_name_becomes_rich_color(self):
+        style = TerminalWidget._char_to_style(_char_from_ansi("\x1b[105mX"))
+
+        assert style.bgcolor.name == "bright_magenta"
+
+    def test_colon_truecolor_sgr_is_normalized_before_pyte(self):
+        normalized = _normalize_colon_color_sgr("\x1b[1;38:2::1:2:3;48:2:4:5:6mX")
+        style = TerminalWidget._char_to_style(_char_from_ansi(normalized))
+
+        assert normalized == "\x1b[1;38;2;1;2;3;48;2;4;5;6mX"
+        assert _rgb(style.color) == (1, 2, 3)
+        assert _rgb(style.bgcolor) == (4, 5, 6)
+        assert style.bold is True
+
+    def test_split_colon_truecolor_sgr_waits_for_complete_sequence(self):
+        widget = _make_widget_with_screen(ncol=5, nrow=1)
+        widget._pending_output = ["\x1b[38:2::1"]
+        widget._render_timer = None
+        widget._render_screen = MagicMock()
+        widget.refresh = MagicMock()
+
+        widget._flush_pending_output()
+
+        assert widget._ansi_tail == "\x1b[38:2::1"
+        assert widget._screen.buffer[0][0].data == " "
+
+        widget._pending_output = [":2:3mX"]
+        widget._flush_pending_output()
+
+        char = widget._screen.buffer[0][0]
+        style = TerminalWidget._char_to_style(char)
+        assert widget._ansi_tail == ""
+        assert char.data == "X"
+        assert _rgb(style.color) == (1, 2, 3)
+
+    def test_invalid_color_values_do_not_break_rendering(self):
+        char = MagicMock(
+            fg="not-a-color",
+            bg="also-not-a-color",
+            bold=True,
+            italics=True,
+            underscore=False,
+            strikethrough=True,
+            reverse=False,
+        )
+
+        style = TerminalWidget._char_to_style(char)
+
+        assert style.color is None
+        assert style.bgcolor is None
+        assert style.bold is True
+        assert style.italic is True
+        assert style.strike is True
+
+
+class TestRenderConsoleKwargs:
+    """The terminal widget's Rich console must always use truecolor.
+
+    Quantising to 256 colours produces visible banding in agent
+    gradients (Claude, OpenCode, Codex, etc.). ``NO_COLOR`` is the only
+    exception — we drop the colour system entirely so Rich emits no
+    escapes at all.
+    """
+
+    def test_force_truecolor_when_host_advertises_truecolor(self, monkeypatch):
+        monkeypatch.setenv("COLORTERM", "truecolor")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+        kwargs = _render_console_kwargs(80)
+
+        assert kwargs["color_system"] == "truecolor"
+        assert kwargs["force_terminal"] is True
+        assert kwargs["width"] == 80
+
+    def test_force_truecolor_when_host_advertises_only_256(self, monkeypatch):
+        monkeypatch.setenv("TERM", "tmux-256color")
+        monkeypatch.delenv("COLORTERM", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+        kwargs = _render_console_kwargs(80)
+
+        assert kwargs["color_system"] == "truecolor"
+
+    def test_force_truecolor_when_host_advertises_only_8(self, monkeypatch):
+        monkeypatch.setenv("TERM", "ansi")
+        monkeypatch.delenv("COLORTERM", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+        kwargs = _render_console_kwargs(80)
+
+        assert kwargs["color_system"] == "truecolor"
+
+    def test_drop_color_system_when_no_color_requested(self, monkeypatch):
+        monkeypatch.setenv("COLORTERM", "truecolor")
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        kwargs = _render_console_kwargs(80)
+
+        assert kwargs["color_system"] is None
+
+    def test_drop_color_system_when_term_is_dumb(self, monkeypatch):
+        monkeypatch.setenv("TERM", "dumb")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+        kwargs = _render_console_kwargs(80)
+
+        assert kwargs["color_system"] is None
+
+
+class TestTruecolorGradientThroughConsole:
+    """A full gradient rendered through the widget's console must stay truecolor."""
+
+    def test_gradient_segments_carry_truecolor_styles(self):
+        widget = _make_widget_with_screen(ncol=10, nrow=1)
+        widget._render_console = None
+
+        kwargs = _render_console_kwargs(10)
+        from rich.console import Console
+
+        console = Console(**kwargs)
+
+        from rich.text import Text
+
+        text = Text()
+        for i in range(10):
+            r = int(255 * i / 9)
+            g = int(255 * (9 - i) / 9)
+            b = 128
+            text.append("X", style=f"#{r:02x}{g:02x}{b:02x}")
+
+        segments = list(text.render(console))
+
+        unique_colors = {
+            seg.style.color.triplet
+            for seg in segments
+            if seg.style and seg.style.color and seg.style.color.triplet
+        }
+
+        assert len(unique_colors) == 10
+        assert console.color_system == "truecolor"
+
+
+class TestTerminalScreenPrivateQueries:
+    """tmux 3.7+ probes clients with private DSR queries (e.g. the theme
+    query ``CSI ? 996 n``); those must not abort the pyte feed and drop
+    the rest of the batch."""
+
+    def test_private_device_status_query_does_not_drop_batch(self):
+        screen = _TerminalScreen(20, 2)
+        stream = pyte.Stream(screen)
+
+        stream.feed("BEFORE \x1b[?996n AFTER")
+
+        row = "".join(screen.buffer[0][x].data for x in range(20))
+        assert row.rstrip() == "BEFORE  AFTER"
+
+    def test_non_private_device_status_still_handled(self):
+        screen = _TerminalScreen(20, 2)
+        replies: list[str] = []
+        screen.write_process_input = replies.append
+        stream = pyte.Stream(screen)
+
+        stream.feed("AB\x1b[6n")
+
+        assert replies == ["\x1b[1;3R"]
 
 
 class TestSelectionRect:

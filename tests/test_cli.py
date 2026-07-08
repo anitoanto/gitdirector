@@ -3,6 +3,7 @@ import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click.utils import strip_ansi
 
 from gitdirector.cli import (
     _changes_text,
@@ -333,7 +334,7 @@ class TestStatusCommand:
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0
-        assert "2 repositories" in result.output
+        assert "2 repositories" in strip_ansi(result.output)
 
 
 class TestPullCommand:

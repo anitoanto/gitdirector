@@ -25,6 +25,21 @@ from gitdirector.integrations.tmux import (
     open_in_tmux,
 )
 
+_TMUX_ENV_ARGS = [
+    "-e",
+    "NO_COLOR=",
+    "-e",
+    "TERM=tmux-256color",
+    "-e",
+    "COLORTERM=truecolor",
+    "-e",
+    "FORCE_COLOR=3",
+    "-e",
+    "CLICOLOR_FORCE=1",
+    "-e",
+    "CLAUDE_CODE_TMUX_TRUECOLOR=1",
+]
+
 
 class TestMakeSessionName:
     @patch(
@@ -329,6 +344,7 @@ class TestCreateTmuxSession:
                 "tmux",
                 "new-session",
                 "-d",
+                *_TMUX_ENV_ARGS,
                 "-s",
                 session_name,
                 "-x",
@@ -413,6 +429,7 @@ class TestCreateTmuxSession:
             "tmux",
             "new-session",
             "-d",
+            *_TMUX_ENV_ARGS,
             "-s",
             session_name,
             "-x",
@@ -544,6 +561,7 @@ class TestEnsureTempPanelTmuxSession:
             "tmux",
             "new-session",
             "-d",
+            *_TMUX_ENV_ARGS,
             "-s",
             session_name,
             "-n",
