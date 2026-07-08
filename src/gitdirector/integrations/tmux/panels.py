@@ -15,6 +15,7 @@ from .core import (
     _PANEL_WINDOW_RESTORE_OPTION,
     _current_window_target,
     _ensure_panel_resize_tracking,
+    _is_temp_panel_session,
     _load_panel_tmux_config,
     _panel_border_format,
     _panel_pane_title,
@@ -667,13 +668,16 @@ def _temp_panel_pane_command(
         "else "
         f"{missing_message}; "
         "fi; "
-        f"if ! tmux has-session -t {quoted_session_target} >/dev/null 2>&1; then "
         f"tmux kill-session -t {quoted_temp_panel_target} >/dev/null 2>&1 || true; "
-        "exit 0; "
-        "fi; "
         "exit 0"
     )
     return f"sh -c {shlex.quote(script)}"
+
+
+def cleanup_temp_panel_tmux_session(temp_panel_session_name: str) -> bool:
+    if not _is_temp_panel_session(temp_panel_session_name):
+        raise ValueError(f"not a temp panel session: {temp_panel_session_name!r}")
+    return kill_tmux_session(temp_panel_session_name)
 
 
 def _embedded_tmux_attach_command(
@@ -892,33 +896,76 @@ def ensure_temp_panel_tmux_session(
     *,
     attach_delay_seconds: float = 0.0,
 ) -> str:
-    """Return the temp panel session name for *session_name*, reusing it if alive.
+    """Return a just-in-time temp panel session name for *session_name*.
 
     The temp session is a 1:1 wrapper around an existing inner session
     and is named deterministically from it (see
-    :func:`make_temp_panel_session_name`). It is intentionally kept
-    alive across attaches so that reopening a session does not create
-    a new tmux session each time.
-
-    If a live temp session already exists, only its pane is respawned
-    with the latest attach command — the session, window, and
-    protection state are preserved. Otherwise a fresh temp session is
-    created from scratch.
+    :func:`make_temp_panel_session_name`). A wrapper normally kills
+    itself as soon as the inner attach exits. If a previous wrapper is
+    still present, only clearly inactive wrappers are removed here; a
+    wrapper with a live pane or attached client may be serving another
+    attach and is returned as-is.
     """
     temp_panel_session_name = make_temp_panel_session_name(session_name)
     if _session_exists(temp_panel_session_name):
-        _respawn_temp_panel_pane(
-            temp_panel_session_name,
-            session_name,
-            attach_delay_seconds=attach_delay_seconds,
-        )
-        _settle_temp_panel_attach()
+        if _temp_panel_session_is_inactive(temp_panel_session_name):
+            if _kill_temp_panel_session_and_wait(temp_panel_session_name):
+                return _create_temp_panel_tmux_session(
+                    session_name,
+                    theme_name,
+                    attach_delay_seconds=attach_delay_seconds,
+                )
+            _respawn_temp_panel_pane(
+                temp_panel_session_name,
+                session_name,
+                attach_delay_seconds=attach_delay_seconds,
+            )
+            _settle_temp_panel_attach()
         return temp_panel_session_name
     return _create_temp_panel_tmux_session(
         session_name,
         theme_name,
         attach_delay_seconds=attach_delay_seconds,
     )
+
+
+def _kill_temp_panel_session_and_wait(temp_panel_session_name: str) -> bool:
+    cleanup_temp_panel_tmux_session(temp_panel_session_name)
+    for _attempt in range(5):
+        if not _session_exists(temp_panel_session_name):
+            return True
+        time.sleep(0.05)
+    return not _session_exists(temp_panel_session_name)
+
+
+def _temp_panel_session_is_inactive(temp_panel_session_name: str) -> bool:
+    result = subprocess.run(
+        [
+            "tmux",
+            "list-panes",
+            "-t",
+            f"={temp_panel_session_name}:0",
+            "-F",
+            "#{session_attached}|#{pane_dead}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return True
+
+    rows = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not rows:
+        return True
+
+    for row in rows:
+        attached, _, dead = row.partition("|")
+        if attached.isdigit() and int(attached) > 0:
+            return False
+        if dead != "1":
+            return False
+    return True
 
 
 def _settle_temp_panel_attach() -> None:
