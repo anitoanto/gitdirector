@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 _REPO_ID_LENGTH = 5
 _SESSION_LIST_SEPARATOR = "\t"
 _LAST_SYNC_CONTENT: dict[Path, str] = {}
+_TMUX_TERMINAL_NAME = "tmux-256color"
+_TMUX_TERMINAL_FALLBACK = "screen-256color"
+_TMUX_TRUECOLOR_FEATURES = "*:RGB"
+_TMUX_TRUECOLOR_OVERRIDES = "*:Tc"
+_TMUX_TRUECOLOR_OPTION_INDEX = 90
+_TMUX_CHILD_ENV_UNSET = ("NO_COLOR",)
+# Standard color-capability advertisement, honoured by well-behaved
+# terminal programs (supports-color/chalk, termenv, Rich, ...).
+_TMUX_STANDARD_COLOR_ENV = {
+    "COLORTERM": "truecolor",
+    "FORCE_COLOR": "3",
+    "CLICOLOR_FORCE": "1",
+}
+# Vendor-specific truecolor opt-outs. Some agents ignore the standard
+# variables above and clamp their palette to 256 colors whenever $TMUX
+# is set; each exposes its own escape hatch, read from the process
+# environment at agent startup. Add one entry per non-conforming agent.
+_TMUX_AGENT_TRUECOLOR_OPT_OUTS = {
+    "CLAUDE_CODE_TMUX_TRUECOLOR": "1",  # anthropics/claude-code#36785
+}
+_TMUX_COLOR_ENV = {**_TMUX_STANDARD_COLOR_ENV, **_TMUX_AGENT_TRUECOLOR_OPT_OUTS}
+_TMUX_CHILD_ENV = {"TERM": _TMUX_TERMINAL_NAME, **_TMUX_COLOR_ENV}
 
 
 class TmuxError(RuntimeError):
@@ -202,6 +224,54 @@ def _detached_session_size_args() -> list[str]:
     return ["-x", str(cols), "-y", str(lines)]
 
 
+def _tmux_child_environment_prefix() -> str:
+    unset_args = " ".join(f"-u {name}" for name in _TMUX_CHILD_ENV_UNSET)
+    set_args = " ".join(f"{name}={shlex.quote(value)}" for name, value in _TMUX_CHILD_ENV.items())
+    return f"{unset_args} {set_args}".strip()
+
+
+def _tmux_child_environment_command(command: str) -> str:
+    return f"env {_tmux_child_environment_prefix()} {command}"
+
+
+def _tmux_new_session_environment_args() -> list[str]:
+    args: list[str] = []
+    for name in _TMUX_CHILD_ENV_UNSET:
+        args.extend(["-e", f"{name}="])
+    for name, value in _TMUX_CHILD_ENV.items():
+        args.extend(["-e", f"{name}={value}"])
+    return args
+
+
+def _tmux_color_environment_config(quoted_session: str) -> list[str]:
+    lines = [f"set-environment -u -t {quoted_session} {name}" for name in _TMUX_CHILD_ENV_UNSET]
+    lines.extend(
+        f"set-environment -t {quoted_session} {name} {shlex.quote(value)}"
+        for name, value in _TMUX_COLOR_ENV.items()
+    )
+    return lines
+
+
+def _tmux_terminal_capability_config(quoted_session: str) -> list[str]:
+    tmux_term = shlex.quote(_TMUX_TERMINAL_NAME)
+    fallback_term = shlex.quote(_TMUX_TERMINAL_FALLBACK)
+    terminfo_check = shlex.quote(f"infocmp {_TMUX_TERMINAL_NAME} >/dev/null 2>&1")
+    default_truecolor = shlex.quote(
+        f"set-option -t {quoted_session} default-terminal {tmux_term}; "
+        f"set-environment -t {quoted_session} TERM {tmux_term}"
+    )
+    default_fallback = shlex.quote(
+        f"set-option -t {quoted_session} default-terminal {fallback_term}; "
+        f"set-environment -t {quoted_session} TERM {fallback_term}"
+    )
+    return [
+        f"if-shell {terminfo_check} {default_truecolor} {default_fallback}",
+        f"set-option -gq {shlex.quote(f'terminal-features[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_FEATURES)}",
+        f"set-option -gq {shlex.quote(f'terminal-overrides[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_OVERRIDES)}",
+        *_tmux_color_environment_config(quoted_session),
+    ]
+
+
 def list_repo_sessions(repo_name: str | Path) -> list[str]:
     """List all tmux sessions for a given repository."""
     if isinstance(repo_name, Path):
@@ -289,6 +359,7 @@ def create_tmux_session(
     unset (the next read returns the default ``"-"`` placeholder).
     """
     sessions = _list_sessions()
+    environment_args = _tmux_new_session_environment_args()
     max_attempts = 5
     for _attempt in range(max_attempts):
         session_name = _make_session_name(repo_name, purpose, repo_path=path, sessions=sessions)
@@ -296,6 +367,7 @@ def create_tmux_session(
             [
                 "new-session",
                 "-d",
+                *environment_args,
                 "-s",
                 session_name,
                 *_detached_session_size_args(),
@@ -870,6 +942,7 @@ def _tmux_theme_config(
 
     lines.extend(
         [
+            *_tmux_terminal_capability_config(quoted_session),
             f"set-option -t {quoted_session} mouse on",
             f"set-option -t {quoted_session} set-clipboard on",
             f'set-option -t {quoted_session} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',

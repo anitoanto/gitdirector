@@ -46,6 +46,7 @@ from .screens.repos import (
     RepoInfoScreen,
 )
 from .screens.sessions import EditSessionDescriptionScreen, RemoveSessionScreen
+from .terminal_caps import host_color_system, no_color_requested
 
 _panel_row_height = _app_panels._panel_row_height
 _render_panel_preview = _app_panels._render_panel_preview
@@ -208,6 +209,19 @@ class GitDirectorConsole(
     ]
 
     def __init__(self) -> None:
+        # Ensure Textual's ``App.console`` auto-detects ``"truecolor"`` for
+        # its render Console. ``Strip.render()`` uses ``console._color_system``
+        # to pick the SGR format; if it resolves to ``"256"``, every
+        # truecolor segment produced by child agents gets quantised to
+        # the 256-colour palette — visible banding in gradients.
+        #
+        # Rich's auto-detection runs inside ``App.__init__`` using a
+        # snapshot of ``os.environ``, so the variable must be set
+        # *before* ``super().__init__()`` is called. We only force
+        # ``COLORTERM=truecolor`` when the host actually advertises
+        # truecolor — never downgrade a host that can't render it.
+        if not no_color_requested() and host_color_system() == "truecolor":
+            os.environ["COLORTERM"] = "truecolor"
         super().__init__()
         from ...integrations.tmux import TmuxMonitor
 

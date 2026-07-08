@@ -17,6 +17,7 @@ import weakref
 
 import pyte
 from pyte.screens import Char
+from rich.color import ColorParseError
 from rich.console import Console
 from rich.style import Style
 from rich.text import Text
@@ -31,12 +32,91 @@ from .terminal_caps import host_color_system, no_color_requested
 
 logger = logging.getLogger(__name__)
 
-_RE_ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_RE_ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;:?]*[a-zA-Z]")
+_RE_SGR_SEQUENCE = re.compile(r"\x1b\[([0-9;:]*)m")
+_RE_HEX_COLOR = re.compile(r"^[0-9a-fA-F]{6}$")
 _DECSET_PREFIX = "\x1b[?"
 _MOUSE_TRACKING_MODES = ("1000", "1002", "1003", "1006", "1015")
+_STYLE_PARSE_ERRORS = (TypeError, ValueError, ColorParseError)
+_PYTE_RICH_COLOR_NAMES = {
+    "brown": "yellow",
+    "brightblack": "bright_black",
+    "brightred": "bright_red",
+    "brightgreen": "bright_green",
+    "brightbrown": "bright_yellow",
+    "brightblue": "bright_blue",
+    "brightmagenta": "bright_magenta",
+    "bfightmagenta": "bright_magenta",
+    "brightcyan": "bright_cyan",
+    "brightwhite": "bright_white",
+}
 
 _EMULATOR_TERM_WAIT_SECONDS = 2.0
 _EMULATOR_KILL_WAIT_SECONDS = 2.0
+
+
+class _TerminalScreen(pyte.Screen):
+    """``pyte.Screen`` tolerant of private-mode device status queries.
+
+    tmux 3.7+ probes its client with private DSR sequences (e.g. the
+    light/dark theme query ``CSI ? 996 n``). ``pyte.Screen``'s
+    ``report_device_status`` does not accept the ``private`` keyword the
+    pyte parser passes for those, so the resulting ``TypeError`` aborted
+    ``Stream.feed`` mid-batch and silently dropped the rest of the pending
+    screen update (most visibly the initial full-screen paint on attach).
+    """
+
+    def report_device_status(self, mode: int = 0, **kwargs: bool) -> None:
+        if kwargs.get("private"):
+            return
+        super().report_device_status(mode)
+
+
+def _valid_color_component(value: str) -> bool:
+    return value.isdecimal() and 0 <= int(value) <= 255
+
+
+def _normalize_colon_color_param(param: str) -> str:
+    if ":" not in param:
+        return param
+    parts = param.split(":")
+    if len(parts) < 3 or parts[0] not in {"38", "48"}:
+        return param
+
+    color_target = parts[0]
+    color_mode = parts[1]
+    if color_mode == "5" and len(parts) == 3 and _valid_color_component(parts[2]):
+        return f"{color_target};5;{parts[2]}"
+    if color_mode == "2" and len(parts) in {5, 6}:
+        red, green, blue = parts[-3:]
+        if all(_valid_color_component(component) for component in (red, green, blue)):
+            return f"{color_target};2;{red};{green};{blue}"
+    return param
+
+
+def _normalize_colon_color_sgr(chars: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        params = match.group(1)
+        if ":" not in params:
+            return match.group(0)
+        return f"\x1b[{';'.join(_normalize_colon_color_param(p) for p in params.split(';'))}m"
+
+    return _RE_SGR_SEQUENCE.sub(replace, chars)
+
+
+def _split_incomplete_csi(chars: str) -> tuple[str, str]:
+    esc_index = chars.rfind("\x1b")
+    if esc_index == -1:
+        return chars, ""
+
+    tail = chars[esc_index:]
+    if tail == "\x1b":
+        return chars[:esc_index], tail
+    if not tail.startswith("\x1b["):
+        return chars, ""
+    if any("@" <= char <= "~" for char in tail[2:]):
+        return chars, ""
+    return chars[:esc_index], tail
 
 
 def _copy_to_system_clipboard(text: str) -> bool:
@@ -147,15 +227,23 @@ def _finalize_emulator(pid: int, fd: int) -> None:
 def _render_console_kwargs(width: int) -> dict:
     """Build kwargs for the render Rich ``Console`` used to format cells.
 
-    We still set ``force_terminal=True`` because the output is consumed
-    by Textual (which paints the strips itself), but we let the colour
-    system degrade to whatever the host actually supports instead of
-    unconditionally forcing truecolor. When ``NO_COLOR`` is set we drop
-    the colour system entirely so we don't emit unrenderable escapes.
+    We set ``force_terminal=True`` because the output is consumed by
+    Textual (which paints the strips itself). We force ``color_system``
+    to ``"truecolor"`` whenever colour is allowed so 24-bit SGR sequences
+    from child agents (Claude, etc.) survive the pyte → Rich → Textual
+    pipeline without being quantised to the 256-colour palette — tmux 3.2+
+    preserves truecolor end-to-end and the child has ``COLORTERM=truecolor``
+    set, so falling back to 256 only causes visible gradient banding.
+    When ``NO_COLOR`` is set we drop the colour system entirely so we
+    don't emit unrenderable escapes.
     """
     if no_color_requested():
         return {"force_terminal": True, "color_system": None, "width": width}
-    system = host_color_system() or "256"
+    system = host_color_system()
+    if system is None:
+        system = "256"
+    if system != "truecolor":
+        system = "truecolor"
     return {"force_terminal": True, "color_system": system, "width": width}
 
 
@@ -195,6 +283,8 @@ class _Emulator:
         if pid == 0:
             env = dict(os.environ)
             env.update(TERM="xterm-256color", HOME=str(Path.home()))
+            if not no_color_requested():
+                env.update(COLORTERM="truecolor", FORCE_COLOR="3", CLICOLOR_FORCE="1")
             os.execvpe(argv[0], argv, env)
         return pid, fd
 
@@ -332,6 +422,7 @@ class TerminalWidget(Widget, can_focus=True):
         self._pending_tty_size: tuple[int, int] | None = None
         self._tty_resize_timer = None
         self._pending_output: list[str] = []
+        self._ansi_tail = ""
         self._render_timer = None
         self._applied_tty_size: tuple[int, int] | None = None
         self._current_size: tuple[int, int] | None = None
@@ -363,6 +454,7 @@ class TerminalWidget(Widget, can_focus=True):
                 pass
             self._render_timer = None
         self._pending_output.clear()
+        self._ansi_tail = ""
         self._pending_tty_size = None
         if self._recv_task:
             self._recv_task.cancel()
@@ -429,7 +521,7 @@ class TerminalWidget(Widget, can_focus=True):
                 if cmd == "setup":
                     nrow = self.size.height or 24
                     ncol = self.size.width or 80
-                    self._screen = pyte.Screen(ncol, nrow)
+                    self._screen = _TerminalScreen(ncol, nrow)
                     self._stream = pyte.Stream(self._screen)
                     self._emulator.resize(nrow, ncol)
                     await self._emulator.recv_queue.put(("set_size", nrow, ncol))
@@ -439,7 +531,7 @@ class TerminalWidget(Widget, can_focus=True):
                 elif cmd == "stdout":
                     self._queue_output(msg[1])
                 elif cmd == "disconnect":
-                    self._flush_pending_output()
+                    self._flush_pending_output(final=True)
                     self.post_message(self.Disconnected())
                     if self._emulator is not None:
                         self._emulator.stop()
@@ -457,13 +549,21 @@ class TerminalWidget(Widget, can_focus=True):
                 self._flush_pending_output,
             )
 
-    def _flush_pending_output(self) -> None:
+    def _flush_pending_output(self, *, final: bool = False) -> None:
         self._render_timer = None
-        if not self._pending_output or self._stream is None:
+        ansi_tail = getattr(self, "_ansi_tail", "")
+        if (not self._pending_output and not ansi_tail) or self._stream is None:
             self._pending_output.clear()
+            self._ansi_tail = ""
             return
-        chars = "".join(self._pending_output)
+        chars = f"{ansi_tail}{''.join(self._pending_output)}"
         self._pending_output.clear()
+        self._ansi_tail = ""
+        if not final:
+            chars, self._ansi_tail = _split_incomplete_csi(chars)
+        if not chars:
+            return
+        chars = _normalize_colon_color_sgr(chars)
         for match in _RE_ANSI_SEQUENCE.finditer(chars):
             seq = match.group(0)
             if seq.startswith(_DECSET_PREFIX):
@@ -474,7 +574,10 @@ class TerminalWidget(Widget, can_focus=True):
         try:
             self._stream.feed(chars)
         except Exception:
-            pass
+            # A parser error mid-feed drops the rest of this batch; the
+            # next batch resumes cleanly. Log it so unsupported sequences
+            # (like the tmux theme query was) are diagnosable.
+            logger.debug("pyte stream.feed failed; dropped rest of batch", exc_info=True)
         self._render_screen()
         self.refresh()
 
@@ -511,7 +614,10 @@ class TerminalWidget(Widget, can_focus=True):
             return f"#{r:02x}{g:02x}{b:02x}"
         if isinstance(color, int):
             return f"color({color})"
-        return str(color)
+        color_name = str(color)
+        if _RE_HEX_COLOR.fullmatch(color_name):
+            return f"#{color_name}"
+        return _PYTE_RICH_COLOR_NAMES.get(color_name, color_name)
 
     @staticmethod
     def _char_to_style(char: Char) -> Style:
@@ -527,14 +633,27 @@ class TerminalWidget(Widget, can_focus=True):
                 strike=char.strikethrough,
                 reverse=char.reverse,
             )
-        except (TypeError, ValueError):
+        except _STYLE_PARSE_ERRORS:
             # Bad color value from the child process. Render the cell with
             # the foreground only so the rest of the pane stays legible
             # rather than collapsing the whole cell to an unstyled glyph.
             try:
-                return Style(color=fg)
-            except (TypeError, ValueError):
-                return Style()
+                return Style(
+                    color=fg,
+                    bold=char.bold,
+                    italic=char.italics,
+                    underline=char.underscore,
+                    strike=char.strikethrough,
+                    reverse=char.reverse,
+                )
+            except _STYLE_PARSE_ERRORS:
+                return Style(
+                    bold=char.bold,
+                    italic=char.italics,
+                    underline=char.underscore,
+                    strike=char.strikethrough,
+                    reverse=char.reverse,
+                )
 
     def render_line(self, y: int) -> Strip:
         cell_length = max(self.size.width, 1)

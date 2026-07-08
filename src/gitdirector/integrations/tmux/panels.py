@@ -25,6 +25,8 @@ from .core import (
     _session_option_target,
     _session_tmux_config,
     _temp_panel_display_name,
+    _tmux_child_environment_command,
+    _tmux_new_session_environment_args,
     kill_tmux_session,
     make_panel_session_name,
     make_temp_panel_session_name,
@@ -123,7 +125,14 @@ def _tmux_option_value(target: str, option: str, *, window: bool = False) -> str
 
 
 def _respawn_pane(pane_id: str, command: str, *, check: bool = True) -> subprocess.CompletedProcess:
-    args = ["tmux", "respawn-pane", "-k", "-t", pane_id, command]
+    args = [
+        "tmux",
+        "respawn-pane",
+        "-k",
+        "-t",
+        pane_id,
+        _tmux_child_environment_command(command),
+    ]
     result = _run_tmux_with_fork_retry(args[1:])
     if check:
         _raise_for_tmux_result(result)
@@ -783,6 +792,7 @@ def rebuild_panel_tmux_session(
                 "tmux",
                 "new-session",
                 "-d",
+                *_tmux_new_session_environment_args(),
                 "-s",
                 build_session_name,
                 "-n",
@@ -1049,6 +1059,7 @@ def _create_temp_panel_tmux_session(
                 "tmux",
                 "new-session",
                 "-d",
+                *_tmux_new_session_environment_args(),
                 "-s",
                 temp_panel_session_name,
                 "-n",

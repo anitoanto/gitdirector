@@ -64,6 +64,10 @@ def host_color_system() -> str | None:
             return "truecolor"
         return "256"
 
+    colorterm = (os.environ.get("COLORTERM") or "").lower()
+    if "truecolor" in colorterm or "24bit" in colorterm:
+        return "truecolor"
+
     term = (os.environ.get("TERM") or "").lower()
     if "truecolor" in term or "24bit" in term:
         return "truecolor"
