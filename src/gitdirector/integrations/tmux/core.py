@@ -447,10 +447,12 @@ def attach_tmux_session(
     """
     from .panels import (
         _ensure_panel_prefix_bindings,
+        cleanup_temp_panel_tmux_session,
         ensure_temp_panel_tmux_session,
     )
 
     target_session = session_name
+    temp_panel_session_name: str | None = None
     if (
         not skip_config_sync
         and session_name.startswith("gd/")
@@ -460,10 +462,11 @@ def attach_tmux_session(
     if _should_open_in_temp_panel(session_name):
         if not _session_exists(session_name):
             raise TmuxError(f"tmux session no longer exists: {session_name}")
-        target_session = ensure_temp_panel_tmux_session(
+        temp_panel_session_name = ensure_temp_panel_tmux_session(
             session_name,
             attach_delay_seconds=attach_delay_seconds,
         )
+        target_session = temp_panel_session_name
     elif _is_persistent_panel_session(target_session):
         if not _session_exists(target_session):
             raise TmuxError(f"tmux session no longer exists: {target_session}")
@@ -473,7 +476,11 @@ def attach_tmux_session(
     if os.environ.get("TMUX"):
         _run_tmux(["switch-client", "-t", f"={target_session}"], check=True, capture_output=False)
         return False
-    _run_tmux(["attach-session", "-t", f"={target_session}"], check=True, capture_output=False)
+    try:
+        _run_tmux(["attach-session", "-t", f"={target_session}"], check=True, capture_output=False)
+    finally:
+        if temp_panel_session_name is not None:
+            cleanup_temp_panel_tmux_session(temp_panel_session_name)
     return True
 
 
@@ -521,9 +528,8 @@ def make_temp_panel_session_name(session_name: str) -> str:
     session names are already unique (repo + purpose + incrementing
     sequence), which makes the temp name unique by construction.
 
-    The temp session is reused across attaches (see
-    :func:`ensure_temp_panel_tmux_session`), so the same name must
-    always map to the same wrapper session for a given inner session.
+    The name is deterministic so a stale wrapper can be found and removed
+    before recreating the temp panel for a later attach.
     """
     suffix = session_name[3:] if session_name.startswith("gd/") else session_name
     return f"gd/temp/panel/{suffix}"
