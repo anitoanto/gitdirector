@@ -11,7 +11,7 @@ These tests cover:
 * Empty state: shows "no uncommitted changes" when the working tree is clean
 * Error state: shows error message when git diff fails
 * Commit flow: ``g`` opens the stage/confirm/commit/push modal chain
-* Integration: action menu "Review Diff" option dispatches correctly
+* Integration: git menu "Review Diff" option dispatches correctly
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from gitdirector.commands.tui import (
     ActionMenuScreen,
     DiffReviewScreen,
     GitDirectorConsole,
+    GitOperationsMenuScreen,
 )
+from gitdirector.commands.tui.screens.commit import CommitMessageScreen
 from gitdirector.commands.tui.screens.diff_files import FileTileList
 
 from .conftest import _make_info, _mock_manager, _wait_for_refresh
@@ -665,13 +667,13 @@ class TestContentPanelTone:
 
 
 # ---------------------------------------------------------------------------
-# Integration with the action menu
+# Integration with the git operations menu
 # ---------------------------------------------------------------------------
 
 
 class TestReviewDiffActionMenuIntegration:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_action_menu_includes_review_diff_option(self, _mock_sessions):
+    async def test_action_menu_excludes_review_diff_option(self, _mock_sessions):
         screen = ActionMenuScreen("my-repo", Path("/tmp/my-repo"), branch="main")
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -680,7 +682,21 @@ class TestReviewDiffActionMenuIntegration:
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
             ids = [opt.id for opt in menu.options if opt.id is not None]
+            assert "review_diff" not in ids
+
+    async def test_git_operations_menu_includes_review_diff_option(self):
+        screen = GitOperationsMenuScreen("my-repo", branch="main")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            menu = app.screen.query_one("#action-menu", OptionList)
+            ids = [opt.id for opt in menu.options if opt.id is not None]
             assert "review_diff" in ids
+            labels = [str(opt.prompt) for opt in menu.options]
+            assert any("Review Diff" in label for label in labels)
+            assert any("Diff Viewer" in label for label in labels)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_app_opens_review_diff_screen(self, _mock_sessions, mocker):
@@ -703,7 +719,7 @@ class TestReviewDiffActionMenuIntegration:
             assert isinstance(app.screen, DiffReviewScreen)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_handle_menu_action_review_diff(self, _mock_sessions, mocker):
+    async def test_handle_git_menu_action_review_diff(self, _mock_sessions, mocker):
         from gitdirector import repo as repo_mod
 
         mocker.patch.object(
@@ -718,7 +734,7 @@ class TestReviewDiffActionMenuIntegration:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._handle_menu_action("review_diff")
+            app._handle_git_menu_action("review_diff", Path("/tmp/alpha"))
             await pilot.pause()
             assert isinstance(app.screen, DiffReviewScreen)
 
@@ -954,3 +970,147 @@ class TestDiffReviewScreenCommitFlow:
 
             assert isinstance(app.screen, CommitResultScreen)
             assert app.screen.commit_ok is False
+
+
+# ---------------------------------------------------------------------------
+# CommitMessageScreen focus and key bindings
+# ---------------------------------------------------------------------------
+
+
+class TestCommitMessageScreenFocus:
+    """Cover the tab toggle and vim-style j/k navigation in CommitMessageScreen."""
+
+    def _make_screen(self) -> CommitMessageScreen:
+        return CommitMessageScreen("my-repo", additions=3, deletions=1, file_count=2)
+
+    async def test_initial_focus_is_message_input(self):
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            msg = app.screen.query_one("#commit-message-input")
+            assert app.focused is msg
+
+    async def test_tab_toggles_focus_to_action_list_and_back(self):
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            msg = app.screen.query_one("#commit-message-input")
+            action_list = app.screen.query_one("#commit-message-action-list")
+
+            assert app.focused is msg
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is action_list
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is msg
+
+    async def test_shift_tab_toggles_focus_back_to_message(self):
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            action_list = app.screen.query_one("#commit-message-action-list")
+            assert app.focused is action_list
+
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            msg = app.screen.query_one("#commit-message-input")
+            assert app.focused is msg
+
+    async def test_j_navigates_action_list_when_focused(self):
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            action_list = app.screen.query_one("#commit-message-action-list")
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert action_list.highlighted == 0
+            assert action_list.highlighted_option.id == "commit"
+
+            await pilot.press("j")
+            await pilot.pause()
+            assert action_list.highlighted == 1
+            assert action_list.highlighted_option.id == "commit_push"
+
+    async def test_k_navigates_action_list_when_focused(self):
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            action_list = app.screen.query_one("#commit-message-action-list")
+
+            await pilot.press("tab")
+            await pilot.press("j")
+            await pilot.pause()
+            assert action_list.highlighted == 1
+
+            await pilot.press("k")
+            await pilot.pause()
+            assert action_list.highlighted == 0
+            assert action_list.highlighted_option.id == "commit"
+
+    async def test_jk_typed_in_message_input_are_not_intercepted(self):
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            msg = app.screen.query_one("#commit-message-input")
+            assert app.focused is msg
+
+            await pilot.press("j")
+            await pilot.press("k")
+            await pilot.pause()
+            assert msg.value == "jk"
+            action_list = app.screen.query_one("#commit-message-action-list")
+            assert action_list.highlighted == 0
+
+    async def test_jk_commit_and_push_via_tab_toggle(self):
+        """End-to-end: tab to picker, j to move, tab back to type, tab back, enter."""
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            action_list = app.screen.query_one("#commit-message-action-list")
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is action_list
+
+            await pilot.press("j")
+            await pilot.pause()
+            assert action_list.highlighted == 1
+
+            await pilot.press("tab")
+            await pilot.pause()
+            msg = app.screen.query_one("#commit-message-input")
+            assert app.focused is msg
+            msg.value = "feat: jk commit"
+            assert action_list.highlighted == 1
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is action_list
+            assert action_list.highlighted == 1
+            assert action_list.highlighted_option.id == "commit_push"

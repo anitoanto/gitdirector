@@ -389,8 +389,8 @@ class TestExactMatchPanelPaneCommand:
         cmd = _panel_pane_command("Dev", 1, None)
         script = shlex.split(cmd)[2]
         assert "has-session" not in cmd
-        assert "UNASSIGNED" in cmd
-        assert "printf '%s\\n' '' UNASSIGNED" in script
+        assert "UNASSIGNED" not in cmd
+        assert script.endswith("exit 0")
         assert "Panel: Dev" not in cmd
         assert "Pane 1: unassigned" not in cmd
 

@@ -46,6 +46,7 @@ from .screens.repos import (
     RepoInfoScreen,
 )
 from .screens.sessions import EditSessionDescriptionScreen, RemoveSessionScreen
+from .terminal_caps import host_color_system, no_color_requested
 
 _panel_row_height = _app_panels._panel_row_height
 _render_panel_preview = _app_panels._render_panel_preview
@@ -88,6 +89,9 @@ class GitDirectorConsole(
         background: $surface;
         overflow: hidden;
     }
+    HeaderTitle {
+        padding: 0 10 0 8;
+    }
     #status-bar {
         dock: bottom;
         height: 1;
@@ -120,6 +124,7 @@ class GitDirectorConsole(
         overflow-x: auto;
         overflow-y: auto;
         padding: 0 1;
+        scrollbar-size-horizontal: 0;
     }
     #no-repos-message {
         height: 1fr;
@@ -194,7 +199,7 @@ class GitDirectorConsole(
         Binding("s", "sort", "Sort", show=True),
         Binding("g", "show_git_menu", "Git", show=True),
         Binding("i", "show_info", "Info", show=True),
-        Binding("d", "edit_session_description", "Description", show=False),
+        Binding("d", "edit_session_description", "Description", show=True),
         Binding("escape", "close_search", show=False),
         Binding("1", "tab_repos", "Repos", show=False),
         Binding("2", "tab_sessions", "Sessions", show=False),
@@ -204,6 +209,19 @@ class GitDirectorConsole(
     ]
 
     def __init__(self) -> None:
+        # Ensure Textual's ``App.console`` auto-detects ``"truecolor"`` for
+        # its render Console. ``Strip.render()`` uses ``console._color_system``
+        # to pick the SGR format; if it resolves to ``"256"``, every
+        # truecolor segment produced by child agents gets quantised to
+        # the 256-colour palette — visible banding in gradients.
+        #
+        # Rich's auto-detection runs inside ``App.__init__`` using a
+        # snapshot of ``os.environ``, so the variable must be set
+        # *before* ``super().__init__()`` is called. We only force
+        # ``COLORTERM=truecolor`` when the host actually advertises
+        # truecolor — never downgrade a host that can't render it.
+        if not no_color_requested() and host_color_system() == "truecolor":
+            os.environ["COLORTERM"] = "truecolor"
         super().__init__()
         from ...integrations.tmux import TmuxMonitor
 
@@ -246,7 +264,7 @@ class GitDirectorConsole(
         self._repo_status_executor: ThreadPoolExecutor | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield Header(show_clock=True, icon="☰")
         with TabbedContent(id="tabs"):
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
@@ -295,6 +313,7 @@ class GitDirectorConsole(
         self._panels_col_keys = panels_table.add_columns(
             "Map", "Name", "TMUX", "Layout", "Panes", "Status"
         )
+        self._disable_tabs_widget_arrow_keybindings()
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(
@@ -304,6 +323,21 @@ class GitDirectorConsole(
         self._set_session_status_tracking_running(False)
         self._load_update_notice()
         self._load_repos()
+
+    def _disable_tabs_widget_arrow_keybindings(self) -> None:
+        """Remove the ``left``/``right`` bindings from every Tabs widget.
+
+        The ``Tabs`` widget binds ``left``/``right`` to ``previous_tab``/``next_tab``
+        so it can switch tabs when focused. We want those keys to scroll the
+        active table horizontally instead, so strip the bindings on the
+        underlying ContentTabs instances. Users can still switch tabs with the
+        ``1``/``2``/``3`` number keys (and ``tab``/``shift+tab``).
+        """
+        from textual.widgets._tabs import Tabs
+
+        for tabs_widget in self.query(Tabs):
+            tabs_widget._bindings.key_to_bindings.pop("left", None)
+            tabs_widget._bindings.key_to_bindings.pop("right", None)
 
     def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
         return self._shutdown_requested or (worker is not None and worker.is_cancelled)
@@ -434,8 +468,11 @@ class GitDirectorConsole(
                 kill_tmux_session(session_name)
                 self._update_status(f"tmux agent launch failed: {exc}")
                 return
-            self.push_screen(
-                AgentLoadingScreen(agent_cmd, session_name, ready_marker),
+            self._show_attach_loading_screen(
+                session_name,
+                path,
+                ready_marker=ready_marker,
+                skip_config_sync=True,
                 callback=refresh_after_launch,
             )
         else:
@@ -451,6 +488,7 @@ class GitDirectorConsole(
         session_name: str,
         path: Path | None = None,
         row_key: str | None = None,
+        ready_marker: Path | None = None,
         *,
         skip_config_sync: bool = False,
         callback: Callable[[object], None] | None = None,
@@ -478,6 +516,7 @@ class GitDirectorConsole(
             AgentLoadingScreen(
                 title,
                 session_name,
+                ready_marker,
                 loading_hint=loading_hint,
                 on_attach=attach,
             ),
@@ -724,6 +763,8 @@ class GitDirectorConsole(
             self._show_repo_git_remotes(path)
         elif action == "push":
             self._prompt_repo_push(path)
+        elif action == "review_diff":
+            self._open_review_diff(path)
 
     def _show_repo_git_output(
         self,
@@ -996,8 +1037,6 @@ class GitDirectorConsole(
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
             self._attach_to_session(session_name, path)
-        elif action == "review_diff":
-            self._open_review_diff()
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
@@ -1006,8 +1045,9 @@ class GitDirectorConsole(
                     callback=self._handle_remove_selection,
                 )
 
-    def _open_review_diff(self) -> None:
-        path = self._get_selected_path()
+    def _open_review_diff(self, path: Path | None = None) -> None:
+        if path is None:
+            path = self._get_selected_path()
         if path is None:
             return
         info = self._results.get(str(path))

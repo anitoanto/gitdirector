@@ -69,6 +69,16 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/panel/main: status-position bottom" in config
         assert "set-option -t =gd/panel/main: status-left" in config
         assert "set-option -t =gd/panel/main: status-right" in config
+        assert "if-shell 'infocmp tmux-256color >/dev/null 2>&1'" in config
+        assert "default-terminal tmux-256color" in config
+        assert "default-terminal screen-256color" in config
+        assert "'terminal-features[90]' '*:RGB'" in config
+        assert "'terminal-overrides[90]' '*:Tc'" in config
+        assert "set-environment -u -t =gd/panel/main: NO_COLOR" in config
+        assert "set-environment -t =gd/panel/main: COLORTERM truecolor" in config
+        assert "set-environment -t =gd/panel/main: FORCE_COLOR 3" in config
+        assert "set-environment -t =gd/panel/main: CLICOLOR_FORCE 1" in config
+        assert "set-environment -t =gd/panel/main: CLAUDE_CODE_TMUX_TRUECOLOR 1" in config
         assert "set-option -t =gd/panel/main: mouse on" in config
         assert "window-status-current-format ' #{pane_index}:#{pane_title} '" in config
         assert f'message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"' in config
@@ -113,7 +123,17 @@ class TestPanelPaneTitles:
         config = _session_tmux_config("gd/my-repo/shell/1", "rose-pine")
 
         assert "set-option -t =gd/my-repo/shell/1: status-left" in config
+        assert "default-terminal tmux-256color" in config
+        assert "default-terminal screen-256color" in config
+        assert "'terminal-features[90]' '*:RGB'" in config
+        assert "'terminal-overrides[90]' '*:Tc'" in config
+        assert "set-environment -u -t =gd/my-repo/shell/1: NO_COLOR" in config
+        assert "set-environment -t =gd/my-repo/shell/1: COLORTERM truecolor" in config
+        assert "set-environment -t =gd/my-repo/shell/1: FORCE_COLOR 3" in config
+        assert "set-environment -t =gd/my-repo/shell/1: CLICOLOR_FORCE 1" in config
+        assert "set-environment -t =gd/my-repo/shell/1: CLAUDE_CODE_TMUX_TRUECOLOR 1" in config
         assert "set-option -t =gd/my-repo/shell/1: mouse on" in config
+        assert "set-option -t =gd/my-repo/shell/1: set-clipboard on" in config
         assert "SHELL" in config
         assert "my-repo/shell/1" in config
         assert "window-status-current-format ' #I:#W '" in config
@@ -133,13 +153,22 @@ class TestPanelPaneTitles:
         assert "COPILOT" in config
         assert "my-repo/copilot/1" in config
         assert "pane-border-status top" not in config
+        assert "set-clipboard on" in config
+
+    def test_panel_tmux_config_emits_set_clipboard_on(self):
+        with patch(
+            "gitdirector.integrations.tmux.core._current_window_target",
+            return_value="gd/panel/main:0",
+        ):
+            config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
+        assert "set-option -t =gd/panel/main: set-clipboard on" in config
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_load_panel_tmux_config_writes_and_sources_file(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
 
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             written_path = _load_panel_tmux_config("Main", "gd/panel/main", "nord")
 
@@ -164,9 +193,9 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_writes_all_live_sessions(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch(
                 "gitdirector.integrations.tmux.core._live_panel_sessions",
@@ -188,9 +217,9 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_writes_regular_sessions(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]):
                 with patch(
@@ -215,9 +244,9 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_skips_source_when_no_live_sessions(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]):
                 with patch(
@@ -239,13 +268,13 @@ class TestPanelPaneTitles:
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_sync_panel_tmux_config_ignores_source_file_failure(self, mock_run, tmp_path):
-        config_path = tmp_path / "gd-tmux.conf"
+        config_path = tmp_path / "tmux_design.conf"
         mock_run.side_effect = __import__("subprocess").CalledProcessError(
             1, ["tmux", "source-file", str(config_path)]
         )
 
         with patch(
-            "gitdirector.integrations.tmux.core._gd_tmux_config_path", return_value=config_path
+            "gitdirector.integrations.tmux.core._tmux_design_config_path", return_value=config_path
         ):
             with patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]):
                 with patch(

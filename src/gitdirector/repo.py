@@ -454,6 +454,10 @@ class Repository:
                 unstaged = True
                 staged_files.append(filename)
                 unstaged_files.append(filename)
+            elif line.startswith("? "):
+                filename = line[2:]
+                unstaged = True
+                unstaged_files.append(filename)
 
         if fetch and branch is not None:
             code, err = self._fetch_origin_branch(branch)
