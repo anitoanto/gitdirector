@@ -23,13 +23,23 @@ class TestConfigInit:
     def test_loads_existing_config(self, config_dir, monkeypatch):
         config_dir.mkdir(parents=True, exist_ok=True)
         config_file = config_dir / "config.yaml"
-        data = {
-            "repositories": ["/tmp/repo-a", "/tmp/repo-b"],
-            "max_workers": 4,
-            "github_username": "octocat",
-            "github_PAT": "ghp_secret",
-        }
-        config_file.write_text(yaml.dump(data))
+        secrets_file = config_dir / "secrets.yaml"
+        config_file.write_text(
+            yaml.dump(
+                {
+                    "repositories": ["/tmp/repo-a", "/tmp/repo-b"],
+                    "max_workers": 4,
+                }
+            )
+        )
+        secrets_file.write_text(
+            yaml.dump(
+                {
+                    "github_username": "octocat",
+                    "github_PAT": "ghp_secret",
+                }
+            )
+        )
 
         monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
         cfg = Config()
@@ -151,16 +161,17 @@ class TestConfigGitHubAuth:
         config.github_PAT = "ghp_secret"
         config.save()
 
-        data = yaml.safe_load(config.config_file.read_text())
-        assert data["github_username"] == "octocat"
-        assert data["github_PAT"] == "ghp_secret"
+        assert "github_username" not in yaml.safe_load(config.config_file.read_text())
+        secrets_data = yaml.safe_load(config.secrets_file.read_text())
+        assert secrets_data["github_username"] == "octocat"
+        assert secrets_data["github_PAT"] == "ghp_secret"
 
     def test_preserves_github_auth_when_repositories_change(self, config_dir, monkeypatch):
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / "config.yaml").write_text(
+        (config_dir / "config.yaml").write_text(yaml.dump({"repositories": ["/tmp/repo-a"]}))
+        (config_dir / "secrets.yaml").write_text(
             yaml.dump(
                 {
-                    "repositories": ["/tmp/repo-a"],
                     "github_username": "octocat",
                     "github_PAT": "ghp_secret",
                 }
@@ -171,10 +182,17 @@ class TestConfigGitHubAuth:
 
         cfg.add_repository(Path("/tmp/repo-b"))
 
-        data = yaml.safe_load(cfg.config_file.read_text())
-        assert data["repositories"] == ["/tmp/repo-a", "/tmp/repo-b"]
-        assert data["github_username"] == "octocat"
-        assert data["github_PAT"] == "ghp_secret"
+        main_data = yaml.safe_load(cfg.config_file.read_text())
+        secrets_data = yaml.safe_load(cfg.secrets_file.read_text())
+        assert main_data["repositories"] == ["/tmp/repo-a", "/tmp/repo-b"]
+        assert secrets_data["github_username"] == "octocat"
+        assert secrets_data["github_PAT"] == "ghp_secret"
+
+    def test_secrets_file_not_created_when_no_github_auth(self, config):
+        config.save()
+
+        assert config.config_file.exists()
+        assert not config.secrets_file.exists()
 
 
 class TestConfigSaveRoundtrip:

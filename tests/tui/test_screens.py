@@ -131,7 +131,9 @@ class TestActionMenuScreen:
             branch_label = app.screen.query_one("#menu-branch", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
             assert "main" in branch_label.content
-            assert menu.option_count == 10
+            assert menu.option_count == 8
+            ids = [opt.id for opt in menu.options if opt.id is not None]
+            assert "review_diff" not in ids
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_no_branch_shows_dash(self, mock_sessions):
@@ -207,7 +209,7 @@ class TestActionMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 16
+            assert menu.option_count == 14
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
     async def test_disabled_options_and_navigation(self, _mock_sessions):
@@ -241,7 +243,9 @@ class TestGitOperationsMenuScreen:
 
             assert "my-repo" in title.content
             assert "main" in branch_label.content
-            assert menu.option_count == 6
+            assert menu.option_count == 9
+            ids = [opt.id for opt in menu.options if opt.id is not None]
+            assert "review_diff" in ids
 
     async def test_select_status(self):
         results: list[str | None] = []
@@ -1523,11 +1527,11 @@ class TestAgentLoadingScreen:
         screen._do_dismiss.assert_not_called()
 
         screen._dismissed = False
-        mock_monotonic.return_value = 100.5
+        mock_monotonic.return_value = 100.1
         screen._check_ready()
         screen._ready_marker.exists.assert_not_called()
 
-        mock_monotonic.return_value = 101.5
+        mock_monotonic.return_value = 100.5
         screen._ready_marker.exists.return_value = False
         screen._check_ready()
 

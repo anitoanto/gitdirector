@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from click.utils import strip_ansi
 
 from gitdirector.cli import cli
 
@@ -81,7 +82,7 @@ class TestUnlinkAmbiguity:
         assert config.has_repository(b)
         # Rich's console wraps long paths; the assertion must be made on the
         # output with all whitespace collapsed.
-        collapsed = "".join(result.output.split())
+        collapsed = "".join(strip_ansi(result.output).split())
         assert str(a) in collapsed, f"expected path {a} in output; got: {result.output!r}"
         assert str(b) in collapsed, f"expected path {b} in output; got: {result.output!r}"
 

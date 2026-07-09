@@ -431,7 +431,6 @@ class TestGitDirectorConsoleActionRouting:
             app.action_open_tmux.assert_called_once_with(agent_cmd="copilot")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    @patch("gitdirector.commands.tui.app.AgentLoadingScreen")
     @patch(
         "gitdirector.integrations.tmux.launch_command_in_tmux_session",
         return_value=Path("/tmp/gitdirector-agent.ready"),
@@ -444,11 +443,11 @@ class TestGitDirectorConsoleActionRouting:
         self,
         mock_create_session,
         mock_launch_command,
-        mock_loading_screen,
         _mock_sessions,
     ):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        app._suspend_and_attach = MagicMock()
         app.push_screen = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
@@ -463,12 +462,19 @@ class TestGitDirectorConsoleActionRouting:
                 description=None,
             )
             mock_launch_command.assert_called_once_with("gd/alpha/copilot/1", "copilot")
-            mock_loading_screen.assert_called_once_with(
-                "copilot",
-                "gd/alpha/copilot/1",
-                Path("/tmp/gitdirector-agent.ready"),
-            )
             app.push_screen.assert_called_once()
+            screen = app.push_screen.call_args.args[0]
+            assert isinstance(screen, AgentLoadingScreen)
+            assert screen._agent_cmd == "copilot"
+            assert screen._ready_marker == Path("/tmp/gitdirector-agent.ready")
+
+            screen._on_attach()
+            app._suspend_and_attach.assert_called_once_with(
+                "gd/alpha/copilot/1",
+                Path("/tmp/alpha"),
+                row_key=None,
+                skip_config_sync=True,
+            )
 
     async def test_do_remove_calls_kill_tmux_session(self):
         app = GitDirectorConsole()

@@ -119,6 +119,20 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
 _COMMIT_MESSAGE_RE = re.compile(r"[\s\S]+", re.MULTILINE)
 
 
+class _CommitActionOptionList(OptionList):
+    """OptionList used as the commit/push picker with vim-style j/k keys.
+
+    The ``j``/``k`` bindings live on the widget itself so they only
+    fire when the picker has focus. This keeps typing ``j`` or ``k``
+    inside the commit message input working as expected.
+    """
+
+    BINDINGS = [
+        Binding("j", "cursor_down", show=False),
+        Binding("k", "cursor_up", show=False),
+    ]
+
+
 class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
     """Collect a commit message and the final action (commit / commit & push).
 
@@ -127,18 +141,22 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
     "commit & push" so the caller should run ``git push`` after the
     commit succeeds.
 
-    Two ``OptionList`` entries below the input act as the action
+    Two picker entries below the input act as the action
     picker; the first option ("commit") is highlighted by default.
     Pressing ``enter`` from the input field commits with the currently
     highlighted action, matching the project's existing form
     conventions (see ``CreatePanelScreen``).
+
+    Focus toggles between the input and the action picker with
+    ``tab`` / ``shift+tab``. While the picker is focused, ``j`` /
+    ``k`` (and ``up`` / ``down``) move the selection.
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "Esc cancel", show=True),
         Binding("ctrl+enter", "confirm", "Confirm", show=False),
-        Binding("tab", "focus_action", "Tab focus action", show=False),
-        Binding("shift+tab", "focus_message", "Shift+Tab focus message", show=False),
+        Binding("tab", "focus_toggle", "Tab switch focus", show=False),
+        Binding("shift+tab", "focus_toggle", "Shift+Tab switch focus", show=False),
         Binding("down", "action_cursor_down", "\u2193 action", show=False),
         Binding("up", "action_cursor_up", "\u2191 action", show=False),
     ]
@@ -218,13 +236,14 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
                 placeholder="Commit message\u2026",
                 id="commit-message-input",
             )
-            yield OptionList(
+            yield _CommitActionOptionList(
                 Option("[white]\u2713[/white] [bold]Commit[/bold]", id="commit"),
                 Option("[cyan]\u2191[/cyan] [bold]Commit and push[/bold]", id="commit_push"),
                 id="commit-message-action-list",
             )
             yield Static(
-                "type message    [\u2191\u2193] pick action    [enter] confirm    [esc] cancel",
+                "type message    [tab] switch    [\u2191\u2193/jk] pick action"
+                "    [enter] confirm    [esc] cancel",
                 id="commit-message-hint",
             )
 
@@ -261,19 +280,25 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         self._in_message = True
         self.query_one("#commit-message-input", Input).focus()
 
+    def action_focus_toggle(self) -> None:
+        """Toggle focus between the message input and the action picker."""
+        if self._action_list_has_focus():
+            self.action_focus_message()
+        else:
+            self.action_focus_action()
+
+    def _action_list_has_focus(self) -> bool:
+        try:
+            action_list = self.query_one("#commit-message-action-list", OptionList)
+        except Exception:
+            return False
+        return self.focused is action_list
+
     def action_cursor_down(self) -> None:
         self.query_one("#commit-message-action-list", OptionList).action_cursor_down()
 
     def action_cursor_up(self) -> None:
         self.query_one("#commit-message-action-list", OptionList).action_cursor_up()
-
-    def action_cursor_down_global(self) -> None:
-        # Bound for the ``down`` key while focus is on the Input —
-        # moves the action list, not the cursor inside the Input.
-        if self._in_message:
-            self.action_cursor_down()
-        else:
-            super().action_cursor_down()  # type: ignore[misc]
 
     def _message(self) -> str:
         return self.query_one("#commit-message-input", Input).value.strip()
