@@ -159,6 +159,7 @@ class TestRenderConsoleKwargs:
     """
 
     def test_force_truecolor_when_host_advertises_truecolor(self, monkeypatch):
+        monkeypatch.setenv("TERM", "xterm-256color")
         monkeypatch.setenv("COLORTERM", "truecolor")
         monkeypatch.delenv("NO_COLOR", raising=False)
 
@@ -206,7 +207,11 @@ class TestRenderConsoleKwargs:
 class TestTruecolorGradientThroughConsole:
     """A full gradient rendered through the widget's console must stay truecolor."""
 
-    def test_gradient_segments_carry_truecolor_styles(self):
+    def test_gradient_segments_carry_truecolor_styles(self, monkeypatch):
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setenv("COLORTERM", "truecolor")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
         widget = _make_widget_with_screen(ncol=10, nrow=1)
         widget._render_console = None
 
