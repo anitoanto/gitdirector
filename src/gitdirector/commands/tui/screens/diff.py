@@ -376,6 +376,7 @@ class DiffReviewScreen(ModalScreen[None]):
             return
 
         files_list.set_files(self._files, repo_dir=str(self.repo_path))
+        self._render_selected_file()
         self._show_content()
         self._update_summary()
         self._apply_focus()

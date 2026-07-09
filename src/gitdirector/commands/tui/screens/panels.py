@@ -193,7 +193,7 @@ class AgentLoadingScreen(ModalScreen[None]):
     """Full-screen loading overlay shown while a tmux session initialises."""
 
     _POLL_INTERVAL = 0.1
-    _MIN_WAIT = 1.0
+    _MIN_WAIT = 0.2
     _MAX_WAIT = 15.0
 
     DEFAULT_CSS = _safe_css("""

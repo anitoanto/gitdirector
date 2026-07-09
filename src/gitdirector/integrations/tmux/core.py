@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 _REPO_ID_LENGTH = 5
 _SESSION_LIST_SEPARATOR = "\t"
 _LAST_SYNC_CONTENT: dict[Path, str] = {}
+_TMUX_TERMINAL_NAME = "tmux-256color"
+_TMUX_TERMINAL_FALLBACK = "screen-256color"
+_TMUX_TRUECOLOR_FEATURES = "*:RGB"
+_TMUX_TRUECOLOR_OVERRIDES = "*:Tc"
+_TMUX_TRUECOLOR_OPTION_INDEX = 90
+_TMUX_CHILD_ENV_UNSET = ("NO_COLOR",)
+# Standard color-capability advertisement, honoured by well-behaved
+# terminal programs (supports-color/chalk, termenv, Rich, ...).
+_TMUX_STANDARD_COLOR_ENV = {
+    "COLORTERM": "truecolor",
+    "FORCE_COLOR": "3",
+    "CLICOLOR_FORCE": "1",
+}
+# Vendor-specific truecolor opt-outs. Some agents ignore the standard
+# variables above and clamp their palette to 256 colors whenever $TMUX
+# is set; each exposes its own escape hatch, read from the process
+# environment at agent startup. Add one entry per non-conforming agent.
+_TMUX_AGENT_TRUECOLOR_OPT_OUTS = {
+    "CLAUDE_CODE_TMUX_TRUECOLOR": "1",  # anthropics/claude-code#36785
+}
+_TMUX_COLOR_ENV = {**_TMUX_STANDARD_COLOR_ENV, **_TMUX_AGENT_TRUECOLOR_OPT_OUTS}
+_TMUX_CHILD_ENV = {"TERM": _TMUX_TERMINAL_NAME, **_TMUX_COLOR_ENV}
 
 
 class TmuxError(RuntimeError):
@@ -202,6 +224,54 @@ def _detached_session_size_args() -> list[str]:
     return ["-x", str(cols), "-y", str(lines)]
 
 
+def _tmux_child_environment_prefix() -> str:
+    unset_args = " ".join(f"-u {name}" for name in _TMUX_CHILD_ENV_UNSET)
+    set_args = " ".join(f"{name}={shlex.quote(value)}" for name, value in _TMUX_CHILD_ENV.items())
+    return f"{unset_args} {set_args}".strip()
+
+
+def _tmux_child_environment_command(command: str) -> str:
+    return f"env {_tmux_child_environment_prefix()} {command}"
+
+
+def _tmux_new_session_environment_args() -> list[str]:
+    args: list[str] = []
+    for name in _TMUX_CHILD_ENV_UNSET:
+        args.extend(["-e", f"{name}="])
+    for name, value in _TMUX_CHILD_ENV.items():
+        args.extend(["-e", f"{name}={value}"])
+    return args
+
+
+def _tmux_color_environment_config(quoted_session: str) -> list[str]:
+    lines = [f"set-environment -u -t {quoted_session} {name}" for name in _TMUX_CHILD_ENV_UNSET]
+    lines.extend(
+        f"set-environment -t {quoted_session} {name} {shlex.quote(value)}"
+        for name, value in _TMUX_COLOR_ENV.items()
+    )
+    return lines
+
+
+def _tmux_terminal_capability_config(quoted_session: str) -> list[str]:
+    tmux_term = shlex.quote(_TMUX_TERMINAL_NAME)
+    fallback_term = shlex.quote(_TMUX_TERMINAL_FALLBACK)
+    terminfo_check = shlex.quote(f"infocmp {_TMUX_TERMINAL_NAME} >/dev/null 2>&1")
+    default_truecolor = shlex.quote(
+        f"set-option -t {quoted_session} default-terminal {tmux_term}; "
+        f"set-environment -t {quoted_session} TERM {tmux_term}"
+    )
+    default_fallback = shlex.quote(
+        f"set-option -t {quoted_session} default-terminal {fallback_term}; "
+        f"set-environment -t {quoted_session} TERM {fallback_term}"
+    )
+    return [
+        f"if-shell {terminfo_check} {default_truecolor} {default_fallback}",
+        f"set-option -gq {shlex.quote(f'terminal-features[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_FEATURES)}",
+        f"set-option -gq {shlex.quote(f'terminal-overrides[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_OVERRIDES)}",
+        *_tmux_color_environment_config(quoted_session),
+    ]
+
+
 def list_repo_sessions(repo_name: str | Path) -> list[str]:
     """List all tmux sessions for a given repository."""
     if isinstance(repo_name, Path):
@@ -289,6 +359,7 @@ def create_tmux_session(
     unset (the next read returns the default ``"-"`` placeholder).
     """
     sessions = _list_sessions()
+    environment_args = _tmux_new_session_environment_args()
     max_attempts = 5
     for _attempt in range(max_attempts):
         session_name = _make_session_name(repo_name, purpose, repo_path=path, sessions=sessions)
@@ -296,6 +367,7 @@ def create_tmux_session(
             [
                 "new-session",
                 "-d",
+                *environment_args,
                 "-s",
                 session_name,
                 *_detached_session_size_args(),
@@ -368,6 +440,37 @@ def kill_tmux_session(session_name: str) -> bool:
         return False
 
 
+def kill_all_gd_sessions() -> list[str]:
+    """Kill every ``gd/*`` tmux session and return the names that were killed.
+
+    Uses :func:`list_all_gd_sessions` to enumerate, then forwards each entry
+    through :func:`kill_tmux_session` so the same exact-match and ``gd/``
+    prefix guarantees apply. Names that fail to kill (already gone, server
+    crashed mid-iteration) are silently skipped — this is best-effort cleanup,
+    not a hard guarantee, so a partially-stale list is acceptable.
+
+    Returns the list of session names that were successfully killed, which
+    callers can use to print a summary. Returns an empty list when tmux is
+    not running or no ``gd/*`` sessions exist.
+    """
+    try:
+        entries = list_all_gd_sessions()
+    except (TmuxError, OSError, ValueError):
+        logger.debug("Failed to enumerate GitDirector tmux sessions", exc_info=True)
+        return []
+
+    killed: list[str] = []
+    for entry in entries:
+        session_name = entry["session_name"]
+        try:
+            if kill_tmux_session(session_name):
+                killed.append(session_name)
+        except ValueError:
+            logger.debug("Refusing to kill unexpected session name during reset: %s", session_name)
+            continue
+    return killed
+
+
 def _validate_session_name_for_kill(session_name: str) -> None:
     """Reject inputs that could kill more sessions than intended.
 
@@ -410,16 +513,18 @@ def attach_tmux_session(
     When *skip_config_sync* is true the leading ``sync_panel_tmux_config`` call
     is omitted. Callers that just created the session (and therefore triggered
     a sync moments ago) should set this to avoid a visible flicker: the sync
-    re-lists every tmux session, rewrites the gd-tmux.conf file, and runs
+    re-lists every tmux session, rewrites the tmux_design.conf file, and runs
     ``tmux source-file``, which together take long enough to expose a brief
     empty alt-screen between the manual screen clear and tmux's first redraw.
     """
     from .panels import (
         _ensure_panel_prefix_bindings,
+        cleanup_temp_panel_tmux_session,
         ensure_temp_panel_tmux_session,
     )
 
     target_session = session_name
+    temp_panel_session_name: str | None = None
     if (
         not skip_config_sync
         and session_name.startswith("gd/")
@@ -429,10 +534,11 @@ def attach_tmux_session(
     if _should_open_in_temp_panel(session_name):
         if not _session_exists(session_name):
             raise TmuxError(f"tmux session no longer exists: {session_name}")
-        target_session = ensure_temp_panel_tmux_session(
+        temp_panel_session_name = ensure_temp_panel_tmux_session(
             session_name,
             attach_delay_seconds=attach_delay_seconds,
         )
+        target_session = temp_panel_session_name
     elif _is_persistent_panel_session(target_session):
         if not _session_exists(target_session):
             raise TmuxError(f"tmux session no longer exists: {target_session}")
@@ -442,7 +548,11 @@ def attach_tmux_session(
     if os.environ.get("TMUX"):
         _run_tmux(["switch-client", "-t", f"={target_session}"], check=True, capture_output=False)
         return False
-    _run_tmux(["attach-session", "-t", f"={target_session}"], check=True, capture_output=False)
+    try:
+        _run_tmux(["attach-session", "-t", f"={target_session}"], check=True, capture_output=False)
+    finally:
+        if temp_panel_session_name is not None:
+            cleanup_temp_panel_tmux_session(temp_panel_session_name)
     return True
 
 
@@ -490,9 +600,8 @@ def make_temp_panel_session_name(session_name: str) -> str:
     session names are already unique (repo + purpose + incrementing
     sequence), which makes the temp name unique by construction.
 
-    The temp session is reused across attaches (see
-    :func:`ensure_temp_panel_tmux_session`), so the same name must
-    always map to the same wrapper session for a given inner session.
+    The name is deterministic so a stale wrapper can be found and removed
+    before recreating the temp panel for a later attach.
     """
     suffix = session_name[3:] if session_name.startswith("gd/") else session_name
     return f"gd/temp/panel/{suffix}"
@@ -760,8 +869,8 @@ def _panel_window_status_format() -> str:
     return " #{pane_index}:#{pane_title} "
 
 
-def _gd_tmux_config_path() -> Path:
-    return Path.home() / ".gitdirector" / "gd-tmux.conf"
+def _tmux_design_config_path() -> Path:
+    return Path.home() / ".gitdirector" / "tmux_design.conf"
 
 
 def _session_badge_text(session_name: str) -> str:
@@ -833,7 +942,9 @@ def _tmux_theme_config(
 
     lines.extend(
         [
+            *_tmux_terminal_capability_config(quoted_session),
             f"set-option -t {quoted_session} mouse on",
+            f"set-option -t {quoted_session} set-clipboard on",
             f'set-option -t {quoted_session} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
             f'set-option -t {quoted_session} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
             f'set-window-option -t {quoted_window} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',
@@ -896,7 +1007,7 @@ def _load_panel_tmux_config(
     session_name: str,
     theme_name: str | None = None,
 ) -> Path:
-    config_path = _gd_tmux_config_path()
+    config_path = _tmux_design_config_path()
     config_path.parent.mkdir(exist_ok=True)
     atomic_write_text(config_path, _panel_tmux_config(panel_name, session_name, theme_name))
     _run_tmux(["source-file", str(config_path)], check=True)
@@ -1011,7 +1122,7 @@ def _live_repo_tmux_sessions() -> list[str]:
 
 def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     resolved_theme = _resolved_panel_theme_name(theme_name)
-    config_path = _gd_tmux_config_path()
+    config_path = _tmux_design_config_path()
     config_path.parent.mkdir(exist_ok=True)
     live_panel_sessions = _live_panel_sessions()
     live_repo_sessions = _live_repo_tmux_sessions()

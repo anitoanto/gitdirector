@@ -15,6 +15,7 @@ from .core import (
     _list_sessions,
     _parse_gd_session_name,
     _run_tmux,
+    _tmux_child_environment_command,
     kill_tmux_session,
 )
 
@@ -81,7 +82,7 @@ def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
             "-k",
             "-t",
             pane_target,
-            f"sh -lc {shlex.quote(cleanup_script)}",
+            _tmux_child_environment_command(f"sh -lc {shlex.quote(cleanup_script)}"),
         ],
     )
     if isinstance(result.returncode, int) and result.returncode != 0:
