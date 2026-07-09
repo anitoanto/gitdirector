@@ -1,5 +1,6 @@
 import click
 from rich.table import Table
+from rich.text import Text
 
 from . import console, get_version, print_update_notice
 
@@ -43,11 +44,11 @@ def show_help():
             "gd-capture SESSION [--lines N] [--full]",
             "Print the current scrollback of a live gd tmux session",
         ),
-        ("gd-send SESSION [TEXT] [--enter|--key C-c]", "Send text or C-c to a gd session"),
+        ("gd-send SESSION [TEXT] [--enter | --key C-c]", "Send text or C-c to a gd session"),
         ("completion SHELL", "Print shell completion setup for bash, zsh, or fish"),
         ("help", "Show this help message"),
     ]:
-        cmd_table.add_row(cmd, desc)
+        cmd_table.add_row(Text(cmd), desc)
 
     console.print(cmd_table)
 
