@@ -464,6 +464,7 @@ class TestHelpCommand:
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
         assert "pull [--yes]" in result.output
+        assert "gd-send SESSION [TEXT] [--enter | --key C-c]" in result.output
 
     def test_no_args_shows_help(self, runner):
         result = runner.invoke(cli, [])
