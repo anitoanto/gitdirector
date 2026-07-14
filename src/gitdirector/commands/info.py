@@ -46,29 +46,20 @@ def register(cli: click.Group):
     def info(target: str, full: bool):
         """Show file statistics for a repository."""
         manager = RepositoryManager()
-        candidate_path = Path(target).expanduser()
-
-        if candidate_path.is_dir() and (candidate_path / ".git").is_dir():
-            repo_path = candidate_path.resolve()
-        else:
-            repos = manager.config.repositories
-            target_lower = target.lower()
-            exact = [r for r in repos if r.name.lower() == target_lower]
-            if exact:
-                matches = exact
-            else:
-                matches = [r for r in repos if target_lower in r.name.lower()]
-
+        repo_path, matches, _path_attempted = manager.resolve_repository_target(
+            target,
+            allow_untracked_git_path=True,
+            fuzzy_names=True,
+        )
+        if repo_path is None:
             if not matches:
                 console.print(f"\n  [red]Repository '{target}' not found[/red]\n")
                 raise SystemExit(1)
-            if len(matches) > 1:
-                console.print(f"\n  [red]Multiple repositories match '{target}':[/red]")
-                for m in matches:
-                    console.print(f"    {m}")
-                console.print()
-                raise SystemExit(1)
-            repo_path = matches[0]
+            console.print(f"\n  [red]Multiple repositories match '{target}':[/red]")
+            for match in matches:
+                console.print(f"    {match}")
+            console.print()
+            raise SystemExit(1)
 
         result = gather_repo_info(repo_path, full=full)
         _render_info_cli(result, repo_path.name, repo_path)

@@ -5,6 +5,8 @@ from __future__ import annotations
 from time import monotonic
 from unittest.mock import MagicMock, patch
 
+import pytest
+import yaml
 from textual.app import App
 from textual.color import Color
 from textual.widgets import DataTable, Static
@@ -17,7 +19,6 @@ from gitdirector.commands.tui import (
     GitDirectorConsole,
     Panel,
     PanelStore,
-    PanelViewScreen,
     PaneWidget,
 )
 from gitdirector.commands.tui.app import _panel_row_height, _render_panel_preview
@@ -26,6 +27,18 @@ from gitdirector.commands.tui.screens import RenamePanelScreen
 from gitdirector.ui_theme import resolve_panel_theme
 
 from .conftest import _mock_manager
+
+
+def _valid_panel_config(**overrides):
+    return {
+        "name": "Main",
+        "rows": 1,
+        "cols": 2,
+        "layout": "grid_1x2",
+        "panes": {},
+        "closed_panes": [],
+        **overrides,
+    }
 
 
 class TestPaneWidget:
@@ -110,124 +123,66 @@ class TestPaneWidget:
         pane._terminal.stop.assert_called_once_with()
 
 
-class TestPanelViewScreen:
-    def test_build_status_text_shows_session_slug(self):
-        theme = resolve_panel_theme("rose-pine")
-        panel = Panel(
-            name="Main",
-            rows=1,
-            cols=2,
-            panes={1: "gd/my-repo/copilot/3", 2: None},
-        )
-        screen = PanelViewScreen(panel, MagicMock(), theme_name="rose-pine")
-        screen._focused_pane = 1
-        screen._pane_widgets = {
-            1: PaneWidget(1, "gd/my-repo/copilot/3", theme_name="rose-pine"),
-            2: PaneWidget(2, None, theme_name="rose-pine"),
-        }
-
-        status = screen._build_status_text()
-
-        assert " 1/2 " in status
-        assert "copilot my-repo/3" in status
-        assert f"on {theme.badge_active_bg.lower()}" in status.lower()
-        assert f"on {theme.label_active_bg.lower()}" in status.lower()
-
-    async def test_on_mount_applies_spans_for_tall_left_layout(self):
-        panel = Panel(
-            name="Focus",
-            rows=2,
-            cols=2,
-            panes={1: None, 2: None, 3: None},
-            layout_key="tall_left",
-        )
-        screen = PanelViewScreen(panel, MagicMock(), theme_name="rose-pine")
-        app = GitDirectorConsole()
-        app.manager = _mock_manager([])
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            pane1 = app.screen.query_one("#pane-1")
-            pane2 = app.screen.query_one("#pane-2")
-            pane3 = app.screen.query_one("#pane-3")
-
-            assert pane1.styles.row_span == 2
-            assert pane1.styles.column_span == 1
-            assert pane2.styles.row_span == 1
-            assert pane2.styles.column_span == 1
-            assert pane3.styles.row_span == 1
-            assert pane3.styles.column_span == 1
-
-    def test_handle_pane_session_closed_updates_pane_state(self):
-        panel = Panel(
-            name="Main",
-            rows=1,
-            cols=2,
-            panes={1: "gd/my-repo/copilot/3", 2: None},
-        )
-        store = MagicMock()
-        store.update_pane.return_value = False
-        screen = PanelViewScreen(panel, store, theme_name="rose-pine")
-        screen._pane_widgets = {1: MagicMock(spec=PaneWidget)}
-        screen._update_status = MagicMock()
-        screen.action_detach = MagicMock()
-
-        screen._handle_pane_session_closed(1)
-
-        store.update_pane.assert_called_once_with("Main", 1, None, closed=True)
-        assert panel.panes[1] is None
-        assert panel.closed_panes == {1}
-        screen._pane_widgets[1].show_session_closed.assert_called_once_with()
-        screen._update_status.assert_called_once_with()
-        screen.action_detach.assert_not_called()
-
-    def test_handle_pane_session_closed_keeps_panel_when_all_panes_closed(self):
-        panel = Panel(
-            name="Main",
-            rows=1,
-            cols=1,
-            panes={1: "gd/my-repo/copilot/3"},
-        )
-        store = MagicMock()
-        store.update_pane.return_value = False
-        screen = PanelViewScreen(panel, store, theme_name="rose-pine")
-        screen._pane_widgets = {1: MagicMock(spec=PaneWidget)}
-        screen._update_status = MagicMock()
-        screen.action_detach = MagicMock()
-
-        screen._handle_pane_session_closed(1)
-
-        store.update_pane.assert_called_once_with("Main", 1, None, closed=True)
-        assert panel.closed_panes == {1}
-        screen._pane_widgets[1].show_session_closed.assert_called_once_with()
-        screen._update_status.assert_called_once_with()
-        screen.action_detach.assert_not_called()
-
-    async def test_on_mount_shows_closed_message_for_persisted_closed_pane(self):
-        panel = Panel(
-            name="Focus",
-            rows=1,
-            cols=2,
-            panes={1: None, 2: None},
-            closed_panes={1},
-        )
-        screen = PanelViewScreen(panel, MagicMock(), theme_name="rose-pine")
-        app = GitDirectorConsole()
-        app.manager = _mock_manager([])
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            empty = screen.query_one("#pane-empty-1", Static)
-
-            assert "SESSION CLOSED" in str(empty.content)
-            assert "No session assigned" not in str(empty.content)
-
-
 class TestPanelStore:
+    @pytest.mark.parametrize(
+        ("data", "message"),
+        [
+            ({"panels": {}}, "'panels' must be a list"),
+            ({"panels": ["invalid"]}, "panel 1 must be a mapping"),
+            ({"panels": [_valid_panel_config(name=" ")]}, "name must be a non-empty string"),
+            ({"panels": [_valid_panel_config(layout=None)]}, "layout must be a known layout key"),
+            (
+                {"panels": [_valid_panel_config(layout="unknown")]},
+                "layout must be a known layout key",
+            ),
+            (
+                {"panels": [_valid_panel_config(rows=True)]},
+                "rows must be an integer between 1 and 3",
+            ),
+            ({"panels": [_valid_panel_config(cols=4)]}, "cols must be an integer between 1 and 3"),
+            ({"panels": [_valid_panel_config(panes=[])]}, "panes must be a mapping"),
+            (
+                {"panels": [_valid_panel_config(panes={3: "gd/repo/shell/1"})]},
+                "panes pane index 3 is outside 1..2",
+            ),
+            (
+                {"panels": [_valid_panel_config(panes={1: 1})]},
+                "panes\\[1\\] must be a string or null",
+            ),
+            ({"panels": [_valid_panel_config(closed_panes={})]}, "closed_panes must be a list"),
+            (
+                {"panels": [_valid_panel_config(closed_panes=[3])]},
+                "closed_panes pane index 3 is outside 1..2",
+            ),
+            (
+                {
+                    "panels": [
+                        _valid_panel_config(),
+                        _valid_panel_config(name="Main"),
+                    ]
+                },
+                "duplicates panel name 'Main'",
+            ),
+            (
+                {
+                    "panels": [
+                        _valid_panel_config(),
+                        _valid_panel_config(name="MAIN!"),
+                    ]
+                },
+                "normalizes to duplicate tmux session name 'gd/panel/main'",
+            ),
+        ],
+    )
+    def test_load_rejects_malformed_persisted_panels(self, tmp_path, data, message):
+        config_dir = tmp_path / ".gitdirector"
+        config_dir.mkdir()
+        (config_dir / "panels.yaml").write_text(yaml.safe_dump(data))
+
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            with pytest.raises(ValueError, match=message):
+                PanelStore()
+
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_create_skips_empty_panel(self, mock_kill_panel_tmux_session, tmp_path):
         with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
@@ -277,6 +232,43 @@ class TestPanelStore:
 
         assert deleted is False
         mock_kill_panel_tmux_session.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.cleanup_panel_attached_session")
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_rename_cleans_old_normalized_panel_session_and_inner_sessions(
+        self,
+        mock_kill_panel_tmux_session,
+        mock_cleanup_panel_attached_session,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create("Main", layout_key="grid_1x2", panes={1: "gd/repo/shell/1"})
+
+            renamed = store.rename("Main", "Operations")
+
+        assert renamed is True
+        assert store.get("Operations") is not None
+        mock_kill_panel_tmux_session.assert_called_once_with("Main")
+        mock_cleanup_panel_attached_session.assert_called_once_with("gd/repo/shell/1")
+
+    @patch("gitdirector.integrations.tmux.cleanup_panel_attached_session")
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_rename_preserves_shared_normalized_panel_session(
+        self,
+        mock_kill_panel_tmux_session,
+        mock_cleanup_panel_attached_session,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create("Main!", layout_key="grid_1x2", panes={1: "gd/repo/shell/1"})
+
+            renamed = store.rename("Main!", "main")
+
+        assert renamed is True
+        mock_kill_panel_tmux_session.assert_not_called()
+        mock_cleanup_panel_attached_session.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_update_pane_persists_closed_state(self, mock_kill_panel_tmux_session, tmp_path):
@@ -368,6 +360,34 @@ class TestPanelStore:
         assert reloaded_panel.panes == panel.panes
         mock_kill_panel_tmux_session.assert_called_once_with("Main")
 
+    @patch("gitdirector.integrations.tmux.cleanup_panel_attached_session")
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
+    def test_reconfigure_cleans_sessions_removed_from_new_layout(
+        self,
+        mock_kill_panel_tmux_session,
+        mock_cleanup_panel_attached_session,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create(
+                "Main",
+                layout_key="grid_1x2",
+                panes={1: "gd/repo/shell/1", 2: "gd/repo/copilot/1"},
+            )
+
+            reconfigured = store.reconfigure(
+                "Main",
+                layout_key="grid_1x1",
+                panes={1: "gd/repo/shell/1"},
+            )
+
+        assert reconfigured is True
+        assert mock_cleanup_panel_attached_session.call_args_list == [
+            (("gd/repo/shell/1",),),
+            (("gd/repo/copilot/1",),),
+        ]
+
 
 class TestTabStyling:
     def test_tab_headers_use_three_row_height(self):
@@ -380,6 +400,22 @@ class TestTabStyling:
 
 
 class TestGitDirectorConsolePanels:
+    async def test_empty_panels_show_message_without_table(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+        app._panel_store = MagicMock()
+        app._panel_store.panels = []
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app._load_panels()
+            await pilot.pause()
+
+            table = app.query_one("#panels-table", DataTable)
+            empty_message = app.query_one("#no-panels-message", Static)
+            assert table.row_count == 0
+            assert table.display is False
+            assert empty_message.display is True
+
     def test_three_pane_presets_use_equalized_layout_ratios(self):
         tall_left = resolve_panel_layout("tall_left")
         tall_right = resolve_panel_layout("tall_right")
@@ -717,6 +753,39 @@ class TestGitDirectorConsolePanels:
 
         assert isinstance(app.push_screen.call_args.args[0], RenamePanelScreen)
 
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
+    def test_rename_rejects_normalized_persisted_panel_session_collision(
+        self, _mock_session_exists
+    ):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = None
+        app._panel_store.panels = [
+            Panel(name="Main", rows=1, cols=1),
+            Panel(name="Old", rows=1, cols=1),
+        ]
+        app._update_status = MagicMock()
+
+        app._do_rename_panel("Old", "MAIN!")
+
+        app._panel_store.rename.assert_not_called()
+        app._update_status.assert_called_once_with(
+            "Panel 'MAIN!' conflicts with tmux session name 'gd/panel/main'"
+        )
+
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
+    def test_rename_rejects_live_panel_session_collision(self, _mock_session_exists):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = None
+        app._panel_store.panels = [Panel(name="Old", rows=1, cols=1)]
+        app._update_status = MagicMock()
+
+        app._do_rename_panel("Old", "Main")
+
+        app._panel_store.rename.assert_not_called()
+        app._update_status.assert_called_once_with("TMUX session 'gd/panel/main' already exists")
+
     def test_handle_panel_action_delete_pushes_confirmation(self):
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
@@ -783,8 +852,8 @@ class TestGitDirectorConsolePanels:
         app._open_panel.assert_called_once_with("Main")
         app._update_status.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux._protect_session")
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=True)
+    @patch("gitdirector.integrations.tmux.core._protect_session")
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
     def test_open_panel_attaches_immediately(self, _mock_exists, mock_protect):
         app = GitDirectorConsole()
         app._panel_store = MagicMock()
@@ -800,7 +869,7 @@ class TestGitDirectorConsolePanels:
         "gitdirector.integrations.tmux.rebuild_panel_tmux_session",
         return_value="gd/panel/main",
     )
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     def test_open_panel_rebuilds_without_inner_delay(self, _mock_exists, mock_rebuild):
         app = GitDirectorConsole()
         app._panel_store = MagicMock()
@@ -821,7 +890,7 @@ class TestGitDirectorConsolePanels:
         app._suspend_and_attach.assert_called_once_with("gd/panel/main", row_key="Main")
 
     @patch(
-        "gitdirector.integrations.tmux._list_sessions",
+        "gitdirector.integrations.tmux.core._list_sessions",
         return_value=[
             "gd/alpha/shell/1",
             "gd/beta/copilot/1",
@@ -917,7 +986,7 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Studio", app._panels_col_keys[5]) == "\n[green]● active[/green]"
             assert table.get_row_height("Studio") == 9
 
-    @patch("gitdirector.integrations.tmux._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     async def test_load_panels_counts_only_live_sessions_in_panes_column(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
@@ -939,7 +1008,7 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Main", app._panels_col_keys[5]) == "\n[dim]○ empty[/dim]"
 
     @patch(
-        "gitdirector.integrations.tmux._list_sessions",
+        "gitdirector.integrations.tmux.core._list_sessions",
         return_value=["gd/alpha/shell/1"],
     )
     async def test_load_panels_renders_stale_sessions_as_open_squares(self, _mock_list):
@@ -971,7 +1040,7 @@ class TestGitDirectorConsolePanels:
             assert table.get_cell("Main", app._panels_col_keys[5]) == "\n[green]● active[/green]"
 
     @patch(
-        "gitdirector.integrations.tmux._list_sessions",
+        "gitdirector.integrations.tmux.core._list_sessions",
         return_value=["gd/alpha/shell/1", "gd/ops/shell/1"],
     )
     async def test_panel_refresh_preserves_selected_row(self, _mock_list):

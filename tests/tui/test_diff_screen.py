@@ -16,6 +16,7 @@ These tests cover:
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,7 +32,7 @@ from gitdirector.commands.tui import (
 from gitdirector.commands.tui.screens.commit import CommitMessageScreen
 from gitdirector.commands.tui.screens.diff_files import FileTileList
 
-from .conftest import _make_info, _mock_manager, _wait_for_refresh
+from .conftest import _make_info, _mock_manager, _wait_for_deferred_scroll, _wait_for_refresh
 
 
 @pytest.fixture(autouse=True)
@@ -149,21 +150,35 @@ class TestDiffReviewScreenCompose:
             assert "brackets" in hint_text
             assert "n/p" not in hint_text
 
-    async def test_loading_indicator_shown_while_diff_loads(self):
-        # The loading indicator is shown before the worker completes and then
-        # hidden after. Both the autouse fixture's `get_diff_against_head`
-        # patch and the worker's lifecycle are exercised in the rest of the
-        # test suite, so here we just verify the screen has the loading
-        # container mounted in the DOM.
+    async def test_loading_indicator_shown_while_diff_loads(self, mocker):
+        from gitdirector import repo as repo_mod
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def pending_diff(self, **_kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            return True, "", []
+
+        mocker.patch.object(repo_mod.Repository, "get_diff_against_head", pending_diff)
         screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             app.push_screen(screen)
             await pilot.pause()
-            loading_container = app.screen.query_one("#diff-loading")
-            assert loading_container is not None
-            assert any(isinstance(child, LoadingIndicator) for child in loading_container.children)
+            try:
+                assert started.wait(timeout=5)
+                loading_container = app.screen.query_one("#diff-loading")
+                assert loading_container.display is True
+                assert any(
+                    isinstance(child, LoadingIndicator) for child in loading_container.children
+                )
+            finally:
+                release.set()
+            await app.workers.wait_for_complete()
+            assert loading_container.display is False
 
 
 class TestDiffReviewScreenLoading:
@@ -259,14 +274,8 @@ class TestDiffReviewScreenNavigation:
         screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
         app.push_screen(screen)
         await app.workers.wait_for_complete()
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-        await pilot.pause()
         files_list = app.screen.query_one("#diff-files-list", FileTileList)
-        for _ in range(50):
-            if files_list.index is not None:
-                break
-            await pilot.pause()
+        await _wait_for_deferred_scroll(files_list)
         assert files_list.index is not None, "diff file list did not initialise"
         return screen, files_list
 
@@ -737,12 +746,6 @@ class TestReviewDiffActionMenuIntegration:
             app._handle_git_menu_action("review_diff", Path("/tmp/alpha"))
             await pilot.pause()
             assert isinstance(app.screen, DiffReviewScreen)
-
-    async def test_open_review_diff_no_selection(self):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as _:
-            app._open_review_diff()
 
 
 class TestDiffReviewScreenCommitFlow:

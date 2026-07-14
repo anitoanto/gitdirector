@@ -137,18 +137,20 @@ class TestAdvisoryFileLockExclusivity:
         """
         lock_path = tmp_path / "lock"
         order: list[str] = []
-        second_started = threading.Event()
+        first_acquired = threading.Event()
+        second_attempting = threading.Event()
         first_can_release = threading.Event()
 
         def first():
             with advisory_file_lock(lock_path):
                 order.append("first-acquired")
-                second_started.set()
-                first_can_release.wait(timeout=2)
+                first_acquired.set()
+                assert first_can_release.wait(timeout=5)
                 order.append("first-released")
 
         def second():
-            second_started.wait(timeout=2)
+            assert first_acquired.wait(timeout=5)
+            second_attempting.set()
             with advisory_file_lock(lock_path):
                 order.append("second-acquired")
 
@@ -156,14 +158,16 @@ class TestAdvisoryFileLockExclusivity:
         t2 = threading.Thread(target=second)
         t1.start()
         t2.start()
-        # Give second a moment to attempt the lock; it must block.
-        t2.join(timeout=0.2)
-        # Order so far: "first-acquired". Second has NOT acquired yet.
-        assert order == ["first-acquired"], "second writer should have blocked on the advisory lock"
-        first_can_release.set()
-        t1.join(timeout=2)
-        t2.join(timeout=2)
-        # After release, second acquires.
+        try:
+            assert first_acquired.wait(timeout=5)
+            assert second_attempting.wait(timeout=5)
+            assert order == ["first-acquired"]
+        finally:
+            first_can_release.set()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
+        assert not t1.is_alive()
+        assert not t2.is_alive()
         assert order == ["first-acquired", "first-released", "second-acquired"]
 
     def test_lock_file_is_created_on_first_acquire(self, tmp_path):

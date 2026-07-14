@@ -111,10 +111,14 @@ class TestConfirmScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
+            assert menu.option_count == 2
+            assert menu.highlighted == 0
             await pilot.press("up")
+            assert menu.highlighted == 1
             await pilot.press("down")
+            assert menu.highlighted == 0
             await pilot.press("down")
-            assert menu
+            assert menu.highlighted == 1
 
 
 class TestActionMenuScreen:
@@ -210,21 +214,6 @@ class TestActionMenuScreen:
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
             assert menu.option_count == 14
-
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
-    async def test_disabled_options_and_navigation(self, _mock_sessions):
-        screen = ActionMenuScreen("repo", Path("/tmp/repo"), branch="main")
-        results = []
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)) as pilot:
-            app.push_screen(screen, callback=lambda v: results.append(v))
-            await pilot.pause()
-            menu = app.screen.query_one("#action-menu", OptionList)
-            for _ in range(menu.option_count):
-                await pilot.press("down")
-            await pilot.press("enter")
-            assert results
 
 
 class TestGitOperationsMenuScreen:
@@ -965,7 +954,7 @@ class TestCreatePanelScreen:
                 )
             ]
 
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_duplicate_panel_name_submit_stays_open_and_shows_error(
         self, _mock_sessions, _mock_session_exists
@@ -1001,7 +990,7 @@ class TestCreatePanelScreen:
             assert results == []
             assert "already exists" in str(hint.content)
 
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_slug_conflict_submit_stays_open_and_shows_error(
         self, _mock_sessions, _mock_session_exists
@@ -1041,7 +1030,7 @@ class TestCreatePanelScreen:
             assert "conflicts with tmux session name" in str(hint.content)
             assert "gd/panel/ops" in str(hint.content)
 
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_live_tmux_name_conflict_submit_stays_open_and_shows_error(
         self, _mock_sessions, _mock_session_exists
@@ -1349,21 +1338,6 @@ class TestRemoveSessionScreen:
             await pilot.press("enter")
             await pilot.pause()
             assert results == ["gd/my-repo/shell/1"]
-
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
-    async def test_navigation(self, _mock_sessions):
-        screen = RemoveSessionScreen("repo", Path("/tmp/repo"))
-        results = []
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)) as pilot:
-            app.push_screen(screen, callback=lambda v: results.append(v))
-            await pilot.pause()
-            app.screen.query_one("#action-menu", OptionList)
-            await pilot.press("down")
-            await pilot.press("up")
-            await pilot.press("enter")
-            assert results
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
     async def test_j_k_navigation(self, _mock_sessions):

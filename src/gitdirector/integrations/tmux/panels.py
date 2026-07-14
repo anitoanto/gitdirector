@@ -1105,4 +1105,10 @@ def _create_temp_panel_tmux_session(
     return temp_panel_session_name
 
 
-__all__ = [name for name in globals() if not name.startswith("__")]
+__all__ = [
+    "cleanup_panel_attached_session",
+    "cleanup_temp_panel_tmux_session",
+    "ensure_temp_panel_tmux_session",
+    "kill_panel_tmux_session",
+    "rebuild_panel_tmux_session",
+]

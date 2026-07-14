@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from gitdirector.config import Config
@@ -58,6 +59,64 @@ class TestConfigInit:
         cfg = Config()
         assert cfg.repositories == []
         assert cfg.max_workers == Config.DEFAULT_MAX_WORKERS
+
+    @pytest.mark.parametrize(
+        ("main_data", "secrets_data", "message"),
+        [
+            ({"repositories": "/tmp/repo"}, None, "Invalid repositories"),
+            ({"repositories": ["", "/tmp/repo"]}, None, "Invalid repositories"),
+            ({"repositories": [1]}, None, "Invalid repositories"),
+            ({"max_workers": True}, None, "Invalid max_workers"),
+            ({"max_workers": "4"}, None, "Invalid max_workers"),
+            ({"max_workers": 33}, None, "Invalid max_workers"),
+            ({"theme": None}, None, "Invalid theme"),
+            ({"theme": "   "}, None, "Invalid theme"),
+            (None, {"github_username": 1}, "Invalid github_username"),
+            (None, {"github_PAT": []}, "Invalid github_PAT"),
+        ],
+    )
+    def test_rejects_malformed_loaded_fields(
+        self, config_dir, monkeypatch, main_data, secrets_data, message
+    ):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        if main_data is not None:
+            (config_dir / "config.yaml").write_text(yaml.dump(main_data))
+        if secrets_data is not None:
+            (config_dir / "secrets.yaml").write_text(yaml.dump(secrets_data))
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+
+        with pytest.raises(ValueError, match=message):
+            Config()
+
+    def test_blank_github_credentials_load_as_none(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "secrets.yaml").write_text(
+            yaml.dump({"github_username": "  ", "github_PAT": ""})
+        )
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+
+        cfg = Config()
+
+        assert cfg.github_username is None
+        assert cfg.github_PAT is None
+
+
+class TestConfigReloadValidation:
+    @pytest.mark.parametrize(
+        ("filename", "data", "message"),
+        [
+            ("config.yaml", {"repositories": "not-a-list"}, "Invalid repositories"),
+            ("config.yaml", {"max_workers": False}, "Invalid max_workers"),
+            ("config.yaml", {"theme": ""}, "Invalid theme"),
+            ("secrets.yaml", {"github_username": 1}, "Invalid github_username"),
+            ("secrets.yaml", {"github_PAT": {}}, "Invalid github_PAT"),
+        ],
+    )
+    def test_rejects_malformed_fields_reloaded_under_lock(self, config, filename, data, message):
+        (config.config_dir / filename).write_text(yaml.dump(data))
+
+        with pytest.raises(ValueError, match=message):
+            config.add_repository(Path("/tmp/repo"))
 
 
 class TestConfigAddRepository:

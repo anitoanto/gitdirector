@@ -652,38 +652,39 @@ class TestExactMatchSourceCodeAudit:
         import ast
         import inspect
 
-        import gitdirector.integrations.tmux as tmux_mod
-
-        source = inspect.getsource(tmux_mod)
-        tree = ast.parse(source)
+        from gitdirector.integrations.tmux import core, monitor, panels
 
         violations = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.List):
-                continue
-            elts = node.elts
-            for i, elt in enumerate(elts):
-                if not (isinstance(elt, ast.Constant) and elt.value == "-t"):
+        for module in (core, monitor, panels):
+            tree = ast.parse(inspect.getsource(module))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.List):
                     continue
-                if i + 1 >= len(elts):
-                    continue
-                next_elt = elts[i + 1]
-                if isinstance(next_elt, ast.Constant):
-                    val = str(next_elt.value)
-                    if not val.startswith("="):
-                        violations.append(f"Line {node.lineno}: literal '-t' followed by {val!r}")
-                elif isinstance(next_elt, ast.JoinedStr):
-                    first_val = next_elt.values[0] if next_elt.values else None
-                    if isinstance(first_val, ast.Constant) and not str(first_val.value).startswith(
-                        "="
-                    ):
-                        violations.append(
-                            f"Line {node.lineno}: f-string '-t' target doesn't start with '='"
-                        )
-                    elif isinstance(first_val, ast.FormattedValue):
-                        violations.append(
-                            f"Line {node.lineno}: f-string '-t' target starts with a variable (should prefix '=')"
-                        )
+                elts = node.elts
+                for i, elt in enumerate(elts):
+                    if not (isinstance(elt, ast.Constant) and elt.value == "-t"):
+                        continue
+                    if i + 1 >= len(elts):
+                        continue
+                    next_elt = elts[i + 1]
+                    if isinstance(next_elt, ast.Constant):
+                        val = str(next_elt.value)
+                        if not val.startswith("="):
+                            violations.append(
+                                f"{module.__name__}:{node.lineno}: literal '-t' followed by {val!r}"
+                            )
+                    elif isinstance(next_elt, ast.JoinedStr):
+                        first_val = next_elt.values[0] if next_elt.values else None
+                        if isinstance(first_val, ast.Constant) and not str(
+                            first_val.value
+                        ).startswith("="):
+                            violations.append(
+                                f"{module.__name__}:{node.lineno}: f-string '-t' target doesn't start with '='"
+                            )
+                        elif isinstance(first_val, ast.FormattedValue):
+                            violations.append(
+                                f"{module.__name__}:{node.lineno}: f-string '-t' target starts with a variable"
+                            )
         assert violations == [], (
             "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
         )

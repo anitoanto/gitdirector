@@ -18,6 +18,7 @@ from __future__ import annotations
 import click
 
 from ..integrations.tmux import capture_pane
+from ..integrations.tmux.core import _parse_gd_session_name
 
 
 def _resolve_session_name(name: str) -> str:
@@ -26,8 +27,6 @@ def _resolve_session_name(name: str) -> str:
     gd-capture refuses anything that doesn't match the ``gd/{repo}/{purpose}/{N}``
     shape — that way a typo can't be silently routed to the wrong session.
     """
-    from ..integrations.tmux import _parse_gd_session_name
-
     parsed = _parse_gd_session_name(name)
     if parsed is None:
         raise click.BadParameter(

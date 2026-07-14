@@ -15,26 +15,26 @@ def register(cli: click.Group):
         type=click.Path(exists=False),
         shell_complete=complete_repository_names,
     )
-    @click.option("--discover", is_flag=True, help="Recursively discover repositories to unlink")
+    @click.option("--discover", is_flag=True, help="Unlink tracked repositories under PATH")
     def unlink(target: str, discover: bool):
         manager = RepositoryManager()
-        success, message, repos = manager.remove_repository(Path(target), discover=discover)
-
-        # If path-based lookup failed and the target looks like a plain name, try by name.
-        # Treat the following as paths (not names): contains a separator, is '.' or '..', is
-        # absolute, starts with '~', or refers to an existing filesystem entry.
-        if not success and not discover:
-            path_obj = Path(target)
-            is_path_like = (
-                "/" in target
-                or "\\" in target
-                or target in (".", "..")
-                or path_obj.is_absolute()
-                or target.startswith("~")
-                or path_obj.exists()
-            )
-            if not is_path_like:
-                success, message, repos = manager.remove_by_name(target)
+        if discover:
+            success, message, repos = manager.remove_repository(Path(target), discover=True)
+        else:
+            repo_path, matches, path_attempted = manager.resolve_repository_target(target)
+            if repo_path is not None:
+                success, message, repos = manager.remove_repository(repo_path)
+            elif path_attempted:
+                success, message, repos = False, f"No tracked repository at path: {target}", []
+            elif matches:
+                paths_list = "\n".join(f"  {path}" for path in matches)
+                success, message, repos = (
+                    False,
+                    f"Multiple repositories named '{target}' — use the full path:\n{paths_list}",
+                    [],
+                )
+            else:
+                success, message, repos = False, f"No tracked repository named: {target}", []
 
         console.print()
         if success:

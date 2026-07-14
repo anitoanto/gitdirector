@@ -100,7 +100,7 @@ class PanelActionMenuScreen(ModalScreen[str]):
         self.panel = panel
 
     def compose(self) -> ComposeResult:
-        from ....integrations.tmux import make_panel_session_name
+        from ....integrations.tmux.core import make_panel_session_name
 
         session_name = make_panel_session_name(self.panel.name)
 
@@ -625,17 +625,27 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         return f"↑↓/jk navigate    \\[tab] switch lists    \\[ctrl+o] {verb}    \\[esc] back"
 
     @staticmethod
-    def validate_new_panel_name(panel_store: PanelStore, name: str) -> str | None:
-        from ....integrations.tmux import _session_exists, make_panel_session_name
+    def validate_new_panel_name(
+        panel_store: PanelStore,
+        name: str,
+        *,
+        current_name: str | None = None,
+    ) -> str | None:
+        from ....integrations.tmux.core import _session_exists, make_panel_session_name
 
-        if panel_store.get(name):
+        if panel_store.get(name) and name != current_name:
             return f"Panel '{name}' already exists"
 
         session_name = make_panel_session_name(name)
-        if any(make_panel_session_name(panel.name) == session_name for panel in panel_store.panels):
+        if any(
+            panel.name != current_name and make_panel_session_name(panel.name) == session_name
+            for panel in panel_store.panels
+        ):
             return f"Panel '{name}' conflicts with tmux session name '{session_name}'"
 
-        if _session_exists(session_name):
+        if _session_exists(session_name) and (
+            current_name is None or make_panel_session_name(current_name) != session_name
+        ):
             return f"TMUX session '{session_name}' already exists"
 
         return None

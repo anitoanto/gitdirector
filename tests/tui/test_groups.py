@@ -55,7 +55,7 @@ class TestRepositoryGroups:
             await pilot.pause()
 
             assert any(
-                binding.key == "space" and binding.description == "Toggle Group"
+                binding.key == "space" and binding.description == "Toggle"
                 for binding in app.query(FooterKey)
             )
 
@@ -63,7 +63,7 @@ class TestRepositoryGroups:
             await pilot.pause()
 
             assert not any(
-                binding.key == "space" and binding.description == "Toggle Group"
+                binding.key == "space" and binding.description == "Toggle"
                 for binding in app.query(FooterKey)
             )
 
@@ -89,7 +89,7 @@ class TestRepositoryGroups:
             assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
             assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"
             assert table.get_cell("/tmp/other/solo", app._col_keys[0]) == "solo"
-            assert "[space] toggle group" in app.query_one("#status-bar", Static).content
+            assert "[space] toggle" in app.query_one("#status-bar", Static).content
 
             table.move_cursor(row=0)
             assert app._get_selected_path() == Path("/tmp/work")
@@ -133,7 +133,7 @@ class TestRepositoryGroups:
         app.manager = _mock_manager([])
 
         async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause()
+            await app.workers.wait_for_complete()
             app._repo_paths = [repo.path for repo in repos]
             app._groups_entries = detect_repo_groups(app._repo_paths)
             app._results = {str(repos[0].path): repos[0]}
