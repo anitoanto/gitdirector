@@ -19,6 +19,7 @@ import pyte
 from pyte.screens import Char
 from rich.color import ColorParseError
 from rich.console import Console
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual import events
@@ -659,9 +660,12 @@ class TerminalWidget(Widget, can_focus=True):
         cell_length = max(self.size.width, 1)
         if y < len(self._lines):
             line = self._lines[y]
-            segments = list(line.render(self._render_console))
+            segments = [
+                Segment(segment.text, segment.style or Style(), segment.control)
+                for segment in line.render(self._render_console)
+            ]
             return Strip.from_lines([segments], cell_length=cell_length)[0]
-        return Strip.blank(cell_length)
+        return Strip.blank(cell_length, Style())
 
     def _selection_rect(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
         """Return a normalized ``((row, col), (row, col))`` rect, or None."""

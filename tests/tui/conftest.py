@@ -34,6 +34,15 @@ async def _wait_for_animated_scroll(pilot, widget) -> None:
     await pilot.wait_for_scheduled_animations()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tui_tmux_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "gitdirector.integrations.tmux.sync_panel_tmux_config",
+        lambda *_args, **_kwargs: tmp_path / ".gitdirector" / "tmux.conf",
+    )
+
+
 def _status_is_loading(app) -> bool:
     if app is None:
         return False

@@ -443,11 +443,12 @@ def kill_tmux_session(session_name: str) -> bool:
 def kill_all_gd_sessions() -> list[str]:
     """Kill every ``gd/*`` tmux session and return the names that were killed.
 
-    Uses :func:`list_all_gd_sessions` to enumerate, then forwards each entry
-    through :func:`kill_tmux_session` so the same exact-match and ``gd/``
-    prefix guarantees apply. Names that fail to kill (already gone, server
-    crashed mid-iteration) are silently skipped — this is best-effort cleanup,
-    not a hard guarantee, so a partially-stale list is acceptable.
+    Uses :func:`list_all_gd_sessions` plus persistent panel sessions to
+    enumerate, then forwards each name through :func:`kill_tmux_session` so
+    the same exact-match and ``gd/`` prefix guarantees apply. Names that fail
+    to kill (already gone, server crashed mid-iteration) are silently skipped
+    — this is best-effort cleanup, not a hard guarantee, so a partially-stale
+    list is acceptable.
 
     Returns the list of session names that were successfully killed, which
     callers can use to print a summary. Returns an empty list when tmux is
@@ -455,13 +456,18 @@ def kill_all_gd_sessions() -> list[str]:
     """
     try:
         entries = list_all_gd_sessions()
+        session_names = {entry["session_name"] for entry in entries}
+        session_names.update(
+            session_name
+            for session_name in _list_sessions()
+            if _is_persistent_panel_session(session_name)
+        )
     except (TmuxError, OSError, ValueError):
         logger.debug("Failed to enumerate GitDirector tmux sessions", exc_info=True)
         return []
 
     killed: list[str] = []
-    for entry in entries:
-        session_name = entry["session_name"]
+    for session_name in sorted(session_names):
         try:
             if kill_tmux_session(session_name):
                 killed.append(session_name)
@@ -581,7 +587,7 @@ def _is_temp_panel_session(session_name: str) -> bool:
 
 def _is_persistent_panel_session(session_name: str) -> bool:
     parts = session_name.split("/")
-    return len(parts) == 3 and parts[:2] == ["gd", "panel"]
+    return len(parts) == 3 and parts[:2] == ["gd", "panel"] and bool(parts[2])
 
 
 def _should_open_in_temp_panel(session_name: str) -> bool:
@@ -1152,4 +1158,17 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     return config_path
 
 
-__all__ = [name for name in globals() if not name.startswith("__")]
+__all__ = [
+    "TmuxError",
+    "attach_tmux_session",
+    "capture_pane",
+    "create_tmux_session",
+    "kill_all_gd_sessions",
+    "kill_tmux_session",
+    "list_all_gd_sessions",
+    "list_repo_sessions",
+    "open_in_tmux",
+    "send_key_to_session",
+    "send_text_to_session",
+    "sync_panel_tmux_config",
+]

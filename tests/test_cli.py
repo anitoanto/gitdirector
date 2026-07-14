@@ -1,5 +1,6 @@
 import runpy
 import warnings
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -87,6 +88,7 @@ def _mock_manager(**overrides):
     mgr = MagicMock()
     mgr.config.repositories = []
     mgr.config.max_workers = 2
+    mgr.resolve_repository_target = MagicMock(return_value=(None, [], False))
     for key, val in overrides.items():
         setattr(mgr, key, MagicMock(return_value=val))
     return mgr
@@ -132,18 +134,20 @@ class TestLinkCommand:
 
     def test_link_discover_none_found(self, runner, tmp_path):
         """--discover finds no repositories: should print message and succeed."""
-        mgr = _mock_manager(add_repository=(True, "No repositories found", [], []))
+        mgr = _mock_manager(add_repository=(False, "No git repositories found", [], []))
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
         assert result.exit_code == 0
         assert (
-            "no repositories" in result.output.lower() or "nothing to do" in result.output.lower()
+            "no git repositories" in result.output.lower()
+            or "nothing to do" in result.output.lower()
         )
 
 
 class TestUnlinkCommand:
     def test_unlink_success(self, runner, tmp_path):
         mgr = _mock_manager(remove_repository=(True, "Removed repository: /r", [tmp_path]))
+        mgr.resolve_repository_target.return_value = (tmp_path, [], True)
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", str(tmp_path)])
         assert result.exit_code == 0
@@ -155,11 +159,11 @@ class TestUnlinkCommand:
         assert result.exit_code == 1
 
     def test_unlink_by_name_success(self, runner, tmp_path):
-        """Plain name falls through to remove_by_name when path lookup fails."""
+        """A resolved plain name removes its tracked repository path."""
         mgr = _mock_manager(
-            remove_repository=(False, "Repository not tracked: /x", []),
-            remove_by_name=(True, f"Removed repository: {tmp_path}", [tmp_path]),
+            remove_repository=(True, f"Removed repository: {tmp_path}", [tmp_path]),
         )
+        mgr.resolve_repository_target.return_value = (tmp_path, [], False)
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
         assert result.exit_code == 0
@@ -168,7 +172,6 @@ class TestUnlinkCommand:
         """Returns exit code 1 when name is not tracked."""
         mgr = _mock_manager(
             remove_repository=(False, "Repository not tracked", []),
-            remove_by_name=(False, "No tracked repository named: my-repo", []),
         )
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
@@ -179,7 +182,11 @@ class TestUnlinkCommand:
         """Returns exit code 1 when multiple repos share the same name."""
         mgr = _mock_manager(
             remove_repository=(False, "Repository not tracked", []),
-            remove_by_name=(False, "Multiple repositories named 'my-repo'", []),
+        )
+        mgr.resolve_repository_target.return_value = (
+            None,
+            [Path("/a/my-repo"), Path("/b/my-repo")],
+            False,
         )
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])

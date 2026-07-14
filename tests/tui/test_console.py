@@ -37,9 +37,13 @@ class TestGitDirectorConsole:
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
         async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
+            empty_message = app.query_one("#no-repos-message", Static)
             assert table.row_count == 0
+            assert table.display is False
+            assert empty_message.display is True
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_table_populated_with_repos(self, _mock_sessions):
@@ -243,18 +247,6 @@ class TestGitDirectorConsole:
             assert len(table.columns) == 6
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    @patch("gitdirector.commands.tui.ActionMenuScreen")
-    async def test_enter_opens_action_menu(self, mock_screen_cls, _mock_sessions):
-        repos = [_make_info("alpha", Path("/tmp/alpha"), branch="main")]
-        app = GitDirectorConsole()
-        app.manager = _mock_manager(repos)
-        async with app.run_test(size=(120, 30)) as pilot:
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._handle_menu_action(None)
-            assert True
-
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_handle_menu_action_new_session(self, _mock_sessions):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
@@ -275,12 +267,6 @@ class TestGitDirectorConsole:
             await pilot.pause()
             app._handle_menu_action("attach:gd/alpha/shell/1")
             app._attach_to_session.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
-
-    async def test_handle_menu_action_none_is_noop(self):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as _:
-            app._handle_menu_action(None)
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",

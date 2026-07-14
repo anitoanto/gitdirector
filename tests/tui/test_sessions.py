@@ -18,7 +18,9 @@ class TestSessionsTab:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as _:
-            assert app.query_one("#sessions-table", DataTable)
+            table = app.query_one("#sessions-table", DataTable)
+            assert table
+            assert table.display is False
 
     async def test_sessions_table_has_columns(self):
         app = GitDirectorConsole()
@@ -56,7 +58,9 @@ class TestSessionsTab:
             await app.workers.wait_for_complete()
             await pilot.pause()
             no_msg = app.query_one("#no-sessions-message", Static)
+            table = app.query_one("#sessions-table", DataTable)
             assert no_msg.display is True
+            assert table.display is False
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
@@ -1026,18 +1030,6 @@ class TestSessionsRefreshOnReturn:
             await pilot.pause()
             app.manager.get_repository_status.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_suspend_and_attach_refreshes_repo(self, _mock_list):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
-        app._refresh_repo_for_path = MagicMock()
-        app.suspend = MagicMock(
-            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
-        )
-        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
-            with patch("sys.stdout"):
-                app._suspend_and_attach("gd-test", Path("/tmp/alpha"))
-
     async def test_input_changed_routes_to_sessions_filter(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1263,8 +1255,8 @@ class TestSessionDescription:
             ck = app._sess_col_keys
             assert table.columns[ck[4]].width == _resolve_sessions_description_width(app.size.width)
 
-    @patch("gitdirector.integrations.tmux._set_session_description")
-    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.core._set_session_description")
+    @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_d_key_opens_description_editor(self, _mock_list, _mock_get_desc, _mock_set_desc):
         app = GitDirectorConsole()
@@ -1284,8 +1276,8 @@ class TestSessionDescription:
 
             assert isinstance(app.screen, EditSessionDescriptionScreen)
 
-    @patch("gitdirector.integrations.tmux._set_session_description")
-    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.core._set_session_description")
+    @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_handle_description_edit_persists_value(
         self, _mock_list, _mock_get_desc, mock_set_desc
@@ -1302,8 +1294,8 @@ class TestSessionDescription:
             matching = [e for e in app._sessions_entries if e["session_name"] == "gd/alpha/shell/1"]
             assert matching[0]["description"] == "  ready to ship  "
 
-    @patch("gitdirector.integrations.tmux._set_session_description")
-    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.core._set_session_description")
+    @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_handle_description_edit_empty_resets_to_placeholder(
         self, _mock_list, _mock_get_desc, mock_set_desc
@@ -1320,7 +1312,7 @@ class TestSessionDescription:
             matching = [e for e in app._sessions_entries if e["session_name"] == "gd/alpha/shell/1"]
             assert matching[0]["description"] == "-"
 
-    @patch("gitdirector.integrations.tmux._get_session_description", return_value="-")
+    @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_action_edit_session_description_noop_on_other_tabs(
         self, _mock_list, _mock_get_desc

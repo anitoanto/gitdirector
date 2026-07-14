@@ -15,6 +15,7 @@ def test_helper_returns_github_credentials():
         text=True,
         env=env,
         check=False,
+        timeout=10,
     )
 
     assert result.returncode == 0
@@ -33,6 +34,7 @@ def test_helper_ignores_non_github_hosts():
         text=True,
         env=env,
         check=False,
+        timeout=10,
     )
 
     assert result.returncode == 0

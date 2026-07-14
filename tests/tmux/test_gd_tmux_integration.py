@@ -31,6 +31,7 @@ def _run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str
         capture_output=True,
         text=True,
         check=check,
+        timeout=10,
     )
 
 
