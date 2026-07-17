@@ -67,6 +67,32 @@ class TestUnlinkByName:
         assert "no tracked" in result.output.lower() or "not" in result.output.lower()
 
 
+class TestUnlinkDiscover:
+    def test_unlink_discover_uses_a_relative_path(self, unlink_cli, config, tmp_path, monkeypatch):
+        runner, _ = unlink_cli
+        linked = tmp_path / "projects" / "app"
+        retained = tmp_path / "other" / "app"
+        _seed_repo(config, linked)
+        _seed_repo(config, retained)
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(cli, ["unlink", "projects", "--discover"])
+
+        assert result.exit_code == 0, result.output
+        assert not config.has_repository(linked)
+        assert config.has_repository(retained)
+
+    def test_unlink_discover_removes_stale_tracked_paths(self, unlink_cli, config, tmp_path):
+        runner, _ = unlink_cli
+        stale_repo = tmp_path / "missing" / "repo"
+        config.add_repository(stale_repo)
+
+        result = runner.invoke(cli, ["unlink", str(tmp_path / "missing"), "--discover"])
+
+        assert result.exit_code == 0, result.output
+        assert not config.has_repository(stale_repo)
+
+
 class TestUnlinkAmbiguity:
     def test_ambiguous_name_lists_all_matching_paths(self, unlink_cli, config, tmp_path):
         """Two repos with the same basename: the command must refuse and list both."""

@@ -28,7 +28,7 @@ class TestHostCapabilityDetection:
 
     @pytest.fixture(autouse=True)
     def _restore_env(self, monkeypatch):
-        yield
+        monkeypatch.delenv("NO_COLOR", raising=False)
 
     def test_dumb_terminal_detected(self, monkeypatch):
         monkeypatch.setenv("TERM", "dumb")

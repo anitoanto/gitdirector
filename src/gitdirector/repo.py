@@ -560,6 +560,13 @@ class Repository:
         marker line that the renderer can display to the user.
         """
         code, diff_text, err = self._run_git("diff", "HEAD", "--no-color", _strip=False)
+        if code != 0 and _is_no_commits_error(err):
+            code, diff_text, err = self._run_git(
+                "diff",
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                "--no-color",
+                _strip=False,
+            )
         if code != 0:
             return False, err or "git diff failed", []
 

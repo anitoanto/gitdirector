@@ -609,16 +609,15 @@ class TestFileListScrolling:
             await app.workers.wait_for_complete()
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            await _wait_for_deferred_scroll(files_list)
             assert len(files_list._specs) == 20
             assert files_list.is_scrollable
+            assert files_list.max_scroll_y > 0
             # Jump to the last item; the list must scroll to keep
             # it visible (scroll_offset.y should advance past zero).
             files_list.index = 19
             target_y = files_list.max_scroll_y
-            for _ in range(20):
-                if files_list.scroll_offset.y == target_y and target_y > 0:
-                    break
-                await pilot.pause()
+            await _wait_for_deferred_scroll(files_list)
             assert files_list.scroll_offset.y > 0
             # And the scroll position should be near the maximum.
             assert files_list.scroll_offset.y == target_y

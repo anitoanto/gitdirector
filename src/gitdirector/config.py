@@ -42,26 +42,49 @@ class Config:
 
     @classmethod
     def _validate_max_workers(cls, value: object) -> int:
-        try:
-            max_workers = int(value)
-        except (TypeError, ValueError) as exc:
+        if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(
                 "Invalid max_workers: expected an integer "
                 f"between {cls.MIN_MAX_WORKERS} and {cls.MAX_MAX_WORKERS}"
-            ) from exc
-        if not cls.MIN_MAX_WORKERS <= max_workers <= cls.MAX_MAX_WORKERS:
+            )
+        if not cls.MIN_MAX_WORKERS <= value <= cls.MAX_MAX_WORKERS:
             raise ValueError(
                 "Invalid max_workers: expected a value "
                 f"between {cls.MIN_MAX_WORKERS} and {cls.MAX_MAX_WORKERS}"
             )
-        return max_workers
+        return value
 
     @staticmethod
-    def _optional_str(value: object) -> str | None:
+    def _optional_str(value: object, field: str) -> str | None:
         if value is None:
             return None
-        text = str(value).strip()
-        return text or None
+        if not isinstance(value, str):
+            raise ValueError(f"Invalid {field}: expected a string or null")
+        return value.strip() or None
+
+    @staticmethod
+    def _validate_repositories(value: object) -> list[str]:
+        if not isinstance(value, list) or any(
+            not isinstance(path, str) or not path.strip() for path in value
+        ):
+            raise ValueError("Invalid repositories: expected a list of nonempty strings")
+        return value
+
+    @staticmethod
+    def _validate_theme(value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Invalid theme: expected a nonempty string")
+        return value
+
+    @classmethod
+    def _validate_loaded_data(
+        cls, main_data: dict[str, object], secrets_data: dict[str, object]
+    ) -> None:
+        cls._validate_repositories(main_data.get("repositories", []))
+        cls._validate_max_workers(main_data.get("max_workers", cls.DEFAULT_MAX_WORKERS))
+        cls._validate_theme(main_data.get("theme", cls.DEFAULT_THEME))
+        cls._optional_str(secrets_data.get("github_username"), "github_username")
+        cls._optional_str(secrets_data.get("github_PAT"), "github_PAT")
 
     @staticmethod
     def _normalize_paths(paths: list[object]) -> list[Path]:
@@ -80,16 +103,17 @@ class Config:
         main_data: dict[str, object],
         secrets_data: dict[str, object] | None = None,
     ) -> None:
-        repositories = self._normalize_paths(list(main_data.get("repositories", [])))
+        secrets = secrets_data if secrets_data is not None else {}
+        self._validate_loaded_data(main_data, secrets)
+        repositories = self._normalize_paths(main_data.get("repositories", []))
         self.repositories = repositories
         self._repo_set = set(repositories)
         self.max_workers = self._validate_max_workers(
             main_data.get("max_workers", self.DEFAULT_MAX_WORKERS)
         )
-        self.theme = str(main_data.get("theme", self.DEFAULT_THEME))
-        secrets = secrets_data if secrets_data is not None else {}
-        self.github_username = self._optional_str(secrets.get("github_username"))
-        self.github_PAT = self._optional_str(secrets.get("github_PAT"))
+        self.theme = self._validate_theme(main_data.get("theme", self.DEFAULT_THEME))
+        self.github_username = self._optional_str(secrets.get("github_username"), "github_username")
+        self.github_PAT = self._optional_str(secrets.get("github_PAT"), "github_PAT")
         self._snapshot_repositories = tuple(self.repositories)
         self._snapshot_max_workers = self.max_workers
         self._snapshot_theme = self.theme
@@ -111,6 +135,7 @@ class Config:
         with advisory_file_lock(self.lock_file):
             latest_main = self._read_main_unlocked()
             latest_secrets = self._read_secrets_unlocked()
+            self._validate_loaded_data(latest_main, latest_secrets)
             yield latest_main, latest_secrets
 
     def _settings_from_latest(
@@ -118,12 +143,15 @@ class Config:
         latest_main: dict[str, object],
         latest_secrets: dict[str, object],
     ) -> tuple[int, str, str | None, str | None]:
+        self._validate_loaded_data(latest_main, latest_secrets)
         latest_max_workers = self._validate_max_workers(
             latest_main.get("max_workers", self.DEFAULT_MAX_WORKERS)
         )
-        latest_theme = str(latest_main.get("theme", self.DEFAULT_THEME))
-        latest_github_username = self._optional_str(latest_secrets.get("github_username"))
-        latest_github_PAT = self._optional_str(latest_secrets.get("github_PAT"))
+        latest_theme = self._validate_theme(latest_main.get("theme", self.DEFAULT_THEME))
+        latest_github_username = self._optional_str(
+            latest_secrets.get("github_username"), "github_username"
+        )
+        latest_github_PAT = self._optional_str(latest_secrets.get("github_PAT"), "github_PAT")
         max_workers = (
             latest_max_workers
             if self.max_workers == self._snapshot_max_workers

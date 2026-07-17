@@ -3,7 +3,6 @@ from pathlib import Path
 import click
 
 from ..manager import RepositoryManager
-from ..storage import normalize_repository_path
 from . import console
 from .completion import complete_repository_names
 
@@ -17,24 +16,12 @@ def _resolve_repo(target: str) -> Path | None:
     or ambiguous targets.
     """
     manager = RepositoryManager()
-    candidate = Path(target)
-    is_path_like = (
-        "/" in target
-        or "\\" in target
-        or target in (".", "..")
-        or candidate.is_absolute()
-        or target.startswith("~")
-        or candidate.exists()
-    )
-
-    if is_path_like:
-        normalized = normalize_repository_path(candidate)
-        if manager.config.has_repository(normalized):
-            return normalized
-        console.print(f"\n  [red]No tracked repository at path: {normalized}[/red]\n")
+    repo_path, matches, path_attempted = manager.resolve_repository_target(target)
+    if repo_path is not None:
+        return repo_path
+    if path_attempted:
+        console.print(f"\n  [red]No tracked repository at path: {target}[/red]\n")
         return None
-
-    matches = [r for r in manager.config.repositories if r.name == target]
     if not matches:
         console.print(f"\n  [red]No tracked repository named: {target}[/red]\n")
         return None
@@ -45,7 +32,7 @@ def _resolve_repo(target: str) -> Path | None:
             f"{paths_list}\n"
         )
         return None
-    return matches[0]
+    return None
 
 
 def register(cli: click.Group):

@@ -26,7 +26,10 @@ def show_help():
     cmd_table.add_column("desc", style="dim")
 
     for cmd, desc in [
-        ("link PATH [--discover]", "Link a repository or discover all repos under a path"),
+        (
+            "link PATH [--discover]",
+            "Link a repository or discover all repos under a path (no-op if none)",
+        ),
         ("unlink PATH|NAME [--discover]", "Unlink a repository or all repos under a path"),
         ("list", "List all tracked repositories"),
         ("status", "Show status summary and per-repo details"),

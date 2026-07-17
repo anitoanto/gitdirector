@@ -18,6 +18,7 @@ from gitdirector.integrations.tmux import (
     attach_tmux_session,
     create_tmux_session,
     ensure_temp_panel_tmux_session,
+    kill_all_gd_sessions,
     kill_panel_tmux_session,
     kill_tmux_session,
     list_all_gd_sessions,
@@ -266,6 +267,7 @@ class TestListAllGdSessions:
                 "gd/alpha_abcd2/shell/0\t\t\n"
                 "gd/beta_efgh2/claude/2\t\t\n"
                 "gd/temp/panel/alpha/shell/1\t\t\n"
+                "gd/panel/main\t\t\n"
             ),
         )
 
@@ -320,6 +322,7 @@ class TestSessionNamespaceHelpers:
     def test_persistent_panel_match_requires_exact_panel_shape(self):
         assert _is_persistent_panel_session("gd/panel/main") is True
         assert _is_persistent_panel_session("gd/panel/shell/1") is False
+        assert _is_persistent_panel_session("gd/panel/") is False
 
     def test_temp_panel_match_requires_wrapper_shape(self):
         assert _is_temp_panel_session("gd/temp/panel/repo/shell/1") is True
@@ -693,6 +696,26 @@ class TestKillTmuxSession:
     def test_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1)
         assert kill_tmux_session("gd/repo/shell/1") is False
+
+
+class TestKillAllGdSessions:
+    @patch("gitdirector.integrations.tmux.core.kill_tmux_session", return_value=True)
+    @patch(
+        "gitdirector.integrations.tmux.core._list_sessions",
+        return_value=["gd/panel/main", "gd/panel/", "gd/panel/main/extra"],
+    )
+    @patch(
+        "gitdirector.integrations.tmux.core.list_all_gd_sessions",
+        return_value=[{"session_name": "gd/repo/shell/1"}],
+    )
+    def test_kills_regular_and_valid_persistent_panel_sessions(
+        self, _mock_list_all, _mock_list_sessions, mock_kill
+    ):
+        assert kill_all_gd_sessions() == ["gd/panel/main", "gd/repo/shell/1"]
+        assert mock_kill.call_args_list == [
+            (("gd/panel/main",),),
+            (("gd/repo/shell/1",),),
+        ]
 
 
 class TestKillPanelTmuxSession:
