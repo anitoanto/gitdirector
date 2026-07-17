@@ -44,7 +44,7 @@ def detect_repo_groups(repo_paths: Iterable[Path]) -> list[RepoGroup]:
 
 
 def group_session_repo_label(path: Path) -> str:
-    from ...integrations.tmux import _sanitize_repo_name
+    from ...integrations.tmux.core import _sanitize_repo_name
 
     return f"group_{_sanitize_repo_name(path.name) or 'repo'}"
 

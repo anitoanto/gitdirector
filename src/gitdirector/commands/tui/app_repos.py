@@ -98,8 +98,8 @@ class ConsoleReposMixin:
 
     def _populate_initial_rows(self) -> None:
         table = self.query_one("#repo-table", DataTable)
-        self.query_one("#no-repos-message", Static).display = False
-        table.display = True
+        no_msg = self.query_one("#no-repos-message", Static)
+        self._set_table_empty_state(table, no_msg, is_empty=False)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -133,8 +133,10 @@ class ConsoleReposMixin:
             logger.debug("Failed to update repo row %s", row_key, exc_info=True)
 
     def _show_no_repos(self) -> None:
-        self.query_one("#repo-table", DataTable).display = False
-        self.query_one("#no-repos-message", Static).display = True
+        table = self.query_one("#repo-table", DataTable)
+        no_msg = self.query_one("#no-repos-message", Static)
+        self._set_table_empty_state(table, no_msg, is_empty=True)
+        table.clear()
         self._visible_repo_count = 0
         self._visible_group_count = 0
         self._update_status("No repositories linked")
@@ -314,8 +316,7 @@ class ConsoleReposMixin:
 
     def _apply_filter_and_sort(self) -> None:
         table = self.query_one("#repo-table", DataTable)
-        self.query_one("#no-repos-message", Static).display = False
-        table.display = True
+        no_msg = self.query_one("#no-repos-message", Static)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -328,7 +329,14 @@ class ConsoleReposMixin:
         infos = list(self._results.values())
         total = len(infos)
         infos = self._filter_repo_infos_for_search(infos)
-        self._render_repo_info_rows(table, infos)
+        is_empty = total == 0 and not self._repo_paths and not self._search_query
+        self._set_table_empty_state(table, no_msg, is_empty=is_empty)
+        table.clear()
+        if is_empty:
+            self._visible_repo_count = 0
+            self._visible_group_count = 0
+        else:
+            self._render_repo_info_rows(table, infos)
 
         if self._resume_selection_tab == "repos":
             self._restore_resume_selection("repos")
@@ -369,7 +377,7 @@ class ConsoleReposMixin:
 
         msg += "   ↑↓/jk navigate  [enter] actions"
         if group_count:
-            msg += "  [space] toggle group"
+            msg += "  [space] toggle"
         msg += "  g git  / search  s sort  r refresh  q quit"
         if self._search_query:
             msg += "  [esc] clear search"

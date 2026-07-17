@@ -25,7 +25,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | Command                                                    | Description                                            |
 | ---------------------------------------------------------- | ------------------------------------------------------ |
 | `gitdirector console`                                      | Open the interactive TUI dashboard                     |
-| `gitdirector link PATH [--discover]`                       | Link a repository or discover all under a path         |
+| `gitdirector link PATH [--discover]`                       | Link a repository or discover all under a path (no-op if none) |
 | `gitdirector unlink PATH\|NAME [--discover]`               | Unlink a repository by path, name, or all under a path |
 | `gitdirector list`                                         | List all tracked repositories with live status         |
 | `gitdirector status`                                       | Show repositories with staged/unstaged files           |
@@ -46,6 +46,8 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 gitdirector link /path/to/repo
 gitdirector link /path/to/folder --discover   # recursively find and link all repos
 ```
+
+`link --discover` succeeds without changes when the path contains no new repositories.
 
 ### console
 

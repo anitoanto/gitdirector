@@ -273,12 +273,13 @@ class TestMakeAgentReadyMarker:
 
     def test_ignores_missing_temp_file(self):
         with patch(
-            "gitdirector.integrations.tmux.tempfile.mkstemp",
+            "gitdirector.integrations.tmux.monitor.tempfile.mkstemp",
             return_value=(123, "/tmp/gitdirector-agent-test.ready"),
         ):
-            with patch("gitdirector.integrations.tmux.os.close") as mock_close:
+            with patch("gitdirector.integrations.tmux.monitor.os.close") as mock_close:
                 with patch(
-                    "gitdirector.integrations.tmux.Path.unlink", side_effect=FileNotFoundError
+                    "gitdirector.integrations.tmux.monitor.Path.unlink",
+                    side_effect=FileNotFoundError,
                 ):
                     marker = _make_agent_ready_marker()
 
