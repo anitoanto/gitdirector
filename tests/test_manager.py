@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -181,6 +182,59 @@ class TestRemoveDiscover:
         assert ok is False
         assert "no tracked repositories" in msg.lower()
 
+    def test_remove_discover_includes_the_target_repository(self, manager, tmp_path):
+        repo = tmp_path / "project"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        manager.add_repository(repo)
+
+        ok, _msg, removed = manager.remove_repository(repo, discover=True)
+
+        assert ok is True
+        assert removed == [repo.resolve()]
+
+    def test_remove_discover_resolves_relative_path_from_current_directory(
+        self, manager, tmp_path, monkeypatch
+    ):
+        project_repo = tmp_path / "projects" / "app"
+        other_repo = tmp_path / "other" / "app"
+        for repo in (project_repo, other_repo):
+            repo.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            manager.add_repository(repo)
+        monkeypatch.chdir(tmp_path)
+
+        ok, _msg, removed = manager.remove_repository(Path("projects"), discover=True)
+
+        assert ok is True
+        assert removed == [project_repo.resolve()]
+        assert manager.config.repositories == [other_repo.resolve()]
+
+    def test_remove_discover_does_not_match_a_path_with_the_same_prefix(self, manager, tmp_path):
+        project_repo = tmp_path / "project" / "app"
+        similarly_named_repo = tmp_path / "project-old" / "app"
+        for repo in (project_repo, similarly_named_repo):
+            repo.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            manager.add_repository(repo)
+
+        ok, _msg, removed = manager.remove_repository(tmp_path / "project", discover=True)
+
+        assert ok is True
+        assert removed == [project_repo.resolve()]
+        assert manager.config.repositories == [similarly_named_repo.resolve()]
+
+    def test_remove_discover_removes_a_tracked_repo_when_path_no_longer_exists(
+        self, manager, tmp_path
+    ):
+        stale_repo = tmp_path / "missing" / "repo"
+        manager.config.add_repository(stale_repo)
+
+        ok, _msg, removed = manager.remove_repository(tmp_path / "missing", discover=True)
+
+        assert ok is True
+        assert removed == [stale_repo.resolve()]
+
 
 # ---------------------------------------------------------------------------
 # get_repository_status
@@ -245,14 +299,7 @@ class TestGetRepositoryStatus:
 
 
 # ---------------------------------------------------------------------------
-# `link --discover` walk semantics — locks down the noisy-tree behaviour
-# ---------------------------------------------------------------------------
-#
-# The current discover walker only removes ``.git`` from the directory list
-# before recursing. That means ``node_modules/``, ``target/`` and other vendor
-# trees are walked in full. We pin the *current* behaviour here so the
-# eventual fix (skip-list) doesn't accidentally drop the contract of
-# "find every repo, including nested ones".
+# `link --discover` walk semantics
 # ---------------------------------------------------------------------------
 
 
@@ -271,13 +318,6 @@ def _make_nested_git_marker(parent, *parts):
     return nested
 
 
-def _make_noise_dir(parent, name):
-    d = parent / name
-    d.mkdir()
-    (d / "stuff.txt").write_text("x" * 1024)
-    return d
-
-
 class TestDiscoverWalkSemantics:
     def test_finds_nested_git_marker_in_vendor(self, manager, tmp_path):
         """A ``.git`` directory nested inside vendor/submodules is still discovered."""
@@ -288,23 +328,65 @@ class TestDiscoverWalkSemantics:
         names = {p.name for p in added}
         assert names == {"app", "widget"}
 
-    def test_descends_into_noisy_directories(self, manager, tmp_path):
-        """Current behaviour: discovery walks *into* node_modules/target/.venv.
-
-        The bug is that noisy dirs are not skipped. The test locks the
-        current behaviour down so a future fix has a regression net: any
-        change that stops descending into ``node_modules`` *and* also drops
-        the nested repo would fail this test.
-        """
-        _make_real_git_repo(tmp_path, "app")
-        node_modules = _make_noise_dir(tmp_path, "node_modules")
-        nested = node_modules / "some-pkg"
-        nested.mkdir()
-        (nested / ".git").mkdir()
+    def test_discovers_directories_previously_hard_coded_as_noise(self, manager, tmp_path):
+        repos = [
+            _make_nested_git_marker(tmp_path, directory, "package")
+            for directory in (".venv", "node_modules", "target")
+        ]
 
         ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
         assert ok is True
-        names = {p.name for p in added}
-        # Both the top-level app AND the nested node_modules/some-pkg are found.
-        assert "app" in names
-        assert "some-pkg" in names
+        assert set(added) == {repo.resolve() for repo in repos}
+
+    def test_prunes_directories_ignored_by_root_gitignore(self, manager, tmp_path):
+        (tmp_path / ".gitignore").write_text("generated/\n")
+        kept = _make_real_git_repo(tmp_path, "app")
+        _make_nested_git_marker(tmp_path, "generated", "dependency")
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+
+        assert ok is True
+        assert added == [kept.resolve()]
+
+    def test_applies_nested_gitignore_relative_to_its_directory(self, manager, tmp_path):
+        (tmp_path / "services").mkdir()
+        (tmp_path / "services" / ".gitignore").write_text("generated/\n")
+        _make_nested_git_marker(tmp_path, "services", "generated", "hidden")
+        discovered = _make_nested_git_marker(tmp_path, "docs", "generated", "visible")
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+
+        assert ok is True
+        assert added == [discovered.resolve()]
+
+    def test_nested_gitignore_overrides_parent_rule(self, manager, tmp_path):
+        (tmp_path / ".gitignore").write_text("*.generated/\n")
+        (tmp_path / "projects").mkdir()
+        (tmp_path / "projects" / ".gitignore").write_text("!keep.generated/\n")
+        kept = _make_nested_git_marker(tmp_path, "projects", "keep.generated")
+        _make_nested_git_marker(tmp_path, "projects", "discard.generated")
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+
+        assert ok is True
+        assert added == [kept.resolve()]
+
+    def test_does_not_descend_into_an_ignored_parent_for_a_negated_child(self, manager, tmp_path):
+        (tmp_path / ".gitignore").write_text("cache/\n!cache/keep/\n")
+        kept = _make_real_git_repo(tmp_path, "app")
+        _make_nested_git_marker(tmp_path, "cache", "keep", "dependency")
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+
+        assert ok is True
+        assert added == [kept.resolve()]
+
+    def test_supports_gitignore_comments_and_escaped_patterns(self, manager, tmp_path):
+        (tmp_path / ".gitignore").write_text("# explanation\n\\#generated/\n")
+        kept = _make_real_git_repo(tmp_path, "app")
+        _make_nested_git_marker(tmp_path, "#generated", "dependency")
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+
+        assert ok is True
+        assert added == [kept.resolve()]

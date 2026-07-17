@@ -24,6 +24,16 @@ logger = logging.getLogger(__name__)
 
 
 class ConsoleUIHelpersMixin:
+    def _set_table_empty_state(
+        self,
+        table: DataTable,
+        empty_message: Static,
+        *,
+        is_empty: bool,
+    ) -> None:
+        table.display = not is_empty
+        empty_message.display = is_empty
+
     def _compose_status_message(self, message: str) -> str:
         notice = getattr(self, "_update_notice", None)
         if not notice:

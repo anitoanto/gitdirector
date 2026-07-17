@@ -126,25 +126,18 @@ class GitDirectorConsole(
         padding: 0 1;
         scrollbar-size-horizontal: 0;
     }
-    #no-repos-message {
-        height: 1fr;
+    #repo-table,
+    #sessions-table,
+    #panels-table,
+    #no-repos-message,
+    #no-sessions-message,
+    #no-panels-message {
         display: none;
-        align: center middle;
-        color: $text-muted;
-        padding: 2 4;
-        content-align: center middle;
     }
-    #no-sessions-message {
-        height: 1fr;
-        display: none;
-        align: center middle;
-        color: $text-muted;
-        padding: 2 4;
-        content-align: center middle;
-    }
+    #no-repos-message,
+    #no-sessions-message,
     #no-panels-message {
         height: 1fr;
-        display: none;
         align: center middle;
         color: $text-muted;
         padding: 2 4;
@@ -204,7 +197,7 @@ class GitDirectorConsole(
         Binding("1", "tab_repos", "Repos", show=False),
         Binding("2", "tab_sessions", "Sessions", show=False),
         Binding("3", "tab_panels", "Panels", show=False),
-        Binding("space", "toggle_group", "Toggle Group", show=True),
+        Binding("space", "toggle_group", "Toggle", show=True),
         Binding("n", "new_panel", "New Panel", show=True),
     ]
 
@@ -493,7 +486,7 @@ class GitDirectorConsole(
         skip_config_sync: bool = False,
         callback: Callable[[object], None] | None = None,
     ) -> None:
-        from ...integrations.tmux import _parse_gd_session_name
+        from ...integrations.tmux.core import _parse_gd_session_name
 
         title = "session"
         loading_hint = "waiting for session to initialize\u2026"
@@ -690,7 +683,7 @@ class GitDirectorConsole(
         """Open the description editor for the currently highlighted session row."""
         if self._active_tab != "sessions":
             return
-        from ...integrations.tmux import _get_session_description
+        from ...integrations.tmux.core import _get_session_description
 
         table = self.query_one("#sessions-table", DataTable)
         session_name = self._get_selected_row_key(table)
@@ -705,7 +698,7 @@ class GitDirectorConsole(
     def _handle_description_edit(self, session_name: str, value: str | None) -> None:
         if value is None:
             return
-        from ...integrations.tmux import _set_session_description
+        from ...integrations.tmux.core import _set_session_description
 
         _set_session_description(session_name, value)
         for entry in self._sessions_entries:

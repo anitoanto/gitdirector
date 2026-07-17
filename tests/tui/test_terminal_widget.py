@@ -553,7 +553,8 @@ def _set_widget_screen(widget: TerminalWidget, text: str, *, ncol: int = 20, nro
 
 class TestTerminalWidgetClipboardIntegration:
     @pytest.mark.asyncio
-    async def test_y_copies_visible_text_to_app_clipboard(self):
+    async def test_y_copies_visible_text_to_app_clipboard(self, monkeypatch):
+        monkeypatch.setenv("NO_COLOR", "1")
         app = _TerminalWidgetTestApp()
 
         with patch(
@@ -569,7 +570,8 @@ class TestTerminalWidgetClipboardIntegration:
                 assert app._clipboard == "hello\nworld"
 
     @pytest.mark.asyncio
-    async def test_mouse_drag_copies_selection_to_app_clipboard(self):
+    async def test_mouse_drag_copies_selection_to_app_clipboard(self, monkeypatch):
+        monkeypatch.setenv("NO_COLOR", "1")
         app = _TerminalWidgetTestApp()
 
         with patch(
