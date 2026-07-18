@@ -670,7 +670,11 @@ class GitDirectorConsole(
     def action_show_info(self) -> None:
         if self._active_tab != "repos":
             return
-        if self._selected_repo_row_is_group():
+        group = self._get_selected_group()
+        if group is not None:
+            screen = RepoInfoScreen(f"{group.name} ({group.repo_count} repos)", group.path)
+            self.push_screen(screen)
+            self._gather_and_show_group_info(group, screen)
             return
         path = self._get_selected_path()
         if path is None:
@@ -732,6 +736,54 @@ class GitDirectorConsole(
         if self._background_shutdown_requested(worker):
             return
         self.call_from_thread(screen.populate, result)
+
+    @work(thread=True)
+    def _gather_and_show_group_info(self, group, screen: RepoInfoScreen) -> None:
+        worker = self._current_worker_or_none()
+        if self._background_shutdown_requested(worker):
+            return
+
+        from ...info import FileTypeInfo, RepoInfoResult, gather_repo_info
+
+        try:
+            results = [gather_repo_info(path) for path in group.repositories]
+        except Exception as exc:
+            if self._background_shutdown_requested(worker):
+                return
+            self.call_from_thread(screen.show_error, str(exc))
+            return
+
+        file_types: dict[str, tuple[int, int, int, bool]] = {}
+        for result in results:
+            for file_type in result.file_types:
+                count, lines, tokens, has_text = file_types.get(
+                    file_type.extension, (0, 0, 0, False)
+                )
+                if file_type.line_count is not None:
+                    lines += file_type.line_count
+                    tokens += file_type.token_count or 0
+                    has_text = True
+                file_types[file_type.extension] = (count + file_type.count, lines, tokens, has_text)
+
+        aggregate = RepoInfoResult(
+            total_files=sum(result.total_files for result in results),
+            file_types=sorted(
+                [
+                    FileTypeInfo(
+                        extension, count, lines if has_text else None, tokens if has_text else None
+                    )
+                    for extension, (count, lines, tokens, has_text) in file_types.items()
+                ],
+                key=lambda file_type: file_type.line_count or 0,
+                reverse=True,
+            ),
+            total_lines=sum(result.total_lines for result in results),
+            total_tokens=sum(result.total_tokens for result in results),
+            max_depth=max((result.max_depth for result in results), default=0),
+        )
+        if self._background_shutdown_requested(worker):
+            return
+        self.call_from_thread(screen.populate, aggregate)
 
     def _push_info_screen(self, name: str, path: Path, result) -> None:
         self.push_screen(RepoInfoScreen(name, path))

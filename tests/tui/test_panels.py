@@ -210,8 +210,11 @@ class TestPanelStore:
         assert store.get("Main").panes[1] is None
         mock_kill_panel_tmux_session.assert_not_called()
 
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
-    def test_delete_kills_panel_tmux_session(self, mock_kill_panel_tmux_session, tmp_path):
+    def test_delete_kills_panel_tmux_session(
+        self, mock_kill_panel_tmux_session, mock_sync_panel_tmux_config, tmp_path
+    ):
         with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x2", panes={1: "gd/my-repo/shell/1"})
@@ -222,6 +225,29 @@ class TestPanelStore:
         assert store.get("Main") is None
         assert store.panels == []
         mock_kill_panel_tmux_session.assert_called_once_with("Main")
+        mock_sync_panel_tmux_config.assert_called_once_with()
+
+    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.panel_tmux_session_exists", return_value=True)
+    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session", return_value=False)
+    def test_delete_preserves_panel_when_its_tmux_session_cannot_be_killed(
+        self,
+        mock_kill_panel_tmux_session,
+        mock_panel_tmux_session_exists,
+        mock_sync_panel_tmux_config,
+        tmp_path,
+    ):
+        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+            store = PanelStore()
+            store.create("Main", layout_key="grid_1x2", panes={1: "gd/my-repo/shell/1"})
+
+            deleted = store.delete("Main")
+
+        assert deleted is False
+        assert store.get("Main") is not None
+        mock_kill_panel_tmux_session.assert_called_once_with("Main")
+        mock_panel_tmux_session_exists.assert_called_once_with("Main")
+        mock_sync_panel_tmux_config.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_delete_missing_panel_skips_tmux_cleanup(self, mock_kill_panel_tmux_session, tmp_path):

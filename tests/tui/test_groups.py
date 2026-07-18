@@ -84,7 +84,11 @@ class TestRepositoryGroups:
             group_key = group_row_key(Path("/tmp/work"))
             assert table.row_count == 4
             assert "work" in str(table.get_cell(group_key, app._col_keys[0]))
-            assert "2 repos" in str(table.get_cell(group_key, app._col_keys[1]))
+            assert "[2 repos]" not in str(table.get_cell(group_key, app._col_keys[0]))
+            assert "[2 repos]" in str(table.get_cell(group_key, app._col_keys[1]))
+            assert table.get_cell(group_key, app._col_keys[2]) == ""
+            assert table.get_cell(group_key, app._col_keys[3]) == ""
+            assert table.get_cell(group_key, app._col_keys[4]) == ""
             assert table.get_cell(group_key, app._col_keys[5]) == "/tmp/work"
             assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
             assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"

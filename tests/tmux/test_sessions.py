@@ -326,6 +326,7 @@ class TestSessionNamespaceHelpers:
 
     def test_temp_panel_match_requires_wrapper_shape(self):
         assert _is_temp_panel_session("gd/temp/panel/repo/shell/1") is True
+        assert _is_temp_panel_session("gd/temp/panel/build-1234") is True
         assert _is_temp_panel_session("gd/temp/panel/1") is False
 
 
@@ -702,19 +703,33 @@ class TestKillAllGdSessions:
     @patch("gitdirector.integrations.tmux.core.kill_tmux_session", return_value=True)
     @patch(
         "gitdirector.integrations.tmux.core._list_sessions",
-        return_value=["gd/panel/main", "gd/panel/", "gd/panel/main/extra"],
+        return_value=[
+            "gd/panel/main",
+            "gd/panel/",
+            "gd/panel/main/extra",
+            "gd/temp/panel/repo/shell/1",
+            "gd/temp/panel/build-1234",
+            "gd/temp/panel/",
+        ],
     )
     @patch(
         "gitdirector.integrations.tmux.core.list_all_gd_sessions",
         return_value=[{"session_name": "gd/repo/shell/1"}],
     )
-    def test_kills_regular_and_valid_persistent_panel_sessions(
+    def test_kills_regular_and_valid_panel_sessions(
         self, _mock_list_all, _mock_list_sessions, mock_kill
     ):
-        assert kill_all_gd_sessions() == ["gd/panel/main", "gd/repo/shell/1"]
+        assert kill_all_gd_sessions() == [
+            "gd/panel/main",
+            "gd/repo/shell/1",
+            "gd/temp/panel/build-1234",
+            "gd/temp/panel/repo/shell/1",
+        ]
         assert mock_kill.call_args_list == [
             (("gd/panel/main",),),
             (("gd/repo/shell/1",),),
+            (("gd/temp/panel/build-1234",),),
+            (("gd/temp/panel/repo/shell/1",),),
         ]
 
 
