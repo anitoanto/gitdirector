@@ -29,7 +29,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, LoadingIndicator, OptionList, Static
+from textual.widgets import LoadingIndicator, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
@@ -186,12 +186,16 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         }
         #commit-message-input {
             width: 1fr;
-            height: 3;
+            height: auto;
+            min-height: 3;
+            max-height: 10;
             border: none;
             background: $boost;
             color: $text;
             margin: 0 0 1 0;
             padding: 0 1;
+            scrollbar-size-vertical: 0;
+            overflow-y: hidden;
         }
         #commit-message-input:focus {
             background: $boost;
@@ -232,27 +236,34 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
                 f"[dim]\u00b7  {self.file_count} {noun}[/dim]",
                 id="commit-message-stats",
             )
-            yield Input(
+            yield TextArea(
+                "",
                 placeholder="Commit message\u2026",
                 id="commit-message-input",
             )
             yield _CommitActionOptionList(
-                Option("[white]\u2713[/white] [bold]Commit[/bold]", id="commit"),
                 Option("[cyan]\u2191[/cyan] [bold]Commit and push[/bold]", id="commit_push"),
+                Option("[white]\u2713[/white] [bold]Commit[/bold]", id="commit"),
                 id="commit-message-action-list",
             )
             yield Static(
-                "type message    [tab] switch    [\u2191\u2193/jk] pick action"
-                "    [enter] confirm    [esc] cancel",
+                "type message    \\[tab] switch    [\u2191\u2193/jk] pick action"
+                "    [ctrl+enter] confirm    \\[esc] cancel",
                 id="commit-message-hint",
             )
 
     def on_mount(self) -> None:
-        self.query_one("#commit-message-input", Input).focus()
+        message = self.query_one("#commit-message-input", TextArea)
+        message.focus()
+        self.call_after_refresh(self._resize_message_input)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        self._confirm()
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "commit-message-input":
+            self.call_after_refresh(self._resize_message_input)
+
+    def _resize_message_input(self) -> None:
+        message = self.query_one("#commit-message-input", TextArea)
+        message.styles.height = min(10, max(3, message.virtual_size.height))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         # Click / enter on an option also confirms; the current
@@ -278,7 +289,7 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
 
     def action_focus_message(self) -> None:
         self._in_message = True
-        self.query_one("#commit-message-input", Input).focus()
+        self.query_one("#commit-message-input", TextArea).focus()
 
     def action_focus_toggle(self) -> None:
         """Toggle focus between the message input and the action picker."""
@@ -301,7 +312,7 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         self.query_one("#commit-message-action-list", OptionList).action_cursor_up()
 
     def _message(self) -> str:
-        return self.query_one("#commit-message-input", Input).value.strip()
+        return self.query_one("#commit-message-input", TextArea).text.strip()
 
     def _message_valid(self) -> bool:
         msg = self._message()

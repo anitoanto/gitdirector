@@ -627,13 +627,20 @@ class PanelStore:
         with advisory_file_lock(self.lock_file):
             write_yaml_atomic(self.panels_file, data)
 
-    def _kill_panel_sessions(self, panel_names: list[str]) -> None:
+    def _kill_panel_sessions(self, panel_names: list[str]) -> bool:
         if not panel_names:
-            return
-        from ...integrations.tmux import kill_panel_tmux_session
+            return True
+        from ...integrations.tmux import kill_panel_tmux_session, panel_tmux_session_exists
 
         for panel_name in panel_names:
-            kill_panel_tmux_session(panel_name)
+            if not kill_panel_tmux_session(panel_name) and panel_tmux_session_exists(panel_name):
+                return False
+        return True
+
+    def _sync_panel_tmux_config(self) -> None:
+        from ...integrations.tmux import sync_panel_tmux_config
+
+        sync_panel_tmux_config()
 
     def _cleanup_inner_panel_sessions(self, session_names: list[str]) -> None:
         if not session_names:
@@ -682,10 +689,12 @@ class PanelStore:
         for i, p in enumerate(self._panels):
             if p.name == name:
                 inner_sessions = [s for s in p.panes.values() if s]
+                if not self._kill_panel_sessions([name]):
+                    return False
                 self._panels.pop(i)
                 self._save()
-                self._kill_panel_sessions([name])
                 self._cleanup_inner_panel_sessions(inner_sessions)
+                self._sync_panel_tmux_config()
                 return True
         return False
 

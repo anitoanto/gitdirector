@@ -147,7 +147,9 @@ class TestDiffReviewScreenCompose:
             hint_text = hint.content.lower()
             assert "tab" in hint_text
             assert "esc" in hint_text
-            assert "brackets" in hint_text
+            assert "toggle focus" in hint_text
+            assert "cycle" in hint_text
+            assert "brackets" not in hint_text
             assert "n/p" not in hint_text
 
     async def test_loading_indicator_shown_while_diff_loads(self, mocker):
@@ -322,6 +324,25 @@ class TestDiffReviewScreenNavigation:
             await pilot.press("[")
             await pilot.pause()
             assert files_list.index == 0
+
+    async def test_brackets_cycle_files_while_diff_is_focused(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            _screen, files_list = await self._setup_with_diff(app, mocker, pilot)
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.screen.focused.id == "diff-content-scroll"
+
+            await pilot.press("]")
+            await pilot.pause()
+            assert files_list.index == 1
+            assert app.screen.focused.id == "diff-content-scroll"
+
+            await pilot.press("[")
+            await pilot.pause()
+            assert files_list.index == 0
+            assert app.screen.focused.id == "diff-content-scroll"
 
     async def test_arrow_keys_navigate_files_when_file_list_is_focused(self, mocker):
         app = GitDirectorConsole()
@@ -876,13 +897,17 @@ class TestDiffReviewScreenCommitFlow:
             )
 
             assert isinstance(app.screen, StageFilesConfirmScreen)
-            await pilot.press("down")  # "No" is the default; pick "Yes"
+            await pilot.press("down")
             await pilot.press("enter")
             await pilot.pause()
             assert isinstance(app.screen, CommitMessageScreen)
 
             msg_input = app.screen.query_one("#commit-message-input")
-            msg_input.value = "Add commit flow"
+            msg_input.text = "Add commit flow"
+            # "Commit and push" is the default highlighted action; switch to the
+            # commit-only option via the picker.
+            await pilot.press("tab")
+            await pilot.press("j")
             await pilot.press("enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
@@ -915,11 +940,10 @@ class TestDiffReviewScreenCommitFlow:
             await pilot.pause()
             assert isinstance(app.screen, CommitMessageScreen)
 
-            app.screen.query_one("#commit-message-input").value = "Ship it"
-            # Move focus to the action list and pick "commit & push"
-            await pilot.press("tab")
-            await pilot.press("down")
-            await pilot.press("enter")
+            app.screen.query_one("#commit-message-input").text = "Ship it"
+            # "Commit and push" is the default highlighted action. Use ctrl+enter
+            # so the TextArea doesn't insert a newline instead of confirming.
+            await pilot.press("ctrl+enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -964,8 +988,8 @@ class TestDiffReviewScreenCommitFlow:
             await pilot.press("down")
             await pilot.press("enter")
             await pilot.pause()
-            app.screen.query_one("#commit-message-input").value = "failing"
-            await pilot.press("enter")
+            app.screen.query_one("#commit-message-input").text = "failing"
+            await pilot.press("ctrl+enter")
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -1044,12 +1068,12 @@ class TestCommitMessageScreenFocus:
             await pilot.press("tab")
             await pilot.pause()
             assert action_list.highlighted == 0
-            assert action_list.highlighted_option.id == "commit"
+            assert action_list.highlighted_option.id == "commit_push"
 
             await pilot.press("j")
             await pilot.pause()
             assert action_list.highlighted == 1
-            assert action_list.highlighted_option.id == "commit_push"
+            assert action_list.highlighted_option.id == "commit"
 
     async def test_k_navigates_action_list_when_focused(self):
         screen = self._make_screen()
@@ -1068,7 +1092,7 @@ class TestCommitMessageScreenFocus:
             await pilot.press("k")
             await pilot.pause()
             assert action_list.highlighted == 0
-            assert action_list.highlighted_option.id == "commit"
+            assert action_list.highlighted_option.id == "commit_push"
 
     async def test_jk_typed_in_message_input_are_not_intercepted(self):
         screen = self._make_screen()
@@ -1083,7 +1107,7 @@ class TestCommitMessageScreenFocus:
             await pilot.press("j")
             await pilot.press("k")
             await pilot.pause()
-            assert msg.value == "jk"
+            assert msg.text == "jk"
             action_list = app.screen.query_one("#commit-message-action-list")
             assert action_list.highlighted == 0
 
@@ -1109,11 +1133,11 @@ class TestCommitMessageScreenFocus:
             await pilot.pause()
             msg = app.screen.query_one("#commit-message-input")
             assert app.focused is msg
-            msg.value = "feat: jk commit"
+            msg.text = "feat: jk commit"
             assert action_list.highlighted == 1
 
             await pilot.press("tab")
             await pilot.pause()
             assert app.focused is action_list
             assert action_list.highlighted == 1
-            assert action_list.highlighted_option.id == "commit_push"
+            assert action_list.highlighted_option.id == "commit"

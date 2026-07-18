@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent
+from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent, TextArea
 
 from gitdirector.commands.tui import AgentLoadingScreen, GitDirectorConsole, SortMenuScreen
 from gitdirector.commands.tui.app_sessions import _MAX_SESSIONS_DESCRIPTION_WIDTH
@@ -1275,6 +1275,28 @@ class TestSessionDescription:
             )
 
             assert isinstance(app.screen, EditSessionDescriptionScreen)
+
+    async def test_description_editor_expands_for_wrapped_text(self):
+        from gitdirector.commands.tui.screens.sessions import EditSessionDescriptionScreen
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            screen = EditSessionDescriptionScreen("gd/alpha/shell/1", "-")
+            result: list[str | None] = []
+            app.push_screen(screen, callback=result.append)
+            await pilot.pause()
+
+            description_input = screen.query_one("#description-input", TextArea)
+            initial_height = description_input.size.height
+            description = "long description " * 30
+            description_input.text = description
+            await pilot.pause()
+
+            assert description_input.size.height > initial_height
+            await pilot.press("enter")
+            await pilot.pause()
+            assert result == [description.strip()]
 
     @patch("gitdirector.integrations.tmux.core._set_session_description")
     @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")

@@ -17,7 +17,8 @@ from gitdirector.commands.tui import (
     PullResultScreen,
 )
 from gitdirector.commands.tui.app import _run_console
-from gitdirector.info import RepoInfoResult
+from gitdirector.commands.tui.app_groups import RepoGroup
+from gitdirector.info import FileTypeInfo, RepoInfoResult
 from gitdirector.repo import Repository, RepoStatus
 
 from .conftest import _make_info, _mock_manager
@@ -913,6 +914,25 @@ class TestGitDirectorConsoleDirectBranches:
         app.push_screen.assert_called_once_with(screen)
         app._gather_and_show_info.assert_called_once_with(path, screen)
 
+    @patch("gitdirector.commands.tui.app.RepoInfoScreen")
+    def test_action_show_info_for_group_starts_aggregate_worker(self, mock_screen_cls):
+        group = RepoGroup(Path("/tmp/work"), (Path("/tmp/work/alpha"), Path("/tmp/work/beta")))
+        screen = MagicMock()
+        mock_screen_cls.return_value = screen
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._get_selected_group = MagicMock(return_value=group)
+        app._get_selected_path = MagicMock()
+        app.push_screen = MagicMock()
+        app._gather_and_show_group_info = MagicMock()
+
+        app.action_show_info()
+
+        mock_screen_cls.assert_called_once_with("work (2 repos)", Path("/tmp/work"))
+        app.push_screen.assert_called_once_with(screen)
+        app._gather_and_show_group_info.assert_called_once_with(group, screen)
+        app._get_selected_path.assert_not_called()
+
     @patch("gitdirector.info.gather_repo_info")
     def test_gather_and_show_info_populates_screen_from_worker(self, mock_gather):
         path = Path("/tmp/alpha")
@@ -926,6 +946,44 @@ class TestGitDirectorConsoleDirectBranches:
 
         mock_gather.assert_called_once_with(path)
         app.call_from_thread.assert_called_once_with(screen.populate, result)
+
+    @patch("gitdirector.info.gather_repo_info")
+    def test_gather_and_show_group_info_aggregates_repository_results(self, mock_gather):
+        group = RepoGroup(Path("/tmp/work"), (Path("/tmp/work/alpha"), Path("/tmp/work/beta")))
+        alpha = RepoInfoResult(
+            2,
+            [FileTypeInfo(".py", 1, 10, 20), FileTypeInfo(".png", 1, None, None)],
+            10,
+            20,
+            2,
+        )
+        beta = RepoInfoResult(
+            3,
+            [FileTypeInfo(".py", 2, 30, 60), FileTypeInfo(".md", 1, 5, 10)],
+            35,
+            70,
+            4,
+        )
+        screen = MagicMock()
+        app = GitDirectorConsole()
+        app.call_from_thread = MagicMock()
+        mock_gather.side_effect = [alpha, beta]
+
+        GitDirectorConsole._gather_and_show_group_info.__wrapped__(app, group, screen)
+
+        assert mock_gather.call_args_list[0].args == (Path("/tmp/work/alpha"),)
+        assert mock_gather.call_args_list[1].args == (Path("/tmp/work/beta"),)
+        result = app.call_from_thread.call_args.args[1]
+        assert result.total_files == 5
+        assert result.total_lines == 45
+        assert result.total_tokens == 90
+        assert result.max_depth == 4
+        assert result.file_types == [
+            FileTypeInfo(".py", 3, 40, 80),
+            FileTypeInfo(".md", 1, 5, 10),
+            FileTypeInfo(".png", 1, None, None),
+        ]
+        assert app.call_from_thread.call_args.args[0] is screen.populate
 
     @patch("gitdirector.commands.tui.app.RepoInfoScreen")
     def test_push_info_screen_updates_status(self, mock_screen_cls):
