@@ -32,13 +32,7 @@ class ActionMenuScreen(SessionActionMenuScreen):
         return f"[dim]branch:[/dim] [cyan]{self.branch or '—'}[/cyan]"
 
     def _primary_options(self) -> list[Option]:
-        return super()._primary_options() + [
-            Option("", disabled=True),
-            Option(
-                "[white]\u00b1[/white] [bold]Review Diff[/bold] [dim]uncommitted changes[/dim]",
-                id="review_diff",
-            ),
-        ]
+        return super()._primary_options()
 
 
 class GitOperationsMenuScreen(ModalScreen[str]):
@@ -84,6 +78,12 @@ class GitOperationsMenuScreen(ModalScreen[str]):
                     id="pull",
                 ),
                 Option("[white]↑[/white] [bold]Push[/bold] [dim]git push[/dim]", id="push"),
+                Option("", disabled=True),
+                Option("[dim]Diff Viewer[/dim]", disabled=True),
+                Option(
+                    "[white]\u00b1[/white] [bold]Review Diff[/bold] [dim]uncommitted changes[/dim]",
+                    id="review_diff",
+                ),
                 id="action-menu",
             )
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")

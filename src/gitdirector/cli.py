@@ -20,6 +20,7 @@ from .commands import (
     listt,
     print_update_notice,
     pull,
+    reset,
     status,
     tui,
     unlink,
@@ -59,6 +60,7 @@ cd.register(cli)
 help.register(cli)
 tui.register(cli)
 autoclean.register(cli)
+reset.register(cli)
 info.register(cli)
 gd_tmux.register(cli)
 capture.register(cli)

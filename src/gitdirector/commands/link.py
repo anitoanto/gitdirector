@@ -28,6 +28,21 @@ def register(cli: click.Group):
             else:
                 for repo_path in repos:
                     console.print(f"  [green]+[/green] {repo_path}")
+        elif (
+            discover
+            and not repos
+            and message
+            in {
+                "No git repositories found",
+                "No new repositories found",
+            }
+        ):
+            console.print(f"  {message}")
+            for repo_path in skipped:
+                console.print(
+                    f"  [dim yellow]\\[skipped][/dim yellow] "
+                    f"[bright_black]{repo_path}[/bright_black]"
+                )
         else:
             console.print(f"  [red]{message}[/red]")
             console.print()

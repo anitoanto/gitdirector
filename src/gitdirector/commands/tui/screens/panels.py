@@ -1,9 +1,10 @@
-"""Modal screens related to panels (create, reconfigure, rename, action menu, agent loading)."""
+"""Modal screens related to panels (create, reconfigure, rename, action menu, session loading)."""
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from rich.markup import escape
@@ -99,7 +100,7 @@ class PanelActionMenuScreen(ModalScreen[str]):
         self.panel = panel
 
     def compose(self) -> ComposeResult:
-        from ....integrations.tmux import make_panel_session_name
+        from ....integrations.tmux.core import make_panel_session_name
 
         session_name = make_panel_session_name(self.panel.name)
 
@@ -189,10 +190,10 @@ class RenamePanelScreen(ModalScreen[str | None]):
 
 
 class AgentLoadingScreen(ModalScreen[None]):
-    """Full-screen loading overlay shown while an agent initialises."""
+    """Full-screen loading overlay shown while a tmux session initialises."""
 
     _POLL_INTERVAL = 0.1
-    _MIN_WAIT = 1.0
+    _MIN_WAIT = 0.2
     _MAX_WAIT = 15.0
 
     DEFAULT_CSS = _safe_css("""
@@ -224,13 +225,23 @@ class AgentLoadingScreen(ModalScreen[None]):
     }
     """)
 
-    def __init__(self, agent_cmd: str, session_name: str, ready_marker: Path) -> None:
+    def __init__(
+        self,
+        agent_cmd: str,
+        session_name: str,
+        ready_marker: Path | None = None,
+        *,
+        loading_hint: str = "waiting for agent to initialize\u2026",
+        on_attach: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__()
         self._agent_cmd = agent_cmd
         self._session_name = session_name
         self._ready_marker = ready_marker
-        self._done_marker = Path(f"{ready_marker}.done")
-        self._failed_marker = Path(f"{ready_marker}.failed")
+        self._done_marker = Path(f"{ready_marker}.done") if ready_marker else None
+        self._failed_marker = Path(f"{ready_marker}.failed") if ready_marker else None
+        self._loading_hint = loading_hint
+        self._on_attach = on_attach
         self._dismissed = False
         self._start_time = 0.0
 
@@ -241,16 +252,22 @@ class AgentLoadingScreen(ModalScreen[None]):
                 f"Launching [bold]{self._agent_cmd}[/bold]",
                 id="loading-text",
             )
-            yield Static("waiting for agent to initialize\u2026", id="loading-hint")
+            yield Static(self._loading_hint, id="loading-hint")
 
     def on_mount(self) -> None:
         self._start_time = time.monotonic()
+        if self._ready_marker is None:
+            self._poll_timer = None
+            self._timeout_timer = self.set_timer(self._MIN_WAIT, self._force_dismiss)
+            return
         self._poll_timer = self.set_interval(self._POLL_INTERVAL, self._check_ready)
         self._timeout_timer = self.set_timer(self._MAX_WAIT, self._force_dismiss)
         self.call_after_refresh(self._check_ready)
 
     def _check_ready(self) -> None:
         if self._dismissed:
+            return
+        if self._ready_marker is None:
             return
         if time.monotonic() - self._start_time < self._MIN_WAIT:
             return
@@ -265,7 +282,8 @@ class AgentLoadingScreen(ModalScreen[None]):
         if self._dismissed:
             return
         self._dismissed = True
-        self._poll_timer.stop()
+        if self._ready_marker is not None:
+            self._poll_timer.stop()
         self._do_dismiss()
 
     def _do_dismiss(self) -> None:
@@ -275,8 +293,15 @@ class AgentLoadingScreen(ModalScreen[None]):
 
         from ....integrations.tmux import attach_tmux_session
 
+        if self._on_attach is not None:
+            self._on_attach()
+            self.dismiss(None)
+            return
+
         session_name = self._session_name
         for marker in (self._ready_marker, self._done_marker, self._failed_marker):
+            if marker is None:
+                continue
             try:
                 marker.unlink()
             except FileNotFoundError:
@@ -600,17 +625,27 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         return f"↑↓/jk navigate    \\[tab] switch lists    \\[ctrl+o] {verb}    \\[esc] back"
 
     @staticmethod
-    def validate_new_panel_name(panel_store: PanelStore, name: str) -> str | None:
-        from ....integrations.tmux import _session_exists, make_panel_session_name
+    def validate_new_panel_name(
+        panel_store: PanelStore,
+        name: str,
+        *,
+        current_name: str | None = None,
+    ) -> str | None:
+        from ....integrations.tmux.core import _session_exists, make_panel_session_name
 
-        if panel_store.get(name):
+        if panel_store.get(name) and name != current_name:
             return f"Panel '{name}' already exists"
 
         session_name = make_panel_session_name(name)
-        if any(make_panel_session_name(panel.name) == session_name for panel in panel_store.panels):
+        if any(
+            panel.name != current_name and make_panel_session_name(panel.name) == session_name
+            for panel in panel_store.panels
+        ):
             return f"Panel '{name}' conflicts with tmux session name '{session_name}'"
 
-        if _session_exists(session_name):
+        if _session_exists(session_name) and (
+            current_name is None or make_panel_session_name(current_name) != session_name
+        ):
             return f"TMUX session '{session_name}' already exists"
 
         return None

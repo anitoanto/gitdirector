@@ -1,8 +1,10 @@
 import runpy
 import warnings
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click.utils import strip_ansi
 
 from gitdirector.cli import (
     _changes_text,
@@ -86,6 +88,7 @@ def _mock_manager(**overrides):
     mgr = MagicMock()
     mgr.config.repositories = []
     mgr.config.max_workers = 2
+    mgr.resolve_repository_target = MagicMock(return_value=(None, [], False))
     for key, val in overrides.items():
         setattr(mgr, key, MagicMock(return_value=val))
     return mgr
@@ -131,18 +134,20 @@ class TestLinkCommand:
 
     def test_link_discover_none_found(self, runner, tmp_path):
         """--discover finds no repositories: should print message and succeed."""
-        mgr = _mock_manager(add_repository=(True, "No repositories found", [], []))
+        mgr = _mock_manager(add_repository=(False, "No git repositories found", [], []))
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
         assert result.exit_code == 0
         assert (
-            "no repositories" in result.output.lower() or "nothing to do" in result.output.lower()
+            "no git repositories" in result.output.lower()
+            or "nothing to do" in result.output.lower()
         )
 
 
 class TestUnlinkCommand:
     def test_unlink_success(self, runner, tmp_path):
         mgr = _mock_manager(remove_repository=(True, "Removed repository: /r", [tmp_path]))
+        mgr.resolve_repository_target.return_value = (tmp_path, [], True)
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", str(tmp_path)])
         assert result.exit_code == 0
@@ -154,11 +159,11 @@ class TestUnlinkCommand:
         assert result.exit_code == 1
 
     def test_unlink_by_name_success(self, runner, tmp_path):
-        """Plain name falls through to remove_by_name when path lookup fails."""
+        """A resolved plain name removes its tracked repository path."""
         mgr = _mock_manager(
-            remove_repository=(False, "Repository not tracked: /x", []),
-            remove_by_name=(True, f"Removed repository: {tmp_path}", [tmp_path]),
+            remove_repository=(True, f"Removed repository: {tmp_path}", [tmp_path]),
         )
+        mgr.resolve_repository_target.return_value = (tmp_path, [], False)
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
         assert result.exit_code == 0
@@ -167,7 +172,6 @@ class TestUnlinkCommand:
         """Returns exit code 1 when name is not tracked."""
         mgr = _mock_manager(
             remove_repository=(False, "Repository not tracked", []),
-            remove_by_name=(False, "No tracked repository named: my-repo", []),
         )
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
@@ -178,7 +182,11 @@ class TestUnlinkCommand:
         """Returns exit code 1 when multiple repos share the same name."""
         mgr = _mock_manager(
             remove_repository=(False, "Repository not tracked", []),
-            remove_by_name=(False, "Multiple repositories named 'my-repo'", []),
+        )
+        mgr.resolve_repository_target.return_value = (
+            None,
+            [Path("/a/my-repo"), Path("/b/my-repo")],
+            False,
         )
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
@@ -333,7 +341,7 @@ class TestStatusCommand:
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0
-        assert "2 repositories" in result.output
+        assert "2 repositories" in strip_ansi(result.output)
 
 
 class TestPullCommand:
@@ -463,6 +471,7 @@ class TestHelpCommand:
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
         assert "pull [--yes]" in result.output
+        assert "gd-send SESSION [TEXT] [--enter | --key C-c]" in result.output
 
     def test_no_args_shows_help(self, runner):
         result = runner.invoke(cli, [])
@@ -477,6 +486,66 @@ class TestCompletionCommand:
         assert result.exit_code == 0
         assert "#compdef gitdirector" in result.output
         assert "_GITDIRECTOR_COMPLETE=zsh_complete" in result.output
+
+    def test_completion_zsh_includes_compinit_bootstrap(self, runner):
+        """The eval'd script must load compinit so `compdef` is defined.
+
+        Without this bootstrap, fresh zsh shells that haven't loaded
+        compinit yet report ``command not found: compdef`` when the
+        user runs ``eval "$(gitdirector completion zsh)"``.
+        """
+        result = runner.invoke(cli, ["completion", "zsh"])
+
+        assert result.exit_code == 0
+        assert "autoload -U +X compinit" in result.output
+        assert "typeset -f compdef" in result.output
+        assert result.output.index("#compdef gitdirector") < result.output.index(
+            "autoload -U +X compinit"
+        )
+
+    def test_completion_zsh_bootstrap_appears_before_function(self, runner):
+        result = runner.invoke(cli, ["completion", "zsh"])
+
+        assert result.exit_code == 0
+        bootstrap_idx = result.output.index("autoload -U +X compinit")
+        function_idx = result.output.index("_gitdirector_completion() {")
+        assert bootstrap_idx < function_idx
+
+    def test_completion_zsh_eval_works_without_prior_compinit(self, runner, tmp_path):
+        """End-to-end: eval the zsh output in a shell that never loaded compinit.
+
+        Spawns ``zsh -f`` (no rc files) and evaluates the output.
+        Without the bootstrap this raises ``compdef: command not found``.
+        """
+        import shutil
+        import subprocess
+
+        if not shutil.which("zsh"):
+            pytest.skip("zsh is not installed on this system")
+
+        result = runner.invoke(cli, ["completion", "zsh"])
+        assert result.exit_code == 0
+
+        script = tmp_path / "completion.zsh"
+        script.write_text(result.output)
+        proc = subprocess.run(
+            ["zsh", "-f", "-c", f'source "{script}" && echo OK'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0, (
+            f"zsh eval failed.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+        assert "OK" in proc.stdout
+        assert "command not found" not in proc.stderr
+
+    def test_completion_bash_output_is_unchanged(self, runner):
+        """The bash bootstrap should NOT be injected — bash is not patched."""
+        result = runner.invoke(cli, ["completion", "bash"])
+
+        assert result.exit_code == 0
+        assert "autoload -U +X compinit" not in result.output
 
     def test_completion_unknown_shell_fails(self, runner):
         result = runner.invoke(cli, ["completion", "powershell"])

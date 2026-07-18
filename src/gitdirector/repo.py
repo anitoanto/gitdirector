@@ -454,6 +454,10 @@ class Repository:
                 unstaged = True
                 staged_files.append(filename)
                 unstaged_files.append(filename)
+            elif line.startswith("? "):
+                filename = line[2:]
+                unstaged = True
+                unstaged_files.append(filename)
 
         if fetch and branch is not None:
             code, err = self._fetch_origin_branch(branch)
@@ -556,6 +560,13 @@ class Repository:
         marker line that the renderer can display to the user.
         """
         code, diff_text, err = self._run_git("diff", "HEAD", "--no-color", _strip=False)
+        if code != 0 and _is_no_commits_error(err):
+            code, diff_text, err = self._run_git(
+                "diff",
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                "--no-color",
+                _strip=False,
+            )
         if code != 0:
             return False, err or "git diff failed", []
 

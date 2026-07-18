@@ -1,5 +1,6 @@
 import click
 from rich.table import Table
+from rich.text import Text
 
 from . import console, get_version, print_update_notice
 
@@ -25,7 +26,10 @@ def show_help():
     cmd_table.add_column("desc", style="dim")
 
     for cmd, desc in [
-        ("link PATH [--discover]", "Link a repository or discover all repos under a path"),
+        (
+            "link PATH [--discover]",
+            "Link a repository or discover all repos under a path (no-op if none)",
+        ),
         ("unlink PATH|NAME [--discover]", "Unlink a repository or all repos under a path"),
         ("list", "List all tracked repositories"),
         ("status", "Show status summary and per-repo details"),
@@ -33,6 +37,7 @@ def show_help():
         ("cd NAME", "Open or switch to a tmux session for a repository"),
         ("console", "Interactive TUI for browsing and opening repositories"),
         ("autoclean", "Remove broken repository links from tracking"),
+        ("reset [--yes]", "Kill all sessions and panels, wipe ~/.gitdirector, recreate config"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
         (
             'gd-tmux PATH|NAME "cmd" [--description "..."]',
@@ -42,11 +47,11 @@ def show_help():
             "gd-capture SESSION [--lines N] [--full]",
             "Print the current scrollback of a live gd tmux session",
         ),
-        ("gd-send SESSION [TEXT] [--enter|--key C-c]", "Send text or C-c to a gd session"),
+        ("gd-send SESSION [TEXT] [--enter | --key C-c]", "Send text or C-c to a gd session"),
         ("completion SHELL", "Print shell completion setup for bash, zsh, or fish"),
         ("help", "Show this help message"),
     ]:
-        cmd_table.add_row(cmd, desc)
+        cmd_table.add_row(Text(cmd), desc)
 
     console.print(cmd_table)
 

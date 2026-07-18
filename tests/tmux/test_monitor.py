@@ -44,9 +44,15 @@ class TestLaunchCommandInTmuxSession:
             "touch /tmp/gitdirector-agent.ready.done >/dev/null 2>&1 || true; fi; "
             f"tmux detach-client -s {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
+            "rm -f /tmp/gitdirector-agent.ready /tmp/gitdirector-agent.ready.done "
+            "/tmp/gitdirector-agent.ready.failed >/dev/null 2>&1 || true; "
             "exit $status"
         )
-        expected_command = f"sh -lc {shlex.quote(cleanup_script)}"
+        expected_command = (
+            "env -u NO_COLOR TERM=tmux-256color COLORTERM=truecolor "
+            "FORCE_COLOR=3 CLICOLOR_FORCE=1 CLAUDE_CODE_TMUX_TRUECOLOR=1 "
+            f"sh -lc {shlex.quote(cleanup_script)}"
+        )
         assert ready_marker == Path("/tmp/gitdirector-agent.ready")
         mock_run.assert_called_once_with(
             [
@@ -78,18 +84,24 @@ class TestLaunchCommandInTmuxSession:
         assert 'echo "hello world"' in wrapped_script
         # The outer wrapping still uses shlex.quote so single-quote–bearing
         # commands survive the tmux command boundary intact.
-        assert wrapped_script.startswith("sh -lc ")
+        assert wrapped_script.startswith(
+            "env -u NO_COLOR TERM=tmux-256color COLORTERM=truecolor "
+            "FORCE_COLOR=3 CLICOLOR_FORCE=1 CLAUDE_CODE_TMUX_TRUECOLOR=1 sh -lc "
+        )
 
 
 def _inner_shell_script(mock_run) -> str:
     """Return the script that ``sh -lc`` actually executes.
 
     The wrapper passed to ``tmux respawn-pane`` is
-    ``sh -lc <shlex.quote(script)>``; parsing the wrapper as a shell line
-    recovers the original script.
+    ``env ... sh -lc <shlex.quote(script)>``; parsing the wrapper as a
+    shell line recovers the original script.
     """
     wrapped = mock_run.call_args[0][0][-1]
-    return shlex.split(wrapped)[2]
+    parts = shlex.split(wrapped)
+    shell_index = parts.index("sh")
+    assert parts[shell_index + 1] == "-lc"
+    return parts[shell_index + 2]
 
 
 def _assert_user_command_wrapped(mock_run, command: str) -> None:
@@ -261,12 +273,13 @@ class TestMakeAgentReadyMarker:
 
     def test_ignores_missing_temp_file(self):
         with patch(
-            "gitdirector.integrations.tmux.tempfile.mkstemp",
+            "gitdirector.integrations.tmux.monitor.tempfile.mkstemp",
             return_value=(123, "/tmp/gitdirector-agent-test.ready"),
         ):
-            with patch("gitdirector.integrations.tmux.os.close") as mock_close:
+            with patch("gitdirector.integrations.tmux.monitor.os.close") as mock_close:
                 with patch(
-                    "gitdirector.integrations.tmux.Path.unlink", side_effect=FileNotFoundError
+                    "gitdirector.integrations.tmux.monitor.Path.unlink",
+                    side_effect=FileNotFoundError,
                 ):
                     marker = _make_agent_ready_marker()
 
@@ -945,11 +958,49 @@ class TestTmuxMonitor:
 
         monitor._sync_sessions()
 
-        assert set(added) == {"gd/new/shell/1", "gd/existing/shell/1"}
+        assert set(added) == {"gd/new/shell/1"}
         assert set(removed) == {"gd/stale/shell/1", "gd/existing/shell/1"}
+        assert monitor._reader_failure_backoff["gd/existing/shell/1"] > time.time()
         monitor._poll_content_changes.assert_called_once_with(
             {"gd/new/shell/1", "gd/existing/shell/1"}
         )
+
+    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
+    def test_sync_sessions_skips_reader_retry_during_backoff(self, mock_list_sessions):
+        monitor = TmuxMonitor()
+        monitor._running = True
+        monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() + 60
+        mock_list_sessions.return_value = ["gd/repo/shell/1"]
+
+        monitor._add_reader = MagicMock()
+        monitor._poll_content_changes = MagicMock(
+            side_effect=lambda sessions: setattr(monitor, "_running", False)
+        )
+
+        monitor._sync_sessions()
+
+        monitor._add_reader.assert_not_called()
+        monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
+
+    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
+    def test_sync_sessions_clears_backoff_after_successful_reader_start(self, mock_list_sessions):
+        monitor = TmuxMonitor()
+        monitor._running = True
+        monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() - 1
+        mock_list_sessions.return_value = ["gd/repo/shell/1"]
+
+        def add_reader(session_name: str):
+            monitor._readers[session_name] = MagicMock(is_alive=MagicMock(return_value=True))
+
+        monitor._add_reader = MagicMock(side_effect=add_reader)
+        monitor._poll_content_changes = MagicMock(
+            side_effect=lambda sessions: setattr(monitor, "_running", False)
+        )
+
+        monitor._sync_sessions()
+
+        monitor._add_reader.assert_called_once_with("gd/repo/shell/1")
+        assert "gd/repo/shell/1" not in monitor._reader_failure_backoff
 
     @patch("gitdirector.integrations.tmux.monitor._list_sessions")
     def test_sync_sessions_skips_panel_and_temp_wrapper_sessions(self, mock_list_sessions):

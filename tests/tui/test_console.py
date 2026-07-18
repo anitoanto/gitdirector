@@ -9,6 +9,7 @@ from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
 from gitdirector.commands.tui import (
+    AgentLoadingScreen,
     ConfirmScreen,
     GitCommandResultScreen,
     GitDirectorConsole,
@@ -16,7 +17,8 @@ from gitdirector.commands.tui import (
     PullResultScreen,
 )
 from gitdirector.commands.tui.app import _run_console
-from gitdirector.info import RepoInfoResult
+from gitdirector.commands.tui.app_groups import RepoGroup
+from gitdirector.info import FileTypeInfo, RepoInfoResult
 from gitdirector.repo import Repository, RepoStatus
 
 from .conftest import _make_info, _mock_manager
@@ -36,9 +38,13 @@ class TestGitDirectorConsole:
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
         async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
+            empty_message = app.query_one("#no-repos-message", Static)
             assert table.row_count == 0
+            assert table.display is False
+            assert empty_message.display is True
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_table_populated_with_repos(self, _mock_sessions):
@@ -61,7 +67,7 @@ class TestGitDirectorConsole:
         app._monitor = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("q")
-        app._monitor.stop.assert_called_once_with(wait=False)
+        app._monitor.stop.assert_called_once_with(wait=True)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_cursor_down_binding(self, _mock_sessions):
@@ -242,18 +248,6 @@ class TestGitDirectorConsole:
             assert len(table.columns) == 6
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    @patch("gitdirector.commands.tui.ActionMenuScreen")
-    async def test_enter_opens_action_menu(self, mock_screen_cls, _mock_sessions):
-        repos = [_make_info("alpha", Path("/tmp/alpha"), branch="main")]
-        app = GitDirectorConsole()
-        app.manager = _mock_manager(repos)
-        async with app.run_test(size=(120, 30)) as pilot:
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._handle_menu_action(None)
-            assert True
-
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_handle_menu_action_new_session(self, _mock_sessions):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
@@ -274,12 +268,6 @@ class TestGitDirectorConsole:
             await pilot.pause()
             app._handle_menu_action("attach:gd/alpha/shell/1")
             app._attach_to_session.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
-
-    async def test_handle_menu_action_none_is_noop(self):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as _:
-            app._handle_menu_action(None)
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
@@ -430,7 +418,6 @@ class TestGitDirectorConsoleActionRouting:
             app.action_open_tmux.assert_called_once_with(agent_cmd="copilot")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    @patch("gitdirector.commands.tui.app.AgentLoadingScreen")
     @patch(
         "gitdirector.integrations.tmux.launch_command_in_tmux_session",
         return_value=Path("/tmp/gitdirector-agent.ready"),
@@ -443,11 +430,11 @@ class TestGitDirectorConsoleActionRouting:
         self,
         mock_create_session,
         mock_launch_command,
-        mock_loading_screen,
         _mock_sessions,
     ):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        app._suspend_and_attach = MagicMock()
         app.push_screen = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
@@ -462,12 +449,19 @@ class TestGitDirectorConsoleActionRouting:
                 description=None,
             )
             mock_launch_command.assert_called_once_with("gd/alpha/copilot/1", "copilot")
-            mock_loading_screen.assert_called_once_with(
-                "copilot",
-                "gd/alpha/copilot/1",
-                Path("/tmp/gitdirector-agent.ready"),
-            )
             app.push_screen.assert_called_once()
+            screen = app.push_screen.call_args.args[0]
+            assert isinstance(screen, AgentLoadingScreen)
+            assert screen._agent_cmd == "copilot"
+            assert screen._ready_marker == Path("/tmp/gitdirector-agent.ready")
+
+            screen._on_attach()
+            app._suspend_and_attach.assert_called_once_with(
+                "gd/alpha/copilot/1",
+                Path("/tmp/alpha"),
+                row_key=None,
+                skip_config_sync=True,
+            )
 
     async def test_do_remove_calls_kill_tmux_session(self):
         app = GitDirectorConsole()
@@ -920,6 +914,25 @@ class TestGitDirectorConsoleDirectBranches:
         app.push_screen.assert_called_once_with(screen)
         app._gather_and_show_info.assert_called_once_with(path, screen)
 
+    @patch("gitdirector.commands.tui.app.RepoInfoScreen")
+    def test_action_show_info_for_group_starts_aggregate_worker(self, mock_screen_cls):
+        group = RepoGroup(Path("/tmp/work"), (Path("/tmp/work/alpha"), Path("/tmp/work/beta")))
+        screen = MagicMock()
+        mock_screen_cls.return_value = screen
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._get_selected_group = MagicMock(return_value=group)
+        app._get_selected_path = MagicMock()
+        app.push_screen = MagicMock()
+        app._gather_and_show_group_info = MagicMock()
+
+        app.action_show_info()
+
+        mock_screen_cls.assert_called_once_with("work (2 repos)", Path("/tmp/work"))
+        app.push_screen.assert_called_once_with(screen)
+        app._gather_and_show_group_info.assert_called_once_with(group, screen)
+        app._get_selected_path.assert_not_called()
+
     @patch("gitdirector.info.gather_repo_info")
     def test_gather_and_show_info_populates_screen_from_worker(self, mock_gather):
         path = Path("/tmp/alpha")
@@ -933,6 +946,44 @@ class TestGitDirectorConsoleDirectBranches:
 
         mock_gather.assert_called_once_with(path)
         app.call_from_thread.assert_called_once_with(screen.populate, result)
+
+    @patch("gitdirector.info.gather_repo_info")
+    def test_gather_and_show_group_info_aggregates_repository_results(self, mock_gather):
+        group = RepoGroup(Path("/tmp/work"), (Path("/tmp/work/alpha"), Path("/tmp/work/beta")))
+        alpha = RepoInfoResult(
+            2,
+            [FileTypeInfo(".py", 1, 10, 20), FileTypeInfo(".png", 1, None, None)],
+            10,
+            20,
+            2,
+        )
+        beta = RepoInfoResult(
+            3,
+            [FileTypeInfo(".py", 2, 30, 60), FileTypeInfo(".md", 1, 5, 10)],
+            35,
+            70,
+            4,
+        )
+        screen = MagicMock()
+        app = GitDirectorConsole()
+        app.call_from_thread = MagicMock()
+        mock_gather.side_effect = [alpha, beta]
+
+        GitDirectorConsole._gather_and_show_group_info.__wrapped__(app, group, screen)
+
+        assert mock_gather.call_args_list[0].args == (Path("/tmp/work/alpha"),)
+        assert mock_gather.call_args_list[1].args == (Path("/tmp/work/beta"),)
+        result = app.call_from_thread.call_args.args[1]
+        assert result.total_files == 5
+        assert result.total_lines == 45
+        assert result.total_tokens == 90
+        assert result.max_depth == 4
+        assert result.file_types == [
+            FileTypeInfo(".py", 3, 40, 80),
+            FileTypeInfo(".md", 1, 5, 10),
+            FileTypeInfo(".png", 1, None, None),
+        ]
+        assert app.call_from_thread.call_args.args[0] is screen.populate
 
     @patch("gitdirector.commands.tui.app.RepoInfoScreen")
     def test_push_info_screen_updates_status(self, mock_screen_cls):
@@ -1248,7 +1299,7 @@ class TestGitDirectorConsoleDirectBranches:
                 app.action_quit()
 
         app._pause_session_status_tracking.assert_called_once_with(wait=False)
-        app._monitor.stop.assert_called_once_with(wait=False)
+        app._monitor.stop.assert_called_once_with(wait=True)
         executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
         mock_cancel_all.assert_called_once_with()
         mock_kill_git.assert_called_once_with()
@@ -1299,13 +1350,13 @@ class TestGitDirectorConsoleDirectBranches:
         table = MagicMock()
         table.row_count = 0
         app.query_one = MagicMock(return_value=table)
-        app._suspend_and_attach = MagicMock()
+        app.push_screen = MagicMock()
 
         app.action_select_row()
 
-        app._suspend_and_attach.assert_not_called()
+        app.push_screen.assert_not_called()
 
-    def test_action_select_row_attaches_selected_session(self):
+    def test_action_select_row_reattaches_selected_session_with_inner_delay(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
         row_key = MagicMock()
@@ -1319,7 +1370,24 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_select_row()
 
-        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1")
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/shell/1",
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
+
+    def test_on_data_table_row_selected_reattaches_agent_session_with_inner_delay(self):
+        app = GitDirectorConsole()
+        app._suspend_and_attach = MagicMock()
+        event = MagicMock()
+        event.data_table.id = "sessions-table"
+        event.row_key.value = "gd/alpha/copilot/1"
+
+        app.on_data_table_row_selected(event)
+
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/copilot/1",
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
 
     def test_action_select_row_on_repos_opens_menu(self):
         app = GitDirectorConsole()
@@ -1341,18 +1409,30 @@ class TestGitDirectorConsoleDirectBranches:
         app.action_show_menu.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.create_tmux_session", return_value="gd/alpha/shell/1")
-    def test_action_open_tmux_shell_attaches_to_new_session(self, mock_create):
+    def test_action_open_tmux_shell_uses_loading_screen(self, mock_create):
         app = GitDirectorConsole()
         app._get_selected_path = MagicMock(return_value=Path("/tmp/alpha"))
         app._suspend_and_attach = MagicMock()
+        app.push_screen = MagicMock()
 
         app.action_open_tmux()
 
         mock_create.assert_called_once_with(
             "alpha", Path("/tmp/alpha"), purpose="shell", description=None
         )
+
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, AgentLoadingScreen)
+        assert screen._agent_cmd == "shell"
+        assert screen._ready_marker is None
+        assert screen._loading_hint == "waiting for session to initialize…"
+
+        screen._on_attach()
         app._suspend_and_attach.assert_called_once_with(
-            "gd/alpha/shell/1", Path("/tmp/alpha"), skip_config_sync=True
+            "gd/alpha/shell/1",
+            Path("/tmp/alpha"),
+            row_key=None,
+            skip_config_sync=True,
         )
 
     def test_action_open_tmux_without_selection_is_noop(self):
@@ -1373,13 +1453,17 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_attach_to_session_delegates_to_suspend_and_attach(self):
+    def test_attach_to_session_reuses_temp_attach_with_inner_delay(self):
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
 
-        app._attach_to_session("gd/alpha/shell/1", Path("/tmp/alpha"))
+        app._attach_to_session("gd/alpha/copilot/1", Path("/tmp/alpha"))
 
-        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/alpha/copilot/1",
+            Path("/tmp/alpha"),
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
 
     @patch("gitdirector.commands.tui.app.ActionMenuScreen")
     def test_action_show_menu_uses_selected_repo_metadata(self, mock_screen_cls):
@@ -1439,7 +1523,7 @@ class TestGitDirectorConsoleDirectBranches:
             except RuntimeError:
                 pass
 
-        mock_stop.assert_called_once_with(wait=False)
+        mock_stop.assert_called_once_with(wait=True)
 
 
 class TestBuildLoadedStatus:

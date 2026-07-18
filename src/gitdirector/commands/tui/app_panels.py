@@ -71,7 +71,7 @@ class ConsolePanelsMixin:
     def _panel_matches_search(
         self, panel: Panel, query: str, live_sessions: set[str] | None = None
     ) -> bool:
-        from ...integrations.tmux import make_panel_session_name
+        from ...integrations.tmux.core import make_panel_session_name
 
         normalized_query = query.replace("×", "x")
         live_panes = self._live_panel_pane_count(panel, live_sessions)
@@ -88,7 +88,7 @@ class ConsolePanelsMixin:
         return any(normalized_query in haystack.replace("×", "x") for haystack in haystacks)
 
     def _panel_sort_key_func(self):
-        from ...integrations.tmux import make_panel_session_name
+        from ...integrations.tmux.core import make_panel_session_name
 
         col = self._panels_sort_column
         if col == 1:
@@ -115,7 +115,7 @@ class ConsolePanelsMixin:
         return lambda panel: panel.name.lower()
 
     def _apply_panels_filter_and_sort(self, live_sessions: set[str] | None = None) -> None:
-        from ...integrations.tmux import _list_sessions, make_panel_session_name
+        from ...integrations.tmux.core import _list_sessions, make_panel_session_name
 
         try:
             table = self.query_one("#panels-table", DataTable)
@@ -128,7 +128,6 @@ class ConsolePanelsMixin:
             preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
                 table
             )
-        table.clear()
         no_msg = self.query_one("#no-panels-message", Static)
 
         panels = list(self._panels_entries)
@@ -148,12 +147,10 @@ class ConsolePanelsMixin:
 
         panels.sort(key=self._panel_sort_key_func(), reverse=self._panels_sort_reverse)
 
-        if not panels and total == 0 and not self._search_query:
-            table.display = False
-            no_msg.display = True
-        else:
-            table.display = True
-            no_msg.display = False
+        is_empty = not panels and total == 0 and not self._search_query
+        self._set_table_empty_state(table, no_msg, is_empty=is_empty)
+        table.clear()
+        if not is_empty:
             for panel in panels:
                 filled = self._live_panel_pane_count(panel, live_sessions)
                 total_panes = panel.total_panes
@@ -279,19 +276,23 @@ class ConsolePanelsMixin:
     def _do_rename_panel(self, old_name: str, new_name: str | None) -> None:
         if new_name is None or new_name == old_name:
             return
-        existing = self._panel_store.get(new_name)
-        if existing:
-            self._update_status(f"Panel '{new_name}' already exists")
+        validation_message = CreatePanelScreen.validate_new_panel_name(
+            self._panel_store,
+            new_name,
+            current_name=old_name,
+        )
+        if validation_message:
+            self._update_status(validation_message)
             return
         self._panel_store.rename(old_name, new_name)
         self._load_panels()
 
     def _open_panel(self, panel_name: str) -> None:
-        from ...integrations.tmux import (
+        from ...integrations.tmux import rebuild_panel_tmux_session
+        from ...integrations.tmux.core import (
             _protect_session,
             _session_exists,
             make_panel_session_name,
-            rebuild_panel_tmux_session,
         )
 
         panel = self._panel_store.get(panel_name)
@@ -369,6 +370,11 @@ class ConsolePanelsMixin:
         )
 
     def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
-        if confirmed:
-            self._panel_store.delete(panel_name)
-            self._load_panels()
+        if not confirmed:
+            return
+        if not self._panel_store.delete(panel_name):
+            self._update_status(
+                f"Panel '{panel_name}' could not be deleted because its tmux session is active"
+            )
+            return
+        self._load_panels()

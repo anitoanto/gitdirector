@@ -98,8 +98,8 @@ class ConsoleReposMixin:
 
     def _populate_initial_rows(self) -> None:
         table = self.query_one("#repo-table", DataTable)
-        self.query_one("#no-repos-message", Static).display = False
-        table.display = True
+        no_msg = self.query_one("#no-repos-message", Static)
+        self._set_table_empty_state(table, no_msg, is_empty=False)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -133,8 +133,10 @@ class ConsoleReposMixin:
             logger.debug("Failed to update repo row %s", row_key, exc_info=True)
 
     def _show_no_repos(self) -> None:
-        self.query_one("#repo-table", DataTable).display = False
-        self.query_one("#no-repos-message", Static).display = True
+        table = self.query_one("#repo-table", DataTable)
+        no_msg = self.query_one("#no-repos-message", Static)
+        self._set_table_empty_state(table, no_msg, is_empty=True)
+        table.clear()
         self._visible_repo_count = 0
         self._visible_group_count = 0
         self._update_status("No repositories linked")
@@ -197,19 +199,17 @@ class ConsoleReposMixin:
         marker = "▸" if self._repo_group_is_collapsed(group) else "▾"
         return f"[bold cyan]{marker} {escape(group.name)}[/bold cyan]"
 
-    def _repo_group_count_label(self, shown: int, total: int) -> str:
-        repo_label = "repo" if total == 1 else "repos"
-        if shown == total:
-            return f"{total} {repo_label}"
-        return f"{shown}/{total} {repo_label}"
+    def _repo_group_count_label(self, group: RepoGroup) -> str:
+        repo_label = "repo" if group.repo_count == 1 else "repos"
+        return f"[bold cyan][{group.repo_count} {repo_label}][/bold cyan]"
 
-    def _add_repo_group_row(self, table: DataTable, group: RepoGroup, shown: int) -> None:
+    def _add_repo_group_row(self, table: DataTable, group: RepoGroup) -> None:
         table.add_row(
             self._repo_group_label(group),
-            f"[bold]{self._repo_group_count_label(shown, group.repo_count)}[/bold]",
-            "[dim]group[/dim]",
-            "[dim]enter actions[/dim]",
-            "—",
+            self._repo_group_count_label(group),
+            "",
+            "",
+            "",
             str(group.path),
             key=self._group_row_key(group.path),
         )
@@ -262,7 +262,7 @@ class ConsoleReposMixin:
             shown_group_count += 1
             shown_repo_count += len(group_paths)
             grouped_paths.update(group_paths)
-            self._add_repo_group_row(table, group, len(group_paths))
+            self._add_repo_group_row(table, group)
             if self._repo_group_is_collapsed(group):
                 continue
             for path in sorted(group_paths, key=lambda item: item.name.lower()):
@@ -296,7 +296,7 @@ class ConsoleReposMixin:
             shown_group_count += 1
             shown_repo_count += len(group_infos)
             grouped_paths.update(info.path for info in group_infos)
-            self._add_repo_group_row(table, group, len(group_infos))
+            self._add_repo_group_row(table, group)
             if self._repo_group_is_collapsed(group):
                 continue
             group_infos.sort(key=key_func, reverse=self._sort_reverse)
@@ -314,8 +314,7 @@ class ConsoleReposMixin:
 
     def _apply_filter_and_sort(self) -> None:
         table = self.query_one("#repo-table", DataTable)
-        self.query_one("#no-repos-message", Static).display = False
-        table.display = True
+        no_msg = self.query_one("#no-repos-message", Static)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -328,7 +327,14 @@ class ConsoleReposMixin:
         infos = list(self._results.values())
         total = len(infos)
         infos = self._filter_repo_infos_for_search(infos)
-        self._render_repo_info_rows(table, infos)
+        is_empty = total == 0 and not self._repo_paths and not self._search_query
+        self._set_table_empty_state(table, no_msg, is_empty=is_empty)
+        table.clear()
+        if is_empty:
+            self._visible_repo_count = 0
+            self._visible_group_count = 0
+        else:
+            self._render_repo_info_rows(table, infos)
 
         if self._resume_selection_tab == "repos":
             self._restore_resume_selection("repos")
@@ -369,7 +375,7 @@ class ConsoleReposMixin:
 
         msg += "   ↑↓/jk navigate  [enter] actions"
         if group_count:
-            msg += "  [space] toggle group"
+            msg += "  [space] toggle"
         msg += "  g git  / search  s sort  r refresh  q quit"
         if self._search_query:
             msg += "  [esc] clear search"

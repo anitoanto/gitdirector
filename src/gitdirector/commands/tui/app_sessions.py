@@ -97,7 +97,6 @@ class ConsoleSessionsMixin:
             preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
                 table
             )
-        table.clear()
         no_msg = self.query_one("#no-sessions-message", Static)
 
         entries = list(self._sessions_entries)
@@ -130,12 +129,10 @@ class ConsoleSessionsMixin:
         )
         entries.sort(key=key_func, reverse=self._sessions_sort_reverse)
 
-        if not entries and total == 0 and not self._search_query:
-            table.display = False
-            no_msg.display = True
-        else:
-            table.display = True
-            no_msg.display = False
+        is_empty = not entries and total == 0 and not self._search_query
+        self._set_table_empty_state(table, no_msg, is_empty=is_empty)
+        table.clear()
+        if not is_empty:
             for entry in entries:
                 status = entry.get("status", "running")
                 description = _wrap_session_description(
@@ -147,6 +144,7 @@ class ConsoleSessionsMixin:
                     entry["repo"],
                     entry["session_name"],
                     description,
+                    height=None,
                     key=entry["session_name"],
                 )
 

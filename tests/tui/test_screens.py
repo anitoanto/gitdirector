@@ -111,10 +111,14 @@ class TestConfirmScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
+            assert menu.option_count == 2
+            assert menu.highlighted == 0
             await pilot.press("up")
+            assert menu.highlighted == 1
             await pilot.press("down")
+            assert menu.highlighted == 0
             await pilot.press("down")
-            assert menu
+            assert menu.highlighted == 1
 
 
 class TestActionMenuScreen:
@@ -131,7 +135,9 @@ class TestActionMenuScreen:
             branch_label = app.screen.query_one("#menu-branch", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
             assert "main" in branch_label.content
-            assert menu.option_count == 10
+            assert menu.option_count == 8
+            ids = [opt.id for opt in menu.options if opt.id is not None]
+            assert "review_diff" not in ids
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_no_branch_shows_dash(self, mock_sessions):
@@ -207,22 +213,7 @@ class TestActionMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 16
-
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
-    async def test_disabled_options_and_navigation(self, _mock_sessions):
-        screen = ActionMenuScreen("repo", Path("/tmp/repo"), branch="main")
-        results = []
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)) as pilot:
-            app.push_screen(screen, callback=lambda v: results.append(v))
-            await pilot.pause()
-            menu = app.screen.query_one("#action-menu", OptionList)
-            for _ in range(menu.option_count):
-                await pilot.press("down")
-            await pilot.press("enter")
-            assert results
+            assert menu.option_count == 14
 
 
 class TestGitOperationsMenuScreen:
@@ -241,7 +232,9 @@ class TestGitOperationsMenuScreen:
 
             assert "my-repo" in title.content
             assert "main" in branch_label.content
-            assert menu.option_count == 6
+            assert menu.option_count == 9
+            ids = [opt.id for opt in menu.options if opt.id is not None]
+            assert "review_diff" in ids
 
     async def test_select_status(self):
         results: list[str | None] = []
@@ -961,7 +954,7 @@ class TestCreatePanelScreen:
                 )
             ]
 
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_duplicate_panel_name_submit_stays_open_and_shows_error(
         self, _mock_sessions, _mock_session_exists
@@ -997,7 +990,7 @@ class TestCreatePanelScreen:
             assert results == []
             assert "already exists" in str(hint.content)
 
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_slug_conflict_submit_stays_open_and_shows_error(
         self, _mock_sessions, _mock_session_exists
@@ -1037,7 +1030,7 @@ class TestCreatePanelScreen:
             assert "conflicts with tmux session name" in str(hint.content)
             assert "gd/panel/ops" in str(hint.content)
 
-    @patch("gitdirector.integrations.tmux._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_live_tmux_name_conflict_submit_stays_open_and_shows_error(
         self, _mock_sessions, _mock_session_exists
@@ -1347,21 +1340,6 @@ class TestRemoveSessionScreen:
             assert results == ["gd/my-repo/shell/1"]
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
-    async def test_navigation(self, _mock_sessions):
-        screen = RemoveSessionScreen("repo", Path("/tmp/repo"))
-        results = []
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)) as pilot:
-            app.push_screen(screen, callback=lambda v: results.append(v))
-            await pilot.pause()
-            app.screen.query_one("#action-menu", OptionList)
-            await pilot.press("down")
-            await pilot.press("up")
-            await pilot.press("enter")
-            assert results
-
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=["s1", "s2"])
     async def test_j_k_navigation(self, _mock_sessions):
         screen = RemoveSessionScreen("repo", Path("/tmp/repo"))
         app = GitDirectorConsole()
@@ -1491,6 +1469,24 @@ class TestAgentLoadingScreen:
         assert screen._timeout_timer is timeout_timer
         mock_monotonic.assert_called_once_with()
 
+    @patch("gitdirector.commands.tui.screens.panels.time.monotonic", return_value=42.0)
+    def test_on_mount_without_ready_marker_uses_min_wait_timer(self, mock_monotonic):
+        screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1")
+        timeout_timer = MagicMock()
+        screen.set_interval = MagicMock()
+        screen.set_timer = MagicMock(return_value=timeout_timer)
+        screen.call_after_refresh = MagicMock()
+
+        screen.on_mount()
+
+        assert screen._start_time == 42.0
+        screen.set_interval.assert_not_called()
+        screen.set_timer.assert_called_once_with(screen._MIN_WAIT, screen._force_dismiss)
+        screen.call_after_refresh.assert_not_called()
+        assert screen._poll_timer is None
+        assert screen._timeout_timer is timeout_timer
+        mock_monotonic.assert_called_once_with()
+
     @patch("gitdirector.commands.tui.screens.panels.time.monotonic")
     def test_check_ready_waits_for_minimum_time_and_marker(self, mock_monotonic):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
@@ -1505,11 +1501,11 @@ class TestAgentLoadingScreen:
         screen._do_dismiss.assert_not_called()
 
         screen._dismissed = False
-        mock_monotonic.return_value = 100.5
+        mock_monotonic.return_value = 100.1
         screen._check_ready()
         screen._ready_marker.exists.assert_not_called()
 
-        mock_monotonic.return_value = 101.5
+        mock_monotonic.return_value = 100.5
         screen._ready_marker.exists.return_value = False
         screen._check_ready()
 
@@ -1545,6 +1541,15 @@ class TestAgentLoadingScreen:
 
         assert screen._dismissed is True
         screen._poll_timer.stop.assert_called_once_with()
+        screen._do_dismiss.assert_called_once_with()
+
+    def test_force_dismiss_without_ready_marker_skips_poll_timer(self):
+        screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1")
+        screen._do_dismiss = MagicMock()
+
+        screen._force_dismiss()
+
+        assert screen._dismissed is True
         screen._do_dismiss.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.attach_tmux_session")

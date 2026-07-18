@@ -13,7 +13,7 @@ from .constants import (
     _changes_label,
     _changes_sort_key,
 )
-from .panel_view import PanelViewScreen, PaneWidget
+from .panel_view import PaneWidget
 from .panels import Panel, PanelStore
 from .screens import SortMenuScreen
 from .screens.diff import DiffReviewScreen
@@ -51,7 +51,6 @@ __all__ = [
     "Panel",
     "PanelActionMenuScreen",
     "PanelStore",
-    "PanelViewScreen",
     "_PANELS_SORT_COLUMN_NAMES",
     "PullLoadingScreen",
     "PullResultScreen",

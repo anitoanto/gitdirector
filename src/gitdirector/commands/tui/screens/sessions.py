@@ -5,9 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
@@ -143,6 +144,13 @@ class SelectSessionScreen(ModalScreen[str | None]):
 __all__ = ["EditSessionDescriptionScreen", "RemoveSessionScreen", "SelectSessionScreen"]
 
 
+class DescriptionTextArea(TextArea):
+    BINDINGS = [*TextArea.BINDINGS, Binding("enter", "submit", show=False, priority=True)]
+
+    def action_submit(self) -> None:
+        self.screen.action_submit()
+
+
 class EditSessionDescriptionScreen(ModalScreen[str | None]):
     """Modal for editing the description stored on a tmux session.
 
@@ -165,12 +173,16 @@ class EditSessionDescriptionScreen(ModalScreen[str | None]):
     }
     EditSessionDescriptionScreen #description-input {
         width: 1fr;
-        height: 3;
+        height: auto;
+        min-height: 3;
+        max-height: 10;
         border: none;
         background: $boost;
         color: $text;
         margin: 1 0;
         padding: 0 1;
+        scrollbar-size-vertical: 0;
+        overflow-y: hidden;
     }
     #description-session-name {
         text-align: center;
@@ -190,22 +202,32 @@ class EditSessionDescriptionScreen(ModalScreen[str | None]):
         with Vertical(id="menu-container"):
             yield Static("[bold white]Edit Description[/bold white]", id="menu-title")
             yield Static(f"[dim]{self.session_name}[/dim]", id="description-session-name")
-            yield Input(
-                value=self._initial_value,
+            yield DescriptionTextArea(
+                self._initial_value,
                 placeholder="description (leave empty to reset to '-')",
                 id="description-input",
             )
             yield Static("\\[enter] save    \\[esc] cancel", id="menu-hint")
 
     def on_mount(self) -> None:
-        inp = self.query_one("#description-input", Input)
+        inp = self.query_one("#description-input", TextArea)
         inp.focus()
         if self._initial_value:
-            inp.action_end()
+            lines = self._initial_value.splitlines() or [""]
+            inp.move_cursor((len(lines) - 1, len(lines[-1])))
+        self.call_after_refresh(self._resize_description_input)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        new_value = event.value.strip()
-        self.dismiss(new_value)
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id == "description-input":
+            self.call_after_refresh(self._resize_description_input)
+
+    def _resize_description_input(self) -> None:
+        inp = self.query_one("#description-input", TextArea)
+        inp.styles.height = min(10, max(3, inp.virtual_size.height))
+
+    def action_submit(self) -> None:
+        inp = self.query_one("#description-input", TextArea)
+        self.dismiss(inp.text.strip())
 
     def action_cancel(self) -> None:
         self.dismiss(None)

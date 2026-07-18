@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import click
 
-from ..integrations.tmux import _parse_gd_session_name, send_key_to_session, send_text_to_session
+from ..integrations.tmux import send_key_to_session, send_text_to_session
+from ..integrations.tmux.core import _parse_gd_session_name
 
 SUPPORTED_KEYS = ("C-c",)
 
