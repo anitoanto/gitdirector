@@ -1,5 +1,6 @@
 """Regression guards for exact-match tmux targets and cleanup behavior."""
 
+import inspect
 import shlex
 import subprocess
 from pathlib import Path
@@ -7,16 +8,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import gitdirector.integrations.tmux.panels as tmux_panels
 from gitdirector.integrations.tmux import (
     _capture_pane_text,
     _ControlModeReader,
     _current_window_target,
     _embedded_tmux_attach_command,
     _ensure_panel_resize_tracking,
+    _kill_tmux_session_by_name,
     _panel_attach_fragment,
     _panel_pane_command,
     _respawn_pane,
     _session_exists,
+    _tmux_output,
+    _tmux_session_actual_name,
     _tmux_theme_config,
     attach_tmux_session,
     cleanup_panel_attached_session,
@@ -61,6 +66,71 @@ class TestExactMatchKillTmuxSession:
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
         assert target != "gd/panel/dev"
+
+
+class TestKillTmuxSessionInputValidation:
+    """Defensive validation that prevents accidental bulk kills."""
+
+    @pytest.mark.parametrize(
+        "bad_name",
+        [
+            "",
+            "=",
+            "=gd/repo/shell/1",
+            "gd/",
+            "repo/shell/1",
+            "non-gd-session",
+            "gd/repo/shell/1:",
+            "gd/repo/shell/1:0",
+            "gd/repo/shell/1:0.0",
+            "gd/*",
+            "gd/?",
+            "gd/[abc]",
+            "gd/]x[",
+            "*",
+            "?",
+        ],
+    )
+    def test_rejects_dangerous_or_partial_session_names(self, bad_name):
+        """Empty / non-gd / already-prefixed / glob-bearing / colon-bearing
+        names must NOT reach ``tmux kill-session`` — they could kill many
+        sessions or none, and silently wipe user state."""
+        with pytest.raises(ValueError):
+            kill_tmux_session(bad_name)
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_valid_full_name_still_works(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        kill_tmux_session("gd/repo/shell/1")
+        assert mock_run.call_args[0][0] == [
+            "tmux",
+            "kill-session",
+            "-t",
+            "=gd/repo/shell/1",
+        ]
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_panel_session_name_with_three_segments_is_valid(self, mock_run):
+        """``gd/panel/<name>`` has 3 segments — also valid (panel sessions)."""
+        mock_run.return_value = MagicMock(returncode=0)
+        kill_tmux_session("gd/panel/main")
+        assert mock_run.call_args[0][0] == [
+            "tmux",
+            "kill-session",
+            "-t",
+            "=gd/panel/main",
+        ]
+
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_does_not_invoke_tmux_when_input_invalid(self, mock_run):
+        """Even when validation raises, no subprocess should fire."""
+        with pytest.raises(ValueError):
+            kill_tmux_session("")
+        with pytest.raises(ValueError):
+            kill_tmux_session("gd/")
+        with pytest.raises(ValueError):
+            kill_tmux_session("=gd/whatever")
+        mock_run.assert_not_called()
 
 
 class TestExactMatchAttachTmuxSession:
@@ -295,14 +365,64 @@ class TestExactMatchPanelPaneCommand:
         unquoted = has_session_part.strip("'\"")
         assert unquoted.startswith("=")
 
+    def test_temp_panel_kill_session_uses_equals(self):
+        """Shell-embedded kill-session in temp panel script must use ``=``.
+
+        Without ``=``, tmux's prefix matching would kill every session
+        whose name starts with the wrapper name — including all gd/
+        sessions. Belt-and-braces assertion.
+        """
+        from gitdirector.integrations.tmux.panels import _temp_panel_pane_command
+
+        cmd = _temp_panel_pane_command("gd/temp/panel/repo/shell/1", "gd/repo/shell/1")
+        assert f"kill-session -t {shlex.quote('=gd/temp/panel/repo/shell/1')}" in cmd
+        # All kill-session invocations in the embedded script must be exact.
+        for line in cmd.splitlines() + [cmd]:
+            if "kill-session -t" in line:
+                after_t = line.split("kill-session -t ", 1)[1].split()[0]
+                unquoted = after_t.strip("'\"")
+                assert unquoted.startswith("="), (
+                    f"shell kill-session target not exact-match: {after_t!r}"
+                )
+
     def test_unassigned_pane_has_no_tmux_target(self):
         cmd = _panel_pane_command("Dev", 1, None)
         script = shlex.split(cmd)[2]
         assert "has-session" not in cmd
-        assert "UNASSIGNED" in cmd
-        assert "printf '%s\\n' '' UNASSIGNED" in script
+        assert "UNASSIGNED" not in cmd
+        assert script.endswith("exit 0")
         assert "Panel: Dev" not in cmd
         assert "Pane 1: unassigned" not in cmd
+
+    def test_unassigned_pane_exits_without_placeholder_process(self):
+        cmd = _panel_pane_command("Dev", 1, None)
+        script = shlex.split(cmd)[2]
+
+        assert "tail -f /dev/null" not in script
+        assert "read -r" not in script
+        assert "while :" not in script
+        assert script.endswith("exit 0")
+
+    def test_assigned_pane_exits_without_placeholder_process(self):
+        cmd = _panel_pane_command("Dev", 1, "gd/repo/shell/1")
+        script = shlex.split(cmd)[2]
+
+        assert "tail -f /dev/null" not in script
+        assert "read -r" not in script
+        assert "while :" not in script
+        assert script.endswith("exit 0")
+
+    def test_temp_panel_exits_without_placeholder_process(self):
+        cmd = tmux_panels._temp_panel_pane_command("gd/temp/panel/repo/shell/1", "gd/repo/shell/1")
+        script = shlex.split(cmd)[2]
+
+        assert "tail -f /dev/null" not in script
+        assert "read -r" not in script
+        assert "while :" not in script
+        assert script.endswith("exit 0")
+
+    def test_panels_module_does_not_reintroduce_tail_placeholders(self):
+        assert "tail -f /dev/null" not in inspect.getsource(tmux_panels)
 
 
 class TestRespawnPane:
@@ -332,6 +452,93 @@ class TestRespawnPane:
         assert exc_info.value.returncode == 1
         assert mock_run.call_count == 1
         mock_sleep.assert_not_called()
+
+
+class TestTmuxOutput:
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_retries_transient_split_window_fork_failure(self, mock_run, mock_sleep):
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="create pane failed: fork failed: Device not configured",
+            ),
+            MagicMock(returncode=0, stdout="%1\n", stderr=""),
+        ]
+
+        output = _tmux_output("split-window", "-P", "-F", "#{pane_id}", "cat")
+
+        assert output == "%1"
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once_with(0.05)
+
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_does_not_retry_non_fork_failure(self, mock_run, mock_sleep):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no such target")
+
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
+            _tmux_output("split-window", "cat")
+
+        assert exc_info.value.returncode == 1
+        assert mock_run.call_count == 1
+        mock_sleep.assert_not_called()
+
+
+class TestOrphanSessionNameTmuxSafe:
+    """Orphan session names must avoid ``.`` so tmux does not munge them.
+
+    tmux silently replaces ``.`` with ``_`` in session names, so any session
+    we create with a dot is stored under a different name. The old code used
+    ``{name}.orphaned-{pid}-{ts}`` which caused the orphan to leak because
+    the Python kill call couldn't find it.
+    """
+
+    def test_actual_name_replaces_dots_with_underscores(self):
+        assert _tmux_session_actual_name("gd/panel/main.orphaned-1-2") == (
+            "gd/panel/main_orphaned-1-2"
+        )
+
+    def test_actual_name_passthrough_when_no_dots(self):
+        assert _tmux_session_actual_name("gd/panel/main") == "gd/panel/main"
+
+    def test_actual_name_handles_multiple_dots(self):
+        assert _tmux_session_actual_name("a.b.c.d") == "a_b_c_d"
+
+    def test_rebuild_panel_uses_underscore_in_orphan_name(self):
+        """Source-level guarantee that we don't regress to ``.orphaned-``."""
+        source_path = (
+            Path(__file__).resolve().parents[2] / "src/gitdirector/integrations/tmux/panels.py"
+        )
+        assert source_path.is_file(), f"panels.py not found at {source_path}"
+        source = source_path.read_text()
+        assert ".orphaned-" not in source, (
+            "rebuild_panel_tmux_session must use '_orphaned-' so tmux does not munge it"
+        )
+
+    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
+    def test_kill_by_name_falls_back_to_munged_form(self, mock_kill):
+        """When the intended name has a dot, try the munged form too."""
+        mock_kill.side_effect = [False, True]
+        assert _kill_tmux_session_by_name("gd/panel/main.orphaned-1-2") is True
+        assert mock_kill.call_count == 2
+        first_call_args = mock_kill.call_args_list[0][0]
+        second_call_args = mock_kill.call_args_list[1][0]
+        assert first_call_args[0] == "gd/panel/main.orphaned-1-2"
+        assert second_call_args[0] == "gd/panel/main_orphaned-1-2"
+
+    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
+    def test_kill_by_name_returns_true_on_first_success(self, mock_kill):
+        """If the intended name works directly, don't try the munged form."""
+        mock_kill.return_value = True
+        assert _kill_tmux_session_by_name("gd/panel/main") is True
+        assert mock_kill.call_count == 1
+
+    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
+    def test_kill_by_name_returns_false_when_both_forms_fail(self, mock_kill):
+        mock_kill.return_value = False
+        assert _kill_tmux_session_by_name("gd/panel/main.orphaned-1-2") is False
 
 
 class TestExactMatchLaunchCommand:
@@ -445,38 +652,39 @@ class TestExactMatchSourceCodeAudit:
         import ast
         import inspect
 
-        import gitdirector.integrations.tmux as tmux_mod
-
-        source = inspect.getsource(tmux_mod)
-        tree = ast.parse(source)
+        from gitdirector.integrations.tmux import core, monitor, panels
 
         violations = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.List):
-                continue
-            elts = node.elts
-            for i, elt in enumerate(elts):
-                if not (isinstance(elt, ast.Constant) and elt.value == "-t"):
+        for module in (core, monitor, panels):
+            tree = ast.parse(inspect.getsource(module))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.List):
                     continue
-                if i + 1 >= len(elts):
-                    continue
-                next_elt = elts[i + 1]
-                if isinstance(next_elt, ast.Constant):
-                    val = str(next_elt.value)
-                    if not val.startswith("="):
-                        violations.append(f"Line {node.lineno}: literal '-t' followed by {val!r}")
-                elif isinstance(next_elt, ast.JoinedStr):
-                    first_val = next_elt.values[0] if next_elt.values else None
-                    if isinstance(first_val, ast.Constant) and not str(first_val.value).startswith(
-                        "="
-                    ):
-                        violations.append(
-                            f"Line {node.lineno}: f-string '-t' target doesn't start with '='"
-                        )
-                    elif isinstance(first_val, ast.FormattedValue):
-                        violations.append(
-                            f"Line {node.lineno}: f-string '-t' target starts with a variable (should prefix '=')"
-                        )
+                elts = node.elts
+                for i, elt in enumerate(elts):
+                    if not (isinstance(elt, ast.Constant) and elt.value == "-t"):
+                        continue
+                    if i + 1 >= len(elts):
+                        continue
+                    next_elt = elts[i + 1]
+                    if isinstance(next_elt, ast.Constant):
+                        val = str(next_elt.value)
+                        if not val.startswith("="):
+                            violations.append(
+                                f"{module.__name__}:{node.lineno}: literal '-t' followed by {val!r}"
+                            )
+                    elif isinstance(next_elt, ast.JoinedStr):
+                        first_val = next_elt.values[0] if next_elt.values else None
+                        if isinstance(first_val, ast.Constant) and not str(
+                            first_val.value
+                        ).startswith("="):
+                            violations.append(
+                                f"{module.__name__}:{node.lineno}: f-string '-t' target doesn't start with '='"
+                            )
+                        elif isinstance(first_val, ast.FormattedValue):
+                            violations.append(
+                                f"{module.__name__}:{node.lineno}: f-string '-t' target starts with a variable"
+                            )
         assert violations == [], (
             "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
         )

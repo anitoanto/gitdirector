@@ -1,7 +1,7 @@
 """Layout and formatting tests for tmux integration helpers."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from gitdirector.integrations.tmux import (
     _build_layout_spec,
@@ -478,11 +478,15 @@ class TestRebuildPanelTmuxSession:
         "gitdirector.integrations.tmux.panels._build_panel_layout",
         return_value=["%0", "%1", "%2", "%3"],
     )
+    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
     @patch("gitdirector.integrations.tmux.panels.kill_panel_tmux_session")
+    @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_enables_pane_headers_before_building_layout(
         self,
         mock_run,
+        _mock_session_exists,
+        mock_kill_panel,
         mock_kill,
         mock_build_layout,
         mock_equalize,
@@ -492,6 +496,8 @@ class TestRebuildPanelTmuxSession:
         mock_bindings,
         _mock_term_size,
     ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
         def assert_border_enabled_first(*args, **kwargs):
             commands = [call.args[0] for call in mock_run.call_args_list]
             new_session_command = next(
@@ -504,6 +510,18 @@ class TestRebuildPanelTmuxSession:
                     "tmux",
                     "new-session",
                     "-d",
+                    "-e",
+                    "NO_COLOR=",
+                    "-e",
+                    "TERM=tmux-256color",
+                    "-e",
+                    "COLORTERM=truecolor",
+                    "-e",
+                    "FORCE_COLOR=3",
+                    "-e",
+                    "CLICOLOR_FORCE=1",
+                    "-e",
+                    "CLAUDE_CODE_TMUX_TRUECOLOR=1",
                     "-s",
                     build_session_name,
                     "-n",
@@ -547,7 +565,7 @@ class TestRebuildPanelTmuxSession:
         )
 
         assert session_name == "gd/panel/main"
-        mock_kill.assert_called_once_with("Main")
+        mock_kill_panel.assert_not_called()
         mock_equalize.assert_called_once()
         mock_configure.assert_called_once()
         mock_load.assert_not_called()

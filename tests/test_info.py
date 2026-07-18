@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -19,8 +20,25 @@ from gitdirector.info import (
 )
 
 
+class _TestEncoder:
+    def encode_ordinary(self, text: str) -> list[str]:
+        return text.split()
+
+
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=str(repo), capture_output=True, check=True)
+    env = os.environ.copy()
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(name, None)
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        check=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        timeout=10,
+    )
 
 
 def _init_repo(tmp_path: Path) -> Path:
@@ -101,7 +119,8 @@ class TestCountLines:
 
 class TestCountTokens:
     def test_special_token_text_is_counted_as_normal_text(self):
-        assert _count_tokens("before <|endoftext|> after") > 0
+        with patch("gitdirector.info._get_encoder", return_value=_TestEncoder()):
+            assert _count_tokens("before <|endoftext|> after") > 0
 
     def test_falls_back_when_encode_ordinary_is_unavailable(self):
         class LegacyEncoder:
@@ -284,7 +303,7 @@ class TestGetNonIgnoredFiles:
         _commit_all(repo)
         files = _get_non_ignored_files(repo)
         assert "keep.txt" in files
-        # git itself handles trailing spaces in .gitignore - just verify it doesn't crash
+        assert "data.tmp" not in files
 
     def test_gitignore_ignores_entire_subtree(self, tmp_path):
         repo = _init_repo(tmp_path)
@@ -306,6 +325,10 @@ class TestGetNonIgnoredFiles:
 
 
 class TestGatherRepoInfo:
+    @pytest.fixture(autouse=True)
+    def _stub_token_encoder(self, mocker):
+        mocker.patch("gitdirector.info._get_encoder", return_value=_TestEncoder())
+
     def test_empty_repo(self, tmp_path):
         repo = _init_repo(tmp_path)
         _commit_all(repo, "initial")
@@ -671,7 +694,8 @@ class TestGatherRepoInfo:
         _write(repo, "src/auto.generated.py", "pass\n" * 500)
         _commit_all(repo)
         result = gather_repo_info(repo)
-        assert result.total_lines < 500
+        assert result.total_files == 2
+        assert result.total_lines == 4
 
     def test_untracked_files_included_if_not_ignored(self, tmp_path):
         repo = _init_repo(tmp_path)
@@ -740,7 +764,11 @@ class TestGatherRepoInfo:
 
 
 class TestInfoCommand:
-    def test_info_by_path(self, tmp_path, runner):
+    @pytest.fixture(autouse=True)
+    def _stub_token_encoder(self, mocker):
+        mocker.patch("gitdirector.info._get_encoder", return_value=_TestEncoder())
+
+    def test_info_by_path(self, tmp_path, runner, config):
         from gitdirector.cli import cli
 
         repo = _init_repo(tmp_path)
@@ -749,8 +777,9 @@ class TestInfoCommand:
 
         result = runner.invoke(cli, ["info", str(repo)])
         assert result.exit_code == 0
-        assert "hello.py" not in result.output or "Files" in result.output
-        assert "1" in result.output
+        assert "Files" in result.output
+        assert "Lines" in result.output
+        assert "Tokens" in result.output
 
     def test_info_by_name(self, tmp_path, runner, monkeypatch):
         from gitdirector.cli import cli

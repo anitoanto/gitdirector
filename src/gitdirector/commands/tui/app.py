@@ -46,6 +46,7 @@ from .screens.repos import (
     RepoInfoScreen,
 )
 from .screens.sessions import EditSessionDescriptionScreen, RemoveSessionScreen
+from .terminal_caps import host_color_system, no_color_requested
 
 _panel_row_height = _app_panels._panel_row_height
 _render_panel_preview = _app_panels._render_panel_preview
@@ -88,6 +89,9 @@ class GitDirectorConsole(
         background: $surface;
         overflow: hidden;
     }
+    HeaderTitle {
+        padding: 0 10 0 8;
+    }
     #status-bar {
         dock: bottom;
         height: 1;
@@ -120,26 +124,20 @@ class GitDirectorConsole(
         overflow-x: auto;
         overflow-y: auto;
         padding: 0 1;
+        scrollbar-size-horizontal: 0;
     }
-    #no-repos-message {
-        height: 1fr;
+    #repo-table,
+    #sessions-table,
+    #panels-table,
+    #no-repos-message,
+    #no-sessions-message,
+    #no-panels-message {
         display: none;
-        align: center middle;
-        color: $text-muted;
-        padding: 2 4;
-        content-align: center middle;
     }
-    #no-sessions-message {
-        height: 1fr;
-        display: none;
-        align: center middle;
-        color: $text-muted;
-        padding: 2 4;
-        content-align: center middle;
-    }
+    #no-repos-message,
+    #no-sessions-message,
     #no-panels-message {
         height: 1fr;
-        display: none;
         align: center middle;
         color: $text-muted;
         padding: 2 4;
@@ -194,16 +192,29 @@ class GitDirectorConsole(
         Binding("s", "sort", "Sort", show=True),
         Binding("g", "show_git_menu", "Git", show=True),
         Binding("i", "show_info", "Info", show=True),
-        Binding("d", "edit_session_description", "Description", show=False),
+        Binding("d", "edit_session_description", "Description", show=True),
         Binding("escape", "close_search", show=False),
         Binding("1", "tab_repos", "Repos", show=False),
         Binding("2", "tab_sessions", "Sessions", show=False),
         Binding("3", "tab_panels", "Panels", show=False),
-        Binding("space", "toggle_group", "Toggle Group", show=True),
+        Binding("space", "toggle_group", "Toggle", show=True),
         Binding("n", "new_panel", "New Panel", show=True),
     ]
 
     def __init__(self) -> None:
+        # Ensure Textual's ``App.console`` auto-detects ``"truecolor"`` for
+        # its render Console. ``Strip.render()`` uses ``console._color_system``
+        # to pick the SGR format; if it resolves to ``"256"``, every
+        # truecolor segment produced by child agents gets quantised to
+        # the 256-colour palette — visible banding in gradients.
+        #
+        # Rich's auto-detection runs inside ``App.__init__`` using a
+        # snapshot of ``os.environ``, so the variable must be set
+        # *before* ``super().__init__()`` is called. We only force
+        # ``COLORTERM=truecolor`` when the host actually advertises
+        # truecolor — never downgrade a host that can't render it.
+        if not no_color_requested() and host_color_system() == "truecolor":
+            os.environ["COLORTERM"] = "truecolor"
         super().__init__()
         from ...integrations.tmux import TmuxMonitor
 
@@ -246,7 +257,7 @@ class GitDirectorConsole(
         self._repo_status_executor: ThreadPoolExecutor | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield Header(show_clock=True, icon="☰")
         with TabbedContent(id="tabs"):
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
@@ -295,6 +306,7 @@ class GitDirectorConsole(
         self._panels_col_keys = panels_table.add_columns(
             "Map", "Name", "TMUX", "Layout", "Panes", "Status"
         )
+        self._disable_tabs_widget_arrow_keybindings()
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(
@@ -304,6 +316,21 @@ class GitDirectorConsole(
         self._set_session_status_tracking_running(False)
         self._load_update_notice()
         self._load_repos()
+
+    def _disable_tabs_widget_arrow_keybindings(self) -> None:
+        """Remove the ``left``/``right`` bindings from every Tabs widget.
+
+        The ``Tabs`` widget binds ``left``/``right`` to ``previous_tab``/``next_tab``
+        so it can switch tabs when focused. We want those keys to scroll the
+        active table horizontally instead, so strip the bindings on the
+        underlying ContentTabs instances. Users can still switch tabs with the
+        ``1``/``2``/``3`` number keys (and ``tab``/``shift+tab``).
+        """
+        from textual.widgets._tabs import Tabs
+
+        for tabs_widget in self.query(Tabs):
+            tabs_widget._bindings.key_to_bindings.pop("left", None)
+            tabs_widget._bindings.key_to_bindings.pop("right", None)
 
     def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
         return self._shutdown_requested or (worker is not None and worker.is_cancelled)
@@ -320,7 +347,7 @@ class GitDirectorConsole(
 
         self._shutdown_requested = True
         self._pause_session_status_tracking(wait=False)
-        self._monitor.stop(wait=False)
+        self._monitor.stop(wait=True)
 
         executor = self._repo_status_executor
         self._repo_status_executor = None
@@ -368,7 +395,10 @@ class GitDirectorConsole(
             session_name = self._get_selected_row_key(table)
             if session_name is None:
                 return
-            self._suspend_and_attach(session_name)
+            self._suspend_and_attach(
+                session_name,
+                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+            )
         elif self._active_tab == "panels":
             self._open_selected_panel_menu()
         else:
@@ -377,7 +407,10 @@ class GitDirectorConsole(
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "sessions-table":
             session_name = str(event.row_key.value)
-            self._suspend_and_attach(session_name)
+            self._suspend_and_attach(
+                session_name,
+                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+            )
         elif event.data_table.id == "panels-table":
             self._open_selected_panel_menu()
         else:
@@ -394,7 +427,11 @@ class GitDirectorConsole(
         if path is None:
             return
 
-        from ...integrations.tmux import create_tmux_session, launch_command_in_tmux_session
+        from ...integrations.tmux import (
+            create_tmux_session,
+            kill_tmux_session,
+            launch_command_in_tmux_session,
+        )
 
         launch_tab = self._active_tab
         purpose = agent_cmd if agent_cmd else "shell"
@@ -410,27 +447,74 @@ class GitDirectorConsole(
             self._update_status(f"tmux session creation failed: {exc}")
             return
 
+        def refresh_after_launch(_value: object) -> None:
+            self.set_timer(
+                0.2,
+                lambda: self._refresh_after_session_launch(path, launch_tab),
+            )
+
         if agent_cmd:
             try:
                 ready_marker = launch_command_in_tmux_session(session_name, agent_cmd)
             except Exception as exc:
                 logger.warning("tmux agent launch failed: %s", exc)
+                kill_tmux_session(session_name)
                 self._update_status(f"tmux agent launch failed: {exc}")
                 return
-            self.push_screen(
-                AgentLoadingScreen(agent_cmd, session_name, ready_marker),
-                callback=lambda _: self.set_timer(
-                    0.2,
-                    lambda: self._refresh_after_session_launch(path, launch_tab),
-                ),
+            self._show_attach_loading_screen(
+                session_name,
+                path,
+                ready_marker=ready_marker,
+                skip_config_sync=True,
+                callback=refresh_after_launch,
             )
         else:
-            # create_tmux_session already called sync_panel_tmux_config, so skip
-            # the redundant sync in attach_tmux_session. Without this skip the
-            # sync re-lists every tmux session, rewrites gd-tmux.conf, and runs
-            # `tmux source-file` between the manual screen clear and tmux's
-            # first redraw — long enough to expose a visible empty alt-screen.
-            self._suspend_and_attach(session_name, path, skip_config_sync=True)
+            self._show_attach_loading_screen(
+                session_name,
+                path,
+                skip_config_sync=True,
+                callback=refresh_after_launch,
+            )
+
+    def _show_attach_loading_screen(
+        self,
+        session_name: str,
+        path: Path | None = None,
+        row_key: str | None = None,
+        ready_marker: Path | None = None,
+        *,
+        skip_config_sync: bool = False,
+        callback: Callable[[object], None] | None = None,
+    ) -> None:
+        from ...integrations.tmux.core import _parse_gd_session_name
+
+        title = "session"
+        loading_hint = "waiting for session to initialize\u2026"
+        parsed = _parse_gd_session_name(session_name)
+        if parsed is not None:
+            _repo, purpose, _sequence = parsed
+            title = purpose
+            if purpose != "shell":
+                loading_hint = "waiting for agent to initialize\u2026"
+
+        def attach() -> None:
+            self._suspend_and_attach(
+                session_name,
+                path,
+                row_key=row_key,
+                skip_config_sync=skip_config_sync,
+            )
+
+        self.push_screen(
+            AgentLoadingScreen(
+                title,
+                session_name,
+                ready_marker,
+                loading_hint=loading_hint,
+                on_attach=attach,
+            ),
+            callback=callback,
+        )
 
     def _suspend_and_attach(
         self,
@@ -439,6 +523,7 @@ class GitDirectorConsole(
         row_key: str | None = None,
         *,
         skip_config_sync: bool = False,
+        attach_delay_seconds: float = 0.0,
     ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         import sys
@@ -475,7 +560,11 @@ class GitDirectorConsole(
                             sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
                             sys.stdout.flush()
                             entered_manual_alt_screen = True
-                        attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
+                        attach_tmux_session(
+                            session_name,
+                            skip_config_sync=skip_config_sync,
+                            attach_delay_seconds=attach_delay_seconds,
+                        )
                     finally:
                         if entered_manual_alt_screen:
                             sys.stdout.write("\033[?25h")
@@ -526,7 +615,11 @@ class GitDirectorConsole(
 
     def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""
-        self._suspend_and_attach(session_name, path)
+        self._suspend_and_attach(
+            session_name,
+            path,
+            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
+        )
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()
@@ -577,7 +670,11 @@ class GitDirectorConsole(
     def action_show_info(self) -> None:
         if self._active_tab != "repos":
             return
-        if self._selected_repo_row_is_group():
+        group = self._get_selected_group()
+        if group is not None:
+            screen = RepoInfoScreen(f"{group.name} ({group.repo_count} repos)", group.path)
+            self.push_screen(screen)
+            self._gather_and_show_group_info(group, screen)
             return
         path = self._get_selected_path()
         if path is None:
@@ -590,7 +687,7 @@ class GitDirectorConsole(
         """Open the description editor for the currently highlighted session row."""
         if self._active_tab != "sessions":
             return
-        from ...integrations.tmux import _get_session_description
+        from ...integrations.tmux.core import _get_session_description
 
         table = self.query_one("#sessions-table", DataTable)
         session_name = self._get_selected_row_key(table)
@@ -605,7 +702,7 @@ class GitDirectorConsole(
     def _handle_description_edit(self, session_name: str, value: str | None) -> None:
         if value is None:
             return
-        from ...integrations.tmux import _set_session_description
+        from ...integrations.tmux.core import _set_session_description
 
         _set_session_description(session_name, value)
         for entry in self._sessions_entries:
@@ -640,6 +737,54 @@ class GitDirectorConsole(
             return
         self.call_from_thread(screen.populate, result)
 
+    @work(thread=True)
+    def _gather_and_show_group_info(self, group, screen: RepoInfoScreen) -> None:
+        worker = self._current_worker_or_none()
+        if self._background_shutdown_requested(worker):
+            return
+
+        from ...info import FileTypeInfo, RepoInfoResult, gather_repo_info
+
+        try:
+            results = [gather_repo_info(path) for path in group.repositories]
+        except Exception as exc:
+            if self._background_shutdown_requested(worker):
+                return
+            self.call_from_thread(screen.show_error, str(exc))
+            return
+
+        file_types: dict[str, tuple[int, int, int, bool]] = {}
+        for result in results:
+            for file_type in result.file_types:
+                count, lines, tokens, has_text = file_types.get(
+                    file_type.extension, (0, 0, 0, False)
+                )
+                if file_type.line_count is not None:
+                    lines += file_type.line_count
+                    tokens += file_type.token_count or 0
+                    has_text = True
+                file_types[file_type.extension] = (count + file_type.count, lines, tokens, has_text)
+
+        aggregate = RepoInfoResult(
+            total_files=sum(result.total_files for result in results),
+            file_types=sorted(
+                [
+                    FileTypeInfo(
+                        extension, count, lines if has_text else None, tokens if has_text else None
+                    )
+                    for extension, (count, lines, tokens, has_text) in file_types.items()
+                ],
+                key=lambda file_type: file_type.line_count or 0,
+                reverse=True,
+            ),
+            total_lines=sum(result.total_lines for result in results),
+            total_tokens=sum(result.total_tokens for result in results),
+            max_depth=max((result.max_depth for result in results), default=0),
+        )
+        if self._background_shutdown_requested(worker):
+            return
+        self.call_from_thread(screen.populate, aggregate)
+
     def _push_info_screen(self, name: str, path: Path, result) -> None:
         self.push_screen(RepoInfoScreen(name, path))
         total = len(self._results)
@@ -663,6 +808,8 @@ class GitDirectorConsole(
             self._show_repo_git_remotes(path)
         elif action == "push":
             self._prompt_repo_push(path)
+        elif action == "review_diff":
+            self._open_review_diff(path)
 
     def _show_repo_git_output(
         self,
@@ -935,8 +1082,6 @@ class GitDirectorConsole(
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
             self._attach_to_session(session_name, path)
-        elif action == "review_diff":
-            self._open_review_diff()
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
@@ -945,8 +1090,9 @@ class GitDirectorConsole(
                     callback=self._handle_remove_selection,
                 )
 
-    def _open_review_diff(self) -> None:
-        path = self._get_selected_path()
+    def _open_review_diff(self, path: Path | None = None) -> None:
+        if path is None:
+            path = self._get_selected_path()
         if path is None:
             return
         info = self._results.get(str(path))
@@ -963,9 +1109,10 @@ class GitDirectorConsole(
 
     def _do_remove(self, confirmed: bool, session_name: str) -> None:
         if confirmed:
-            from ...integrations.tmux import kill_tmux_session
+            from ...integrations.tmux import kill_tmux_session, sync_panel_tmux_config
 
             kill_tmux_session(session_name)
+            sync_panel_tmux_config()
 
             self._sessions_entries = [
                 e for e in self._sessions_entries if e["session_name"] != session_name
@@ -987,7 +1134,7 @@ def _run_console() -> None:
         else:
             monitor = getattr(app, "_monitor", None)
             if monitor is not None:
-                monitor.stop(wait=False)
+                monitor.stop(wait=True)
 
 
 def register(cli: click.Group):

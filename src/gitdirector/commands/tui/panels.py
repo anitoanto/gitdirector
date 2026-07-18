@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
+
+logger = logging.getLogger(__name__)
 
 _UP = 1
 _RIGHT = 2
@@ -495,26 +498,87 @@ class PanelStore:
 
     def _load(self) -> None:
         data = load_yaml_mapping(self.panels_file, description="GitDirector panels config")
-        self._panels = []
-        for entry in data.get("panels", []):
+        raw_panels = data.get("panels", [])
+        if not isinstance(raw_panels, list):
+            raise ValueError("Invalid GitDirector panels config: 'panels' must be a list")
+
+        from ...integrations.tmux.core import make_panel_session_name
+
+        panels: list[Panel] = []
+        names: set[str] = set()
+        session_names: set[str] = set()
+        for entry_index, entry in enumerate(raw_panels, start=1):
+            prefix = f"Invalid GitDirector panels config: panel {entry_index}"
+            if not isinstance(entry, dict):
+                raise ValueError(f"{prefix} must be a mapping")
+
+            name = entry.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"{prefix} name must be a non-empty string")
+            if name in names:
+                raise ValueError(f"{prefix} duplicates panel name {name!r}")
+            names.add(name)
+
+            raw_layout_key = entry.get("layout")
+            if "layout" in entry and (
+                not isinstance(raw_layout_key, str) or raw_layout_key not in _PANEL_LAYOUTS
+            ):
+                raise ValueError(f"{prefix} layout must be a known layout key")
+
+            rows = entry.get("rows")
+            cols = entry.get("cols")
+            if isinstance(rows, bool) or not isinstance(rows, int) or not 1 <= rows <= 3:
+                raise ValueError(f"{prefix} rows must be an integer between 1 and 3")
+            if isinstance(cols, bool) or not isinstance(cols, int) or not 1 <= cols <= 3:
+                raise ValueError(f"{prefix} cols must be an integer between 1 and 3")
+
             layout = resolve_panel_layout(
-                entry.get("layout"),
-                entry.get("rows"),
-                entry.get("cols"),
+                raw_layout_key,
+                rows,
+                cols,
             )
+            if raw_layout_key and (rows, cols) != (layout.rows, layout.cols):
+                raise ValueError(f"{prefix} rows and cols must match layout {raw_layout_key!r}")
+
+            raw_panes = entry.get("panes", {})
+            if not isinstance(raw_panes, dict):
+                raise ValueError(f"{prefix} panes must be a mapping")
             panes: dict[int, str | None] = {i: None for i in range(1, layout.total_panes + 1)}
-            for k, v in (entry.get("panes") or {}).items():
-                pane_index = int(k)
-                if 1 <= pane_index <= layout.total_panes:
-                    panes[pane_index] = v if v else None
+            pane_indices: set[int] = set()
+            for raw_pane_index, session_name in raw_panes.items():
+                pane_index = self._validated_pane_index(
+                    raw_pane_index, layout.total_panes, f"{prefix} panes"
+                )
+                if pane_index in pane_indices:
+                    raise ValueError(f"{prefix} panes contains duplicate pane {pane_index}")
+                if session_name is not None and not isinstance(session_name, str):
+                    raise ValueError(f"{prefix} panes[{pane_index}] must be a string or null")
+                pane_indices.add(pane_index)
+                panes[pane_index] = session_name or None
+
+            raw_closed_panes = entry.get("closed_panes", [])
+            if not isinstance(raw_closed_panes, list):
+                raise ValueError(f"{prefix} closed_panes must be a list")
             closed_panes: set[int] = set()
-            for raw_pane_index in entry.get("closed_panes") or []:
-                pane_index = int(raw_pane_index)
-                if 1 <= pane_index <= layout.total_panes and not panes.get(pane_index):
-                    closed_panes.add(pane_index)
-            self._panels.append(
+            for raw_pane_index in raw_closed_panes:
+                pane_index = self._validated_pane_index(
+                    raw_pane_index, layout.total_panes, f"{prefix} closed_panes"
+                )
+                if pane_index in closed_panes:
+                    raise ValueError(f"{prefix} closed_panes contains duplicate pane {pane_index}")
+                if panes[pane_index]:
+                    raise ValueError(f"{prefix} closed_panes[{pane_index}] has an assigned session")
+                closed_panes.add(pane_index)
+
+            session_name = make_panel_session_name(name)
+            if session_name in session_names:
+                raise ValueError(
+                    f"{prefix} normalizes to duplicate tmux session name {session_name!r}"
+                )
+            session_names.add(session_name)
+            panels.append(
                 Panel(
-                    name=entry["name"],
+                    name=name,
                     rows=layout.rows,
                     cols=layout.cols,
                     panes=panes,
@@ -522,6 +586,21 @@ class PanelStore:
                     closed_panes=closed_panes,
                 )
             )
+        self._panels = panels
+
+    @staticmethod
+    def _validated_pane_index(value: object, total_panes: int, field: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{field} pane index must be an integer")
+        if isinstance(value, int):
+            pane_index = value
+        elif isinstance(value, str) and value.isdigit():
+            pane_index = int(value)
+        else:
+            raise ValueError(f"{field} pane index must be an integer")
+        if not 1 <= pane_index <= total_panes:
+            raise ValueError(f"{field} pane index {pane_index} is outside 1..{total_panes}")
+        return pane_index
 
     def _save(self) -> None:
         self.config_dir.mkdir(exist_ok=True)
@@ -548,13 +627,33 @@ class PanelStore:
         with advisory_file_lock(self.lock_file):
             write_yaml_atomic(self.panels_file, data)
 
-    def _kill_panel_sessions(self, panel_names: list[str]) -> None:
+    def _kill_panel_sessions(self, panel_names: list[str]) -> bool:
         if not panel_names:
-            return
-        from ...integrations.tmux import kill_panel_tmux_session
+            return True
+        from ...integrations.tmux import kill_panel_tmux_session, panel_tmux_session_exists
 
         for panel_name in panel_names:
-            kill_panel_tmux_session(panel_name)
+            if not kill_panel_tmux_session(panel_name) and panel_tmux_session_exists(panel_name):
+                return False
+        return True
+
+    def _sync_panel_tmux_config(self) -> None:
+        from ...integrations.tmux import sync_panel_tmux_config
+
+        sync_panel_tmux_config()
+
+    def _cleanup_inner_panel_sessions(self, session_names: list[str]) -> None:
+        if not session_names:
+            return
+        from ...integrations.tmux import cleanup_panel_attached_session
+
+        for session_name in session_names:
+            try:
+                cleanup_panel_attached_session(session_name)
+            except Exception:
+                logger.debug(
+                    "inner panel session cleanup failed for %s", session_name, exc_info=True
+                )
 
     @property
     def panels(self) -> list[Panel]:
@@ -589,9 +688,13 @@ class PanelStore:
     def delete(self, name: str) -> bool:
         for i, p in enumerate(self._panels):
             if p.name == name:
+                inner_sessions = [s for s in p.panes.values() if s]
+                if not self._kill_panel_sessions([name]):
+                    return False
                 self._panels.pop(i)
                 self._save()
-                self._kill_panel_sessions([name])
+                self._cleanup_inner_panel_sessions(inner_sessions)
+                self._sync_panel_tmux_config()
                 return True
         return False
 
@@ -604,8 +707,23 @@ class PanelStore:
     def rename(self, old_name: str, new_name: str) -> bool:
         for p in self._panels:
             if p.name == old_name:
+                from ...integrations.tmux.core import _session_exists, make_panel_session_name
+
+                old_session_name = make_panel_session_name(old_name)
+                new_session_name = make_panel_session_name(new_name)
+                if any(
+                    other is not p and make_panel_session_name(other.name) == new_session_name
+                    for other in self._panels
+                ):
+                    return False
+                if old_session_name != new_session_name and _session_exists(new_session_name):
+                    return False
+                inner_sessions = [session_name for session_name in p.panes.values() if session_name]
                 p.name = new_name
                 self._save()
+                if old_session_name != new_session_name:
+                    self._kill_panel_sessions([old_name])
+                    self._cleanup_inner_panel_sessions(inner_sessions)
                 return True
         return False
 
@@ -622,14 +740,21 @@ class PanelStore:
             return False
 
         layout = resolve_panel_layout(layout_key, rows, cols)
+        old_inner_sessions = [session_name for session_name in panel.panes.values() if session_name]
         source_panes = panel.panes if panes is None else panes
         panel.rows = layout.rows
         panel.cols = layout.cols
         panel.layout_key = layout.key
         panel.panes = self._normalize_panes(layout, source_panes)
         panel.closed_panes = set()
+        inner_sessions = old_inner_sessions + [
+            session_name
+            for session_name in panel.panes.values()
+            if session_name and session_name not in old_inner_sessions
+        ]
         self._save()
         self._kill_panel_sessions([name])
+        self._cleanup_inner_panel_sessions(inner_sessions)
         return True
 
     def update_pane(

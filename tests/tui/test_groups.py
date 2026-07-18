@@ -10,7 +10,7 @@ from textual.css.query import NoMatches
 from textual.widgets import DataTable, OptionList, Static, TabbedContent
 from textual.widgets._footer import FooterKey
 
-from gitdirector.commands.tui import GitDirectorConsole, GroupActionMenuScreen
+from gitdirector.commands.tui import AgentLoadingScreen, GitDirectorConsole, GroupActionMenuScreen
 from gitdirector.commands.tui.app_groups import detect_repo_groups, group_row_key
 
 from .conftest import _make_info, _mock_manager
@@ -55,7 +55,7 @@ class TestRepositoryGroups:
             await pilot.pause()
 
             assert any(
-                binding.key == "space" and binding.description == "Toggle Group"
+                binding.key == "space" and binding.description == "Toggle"
                 for binding in app.query(FooterKey)
             )
 
@@ -63,7 +63,7 @@ class TestRepositoryGroups:
             await pilot.pause()
 
             assert not any(
-                binding.key == "space" and binding.description == "Toggle Group"
+                binding.key == "space" and binding.description == "Toggle"
                 for binding in app.query(FooterKey)
             )
 
@@ -84,12 +84,16 @@ class TestRepositoryGroups:
             group_key = group_row_key(Path("/tmp/work"))
             assert table.row_count == 4
             assert "work" in str(table.get_cell(group_key, app._col_keys[0]))
-            assert "2 repos" in str(table.get_cell(group_key, app._col_keys[1]))
+            assert "[2 repos]" not in str(table.get_cell(group_key, app._col_keys[0]))
+            assert "[2 repos]" in str(table.get_cell(group_key, app._col_keys[1]))
+            assert table.get_cell(group_key, app._col_keys[2]) == ""
+            assert table.get_cell(group_key, app._col_keys[3]) == ""
+            assert table.get_cell(group_key, app._col_keys[4]) == ""
             assert table.get_cell(group_key, app._col_keys[5]) == "/tmp/work"
             assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
             assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"
             assert table.get_cell("/tmp/other/solo", app._col_keys[0]) == "solo"
-            assert "[space] toggle group" in app.query_one("#status-bar", Static).content
+            assert "[space] toggle" in app.query_one("#status-bar", Static).content
 
             table.move_cursor(row=0)
             assert app._get_selected_path() == Path("/tmp/work")
@@ -133,7 +137,7 @@ class TestRepositoryGroups:
         app.manager = _mock_manager([])
 
         async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause()
+            await app.workers.wait_for_complete()
             app._repo_paths = [repo.path for repo in repos]
             app._groups_entries = detect_repo_groups(app._repo_paths)
             app._results = {str(repos[0].path): repos[0]}
@@ -199,28 +203,35 @@ class TestRepositoryGroups:
         ]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
+        app._suspend_and_attach = MagicMock()
+        app.push_screen = MagicMock()
 
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
             table.move_cursor(row=0)
-            app._suspend_and_attach = MagicMock()
 
             app.action_open_tmux()
 
-            mock_create.assert_called_once_with(
-                "work",
-                Path("/tmp/work"),
-                purpose="shell",
-                description=None,
-                repo_label="group_work",
-            )
-            app._suspend_and_attach.assert_called_once_with(
-                "gd/work/shell/1",
-                Path("/tmp/work"),
-                skip_config_sync=True,
-            )
+        mock_create.assert_called_once_with(
+            "work",
+            Path("/tmp/work"),
+            purpose="shell",
+            description=None,
+            repo_label="group_work",
+        )
+        app.push_screen.assert_called_once()
+        screen = app.push_screen.call_args.args[0]
+        assert isinstance(screen, AgentLoadingScreen)
+        assert screen._agent_cmd == "shell"
+        screen._on_attach()
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/work/shell/1",
+            Path("/tmp/work"),
+            row_key=None,
+            skip_config_sync=True,
+        )
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",

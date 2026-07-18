@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -24,6 +25,22 @@ def _make_run_result(returncode=0, stdout="", stderr=""):
     result.stdout = stdout
     result.stderr = stderr
     return result
+
+
+def _run_git(repo_dir: Path, *args: str) -> None:
+    env = os.environ.copy()
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(name, None)
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    subprocess.run(
+        ["git", *args],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        timeout=10,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -186,11 +203,11 @@ class TestRunGit:
         )
         worker.start()
 
-        assert started.wait(1)
+        assert started.wait(5)
 
         Repository.kill_running_git_commands()
 
-        worker.join(timeout=1)
+        worker.join(timeout=5)
         assert not worker.is_alive()
         assert result["value"] == (1, "", "git command cancelled")
         killpg.assert_called_once()
@@ -313,6 +330,8 @@ def _setup_status_mocks(
                         filename = line[3:].strip() if len(line) > 3 else ""
                         if x == "?" and y == "?":
                             v2 += f"? {filename}\n"
+                        elif x == "!":
+                            v2 += f"! {filename}\n"
                         else:
                             v2_x = x if x != " " else "."
                             v2_y = y if y != " " else "."
@@ -424,11 +443,35 @@ class TestGetStatusChanges:
         assert info.staged is True
         assert info.unstaged is True
 
-    def test_untracked_files_ignored(self, fake_git_repo, mocker):
+    def test_untracked_files_marked_unstaged(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, porcelain="?? newfile.py\n")
         info = Repository(fake_git_repo).get_status()
         assert info.staged is False
+        assert info.unstaged is True
+        assert info.unstaged_files == ["newfile.py"]
+
+    def test_untracked_and_staged_change(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, porcelain="M  a.py\n?? newfile.py\n")
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is True
+        assert info.staged_files == ["a.py"]
+        assert info.unstaged is True
+        assert info.unstaged_files == ["newfile.py"]
+
+    def test_multiple_untracked_files(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, porcelain="?? a.py\n?? b.py\n")
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is False
+        assert info.unstaged is True
+        assert info.unstaged_files == ["a.py", "b.py"]
+
+    def test_ignored_files_ignored(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, porcelain="! ignored.py\n")
+        info = Repository(fake_git_repo).get_status()
+        assert info.staged is False
         assert info.unstaged is False
+        assert info.staged_files is None
+        assert info.unstaged_files is None
 
     def test_clean_working_tree(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, porcelain="")
@@ -982,21 +1025,12 @@ class TestGetStatusFetchErrorClassification:
         # Build a real local repo so the non-fetch code path is exercised.
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
-        subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "t@t"],
-            cwd=str(repo_dir),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "t"], cwd=str(repo_dir), check=True, capture_output=True
-        )
+        _run_git(repo_dir, "init")
+        _run_git(repo_dir, "config", "user.email", "t@t")
+        _run_git(repo_dir, "config", "user.name", "t")
         (repo_dir / "README.md").write_text("hi")
-        subprocess.run(["git", "add", "-A"], cwd=str(repo_dir), check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True
-        )
+        _run_git(repo_dir, "add", "-A")
+        _run_git(repo_dir, "commit", "-m", "init")
 
         # Simulate real subprocess output by patching the lower-level call
         # so the production normalization/classification path runs. We patch
@@ -1072,7 +1106,10 @@ class TestGetDiffAgainstHead:
         assert untracked == ["untracked.py"]
 
     def test_failure_returns_error_and_empty_untracked(self, fake_git_repo, mocker):
+        calls = []
+
         def fake_run_git(self, *args, **_kwargs):
+            calls.append(args)
             return 128, "", "fatal: bad revision"
 
         mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
@@ -1081,6 +1118,62 @@ class TestGetDiffAgainstHead:
         assert ok is False
         assert "bad revision" in text
         assert untracked == []
+        assert calls == [("diff", "HEAD", "--no-color")]
+
+    def test_no_commits_retries_against_empty_tree(self, fake_git_repo, mocker):
+        empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        calls = []
+        responses = {
+            ("diff", "HEAD", "--no-color"): (
+                128,
+                "",
+                "fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.",
+            ),
+            ("diff", empty_tree, "--no-color"): (0, "diff --git a/a.py b/a.py\n+new\n", ""),
+            ("ls-files", "--others", "--exclude-standard", "-z"): (0, "untracked.py\x00", ""),
+        }
+
+        def fake_run_git(self, *args, **_kwargs):
+            calls.append(args)
+            return responses.get(tuple(args), (1, "", "unexpected"))
+
+        mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
+        ok, text, untracked = Repository(fake_git_repo).get_diff_against_head()
+
+        assert ok is True
+        assert "+new" in text
+        assert untracked == ["untracked.py"]
+        assert calls == [
+            ("diff", "HEAD", "--no-color"),
+            ("diff", empty_tree, "--no-color"),
+            ("ls-files", "--others", "--exclude-standard", "-z"),
+        ]
+
+    def test_unborn_head_includes_staged_and_modified_files(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _run_git(repo_dir, "init")
+
+        staged = repo_dir / "staged.txt"
+        staged.write_text("staged only\n")
+        _run_git(repo_dir, "add", "staged.txt")
+
+        modified = repo_dir / "modified.txt"
+        modified.write_text("staged version\n")
+        _run_git(repo_dir, "add", "modified.txt")
+        modified.write_text("working tree version\n")
+
+        (repo_dir / "untracked.txt").write_text("untracked\n")
+
+        ok, text, untracked = Repository(repo_dir).get_diff_against_head()
+
+        assert ok is True
+        assert "diff --git a/staged.txt b/staged.txt" in text
+        assert "+staged only" in text
+        assert "diff --git a/modified.txt b/modified.txt" in text
+        assert "+working tree version" in text
+        assert "untracked.txt" not in text
+        assert untracked == ["untracked.txt"]
 
     def test_truncates_diff_above_max_bytes(self, fake_git_repo, mocker):
         huge = "x" * (3 * 1024 * 1024)

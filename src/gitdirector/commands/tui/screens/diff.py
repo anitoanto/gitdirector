@@ -114,21 +114,20 @@ class DiffReviewScreen(ModalScreen[None]):
     #diff-files-pane {
         width: 52;
         height: 1fr;
-        border-right: solid $primary;
+        border-right: solid $boost;
         padding: 0 0;
         background: $surface;
     }
-    #diff-files-pane.--files-focused {
-        border-right: solid $accent;
+    .diff-pane-label {
+        height: 1;
+        padding: 0 1;
+        background: $boost;
+        color: $text-muted;
+        text-style: bold;
     }
-    #diff-files-pane.--diff-focused {
-        border-right: solid $secondary;
-    }
-    #diff-content-pane.--files-focused {
-        border-left: solid $accent;
-    }
-    #diff-content-pane.--diff-focused {
-        border-left: solid $secondary;
+    .diff-pane-label.--focused {
+        background: $accent;
+        color: $text;
     }
     #diff-files-list {
         width: 1fr;
@@ -148,12 +147,6 @@ class DiffReviewScreen(ModalScreen[None]):
         width: 1fr;
         height: 1fr;
         padding: 0 0;
-    }
-    #diff-content-pane.--files-focused {
-        border-left: solid $accent;
-    }
-    #diff-content-pane.--diff-focused {
-        border-left: solid $secondary;
     }
     #diff-content-scroll {
         width: 1fr;
@@ -235,8 +228,10 @@ class DiffReviewScreen(ModalScreen[None]):
                 yield Static("", id="diff-summary")
             with Horizontal(id="diff-body"):
                 with Vertical(id="diff-files-pane"):
+                    yield Static("FILES", id="diff-files-pane-label", classes="diff-pane-label")
                     yield FileTileList(id="diff-files-list")
                 with Vertical(id="diff-content-pane"):
+                    yield Static("DIFF", id="diff-content-pane-label", classes="diff-pane-label")
                     with _DiffContentScroll(id="diff-content-scroll"):
                         yield Static(id="diff-content")
                     with Vertical(id="diff-loading"):
@@ -244,11 +239,11 @@ class DiffReviewScreen(ModalScreen[None]):
                         yield Static("Loading diff\u2026", id="diff-loading-text")
                     yield Static("", id="diff-empty")
             yield Static(
-                "[bold]tab[/bold] panel  "
+                "[bold]tab[/bold] toggle focus  "
                 "[bold]j/k[/bold] line  "
                 "[bold]J/K[/bold] page  "
                 "[bold]h/l[/bold] horizontal  "
-                "[bold]brackets[/bold] file  "
+                "[bold]\\[ ][/bold] cycle  "
                 "[bold]g[/bold] commit  "
                 "[bold]r[/bold] refresh  "
                 "[bold]esc[/bold] close",
@@ -376,6 +371,7 @@ class DiffReviewScreen(ModalScreen[None]):
             return
 
         files_list.set_files(self._files, repo_dir=str(self.repo_path))
+        self._render_selected_file()
         self._show_content()
         self._update_summary()
         self._apply_focus()
@@ -494,17 +490,16 @@ class DiffReviewScreen(ModalScreen[None]):
         if not self._files:
             target = _FOCUS_FILES
         try:
-            # Toggle the focus-class on the two panes so the
-            # divider border can shift colour to signal which side
-            # has focus. We touch *both* panes on every focus
-            # change so the stale classes from the previous focus
-            # don't linger.
             files_pane = self.query_one("#diff-files-pane")
             content_pane = self.query_one("#diff-content-pane")
+            files_label = self.query_one("#diff-files-pane-label")
+            content_label = self.query_one("#diff-content-pane-label")
             files_pane.set_class(False, "--files-focused")
             files_pane.set_class(False, "--diff-focused")
             content_pane.set_class(False, "--files-focused")
             content_pane.set_class(False, "--diff-focused")
+            files_label.set_class(target == _FOCUS_FILES, "--focused")
+            content_label.set_class(target == _FOCUS_DIFF, "--focused")
             if target == _FOCUS_DIFF:
                 content_pane.set_class(True, "--diff-focused")
                 files_pane.set_class(True, "--diff-focused")
@@ -567,9 +562,6 @@ class DiffReviewScreen(ModalScreen[None]):
         if new_index == files_list.index:
             return
         files_list.index = new_index
-        if self._focus_target != _FOCUS_FILES:
-            self._focus_target = _FOCUS_FILES
-            self._apply_focus()
 
     def action_cursor_down(self) -> None:
         if self._focus_target == _FOCUS_FILES or not self._files:

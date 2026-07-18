@@ -609,15 +609,18 @@ class TestFileListScrolling:
             await app.workers.wait_for_complete()
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            await _wait_for_deferred_scroll(files_list)
             assert len(files_list._specs) == 20
             assert files_list.is_scrollable
+            assert files_list.max_scroll_y > 0
             # Jump to the last item; the list must scroll to keep
             # it visible (scroll_offset.y should advance past zero).
             files_list.index = 19
+            target_y = files_list.max_scroll_y
             await _wait_for_deferred_scroll(files_list)
             assert files_list.scroll_offset.y > 0
             # And the scroll position should be near the maximum.
-            assert files_list.scroll_offset.y == files_list.max_scroll_y
+            assert files_list.scroll_offset.y == target_y
 
     async def test_scrolling_back_keeps_selected_tile_visible(self, mocker):
         from gitdirector import repo as repo_mod
@@ -670,9 +673,8 @@ class TestFileListScrolling:
             assert files_list.scroll_offset.y > 0
 
 
-class TestFocusBorderTint:
-    """The divider between the file list and the diff content must
-    shift colour to signal which side has keyboard focus."""
+class TestFocusIndicator:
+    """The active pane header must signal which side has keyboard focus."""
 
     async def test_initial_focus_marks_files_side(self, mocker):
         from gitdirector import repo as repo_mod
@@ -691,10 +693,14 @@ class TestFocusBorderTint:
             await pilot.pause()
             files_pane = screen.query_one("#diff-files-pane")
             content_pane = screen.query_one("#diff-content-pane")
+            files_label = screen.query_one("#diff-files-pane-label")
+            content_label = screen.query_one("#diff-content-pane-label")
             assert files_pane.has_class("--files-focused")
             assert content_pane.has_class("--files-focused")
             assert not files_pane.has_class("--diff-focused")
             assert not content_pane.has_class("--diff-focused")
+            assert files_label.has_class("--focused")
+            assert not content_label.has_class("--focused")
 
     async def test_tab_toggles_focus_classes(self, mocker):
         from gitdirector import repo as repo_mod
@@ -713,6 +719,8 @@ class TestFocusBorderTint:
             await pilot.pause()
             files_pane = screen.query_one("#diff-files-pane")
             content_pane = screen.query_one("#diff-content-pane")
+            files_label = screen.query_one("#diff-files-pane-label")
+            content_label = screen.query_one("#diff-content-pane-label")
             # Tab → diff side
             await pilot.press("tab")
             await pilot.pause()
@@ -720,6 +728,8 @@ class TestFocusBorderTint:
             assert content_pane.has_class("--diff-focused")
             assert not files_pane.has_class("--files-focused")
             assert not content_pane.has_class("--files-focused")
+            assert not files_label.has_class("--focused")
+            assert content_label.has_class("--focused")
             # Tab → files side again
             await pilot.press("tab")
             await pilot.pause()
@@ -727,6 +737,8 @@ class TestFocusBorderTint:
             assert content_pane.has_class("--files-focused")
             assert not files_pane.has_class("--diff-focused")
             assert not content_pane.has_class("--diff-focused")
+            assert files_label.has_class("--focused")
+            assert not content_label.has_class("--focused")
 
 
 class TestSetFilesRegression:

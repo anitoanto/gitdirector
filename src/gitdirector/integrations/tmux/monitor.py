@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -14,8 +15,11 @@ from .core import (
     _list_sessions,
     _parse_gd_session_name,
     _run_tmux,
+    _tmux_child_environment_command,
     kill_tmux_session,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _make_agent_ready_marker() -> Path:
@@ -69,6 +73,7 @@ def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
         f"touch {done_marker_quoted} >/dev/null 2>&1 || true; fi; "
         f"tmux detach-client -s {quoted_session_target} >/dev/null 2>&1 || true; "
         f"tmux kill-session -t {quoted_session_target} >/dev/null 2>&1 || true; "
+        f"rm -f {ready_marker_quoted} {done_marker_quoted} {failed_marker_quoted} >/dev/null 2>&1 || true; "
         "exit $status"
     )
     result = _run_tmux(
@@ -77,7 +82,7 @@ def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
             "-k",
             "-t",
             pane_target,
-            f"sh -lc {shlex.quote(cleanup_script)}",
+            _tmux_child_environment_command(f"sh -lc {shlex.quote(cleanup_script)}"),
         ],
     )
     if isinstance(result.returncode, int) and result.returncode != 0:
@@ -112,7 +117,9 @@ _SILENCE_THRESHOLD_SECS = 10
 _OUTPUT_ACTIVITY_GRACE_SECS = 4.0
 _BELL_GRACE_SECS = 1.0
 _CONTENT_POLL_SECS = 3
-_CONTROL_MODE_STOP_WAIT_SECS = 2.0
+_CONTROL_MODE_STOP_WAIT_SECS = 5.0
+_CONTROL_MODE_KILL_WAIT_SECS = 2.0
+_CONTROL_MODE_FAILURE_BACKOFF_SECS = 30.0
 
 
 def _normalize_process_command(raw_args: str) -> str:
@@ -364,6 +371,11 @@ class _ControlModeReader:
         proc = self._process
         if proc:
             try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
                 proc.terminate()
             except Exception:
                 try:
@@ -373,15 +385,25 @@ class _ControlModeReader:
 
     def wait_for_stop(self, *, timeout: float = _CONTROL_MODE_STOP_WAIT_SECS):
         proc = self._process
-        if not proc:
+        if proc is None:
             return
         try:
             proc.wait(timeout=timeout)
+            return
         except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=_CONTROL_MODE_KILL_WAIT_SECS)
+        except Exception:
+            logger.debug(
+                "control mode reader subprocess %s did not exit after SIGKILL",
+                proc.pid,
+                exc_info=True,
+            )
 
     def stop(self, *, wait: bool = True, timeout: float = _CONTROL_MODE_STOP_WAIT_SECS):
         self.request_stop()
@@ -397,7 +419,7 @@ class _ControlModeReader:
                 ["tmux", "-C", "attach-session", "-t", f"={self._session_name}", "-r"],
                 stdout=subprocess.PIPE,
                 stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
             for line in self._process.stdout:
@@ -405,20 +427,36 @@ class _ControlModeReader:
                     break
                 self._parse_line(line.rstrip("\n"))
         except Exception:
-            pass
+            logger.debug("control mode reader for %s died", self._session_name, exc_info=True)
         finally:
             self._running = False
             proc = self._process
             self._process = None
-            if proc:
+            if proc is not None:
                 try:
                     proc.terminate()
-                    proc.wait(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
+                    try:
+                        proc.wait(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
+                    except Exception:
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=_CONTROL_MODE_KILL_WAIT_SECS)
+                        except Exception:
+                            logger.debug(
+                                "control mode reader subprocess %s did not exit",
+                                proc.pid,
+                                exc_info=True,
+                            )
                 except Exception:
                     try:
                         proc.kill()
+                        proc.wait(timeout=_CONTROL_MODE_KILL_WAIT_SECS)
                     except Exception:
-                        pass
+                        logger.debug(
+                            "control mode reader subprocess %s failed terminate path",
+                            proc.pid,
+                            exc_info=True,
+                        )
 
     def _parse_line(self, line: str):
         if line.startswith("%bell"):
@@ -442,6 +480,7 @@ class TmuxMonitor:
         self._last_content_change_time: dict[str, float] = {}
         self._running = False
         self._sync_thread: threading.Thread | None = None
+        self._reader_failure_backoff: dict[str, float] = {}
 
     def start(self):
         if self._running:
@@ -509,18 +548,30 @@ class TmuxMonitor:
 
                 for s in current - gd_sessions:
                     self._remove_reader(s)
+                    self._reader_failure_backoff.pop(s, None)
 
                 for s in gd_sessions & current:
                     reader = self._readers.get(s)
                     if reader and not reader.is_alive():
                         self._remove_reader(s)
+                        self._record_reader_failure(s)
+                    elif reader:
+                        self._reader_failure_backoff.pop(s, None)
 
+                now = time.time()
                 for s in gd_sessions - set(self._readers.keys()):
+                    next_attempt = self._reader_failure_backoff.get(s, 0.0)
+                    if now < next_attempt:
+                        continue
                     self._add_reader(s)
+                    if s in self._readers and not self._readers[s].is_alive():
+                        self._record_reader_failure(s)
+                    else:
+                        self._reader_failure_backoff.pop(s, None)
 
                 self._poll_content_changes(gd_sessions)
             except Exception:
-                pass
+                logger.warning("tmux session sync failed", exc_info=True)
 
             for _ in range(_CONTENT_POLL_SECS * 10):
                 if not self._running:
@@ -531,6 +582,19 @@ class TmuxMonitor:
         reader = _ControlModeReader(session_name, self._on_event)
         self._readers[session_name] = reader
         reader.start()
+
+    def _record_reader_failure(self, session_name: str) -> None:
+        """Back off ``tmux -C`` attach retries for *session_name*.
+
+        When ``tmux -C attach-session`` fails (most commonly because the
+        PTY allocator is exhausted) we don't want to hammer tmux again
+        on the next sync iteration. Each failure pushes the next attempt
+        out by ``_CONTROL_MODE_FAILURE_BACKOFF_SECS``. Successful
+        observation in a subsequent sync clears the entry.
+        """
+        self._reader_failure_backoff[session_name] = (
+            time.time() + _CONTROL_MODE_FAILURE_BACKOFF_SECS
+        )
 
     def _poll_content_changes(self, sessions: set[str]):
         for session_name in sessions:
@@ -559,4 +623,9 @@ class TmuxMonitor:
             self._last_content_change_time.pop(session_name, None)
 
 
-__all__ = [name for name in globals() if not name.startswith("__")]
+__all__ = [
+    "TmuxMonitor",
+    "get_all_session_statuses",
+    "launch_command_in_tmux_session",
+    "resolve_pane_status",
+]
