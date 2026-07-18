@@ -78,6 +78,7 @@ from .panels import (
     cleanup_temp_panel_tmux_session,
     ensure_temp_panel_tmux_session,
     kill_panel_tmux_session,
+    panel_tmux_session_exists,
     rebuild_panel_tmux_session,
 )
 
@@ -93,6 +94,7 @@ __all__ = [
     "get_all_session_statuses",
     "kill_all_gd_sessions",
     "kill_panel_tmux_session",
+    "panel_tmux_session_exists",
     "kill_tmux_session",
     "launch_command_in_tmux_session",
     "list_all_gd_sessions",

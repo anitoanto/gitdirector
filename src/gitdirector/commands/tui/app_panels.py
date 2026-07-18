@@ -370,6 +370,11 @@ class ConsolePanelsMixin:
         )
 
     def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
-        if confirmed:
-            self._panel_store.delete(panel_name)
-            self._load_panels()
+        if not confirmed:
+            return
+        if not self._panel_store.delete(panel_name):
+            self._update_status(
+                f"Panel '{panel_name}' could not be deleted because its tmux session is active"
+            )
+            return
+        self._load_panels()

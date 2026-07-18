@@ -460,7 +460,7 @@ def kill_all_gd_sessions() -> list[str]:
         session_names.update(
             session_name
             for session_name in _list_sessions()
-            if _is_persistent_panel_session(session_name)
+            if _is_persistent_panel_session(session_name) or _is_temp_panel_session(session_name)
         )
     except (TmuxError, OSError, ValueError):
         logger.debug("Failed to enumerate GitDirector tmux sessions", exc_info=True)
@@ -582,7 +582,9 @@ def _sanitize_panel_name(name: str) -> str:
 
 def _is_temp_panel_session(session_name: str) -> bool:
     parts = session_name.split("/")
-    return len(parts) > 4 and parts[:3] == ["gd", "temp", "panel"]
+    if parts[:3] != ["gd", "temp", "panel"]:
+        return False
+    return len(parts) > 4 or (len(parts) == 4 and parts[3].startswith("build-"))
 
 
 def _is_persistent_panel_session(session_name: str) -> bool:

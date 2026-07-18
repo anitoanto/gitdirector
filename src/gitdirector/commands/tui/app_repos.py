@@ -199,19 +199,17 @@ class ConsoleReposMixin:
         marker = "▸" if self._repo_group_is_collapsed(group) else "▾"
         return f"[bold cyan]{marker} {escape(group.name)}[/bold cyan]"
 
-    def _repo_group_count_label(self, shown: int, total: int) -> str:
-        repo_label = "repo" if total == 1 else "repos"
-        if shown == total:
-            return f"{total} {repo_label}"
-        return f"{shown}/{total} {repo_label}"
+    def _repo_group_count_label(self, group: RepoGroup) -> str:
+        repo_label = "repo" if group.repo_count == 1 else "repos"
+        return f"[bold cyan][{group.repo_count} {repo_label}][/bold cyan]"
 
-    def _add_repo_group_row(self, table: DataTable, group: RepoGroup, shown: int) -> None:
+    def _add_repo_group_row(self, table: DataTable, group: RepoGroup) -> None:
         table.add_row(
             self._repo_group_label(group),
-            f"[bold]{self._repo_group_count_label(shown, group.repo_count)}[/bold]",
-            "[dim]group[/dim]",
-            "[dim]enter actions[/dim]",
-            "—",
+            self._repo_group_count_label(group),
+            "",
+            "",
+            "",
             str(group.path),
             key=self._group_row_key(group.path),
         )
@@ -264,7 +262,7 @@ class ConsoleReposMixin:
             shown_group_count += 1
             shown_repo_count += len(group_paths)
             grouped_paths.update(group_paths)
-            self._add_repo_group_row(table, group, len(group_paths))
+            self._add_repo_group_row(table, group)
             if self._repo_group_is_collapsed(group):
                 continue
             for path in sorted(group_paths, key=lambda item: item.name.lower()):
@@ -298,7 +296,7 @@ class ConsoleReposMixin:
             shown_group_count += 1
             shown_repo_count += len(group_infos)
             grouped_paths.update(info.path for info in group_infos)
-            self._add_repo_group_row(table, group, len(group_infos))
+            self._add_repo_group_row(table, group)
             if self._repo_group_is_collapsed(group):
                 continue
             group_infos.sort(key=key_func, reverse=self._sort_reverse)

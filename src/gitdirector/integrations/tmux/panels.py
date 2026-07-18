@@ -88,6 +88,12 @@ def kill_panel_tmux_session(panel_name: str) -> bool:
     return kill_tmux_session(make_panel_session_name(panel_name))
 
 
+def panel_tmux_session_exists(panel_name: str) -> bool:
+    if not isinstance(panel_name, str) or not panel_name:
+        raise ValueError("panel_tmux_session_exists requires a non-empty panel name")
+    return _session_exists(make_panel_session_name(panel_name))
+
+
 def _kill_tmux_session_by_name(intended_name: str) -> bool:
     """Kill a tmux session by the name we requested, tolerating ``.`` -> ``_``.
 
