@@ -59,11 +59,17 @@ def complete_repository_names(
         return []
 
     prefix = incomplete.lower()
-    return [
-        CompletionItem(repo.name, help=str(repo))
-        for repo in sorted(repositories, key=lambda path: (path.name.lower(), str(path)))
-        if repo.name.lower().startswith(prefix)
-    ]
+    seen: set[str] = set()
+    items: list[CompletionItem] = []
+    for repo in sorted(repositories, key=lambda path: (path.name.lower(), str(path))):
+        name = repo.name
+        if not name.lower().startswith(prefix):
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        items.append(CompletionItem(name, help=str(repo)))
+    return items
 
 
 def register(cli: click.Group):

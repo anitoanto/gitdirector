@@ -826,6 +826,29 @@ class TestInfoCommand:
         result = runner.invoke(cli, ["info", "my-app"])
         assert result.exit_code != 0
 
+    @pytest.mark.parametrize("query", ["my-case-sensitive-repo", "front"])
+    def test_info_resolves_case_insensitive_and_fuzzy_names(
+        self, tmp_path, runner, monkeypatch, query
+    ):
+        from gitdirector.cli import cli
+
+        repo = tmp_path / ("My-Case-Sensitive-Repo" if query.startswith("my-") else "frontend-app")
+        repo.mkdir()
+        _init_repo = repo / ".git"
+        _init_repo.mkdir()
+        config_dir = tmp_path / "home" / ".gitdirector"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text(f"repositories:\n  - {repo}\n")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+        with patch(
+            "gitdirector.commands.info.gather_repo_info",
+            return_value=RepoInfoResult(0, [], 0, 0, 0),
+        ):
+            result = runner.invoke(cli, ["info", query])
+
+        assert result.exit_code == 0, result.output
+
 
 # ---------------------------------------------------------------------------
 # Scalability and edge cases for _read_text
@@ -870,3 +893,40 @@ class TestReadTextScalability:
         text = _read_text(f)
         assert text is not None
         assert "héllo" in text
+
+
+class TestGatherRepoInfoExtensionEdges:
+    def test_aggregates_extensions_over_default_limit(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        extensions = [
+            ".py",
+            ".js",
+            ".ts",
+            ".md",
+            ".json",
+            ".yaml",
+            ".toml",
+            ".css",
+            ".html",
+            ".xml",
+            ".sql",
+            ".sh",
+        ]
+        for index, extension in enumerate(extensions):
+            _write(repo, f"f{index}{extension}", "hello world\n")
+        _commit_all(repo)
+
+        others = next(
+            item for item in gather_repo_info(repo).file_types if item.extension == "others"
+        )
+        assert others.count == 2
+
+    def test_unknown_binary_extension_has_no_line_count(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        for index in range(12):
+            _write(repo, f"f{index}.dat", "\x00\x01\x02")
+        _commit_all(repo)
+
+        entry = next(item for item in gather_repo_info(repo).file_types if item.extension == ".dat")
+        assert entry.count == 12
+        assert entry.line_count is None
