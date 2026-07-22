@@ -161,30 +161,36 @@ class ConsoleReposMixin:
         def shutdown_requested() -> bool:
             return self._background_shutdown_requested(worker)
 
+        def safe_call(callback, *args, **kwargs) -> None:
+            try:
+                self.call_from_thread(callback, *args, **kwargs)
+            except Exception:
+                logger.debug("Suppressed UI update after shutdown", exc_info=True)
+
         self._repo_paths = sorted(self.manager.config.repositories, key=self._repo_path_sort_key)
         self._groups_entries = detect_repo_groups(self._repo_paths)
 
         if not self._repo_paths:
             if not shutdown_requested():
-                self.call_from_thread(self._show_no_repos)
+                safe_call(self._show_no_repos)
                 self._repos_cache_updated_at = monotonic()
                 self._save_repos_cache()
             self._repos_refreshing = False
-            self.call_from_thread(self._hide_refresh_indicator)
+            safe_call(self._hide_refresh_indicator)
             return
 
         if shutdown_requested():
             self._repos_refreshing = False
-            self.call_from_thread(self._hide_refresh_indicator)
+            safe_call(self._hide_refresh_indicator)
             return
 
         if show_loading or not self._results:
-            self.call_from_thread(self._populate_initial_rows, show_loading=show_loading)
+            safe_call(self._populate_initial_rows, show_loading=show_loading)
 
         total = len(self._repo_paths)
         done = 0
         if show_loading:
-            self.call_from_thread(self._update_status, f"Checking {total} repositories…")
+            safe_call(self._update_status, f"Checking {total} repositories…")
 
         executor = ThreadPoolExecutor(max_workers=self.manager.config.max_workers)
         self._repo_status_executor = executor
@@ -205,12 +211,12 @@ class ConsoleReposMixin:
                     break
                 self._results[str(info.path)] = info
                 done += 1
-                self.call_from_thread(self._update_row, info)
+                safe_call(self._update_row, info)
                 remaining = total - done
                 if shutdown_requested():
                     break
                 if show_loading and remaining > 0:
-                    self.call_from_thread(
+                    safe_call(
                         self._update_status,
                         f"{done} done, {remaining} remaining…",
                     )
@@ -221,13 +227,13 @@ class ConsoleReposMixin:
 
         if shutdown_requested():
             self._repos_refreshing = False
-            self.call_from_thread(self._hide_refresh_indicator)
+            safe_call(self._hide_refresh_indicator)
             return
 
         self._repos_cache_updated_at = monotonic()
         self._save_repos_cache()
         self._repos_refreshing = False
-        self.call_from_thread(self._hide_refresh_indicator)
+        safe_call(self._hide_refresh_indicator)
         if show_loading and (
             self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse
         ):
