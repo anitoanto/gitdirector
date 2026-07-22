@@ -28,8 +28,6 @@ from gitdirector.integrations.tmux import (
 
 _TMUX_ENV_ARGS = [
     "-e",
-    "NO_COLOR=",
-    "-e",
     "TERM=tmux-256color",
     "-e",
     "COLORTERM=truecolor",

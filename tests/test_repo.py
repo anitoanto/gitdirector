@@ -12,6 +12,7 @@ from gitdirector.repo import (
     RepositoryInfo,
     RepoStatus,
     _classify_remote_error,
+    _github_credentials_from_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,37 @@ def _run_git(repo_dir: Path, *args: str) -> None:
         stdin=subprocess.DEVNULL,
         timeout=10,
     )
+
+
+class TestGitHubCredentialsFromConfig:
+    def test_returns_none_without_complete_auth(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".gitdirector"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("repositories: []\n")
+        (config_dir / "secrets.yaml").write_text("github_username: octocat\n")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        assert _github_credentials_from_config() is None
+
+    def test_returns_credentials_from_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".gitdirector"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("repositories: []\n")
+        (config_dir / "secrets.yaml").write_text(
+            "github_username: octocat\ngithub_PAT: ghp_secret\n"
+        )
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        assert _github_credentials_from_config() == ("octocat", "ghp_secret")
+
+    def test_returns_none_for_invalid_config(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / ".gitdirector"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("repositories: []\n")
+        (config_dir / "secrets.yaml").write_text("github_username: 123\n")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        assert _github_credentials_from_config() is None
 
 
 # ---------------------------------------------------------------------------

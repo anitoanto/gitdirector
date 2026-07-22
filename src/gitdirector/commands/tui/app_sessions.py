@@ -56,11 +56,15 @@ class ConsoleSessionsMixin:
     def _load_sessions(self) -> None:
         from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
 
-        self.call_from_thread(self._update_status, "Loading sessions…")
-        entries = list_all_gd_sessions()
-        statuses = get_all_session_statuses()
-        self._session_statuses = statuses
-        self.call_from_thread(self._populate_sessions_table, entries)
+        self.call_from_thread(self._show_refresh_indicator)
+        try:
+            self.call_from_thread(self._update_status, "Loading sessions…")
+            entries = list_all_gd_sessions()
+            statuses = get_all_session_statuses()
+            self._session_statuses = statuses
+            self.call_from_thread(self._populate_sessions_table, entries)
+        finally:
+            self.call_from_thread(self._hide_refresh_indicator)
 
     def _populate_sessions_table(self, entries: list[dict[str, str]]) -> None:
         self._sessions_entries = entries

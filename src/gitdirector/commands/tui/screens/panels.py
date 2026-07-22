@@ -775,10 +775,19 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def _auto_assign_panes(self) -> None:
         active = self._active_pane_count()
-        available_sessions = self._available_session_names()
+        available_sessions = [
+            session_name
+            for session_name in self._available_session_names()
+            if session_name not in {self._pane_assignments[i] for i in range(1, active + 1)}
+        ]
         for pane_index in range(1, 10):
-            if pane_index <= active and pane_index <= len(available_sessions):
-                self._pane_assignments[pane_index] = available_sessions[pane_index - 1]
+            if pane_index > active:
+                self._pane_assignments[pane_index] = None
+                continue
+            if self._pane_assignments[pane_index] is not None:
+                continue
+            if available_sessions:
+                self._pane_assignments[pane_index] = available_sessions.pop(0)
             else:
                 self._pane_assignments[pane_index] = None
         self._selected_pane_index = 1
