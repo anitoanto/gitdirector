@@ -165,6 +165,269 @@ class TestParseDiffFiles:
         assert parse_diff_files(diff) == []
 
 
+class TestParseCopyStatus:
+    """Bug regression: a git diff emits 'copy from ... copy to ...' for
+    a copy entry. The parser should set status to 'C' (copied), with
+    the right old_path and new_path, not leave it as 'M'.
+    """
+
+    def test_copy_status_from_header(self):
+        diff_text = (
+            "diff --git a/original.txt b/similar.txt\n"
+            "similarity index 66%\n"
+            "copy from original.txt\n"
+            "copy to similar.txt\n"
+            "index 2756ab3..8bd2bc5 100644\n"
+            "--- a/original.txt\n"
+            "+++ b/similar.txt\n"
+            "@@ -1 +1,2 @@\n"
+            " abc def ghi jkl\n"
+            "+// copy\n"
+        )
+
+        files = parse_diff_files(diff_text)
+
+        assert len(files) == 1
+        f = files[0]
+        assert f.status == "C", f"expected status 'C' (copied), got {f.status!r}"
+        assert f.path == "similar.txt"
+        assert f.old_path == "original.txt"
+
+    def test_rename_still_renders_as_R(self):
+        """Sanity check: a real rename still renders as status 'R' and
+        the diff renderer doesn't regress on the existing rename path
+        while introducing copy support.
+        """
+
+        diff_text = (
+            "diff --git a/old.txt b/new.txt\n"
+            "similarity index 100%\n"
+            "rename from old.txt\n"
+            "rename to new.txt\n"
+        )
+
+        files = parse_diff_files(diff_text)
+
+        assert len(files) == 1
+        f = files[0]
+        assert f.status == "R", f"expected status 'R' for rename, got {f.status!r}"
+        assert f.path == "new.txt"
+        assert f.old_path == "old.txt"
+
+    def test_multiple_copies_from_same_source(self):
+        """When git emits several copies from the same source (one per
+        target), each file must come out with status 'C' and its own
+        old_path. Regressing here would roll both copies up onto the
+        single-old_path of the first one.
+        """
+
+        diff_text = (
+            "diff --git a/original.txt b/back1.txt\n"
+            "similarity index 100%\n"
+            "copy from original.txt\n"
+            "copy to back1.txt\n"
+            "diff --git a/original.txt b/back2.txt\n"
+            "similarity index 100%\n"
+            "copy from original.txt\n"
+            "copy to back2.txt\n"
+            "diff --git a/original.txt b/target.txt\n"
+            "similarity index 100%\n"
+            "rename from original.txt\n"
+            "rename to target.txt\n"
+        )
+
+        files = parse_diff_files(diff_text)
+
+        by_path = {f.path: f for f in files}
+        assert set(by_path) == {"back1.txt", "back2.txt", "target.txt"}
+
+        assert by_path["back1.txt"].status == "C"
+        assert by_path["back1.txt"].old_path == "original.txt"
+
+        assert by_path["back2.txt"].status == "C"
+        assert by_path["back2.txt"].old_path == "original.txt"
+
+        assert by_path["target.txt"].status == "R"
+        assert by_path["target.txt"].old_path == "original.txt"
+
+    def test_copy_with_content_change_preserves_counts(self):
+        """When a copy also adds/removes content the count fields must
+        reflect the additions/deletions from the body lines.
+        """
+
+        diff_text = (
+            "diff --git a/original.txt b/clone.txt\n"
+            "similarity index 72%\n"
+            "copy from original.txt\n"
+            "copy to clone.txt\n"
+            "index 2756ab3..12573ff 100644\n"
+            "--- a/original.txt\n"
+            "+++ b/clone.txt\n"
+            "@@ -1 +1,2 @@\n"
+            " abc def ghi jkl\n"
+            "+//mod\n"
+        )
+
+        files = parse_diff_files(diff_text)
+        assert len(files) == 1
+        f = files[0]
+        assert f.status == "C"
+        assert f.old_path == "original.txt"
+        assert f.path == "clone.txt"
+        assert f.additions == 1, f"expected 1 addition, got {f.additions}"
+        assert f.deletions == 0, f"expected 0 deletions, got {f.deletions}"
+
+
+class TestParseQuotedFilenames:
+    """Bug regression: git quotes filenames that contain characters
+    outside its safe set, e.g. ``"a/file_with\\ttab.txt" "b/file_...
+    "``. The parser must unquote them so they appear in the file list.
+    """
+
+    def test_quoted_paths_with_tab_escape(self):
+        diff_text = (
+            'diff --git "a/file with\\ttab.txt" "b/file with\\ttab.txt"\n'
+            "index 113a406..e019be0 100644\n"
+            '--- "a/file with\\ttab.txt"\n'
+            '+++ "b/file with\\ttab.txt"\n'
+            "@@ -1 +1 @@\n"
+            "-first\n"
+            "+second\n"
+        )
+
+        files = parse_diff_files(diff_text)
+
+        assert len(files) == 1
+        assert files[0].path == "file with\ttab.txt"
+
+    def test_quoted_paths_with_spaces(self):
+        diff_text = (
+            'diff --git "a/my file.txt" "b/my file.txt"\n'
+            "index 113a406..e019be0 100644\n"
+            '--- "a/my file.txt"\n'
+            '+++ "b/my file.txt"\n'
+            "@@ -1 +1 @@\n"
+            "-first\n"
+            "+second\n"
+        )
+
+        files = parse_diff_files(diff_text)
+
+        assert len(files) == 1
+        assert files[0].path == "my file.txt"
+
+
+class TestParseDiffGitPathsHelper:
+    """Direct tests for the line-parsing helper used by the diff renderer."""
+
+    def test_unquoted_paths(self):
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths("diff --git a/foo.py b/bar.py")
+        assert old == "foo.py"
+        assert new == "bar.py"
+
+    def test_unquoted_same_path(self):
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths("diff --git a/foo.py b/foo.py")
+        assert old == "foo.py"
+        assert new == "foo.py"
+
+    def test_quoted_paths_with_spaces(self):
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths('diff --git "a/my file.txt" "b/my file.txt"')
+        assert old == "my file.txt"
+        assert new == "my file.txt"
+
+    def test_quoted_paths_with_tab_escape(self):
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths(
+            'diff --git "a/file_with\\ttab.txt" "b/file_with\\ttab.txt"'
+        )
+        assert old == "file_with\ttab.txt"
+        assert new == "file_with\ttab.txt"
+
+    def test_unrelated_line_returns_none_pair(self):
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths("--- a/foo.py b/bar.py")
+        assert old is None
+        assert new is None
+
+    def test_missing_b_prefix_returns_none(self):
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths("diff --git a/foo.py")
+        assert old is None
+        assert new is None
+
+    def test_quoted_path_unclosed_quote_returns_none(self):
+        """An unclosed quote is malformed — we'd rather drop the file
+        than guess path boundaries.
+        """
+        from gitdirector.commands.tui.diff_renderer import _parse_diff_git_paths
+
+        old, new = _parse_diff_git_paths('diff --git "a/foo b/bar')
+        assert old is None
+        assert new is None
+
+
+class TestUnescapeGitPath:
+    """Reverse of git's pathname quoting (``\\\\``, ``\\t``, ``\\"``, ``\\n``)."""
+
+    def test_plain_text_unchanged(self):
+        from gitdirector.commands.tui.diff_renderer import _unescape_git_path
+
+        assert _unescape_git_path("plain") == "plain"
+
+    def test_tab_escape_decoded(self):
+        from gitdirector.commands.tui.diff_renderer import _unescape_git_path
+
+        assert _unescape_git_path("a\\tb") == "a\tb"
+
+    def test_quote_escape_decoded(self):
+        from gitdirector.commands.tui.diff_renderer import _unescape_git_path
+
+        assert _unescape_git_path('a\\"b') == 'a"b'
+
+    def test_backslash_escape_decoded(self):
+        from gitdirector.commands.tui.diff_renderer import _unescape_git_path
+
+        # ``\\\\`` should yield a single literal backslash.
+        assert _unescape_git_path("a\\\\b") == "a\\b"
+
+    def test_newline_escape_decoded(self):
+        from gitdirector.commands.tui.diff_renderer import _unescape_git_path
+
+        # ``\\n`` is git's newline escape. Real Unix paths can't
+        # contain a literal newline, so we leave the escape decoded.
+        assert _unescape_git_path("a\\nb") == "a\nb"
+
+    def test_octal_escaped_utf8_decoded(self):
+        from gitdirector.commands.tui.diff_renderer import _unescape_git_path
+
+        assert _unescape_git_path("caf\\303\\251.txt") == "café.txt"
+
+
+class TestParseOctalEscapedFilenames:
+    def test_quoted_utf8_path_is_decoded(self):
+        diff_text = (
+            'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\n'
+            "index 113a406..e019be0 100644\n"
+            "@@ -1 +1 @@\n"
+            "-first\n"
+            "+second\n"
+        )
+
+        files = parse_diff_files(diff_text)
+
+        assert len(files) == 1
+        assert files[0].path == "café.txt"
+
+
 class TestDetectLanguage:
     def test_python(self):
         assert detect_language("foo.py") == "python"

@@ -15,6 +15,8 @@ from gitdirector.commands.tui import GitDirectorConsole
 from gitdirector.commands.tui.terminal_caps import (
     _DUMB_TERMS,
     host_color_system,
+    host_supports_alpha,
+    host_supports_hatch,
     host_supports_truecolor,
     is_ci_environment,
     is_dumb_terminal,
@@ -83,6 +85,31 @@ class TestHostCapabilityDetection:
         monkeypatch.delenv("CI", raising=False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
         assert is_ci_environment() is True
+
+    def test_no_color_zero_disables_color(self, monkeypatch):
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setenv("NO_COLOR", "0")
+        assert no_color_requested() is True
+
+    def test_plain_xterm_returns_256(self, monkeypatch):
+        monkeypatch.setenv("TERM", "xterm")
+        monkeypatch.delenv("COLORTERM", raising=False)
+        assert host_color_system() == "256"
+
+    def test_ansi_returns_eight_colors(self, monkeypatch):
+        monkeypatch.setenv("TERM", "ansi")
+        monkeypatch.delenv("COLORTERM", raising=False)
+        assert host_color_system() == "8"
+
+    def test_dumb_terminal_does_not_support_hatch(self, monkeypatch):
+        monkeypatch.setenv("TERM", "dumb")
+        assert host_supports_hatch() is False
+
+    def test_no_color_disables_alpha(self, monkeypatch):
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setenv("COLORTERM", "")
+        monkeypatch.setenv("NO_COLOR", "1")
+        assert host_supports_alpha() is False
 
 
 class TestStripUnsupportedCss:

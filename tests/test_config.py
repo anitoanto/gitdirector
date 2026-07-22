@@ -214,7 +214,7 @@ class TestConfigTheme:
         assert cfg.theme == Config.DEFAULT_THEME
 
 
-class TestConfigGitHubAuth:
+class TestConfigGitHubAuthCleanup:
     def test_saves_github_auth(self, config):
         config.github_username = "octocat"
         config.github_PAT = "ghp_secret"
@@ -277,3 +277,36 @@ class TestConfigSaveRoundtrip:
         config.save()
         data = yaml.safe_load(config.config_file.read_text())
         assert "max_workers" not in data
+
+
+class TestConfigGitHubAuth:
+    def test_clearing_auth_deletes_secrets_file(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(yaml.dump({"repositories": []}))
+        (config_dir / "secrets.yaml").write_text(
+            yaml.dump({"github_username": "octocat", "github_PAT": "ghp_secret"})
+        )
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+
+        config = Config()
+        config.github_username = None
+        config.github_PAT = None
+        config.save()
+
+        assert not config.secrets_file.exists()
+
+    def test_clearing_pat_preserves_username(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(yaml.dump({"repositories": []}))
+        (config_dir / "secrets.yaml").write_text(
+            yaml.dump({"github_username": "octocat", "github_PAT": "ghp_secret"})
+        )
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+
+        config = Config()
+        config.github_PAT = None
+        config.save()
+
+        secrets = yaml.safe_load(config.secrets_file.read_text())
+        assert "github_PAT" not in secrets
+        assert secrets["github_username"] == "octocat"

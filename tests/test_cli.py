@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.utils import strip_ansi
+from rich.console import Console
 
 from gitdirector.cli import (
     _changes_text,
@@ -77,6 +78,22 @@ class TestPathText:
         long = "/very/long/path/" + "x" * 200
         text = _path_text(long)
         assert text.plain.startswith("\u2026")
+
+    def test_truncation_retains_path_tail(self):
+        console = Console(width=120, force_terminal=False)
+        path = "/very/long/leading/dirs/that/are/longer/than/the/column/myrepo"
+        with patch("gitdirector.commands.console", console):
+            text = _path_text(path).plain
+
+        assert len(text) <= max(10, console.width * 2 // 9 - 6)
+        assert text.startswith("\u2026")
+        assert text.endswith("myrepo")
+
+    @pytest.mark.parametrize("width", [0, 4, 10])
+    def test_narrow_console_does_not_crash(self, width):
+        console = Console(width=width, force_terminal=False)
+        with patch("gitdirector.commands.console", console):
+            _path_text("/Users/example/projects/myrepo")
 
 
 # ---------------------------------------------------------------------------

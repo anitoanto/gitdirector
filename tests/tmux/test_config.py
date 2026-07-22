@@ -74,7 +74,7 @@ class TestPanelPaneTitles:
         assert "default-terminal screen-256color" in config
         assert "'terminal-features[90]' '*:RGB'" in config
         assert "'terminal-overrides[90]' '*:Tc'" in config
-        assert "set-environment -u -t =gd/panel/main: NO_COLOR" in config
+        assert "set-environment -r -t =gd/panel/main: NO_COLOR" in config
         assert "set-environment -t =gd/panel/main: COLORTERM truecolor" in config
         assert "set-environment -t =gd/panel/main: FORCE_COLOR 3" in config
         assert "set-environment -t =gd/panel/main: CLICOLOR_FORCE 1" in config
@@ -127,7 +127,7 @@ class TestPanelPaneTitles:
         assert "default-terminal screen-256color" in config
         assert "'terminal-features[90]' '*:RGB'" in config
         assert "'terminal-overrides[90]' '*:Tc'" in config
-        assert "set-environment -u -t =gd/my-repo/shell/1: NO_COLOR" in config
+        assert "set-environment -r -t =gd/my-repo/shell/1: NO_COLOR" in config
         assert "set-environment -t =gd/my-repo/shell/1: COLORTERM truecolor" in config
         assert "set-environment -t =gd/my-repo/shell/1: FORCE_COLOR 3" in config
         assert "set-environment -t =gd/my-repo/shell/1: CLICOLOR_FORCE 1" in config
