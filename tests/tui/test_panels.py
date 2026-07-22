@@ -679,7 +679,7 @@ class TestGitDirectorConsolePanels:
     def test_tab_switch_hotkeys_hidden_from_footer(self):
         hidden_keys = {binding.key for binding in GitDirectorConsole.BINDINGS if not binding.show}
 
-        assert {"1", "2", "3"}.issubset(hidden_keys)
+        assert {"1", "2", "3", "_"}.issubset(hidden_keys)
 
     async def test_new_panel_footer_binding_only_shows_on_panels_tab(self):
         app = GitDirectorConsole()

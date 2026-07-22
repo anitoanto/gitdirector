@@ -185,6 +185,22 @@ class TestGitDirectorConsole:
             await pilot.press("up")
             assert table.cursor_coordinate.row == 0
 
+    async def test_underscore_resets_horizontal_scroll_in_each_tab(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            for tab_id, selector in (
+                ("repos", "#repo-table"),
+                ("sessions", "#sessions-table"),
+                ("panels", "#panels-table"),
+            ):
+                app._active_tab = tab_id
+                table = app.query_one(selector, DataTable)
+                with patch.object(table, "scroll_to") as scroll_to:
+                    await pilot.press("_")
+                    scroll_to.assert_called_once_with(x=0, animate=False)
+
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_refresh_binding(self, _mock_sessions):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
@@ -1019,6 +1035,19 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.call_from_thread.assert_any_call(app._apply_filter_and_sort)
 
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    def test_load_repos_refreshes_in_place_without_placeholders(self, _mock_sessions):
+        info = _make_info("alpha", Path("/tmp/alpha"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([info])
+        app.call_from_thread = MagicMock()
+
+        GitDirectorConsole._load_repos.__wrapped__(app, show_loading=False)
+
+        call_targets = [call.args[0] for call in app.call_from_thread.call_args_list]
+        assert app._populate_initial_rows not in call_targets
+        assert app._update_row in call_targets
+
     def test_update_row_ignores_table_errors(self):
         app = GitDirectorConsole()
         app._col_keys = ("repo", "sync", "branch", "changes", "last", "path")
@@ -1510,6 +1539,43 @@ class TestGitDirectorConsoleDirectBranches:
 
         app._load_repos.assert_not_called()
         app._load_panels.assert_called_once_with()
+
+    def test_action_refresh_forces_repos_reload_despite_fresh_cache(self):
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._results = {"/tmp/alpha": object()}
+        app._repos_cache_updated_at = 123.0
+        app._load_repos = MagicMock()
+
+        app.action_refresh()
+
+        assert app._results == {}
+        assert app._repos_cache_updated_at is None
+        app._load_repos.assert_called_once_with(show_loading=True)
+
+    def test_in_place_repos_refresh_preserves_cached_results(self):
+        app = GitDirectorConsole()
+        result = object()
+        app._results = {"/tmp/alpha": result}
+        app._load_repos = MagicMock()
+
+        app._refresh_repos(show_loading=False)
+
+        assert app._results == {"/tmp/alpha": result}
+        app._load_repos.assert_called_once_with(show_loading=False)
+
+    def test_expired_repos_cache_refreshes_in_place_on_tab_activation(self):
+        app = GitDirectorConsole()
+        app.refresh_bindings = MagicMock()
+        app._sync_session_status_tracking = MagicMock()
+        app._repo_cache_expired = MagicMock(return_value=True)
+        app._refresh_repos = MagicMock()
+        event = MagicMock()
+        event.pane.id = "repos"
+
+        app.on_tabbed_content_tab_activated(event)
+
+        app._refresh_repos.assert_called_once_with(show_loading=False)
 
     @patch("gitdirector.commands.tui.app.GitDirectorConsole")
     def test_run_console_stops_monitor_when_run_raises(self, mock_console_cls):

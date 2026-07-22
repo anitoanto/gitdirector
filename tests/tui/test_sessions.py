@@ -594,7 +594,6 @@ class TestTabRestorationAfterSuspend:
 
             app._resume_target_tab = "sessions"
             app._active_tab = "sessions"
-            app._repos_stale = True
 
             app.query_one("#tabs", TabbedContent).active = "repos"
             await pilot.pause()
@@ -743,6 +742,7 @@ class TestTabRestorationAfterSuspend:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
+            app.manager.get_repository_status.reset_mock()
 
             table = app.query_one("#repo-table", DataTable)
             table.move_cursor(row=2)
@@ -765,6 +765,7 @@ class TestTabRestorationAfterSuspend:
 
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "/tmp/beta"
+            app.manager.get_repository_status.assert_called_once_with(Path("/tmp/beta"), fetch=True)
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
     async def test_repos_tab_guard_redirects_wrong_tab(self, _mock):
@@ -773,7 +774,6 @@ class TestTabRestorationAfterSuspend:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             app._resume_target_tab = "repos"
-            app._repos_stale = True
 
             app.query_one("#tabs", TabbedContent).active = "sessions"
             await pilot.pause()
@@ -981,19 +981,21 @@ class TestSessionsRefreshOnReturn:
                 app._suspend_and_attach("gd-test-session")
         assert app._active_tab == "sessions"
 
-    async def test_suspend_sets_repos_stale(self):
+    async def test_suspend_keeps_repository_cache_valid(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
+        app._repos_cache_updated_at = 123.0
         app.suspend = MagicMock(
             return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
         )
         with patch("gitdirector.integrations.tmux.attach_tmux_session"):
             with patch("sys.stdout"):
                 app._suspend_and_attach("gd-test-session")
-        assert app._repos_stale is True
+        assert app._repos_cache_updated_at == 123.0
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_switching_to_repos_reloads_when_stale(self, _mock_sessions):
+    @patch("gitdirector.commands.tui.app_repos.monotonic", return_value=1800.0)
+    async def test_switching_to_repos_reloads_when_cache_expired(self, _mock_time, _mock_sessions):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
@@ -1001,7 +1003,7 @@ class TestSessionsRefreshOnReturn:
             await app.workers.wait_for_complete()
             await pilot.pause()
             app.manager.get_repository_status.reset_mock()
-            app._repos_stale = True
+            app._repos_cache_updated_at = 0.0
             app.action_tab_sessions()
             await pilot.pause()
             await app.workers.wait_for_complete()
@@ -1010,11 +1012,11 @@ class TestSessionsRefreshOnReturn:
             await pilot.pause()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert app._repos_stale is False
             app.manager.get_repository_status.assert_called_once()
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_switching_to_repos_no_reload_when_not_stale(self, _mock_sessions):
+    @patch("gitdirector.commands.tui.app_repos.monotonic", return_value=1799.0)
+    async def test_switching_to_repos_uses_cache_within_ttl(self, _mock_time, _mock_sessions):
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
@@ -1022,7 +1024,7 @@ class TestSessionsRefreshOnReturn:
             await app.workers.wait_for_complete()
             await pilot.pause()
             app.manager.get_repository_status.reset_mock()
-            app._repos_stale = False
+            app._repos_cache_updated_at = 0.0
             app.action_tab_sessions()
             await pilot.pause()
             app.action_tab_repos()
