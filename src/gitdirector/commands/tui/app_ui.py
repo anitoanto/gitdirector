@@ -114,10 +114,8 @@ class ConsoleUIHelpersMixin:
         elif tab_id == "panels":
             self._load_panels()
         elif tab_id == "repos":
-            if self._repos_stale:
-                self._repos_stale = False
-                self._results.clear()
-                self._load_repos()
+            if self._repo_cache_expired():
+                self._refresh_repos(show_loading=False)
             else:
                 total = len(self._results)
                 try:
@@ -356,6 +354,9 @@ class ConsoleUIHelpersMixin:
 
     def action_cursor_right(self) -> None:
         self._get_active_table().scroll_right()
+
+    def action_reset_horizontal_scroll(self) -> None:
+        self._get_active_table().scroll_to(x=0, animate=False)
 
     def action_search(self) -> None:
         self.query_one("#search-container").display = True

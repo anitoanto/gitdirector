@@ -211,13 +211,17 @@ class ConsolePanelsMixin:
         return msg
 
     def _load_panels(self) -> None:
-        self._panel_store.reload()
+        self._show_refresh_indicator()
         try:
-            self.query_one("#panels-table", DataTable)
-        except NoMatches:
-            return
-        self._panels_entries = self._panel_store.panels
-        self._apply_panels_filter_and_sort()
+            self._panel_store.reload()
+            try:
+                self.query_one("#panels-table", DataTable)
+            except NoMatches:
+                return
+            self._panels_entries = self._panel_store.panels
+            self._apply_panels_filter_and_sort()
+        finally:
+            self._hide_refresh_indicator()
 
     def _selected_panel_name(self) -> str | None:
         table = self.query_one("#panels-table", DataTable)

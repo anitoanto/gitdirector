@@ -254,7 +254,7 @@ wheels = [
 
 [[package]]
 name = "gitdirector"
-version = "1.7.4"
+version = "1.7.6"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

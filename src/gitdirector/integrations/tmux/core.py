@@ -236,15 +236,13 @@ def _tmux_child_environment_command(command: str) -> str:
 
 def _tmux_new_session_environment_args() -> list[str]:
     args: list[str] = []
-    for name in _TMUX_CHILD_ENV_UNSET:
-        args.extend(["-e", f"{name}="])
     for name, value in _TMUX_CHILD_ENV.items():
         args.extend(["-e", f"{name}={value}"])
     return args
 
 
 def _tmux_color_environment_config(quoted_session: str) -> list[str]:
-    lines = [f"set-environment -u -t {quoted_session} {name}" for name in _TMUX_CHILD_ENV_UNSET]
+    lines = [f"set-environment -r -t {quoted_session} {name}" for name in _TMUX_CHILD_ENV_UNSET]
     lines.extend(
         f"set-environment -t {quoted_session} {name} {shlex.quote(value)}"
         for name, value in _TMUX_COLOR_ENV.items()

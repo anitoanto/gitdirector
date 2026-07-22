@@ -14,7 +14,10 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
+from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
+from textual.widgets._footer import FooterKey, FooterLabel
 from textual.worker import NoActiveWorker, Worker, get_current_worker
 
 from ... import version_check
@@ -70,6 +73,27 @@ _NO_UPSTREAM_PUSH_MARKERS = (
 )
 
 
+class RefreshFooter(Footer):
+    refreshing = reactive(False, repaint=False)
+    refresh_text = reactive("", repaint=False)
+
+    def watch_refreshing(self) -> None:
+        self.call_after_refresh(self.recompose)
+
+    def watch_refresh_text(self) -> None:
+        self.call_after_refresh(self.recompose)
+
+    def compose(self) -> ComposeResult:
+        for child in super().compose():
+            if (
+                self.refreshing
+                and isinstance(child, FooterKey)
+                and child.has_class("-command-palette")
+            ):
+                yield FooterLabel(self.refresh_text, classes="-refresh-indicator")
+            yield child
+
+
 def _is_no_upstream_push_error(message: str) -> bool:
     message_lower = message.lower()
     return any(marker in message_lower for marker in _NO_UPSTREAM_PUSH_MARKERS)
@@ -98,6 +122,14 @@ class GitDirectorConsole(
         background: $panel;
         color: white;
         padding: 0 2;
+    }
+    FooterLabel.-refresh-indicator {
+        dock: right;
+        height: 1;
+        margin: 0;
+        padding: 0 2 0 1;
+        background: $footer-background;
+        color: $text-muted;
     }
     #search-container {
         dock: bottom;
@@ -188,6 +220,7 @@ class GitDirectorConsole(
         Binding("left", "cursor_left", "Left", show=False),
         Binding("l", "cursor_right", "Right", show=False),
         Binding("right", "cursor_right", "Right", show=False),
+        Binding("_", "reset_horizontal_scroll", show=False),
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
         Binding("g", "show_git_menu", "Git", show=True),
@@ -237,7 +270,9 @@ class GitDirectorConsole(
         self._collapsed_groups: set[str] = set()
         self._visible_repo_count: int = 0
         self._visible_group_count: int = 0
-        self._repos_stale: bool = False
+        self._repos_cache_updated_at: float | None = None
+        self._repos_cache_saved_at: float | None = None
+        self._repos_refreshing = False
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
         self._waiting_count: int = 0
@@ -255,6 +290,8 @@ class GitDirectorConsole(
         self._session_status_tracking_running = False
         self._shutdown_requested = False
         self._repo_status_executor: ThreadPoolExecutor | None = None
+        self._refresh_operations = 0
+        self._refresh_frame = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True, icon="☰")
@@ -290,7 +327,7 @@ class GitDirectorConsole(
             id="status-bar",
             markup=False,
         )
-        yield Footer()
+        yield RefreshFooter()
 
     def on_mount(self) -> None:
         table = self.query_one("#repo-table", DataTable)
@@ -314,8 +351,41 @@ class GitDirectorConsole(
             self._trigger_status_poll,
         )
         self._set_session_status_tracking_running(False)
+        self.set_interval(0.25, self._advance_refresh_indicator)
         self._load_update_notice()
-        self._load_repos()
+        self._load_repos_from_cache()
+        self._refresh_repos(show_loading=False)
+
+    def _show_refresh_indicator(self) -> None:
+        self._refresh_operations += 1
+        try:
+            footer = self.query_one(RefreshFooter)
+        except NoMatches:
+            return
+        footer.refreshing = True
+        self._advance_refresh_indicator()
+
+    def _hide_refresh_indicator(self) -> None:
+        self._refresh_operations = max(0, self._refresh_operations - 1)
+        if self._refresh_operations == 0:
+            self.set_timer(0.35, self._hide_refresh_indicator_when_idle)
+
+    def _hide_refresh_indicator_when_idle(self) -> None:
+        if self._refresh_operations == 0:
+            try:
+                self.query_one(RefreshFooter).refreshing = False
+            except NoMatches:
+                pass
+
+    def _advance_refresh_indicator(self) -> None:
+        if self._refresh_operations == 0:
+            return
+        frame = "◐◓◑◒"[self._refresh_frame % 4]
+        self._refresh_frame += 1
+        try:
+            self.query_one(RefreshFooter).refresh_text = f"{frame} refreshing"
+        except NoMatches:
+            pass
 
     def _disable_tabs_widget_arrow_keybindings(self) -> None:
         """Remove the ``left``/``right`` bindings from every Tabs widget.
@@ -585,7 +655,6 @@ class GitDirectorConsole(
             self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
 
-        self._repos_stale = True
         self._active_tab = restore_tab
 
     def _refresh_after_session_launch(self, path: Path, launch_tab: str) -> None:
@@ -602,16 +671,24 @@ class GitDirectorConsole(
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:
         """Re-fetch full repository status for the given path."""
-        worker = self._current_worker_or_none()
-        if self._background_shutdown_requested(worker):
-            return
+        self.call_from_thread(self._show_refresh_indicator)
+        try:
+            worker = self._current_worker_or_none()
+            if self._background_shutdown_requested(worker):
+                return
 
-        info = self.manager.get_repository_status(path, fetch=True)
-        if self._background_shutdown_requested(worker):
-            return
+            info = self.manager.get_repository_status(path, fetch=True)
+            if self._background_shutdown_requested(worker):
+                return
 
-        self._results[str(path)] = info
-        self.call_from_thread(self._update_row, info)
+            self._results[str(path)] = info
+            if self._repos_cache_saved_at is not None and len(self._results) == len(
+                self._repo_paths
+            ):
+                self._save_repos_cache(updated_at=self._repos_cache_saved_at)
+            self.call_from_thread(self._update_row, info)
+        finally:
+            self.call_from_thread(self._hide_refresh_indicator)
 
     def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""

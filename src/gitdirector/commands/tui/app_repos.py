@@ -5,15 +5,18 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import monotonic, time
 
 from rich.markup import escape
 from textual import work
 from textual.widgets import DataTable, Static
 
 from ...repo import RepositoryInfo, RepoStatus
+from ...storage import load_yaml_mapping, write_yaml_atomic
 from .app_groups import RepoGroup, detect_repo_groups
 from .constants import (
     _DEFAULT_SORT_COLUMN,
+    _REPO_CACHE_TTL_SECS,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
     _STATUS_ORDER,
@@ -25,11 +28,134 @@ logger = logging.getLogger(__name__)
 
 
 class ConsoleReposMixin:
+    @property
+    def _repos_cache_file(self) -> Path:
+        return Path.home() / ".gitdirector" / "cache" / "repos.yaml"
+
+    def _save_repos_cache(self, *, updated_at: float | None = None) -> None:
+        saved_at = time() if updated_at is None else updated_at
+        data = {
+            "updated_at": saved_at,
+            "repositories": [
+                {
+                    "path": str(info.path),
+                    "name": info.name,
+                    "status": info.status.value,
+                    "branch": info.branch,
+                    "message": info.message,
+                    "staged": info.staged,
+                    "unstaged": info.unstaged,
+                    "staged_files": info.staged_files,
+                    "unstaged_files": info.unstaged_files,
+                    "last_updated": info.last_updated,
+                    "last_commit_timestamp": info.last_commit_timestamp,
+                    "size": info.size,
+                }
+                for info in self._results.values()
+            ],
+        }
+        try:
+            write_yaml_atomic(self._repos_cache_file, data)
+        except OSError:
+            logger.debug("Failed to write repository cache", exc_info=True)
+        else:
+            self._repos_cache_saved_at = saved_at
+
+    def _load_repos_from_cache(self) -> bool:
+        try:
+            data = load_yaml_mapping(self._repos_cache_file, description="repository cache")
+            updated_at = data["updated_at"]
+            entries = data["repositories"]
+            if isinstance(updated_at, bool) or not isinstance(updated_at, (int, float)):
+                return False
+            if not isinstance(entries, list):
+                return False
+            age = time() - updated_at
+            if not 0 <= age < _REPO_CACHE_TTL_SECS:
+                return False
+
+            infos: dict[str, RepositoryInfo] = {}
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    return False
+                path = entry.get("path")
+                name = entry.get("name")
+                status = entry.get("status")
+                if not all(isinstance(value, str) for value in (path, name, status)):
+                    return False
+                if not all(isinstance(entry.get(field), bool) for field in ("staged", "unstaged")):
+                    return False
+                if not isinstance(entry.get("message"), str):
+                    return False
+                if any(
+                    value is not None and not isinstance(value, str)
+                    for value in (
+                        entry.get("branch"),
+                        entry.get("last_updated"),
+                    )
+                ):
+                    return False
+                if any(
+                    value is not None and (isinstance(value, bool) or not isinstance(value, int))
+                    for value in (
+                        entry.get("last_commit_timestamp"),
+                        entry.get("size"),
+                    )
+                ):
+                    return False
+                if any(
+                    value is not None
+                    and (
+                        not isinstance(value, list)
+                        or any(not isinstance(item, str) for item in value)
+                    )
+                    for value in (
+                        entry.get("staged_files"),
+                        entry.get("unstaged_files"),
+                    )
+                ):
+                    return False
+                info = RepositoryInfo(
+                    path=Path(path),
+                    name=name,
+                    status=RepoStatus(status),
+                    branch=entry.get("branch"),
+                    message=entry.get("message", ""),
+                    staged=entry.get("staged", False),
+                    unstaged=entry.get("unstaged", False),
+                    staged_files=entry.get("staged_files"),
+                    unstaged_files=entry.get("unstaged_files"),
+                    last_updated=entry.get("last_updated"),
+                    last_commit_timestamp=entry.get("last_commit_timestamp"),
+                    size=entry.get("size"),
+                )
+                infos[str(info.path)] = info
+        except (KeyError, TypeError, ValueError, OSError):
+            logger.debug("Ignoring invalid repository cache", exc_info=True)
+            return False
+
+        repo_paths = sorted(self.manager.config.repositories, key=self._repo_path_sort_key)
+        if len(infos) != len(entries) or set(infos) != {str(path) for path in repo_paths}:
+            return False
+
+        self._repo_paths = repo_paths
+        self._groups_entries = detect_repo_groups(repo_paths)
+        self._results = infos
+        self._repos_cache_updated_at = monotonic() - age
+        self._repos_cache_saved_at = updated_at
+        if not repo_paths:
+            self._show_no_repos()
+        else:
+            self._populate_initial_rows()
+            self._update_status(self._build_loaded_status(len(repo_paths), len(repo_paths)))
+        return True
+
     def _repo_path_sort_key(self, path: Path) -> tuple[str, str, str]:
         return (path.parent.name.lower(), str(path.parent).lower(), path.name.lower())
 
     @work(thread=True)
-    def _load_repos(self) -> None:
+    def _load_repos(self, *, show_loading: bool = True) -> None:
+        self.call_from_thread(self._show_refresh_indicator)
         worker = self._current_worker_or_none()
 
         def shutdown_requested() -> bool:
@@ -41,16 +167,24 @@ class ConsoleReposMixin:
         if not self._repo_paths:
             if not shutdown_requested():
                 self.call_from_thread(self._show_no_repos)
+                self._repos_cache_updated_at = monotonic()
+                self._save_repos_cache()
+            self._repos_refreshing = False
+            self.call_from_thread(self._hide_refresh_indicator)
             return
 
         if shutdown_requested():
+            self._repos_refreshing = False
+            self.call_from_thread(self._hide_refresh_indicator)
             return
 
-        self.call_from_thread(self._populate_initial_rows)
+        if show_loading or not self._results:
+            self.call_from_thread(self._populate_initial_rows, show_loading=show_loading)
 
         total = len(self._repo_paths)
         done = 0
-        self.call_from_thread(self._update_status, f"Checking {total} repositories…")
+        if show_loading:
+            self.call_from_thread(self._update_status, f"Checking {total} repositories…")
 
         executor = ThreadPoolExecutor(max_workers=self.manager.config.max_workers)
         self._repo_status_executor = executor
@@ -75,7 +209,7 @@ class ConsoleReposMixin:
                 remaining = total - done
                 if shutdown_requested():
                     break
-                if remaining > 0:
+                if show_loading and remaining > 0:
                     self.call_from_thread(
                         self._update_status,
                         f"{done} done, {remaining} remaining…",
@@ -86,9 +220,17 @@ class ConsoleReposMixin:
                 self._repo_status_executor = None
 
         if shutdown_requested():
+            self._repos_refreshing = False
+            self.call_from_thread(self._hide_refresh_indicator)
             return
 
-        if self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse:
+        self._repos_cache_updated_at = monotonic()
+        self._save_repos_cache()
+        self._repos_refreshing = False
+        self.call_from_thread(self._hide_refresh_indicator)
+        if show_loading and (
+            self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse
+        ):
             self.call_from_thread(self._apply_filter_and_sort)
         else:
             self.call_from_thread(
@@ -96,7 +238,20 @@ class ConsoleReposMixin:
                 self._build_loaded_status(total, total),
             )
 
-    def _populate_initial_rows(self) -> None:
+    def _repo_cache_expired(self) -> bool:
+        updated_at = self._repos_cache_updated_at
+        return updated_at is None or monotonic() - updated_at >= _REPO_CACHE_TTL_SECS
+
+    def _refresh_repos(self, *, show_loading: bool) -> None:
+        if self._repos_refreshing:
+            return
+        self._repos_refreshing = True
+        if show_loading:
+            self._results.clear()
+            self._repos_cache_updated_at = None
+        self._load_repos(show_loading=show_loading)
+
+    def _populate_initial_rows(self, *, show_loading: bool = True) -> None:
         table = self.query_one("#repo-table", DataTable)
         no_msg = self.query_one("#no-repos-message", Static)
         self._set_table_empty_state(table, no_msg, is_empty=False)
@@ -108,7 +263,7 @@ class ConsoleReposMixin:
                 table
             )
         table.clear()
-        self._render_repo_path_rows(table, self._repo_paths)
+        self._render_repo_path_rows(table, self._repo_paths, show_loading=show_loading)
 
         if self._resume_selection_tab == "repos":
             self._restore_resume_selection("repos")
@@ -214,13 +369,16 @@ class ConsoleReposMixin:
             key=self._group_row_key(group.path),
         )
 
-    def _add_placeholder_repo_row(self, table: DataTable, path: Path, *, grouped: bool) -> None:
+    def _add_placeholder_repo_row(
+        self, table: DataTable, path: Path, *, grouped: bool, show_loading: bool
+    ) -> None:
+        value = "... ... ... ..." if show_loading else "—"
         table.add_row(
             f"  {path.name}" if grouped else path.name,
-            "... ... ... ...",
-            "... ... ... ...",
-            "... ... ... ...",
-            "... ... ... ... ... ...",
+            value,
+            value,
+            value,
+            value,
             str(path),
             key=str(path),
         )
@@ -242,14 +400,18 @@ class ConsoleReposMixin:
             key=str(info.path),
         )
 
-    def _add_repo_path_row(self, table: DataTable, path: Path, *, grouped: bool) -> None:
+    def _add_repo_path_row(
+        self, table: DataTable, path: Path, *, grouped: bool, show_loading: bool
+    ) -> None:
         info = self._results.get(str(path))
         if info is None:
-            self._add_placeholder_repo_row(table, path, grouped=grouped)
+            self._add_placeholder_repo_row(table, path, grouped=grouped, show_loading=show_loading)
             return
         self._add_repo_info_row(table, info, grouped=grouped)
 
-    def _render_repo_path_rows(self, table: DataTable, paths: list[Path]) -> None:
+    def _render_repo_path_rows(
+        self, table: DataTable, paths: list[Path], *, show_loading: bool = True
+    ) -> None:
         path_set = set(paths)
         grouped_paths: set[Path] = set()
         shown_repo_count = 0
@@ -266,12 +428,12 @@ class ConsoleReposMixin:
             if self._repo_group_is_collapsed(group):
                 continue
             for path in sorted(group_paths, key=lambda item: item.name.lower()):
-                self._add_repo_path_row(table, path, grouped=True)
+                self._add_repo_path_row(table, path, grouped=True, show_loading=show_loading)
 
         ungrouped_paths = [path for path in paths if path not in grouped_paths]
         shown_repo_count += len(ungrouped_paths)
         for path in sorted(ungrouped_paths, key=lambda item: item.name.lower()):
-            self._add_repo_path_row(table, path, grouped=False)
+            self._add_repo_path_row(table, path, grouped=False, show_loading=show_loading)
 
         self._visible_repo_count = shown_repo_count
         self._visible_group_count = shown_group_count
@@ -407,5 +569,4 @@ class ConsoleReposMixin:
         elif self._active_tab == "panels":
             self._load_panels()
         else:
-            self._results.clear()
-            self._load_repos()
+            self._refresh_repos(show_loading=True)
