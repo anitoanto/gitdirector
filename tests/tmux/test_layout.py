@@ -511,8 +511,6 @@ class TestRebuildPanelTmuxSession:
                     "new-session",
                     "-d",
                     "-e",
-                    "NO_COLOR=",
-                    "-e",
                     "TERM=tmux-256color",
                     "-e",
                     "COLORTERM=truecolor",

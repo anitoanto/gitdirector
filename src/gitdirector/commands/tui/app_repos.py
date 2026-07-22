@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import monotonic
 
 from rich.markup import escape
 from textual import work
@@ -14,6 +15,7 @@ from ...repo import RepositoryInfo, RepoStatus
 from .app_groups import RepoGroup, detect_repo_groups
 from .constants import (
     _DEFAULT_SORT_COLUMN,
+    _REPO_CACHE_TTL_SECS,
     _SORT_COLUMN_NAMES,
     _STATUS_LABEL,
     _STATUS_ORDER,
@@ -29,7 +31,7 @@ class ConsoleReposMixin:
         return (path.parent.name.lower(), str(path.parent).lower(), path.name.lower())
 
     @work(thread=True)
-    def _load_repos(self) -> None:
+    def _load_repos(self, *, show_loading: bool = True) -> None:
         worker = self._current_worker_or_none()
 
         def shutdown_requested() -> bool:
@@ -41,12 +43,14 @@ class ConsoleReposMixin:
         if not self._repo_paths:
             if not shutdown_requested():
                 self.call_from_thread(self._show_no_repos)
+                self._repos_cache_updated_at = monotonic()
             return
 
         if shutdown_requested():
             return
 
-        self.call_from_thread(self._populate_initial_rows)
+        if show_loading:
+            self.call_from_thread(self._populate_initial_rows)
 
         total = len(self._repo_paths)
         done = 0
@@ -88,13 +92,26 @@ class ConsoleReposMixin:
         if shutdown_requested():
             return
 
-        if self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse:
+        self._repos_cache_updated_at = monotonic()
+        if show_loading and (
+            self._search_query or self._sort_column != _DEFAULT_SORT_COLUMN or self._sort_reverse
+        ):
             self.call_from_thread(self._apply_filter_and_sort)
         else:
             self.call_from_thread(
                 self._update_status,
                 self._build_loaded_status(total, total),
             )
+
+    def _repo_cache_expired(self) -> bool:
+        updated_at = self._repos_cache_updated_at
+        return updated_at is None or monotonic() - updated_at >= _REPO_CACHE_TTL_SECS
+
+    def _refresh_repos(self, *, show_loading: bool) -> None:
+        if show_loading:
+            self._results.clear()
+        self._repos_cache_updated_at = None
+        self._load_repos(show_loading=show_loading)
 
     def _populate_initial_rows(self) -> None:
         table = self.query_one("#repo-table", DataTable)
@@ -407,5 +424,4 @@ class ConsoleReposMixin:
         elif self._active_tab == "panels":
             self._load_panels()
         else:
-            self._results.clear()
-            self._load_repos()
+            self._refresh_repos(show_loading=True)

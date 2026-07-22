@@ -188,6 +188,7 @@ class GitDirectorConsole(
         Binding("left", "cursor_left", "Left", show=False),
         Binding("l", "cursor_right", "Right", show=False),
         Binding("right", "cursor_right", "Right", show=False),
+        Binding("_", "reset_horizontal_scroll", show=False),
         Binding("slash", "search", "Search", show=True),
         Binding("s", "sort", "Sort", show=True),
         Binding("g", "show_git_menu", "Git", show=True),
@@ -237,7 +238,7 @@ class GitDirectorConsole(
         self._collapsed_groups: set[str] = set()
         self._visible_repo_count: int = 0
         self._visible_group_count: int = 0
-        self._repos_stale: bool = False
+        self._repos_cache_updated_at: float | None = None
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
         self._waiting_count: int = 0
@@ -315,7 +316,7 @@ class GitDirectorConsole(
         )
         self._set_session_status_tracking_running(False)
         self._load_update_notice()
-        self._load_repos()
+        self._refresh_repos(show_loading=True)
 
     def _disable_tabs_widget_arrow_keybindings(self) -> None:
         """Remove the ``left``/``right`` bindings from every Tabs widget.
@@ -585,7 +586,6 @@ class GitDirectorConsole(
             self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
 
-        self._repos_stale = True
         self._active_tab = restore_tab
 
     def _refresh_after_session_launch(self, path: Path, launch_tab: str) -> None:
