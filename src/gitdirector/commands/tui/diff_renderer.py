@@ -261,6 +261,8 @@ _NEW_FILE_RE = re.compile(r"^new file")
 _DELETED_FILE_RE = re.compile(r"^deleted file")
 _RENAME_FROM_RE = re.compile(r"^rename from (.+)$")
 _RENAME_TO_RE = re.compile(r"^rename to (.+)$")
+_COPY_FROM_RE = re.compile(r"^copy from (.+)$")
+_COPY_TO_RE = re.compile(r"^copy to (.+)$")
 _BINARY_RE = re.compile(r"^Binary files .* differ$")
 _HUNK_HEADER_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@")
 
@@ -277,6 +279,77 @@ _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
         ".tif",
     }
 )
+
+
+def _parse_diff_git_paths(line: str) -> tuple[str | None, str | None]:
+    """Extract the old and new paths from a ``diff --git`` header line.
+
+    Handles both the unquoted form (``a/foo b/bar``) and the quoted
+    form that git emits when paths contain characters outside its
+    safe set (``"a/f with\\ttab.txt" "b/f with\\ttab.txt"``). Returns
+    ``(None, None)`` when the line doesn't look like a header so the
+    caller can skip it.
+    """
+
+    if not line.startswith("diff --git "):
+        return None, None
+    rest = line[len("diff --git ") :]
+    if rest.startswith('"a/'):
+        # Quoted form: "<old>" "<new>" with both segments fully quoted.
+        # Find the boundary between the two quoted segments.
+        boundary = rest.find('" "b/')
+        if boundary == -1 or not rest.endswith('"'):
+            return None, None
+        old_raw = rest[3:boundary]
+        new_raw = rest[boundary + 5 : -1]  # skip 5 chars ("_""_b_/)
+    else:
+        if " b/" not in rest:
+            return None, None
+        sep = rest.index(" b/")
+        old_raw = rest[2:sep]
+        new_raw = rest[sep + 3 :]
+    return _unescape_git_path(old_raw), _unescape_git_path(new_raw)
+
+
+def _unescape_git_path(raw: str) -> str:
+    """Decode git's quoted-pathway: ``\\\\`` → ``\\``, ``\\t`` → ``\\t``,
+    ``\\"`` → ``"``.
+
+    Git also wraps ``\\a``, ``\\b``, ``\\v``, ``\\f``, ``\\"``, ``\\``
+    etc. We only reverse the cases we are likely to encounter in practice;
+    the result is good enough to render filenames in the diff view.
+    """
+    result = bytearray()
+    escapes = {
+        "a": b"\a",
+        "b": b"\b",
+        "t": b"\t",
+        "n": b"\n",
+        "v": b"\v",
+        "f": b"\f",
+        "r": b"\r",
+        '"': b'"',
+        "\\": b"\\",
+    }
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt in "01234567" and i + 3 < len(raw):
+                octal = raw[i + 1 : i + 4]
+                if all(char in "01234567" for char in octal):
+                    result.append(int(octal, 8))
+                    i += 4
+                    continue
+            if nxt in escapes:
+                result.extend(escapes[nxt])
+            else:
+                result.extend(raw[i : i + 2].encode())
+            i += 2
+        else:
+            result.extend(raw[i].encode())
+            i += 1
+    return result.decode("utf-8", "surrogateescape")
 
 
 def is_image_file(path: str) -> bool:
@@ -420,11 +493,9 @@ def parse_diff_files(diff_text: str) -> list[ChangedFile]:
     for raw_line in diff_text.splitlines():
         if raw_line.startswith("diff --git "):
             _flush()
-            match = _DIFF_GIT_HEADER_RE.match(raw_line)
-            if not match:
+            old_name, new_name = _parse_diff_git_paths(raw_line)
+            if old_name is None or new_name is None:
                 continue
-            old_name = match.group(1)
-            new_name = match.group(2)
             is_rename = old_name != new_name
             current = ChangedFile(
                 path=new_name,
@@ -446,6 +517,10 @@ def parse_diff_files(diff_text: str) -> list[ChangedFile]:
             current = replace(current, status="R", old_path=m.group(1))
         elif (m := _RENAME_TO_RE.match(raw_line)) and current.is_rename:
             current = replace(current, status="R", old_path=current.old_path or m.group(1))
+        elif (m := _COPY_FROM_RE.match(raw_line)) and current.is_rename:
+            current = replace(current, status="C", old_path=m.group(1))
+        elif (m := _COPY_TO_RE.match(raw_line)) and current.is_rename:
+            current = replace(current, status="C", old_path=current.old_path or m.group(1))
         elif _BINARY_RE.match(raw_line):
             current = replace(current, is_binary=True)
         elif _HUNK_HEADER_RE.match(raw_line):

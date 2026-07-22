@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from unittest.mock import MagicMock, patch
 
 from textual.css.query import NoMatches
@@ -18,13 +19,83 @@ from gitdirector.commands.tui import (
 )
 from gitdirector.commands.tui.app import _run_console
 from gitdirector.commands.tui.app_groups import RepoGroup
+from gitdirector.commands.tui.constants import _REPO_CACHE_TTL_SECS
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 from gitdirector.repo import Repository, RepoStatus
+from gitdirector.storage import load_yaml_mapping
 
 from .conftest import _make_info, _mock_manager
 
 
 class TestGitDirectorConsole:
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_startup_uses_fresh_repository_cache(self, _mock_sessions):
+        info = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
+        refreshed = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.BEHIND, "main")
+        cached_app = GitDirectorConsole()
+        cached_app._results = {str(info.path): info}
+        cached_app._save_repos_cache()
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([info])
+        fetch_started = Event()
+        release_fetch = Event()
+
+        def delayed_status(*_args, **_kwargs):
+            fetch_started.set()
+            assert release_fetch.wait(timeout=1)
+            return refreshed
+
+        app.manager.get_repository_status.side_effect = delayed_status
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+
+            assert table.row_count == 1
+            assert fetch_started.is_set()
+            assert table.get_cell(str(info.path), app._col_keys[1]) == "up to date"
+
+            release_fetch.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        assert "behind" in str(table.get_cell(str(info.path), app._col_keys[1]))
+
+    @patch("gitdirector.commands.tui.app_repos.time")
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_startup_refreshes_stale_repository_cache(self, _mock_sessions, mock_time):
+        info = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
+        cached_app = GitDirectorConsole()
+        cached_app._results = {str(info.path): info}
+        mock_time.return_value = 1_000
+        cached_app._save_repos_cache()
+
+        mock_time.return_value = 1_000 + _REPO_CACHE_TTL_SECS + 1
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([info])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+        app.manager.get_repository_status.assert_any_call(info.path, fetch=True)
+
+    @patch("gitdirector.commands.tui.app_repos.time", return_value=1_000)
+    def test_row_refresh_updates_cache_without_extending_ttl(self, _mock_time):
+        original = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
+        updated = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.BEHIND, "main")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([updated])
+        app._repo_paths = [updated.path]
+        app._results = {str(original.path): original}
+        app._save_repos_cache()
+        app.call_from_thread = MagicMock()
+
+        GitDirectorConsole._refresh_repo_for_path.__wrapped__(app, updated.path)
+
+        cached = load_yaml_mapping(app._repos_cache_file, description="repository cache")
+        assert cached["updated_at"] == 1_000
+        assert cached["repositories"][0]["status"] == RepoStatus.BEHIND.value
+
     async def test_compose_widgets(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1045,7 +1116,12 @@ class TestGitDirectorConsoleDirectBranches:
         GitDirectorConsole._load_repos.__wrapped__(app, show_loading=False)
 
         call_targets = [call.args[0] for call in app.call_from_thread.call_args_list]
-        assert app._populate_initial_rows not in call_targets
+        populate_call = next(
+            call
+            for call in app.call_from_thread.call_args_list
+            if call.args[0] == app._populate_initial_rows
+        )
+        assert populate_call.kwargs == {"show_loading": False}
         assert app._update_row in call_targets
 
     def test_update_row_ignores_table_errors(self):

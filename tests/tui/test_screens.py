@@ -1095,6 +1095,88 @@ class TestCreatePanelScreen:
             assert "unassigned" in str(slot_menu.get_option_at_index(1).prompt)
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
+    async def test_auto_slot_action_preserves_existing_assignments(self, mock_sessions):
+        mock_sessions.return_value = [
+            {
+                "session_name": "gd/repo/available/1",
+                "repo": "repo",
+                "purpose": "available",
+            },
+        ]
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("grid_1x2")
+            app.screen.query_one("#panel-name-input", Input).value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            screen._pane_assignments[1] = "gd/repo/kept/1"
+            screen._pane_assignments[2] = None
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert screen._pane_assignments[1] == "gd/repo/kept/1"
+            assert screen._pane_assignments[2] == "gd/repo/available/1"
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_auto_slot_action_preserves_assignment_without_sessions(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("grid_1x2")
+            app.screen.query_one("#panel-name-input", Input).value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            screen._pane_assignments[1] = "gd/repo/kept/1"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert screen._pane_assignments[1] == "gd/repo/kept/1"
+            assert screen._pane_assignments[2] is None
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
+    async def test_auto_slot_action_does_not_reuse_assigned_session(self, mock_sessions):
+        mock_sessions.return_value = [
+            {
+                "session_name": "gd/repo/only/1",
+                "repo": "repo",
+                "purpose": "only",
+            },
+        ]
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+
+            screen._apply_layout("grid_1x2")
+            app.screen.query_one("#panel-name-input", Input).value = "Ops"
+            screen._go_to_step_2()
+            await pilot.pause()
+
+            screen._pane_assignments[1] = "gd/repo/only/1"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert screen._pane_assignments[1] == "gd/repo/only/1"
+            assert screen._pane_assignments[2] is None
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
     async def test_edit_mode_prefills_panel_configuration_and_opens_on_step_two(
         self, mock_sessions
     ):
