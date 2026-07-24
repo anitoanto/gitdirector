@@ -284,7 +284,7 @@ class GitDirectorConsole(
         self._resume_selection_row: int | None = None
         self._resume_new_panel_guard_until: float = 0.0
         self._panel_store = PanelStore()
-        self._status_message = "Loading repositories…"
+        self._status_message = ""
         self._update_notice = version_check.get_cached_update_notice()
         self._session_status_tracking_paused = False
         self._session_status_tracking_running = False
@@ -354,7 +354,7 @@ class GitDirectorConsole(
         self.set_interval(0.25, self._advance_refresh_indicator)
         self._load_update_notice()
         self._load_repos_from_cache()
-        self._refresh_repos(show_loading=False)
+        self._refresh_repos()
 
     def _show_refresh_indicator(self) -> None:
         self._refresh_operations += 1
