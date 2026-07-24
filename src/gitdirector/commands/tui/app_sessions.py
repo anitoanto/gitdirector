@@ -58,7 +58,6 @@ class ConsoleSessionsMixin:
 
         self.call_from_thread(self._show_refresh_indicator)
         try:
-            self.call_from_thread(self._update_status, "Loading sessions…")
             entries = list_all_gd_sessions()
             statuses = get_all_session_statuses()
             self._session_statuses = statuses
