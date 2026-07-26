@@ -8,6 +8,7 @@ from rich.markup import escape
 from textual import work
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
+from textual.worker import Worker
 
 from .constants import (
     _DEFAULT_SESSIONS_SORT_COLUMN,
@@ -52,19 +53,50 @@ def _wrap_session_description(text: str, max_width: int) -> str:
 
 
 class ConsoleSessionsMixin:
+    def _next_sessions_snapshot_generation(self) -> int:
+        self._sessions_snapshot_generation += 1
+        return self._sessions_snapshot_generation
+
+    def _load_sessions(self) -> Worker[None]:
+        generation = self._next_sessions_snapshot_generation()
+        return self._load_sessions_worker(generation)
+
     @work(thread=True)
-    def _load_sessions(self) -> None:
+    def _load_sessions_worker(self, generation: int) -> None:
         from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
 
         self.call_from_thread(self._show_refresh_indicator)
         try:
-            self.call_from_thread(self._update_status, "Loading sessions…")
             entries = list_all_gd_sessions()
             statuses = get_all_session_statuses()
-            self._session_statuses = statuses
-            self.call_from_thread(self._populate_sessions_table, entries)
+            self.call_from_thread(
+                self._apply_sessions_snapshot,
+                generation,
+                entries,
+                statuses,
+                True,
+            )
         finally:
             self.call_from_thread(self._hide_refresh_indicator)
+
+    def _apply_sessions_snapshot(
+        self,
+        generation: int,
+        entries: list[dict[str, str]],
+        statuses: dict[str, dict[str, object]],
+        refresh_table: bool,
+    ) -> None:
+        if generation != self._sessions_snapshot_generation or self._shutdown_requested:
+            return
+        self._session_statuses = statuses
+        membership_changed = {entry["session_name"] for entry in entries} != {
+            entry["session_name"] for entry in self._sessions_entries
+        }
+        if refresh_table or (self._active_tab == "sessions" and membership_changed):
+            self._populate_sessions_table(entries)
+        else:
+            self._sessions_entries = entries
+            self._on_statuses_updated()
 
     def _populate_sessions_table(self, entries: list[dict[str, str]]) -> None:
         self._sessions_entries = entries
@@ -223,6 +255,7 @@ class ConsoleSessionsMixin:
         if self._session_status_tracking_paused:
             return
         self._session_status_tracking_paused = True
+        self._next_sessions_snapshot_generation()
         self._set_session_status_tracking_running(False, wait=wait)
 
     def _resume_session_status_tracking(self) -> None:
@@ -236,8 +269,12 @@ class ConsoleSessionsMixin:
             return
         self._poll_session_statuses()
 
+    def _poll_session_statuses(self) -> Worker[None]:
+        generation = self._next_sessions_snapshot_generation()
+        return self._poll_session_statuses_worker(generation)
+
     @work(thread=True, exclusive=True, group="status_poll")
-    def _poll_session_statuses(self) -> None:
+    def _poll_session_statuses_worker(self, generation: int) -> None:
         from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
 
         if not self._should_run_session_status_tracking():
@@ -245,11 +282,13 @@ class ConsoleSessionsMixin:
 
         entries = list_all_gd_sessions()
         statuses = get_all_session_statuses()
-        self._session_statuses = statuses
-        self._sessions_entries = entries
-        for entry in entries:
-            entry["status"] = self._resolve_session_status(entry)
-        self.call_from_thread(self._on_statuses_updated)
+        self.call_from_thread(
+            self._apply_sessions_snapshot,
+            generation,
+            entries,
+            statuses,
+            False,
+        )
 
     def _on_statuses_updated(self) -> None:
         waiting = 0

@@ -115,7 +115,7 @@ class ConsoleUIHelpersMixin:
             self._load_panels()
         elif tab_id == "repos":
             if self._repo_cache_expired():
-                self._refresh_repos(show_loading=False)
+                self._refresh_repos()
             else:
                 total = len(self._results)
                 try:

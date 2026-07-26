@@ -840,6 +840,29 @@ class TestRenderFileDiff:
         syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
         assert len(syntax_pieces) == 1
 
+    def test_no_newline_marker_is_not_rendered(self):
+        f = ChangedFile(
+            path="settings.json",
+            status="A",
+            additions=3,
+            diff_text=(
+                "diff --git a/settings.json b/settings.json\n"
+                "--- /dev/null\n"
+                "+++ b/settings.json\n"
+                "@@ -0,0 +1,3 @@\n"
+                "+{\n"
+                '+  "port": 5501\n'
+                "+}\n"
+                "\\ No newline at end of file\n"
+            ),
+        )
+
+        rendered = render_file_diff(f)
+        syntax = next(piece for piece in rendered.renderables if isinstance(piece, Syntax))
+
+        assert "No newline at end of file" not in syntax.code
+        assert syntax.code.splitlines() == ["+{", '+  "port": 5501', "+}"]
+
     def test_binary_file_shows_message_no_syntax(self):
         f = ChangedFile(path="app.exe", status="M", is_binary=True, diff_text="")
         r = render_file_diff(f)

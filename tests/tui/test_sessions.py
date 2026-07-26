@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -441,7 +443,13 @@ class TestSessionsSearchAndSort:
                 "gd/gamma/copilot/1": {"command": "zsh", "dead": False},
             }
             app._active_tab = "sessions"
-            app._on_statuses_updated()
+            generation = app._next_sessions_snapshot_generation()
+            app._apply_sessions_snapshot(
+                generation,
+                [entry.copy() for entry in SAMPLE_SESSIONS],
+                app._session_statuses,
+                False,
+            )
             await pilot.pause()
 
             table.move_cursor(row=0)
@@ -968,6 +976,79 @@ class TestTabRestorationAfterSuspend:
 
 
 class TestSessionsRefreshOnReturn:
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    async def test_status_poll_reconciles_rows_when_it_supersedes_full_load(self, _mock_statuses):
+        full_load_started = threading.Event()
+        release_full_load = threading.Event()
+        calls = 0
+
+        def list_sessions():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                full_load_started.set()
+                release_full_load.wait(timeout=2)
+                return []
+            return [entry.copy() for entry in SAMPLE_SESSIONS]
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        with patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=list_sessions):
+            async with app.run_test(size=(120, 30)) as pilot:
+                app._active_tab = "sessions"
+                stale_worker = app._load_sessions()
+                await asyncio.wait_for(asyncio.to_thread(full_load_started.wait), timeout=1)
+
+                poll_worker = app._poll_session_statuses()
+                await poll_worker.wait()
+                await pilot.pause()
+
+                release_full_load.set()
+                await stale_worker.wait()
+                await pilot.pause()
+
+                table = app.query_one("#sessions-table", DataTable)
+                assert table.row_count == len(SAMPLE_SESSIONS)
+                assert [entry["session_name"] for entry in app._sessions_entries] == [
+                    entry["session_name"] for entry in SAMPLE_SESSIONS
+                ]
+
+    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
+    async def test_stale_empty_refresh_does_not_replace_newer_sessions(self, _mock_statuses):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        calls = 0
+
+        def list_sessions():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                release_first.wait(timeout=2)
+                return []
+            return [entry.copy() for entry in SAMPLE_SESSIONS]
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        with patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=list_sessions):
+            async with app.run_test(size=(120, 30)) as pilot:
+                stale_worker = app._load_sessions()
+                await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=1)
+
+                current_worker = app._load_sessions()
+                await current_worker.wait()
+                await pilot.pause()
+
+                release_first.set()
+                await stale_worker.wait()
+                await pilot.pause()
+
+                table = app.query_one("#sessions-table", DataTable)
+                assert table.row_count == len(SAMPLE_SESSIONS)
+                assert [entry["session_name"] for entry in app._sessions_entries] == [
+                    entry["session_name"] for entry in SAMPLE_SESSIONS
+                ]
+
     async def test_suspend_and_attach_refreshes_sessions_tab(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()

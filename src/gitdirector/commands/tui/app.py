@@ -275,6 +275,7 @@ class GitDirectorConsole(
         self._repos_refreshing = False
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, dict[str, object]] = {}
+        self._sessions_snapshot_generation = 0
         self._waiting_count: int = 0
         self._resume_target_tab: str | None = None
         self._resume_refresh_path: Path | None = None
@@ -284,7 +285,7 @@ class GitDirectorConsole(
         self._resume_selection_row: int | None = None
         self._resume_new_panel_guard_until: float = 0.0
         self._panel_store = PanelStore()
-        self._status_message = "Loading repositories…"
+        self._status_message = ""
         self._update_notice = version_check.get_cached_update_notice()
         self._session_status_tracking_paused = False
         self._session_status_tracking_running = False
@@ -354,7 +355,7 @@ class GitDirectorConsole(
         self.set_interval(0.25, self._advance_refresh_indicator)
         self._load_update_notice()
         self._load_repos_from_cache()
-        self._refresh_repos(show_loading=False)
+        self._refresh_repos()
 
     def _show_refresh_indicator(self) -> None:
         self._refresh_operations += 1
@@ -403,7 +404,9 @@ class GitDirectorConsole(
             tabs_widget._bindings.key_to_bindings.pop("right", None)
 
     def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
-        return self._shutdown_requested or (worker is not None and worker.is_cancelled)
+        return self._shutdown_requested or (
+            worker is not None and (worker.is_cancelled or not self.is_running)
+        )
 
     def _current_worker_or_none(self) -> Worker | None:
         try:
