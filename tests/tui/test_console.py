@@ -1148,6 +1148,20 @@ class TestGitDirectorConsoleDirectBranches:
         assert populate_call.kwargs == {}
         assert app._update_row in call_targets
 
+    def test_load_repos_skips_table_updates_after_app_stops(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        worker = MagicMock(is_cancelled=False)
+        app._current_worker_or_none = MagicMock(return_value=worker)
+        app.call_from_thread = MagicMock()
+        app._save_repos_cache = MagicMock()
+
+        assert app.is_running is False
+        GitDirectorConsole._load_repos.__wrapped__(app)
+
+        app.call_from_thread.assert_called_once_with(app._hide_refresh_indicator)
+        app._save_repos_cache.assert_not_called()
+
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_cached_repo_rows_keep_loading_column_widths(self, _mock_sessions):
         info = _make_info("alpha", Path("/tmp/alpha"), branch="m", last_updated="now")
@@ -1179,6 +1193,14 @@ class TestGitDirectorConsoleDirectBranches:
 
         table.update_cell.assert_called_once()
 
+    def test_update_row_ignores_missing_table_during_shutdown(self):
+        app = GitDirectorConsole()
+        app.query_one = MagicMock(side_effect=NoMatches("#repo-table"))
+
+        app._update_row(_make_info("alpha", Path("/tmp/alpha")))
+
+        app.query_one.assert_called_once_with("#repo-table", DataTable)
+
     def test_action_tab_sessions_ignored_while_restore_pending(self):
         app = GitDirectorConsole()
         app._resume_target_tab = "repos"
@@ -1209,16 +1231,22 @@ class TestGitDirectorConsoleDirectBranches:
         "gitdirector.integrations.tmux.get_all_session_statuses",
         return_value={"gd/alpha/shell/1": {"command": "python", "dead": False}},
     )
-    def test_poll_session_statuses_updates_state_and_notifies(self, _mock_statuses):
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[{"session_name": "gd/alpha/shell/1"}],
+    )
+    def test_poll_session_statuses_updates_state_and_notifies(self, _mock_sessions, _mock_statuses):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
-        app.call_from_thread = MagicMock()
+        app._sessions_entries = [{"session_name": "gd/alpha/shell/1"}]
+        app._sessions_snapshot_generation = 1
+        app.call_from_thread = lambda callback, *args: callback(*args)
         app._on_statuses_updated = MagicMock()
 
-        GitDirectorConsole._poll_session_statuses.__wrapped__(app)
+        GitDirectorConsole._poll_session_statuses_worker.__wrapped__(app, 1)
 
         assert app._session_statuses == {"gd/alpha/shell/1": {"command": "python", "dead": False}}
-        app.call_from_thread.assert_called_once_with(app._on_statuses_updated)
+        app._on_statuses_updated.assert_called_once_with()
 
     def test_trigger_status_poll_delegates_to_worker(self):
         app = GitDirectorConsole()

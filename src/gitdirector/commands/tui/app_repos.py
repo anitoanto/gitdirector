@@ -266,10 +266,10 @@ class ConsoleReposMixin:
             )
 
     def _update_row(self, info: RepositoryInfo) -> None:
-        table = self.query_one("#repo-table", DataTable)
         row_key = str(info.path)
-        ck = self._col_keys
         try:
+            table = self.query_one("#repo-table", DataTable)
+            ck = self._col_keys
             table.update_cell(row_key, ck[1], _STATUS_LABEL.get(info.status, "unknown"))
             table.update_cell(row_key, ck[2], info.branch or "—")
             table.update_cell(row_key, ck[3], _changes_label(info))

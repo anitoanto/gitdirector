@@ -265,6 +265,7 @@ _COPY_FROM_RE = re.compile(r"^copy from (.+)$")
 _COPY_TO_RE = re.compile(r"^copy to (.+)$")
 _BINARY_RE = re.compile(r"^Binary files .* differ$")
 _HUNK_HEADER_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@")
+_NO_NEWLINE_MARKER = r"\ No newline at end of file"
 
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -702,6 +703,8 @@ def _split_diff_for_render(diff_text: str) -> tuple[list[str], list[str], list[s
     body_lines: list[str] = []
     in_hunk = False
     for raw_line in diff_text.splitlines():
+        if raw_line == _NO_NEWLINE_MARKER:
+            continue
         if _HUNK_HEADER_RE.match(raw_line):
             hunk_chips.append(raw_line)
             in_hunk = True
