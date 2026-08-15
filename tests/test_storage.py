@@ -22,6 +22,8 @@ from gitdirector.storage import (
     normalize_repository_path,
 )
 
+from ._timeouts import SYNC_TIMEOUT
+
 # ---------------------------------------------------------------------------
 # normalize_repository_path
 # ---------------------------------------------------------------------------
@@ -145,11 +147,11 @@ class TestAdvisoryFileLockExclusivity:
             with advisory_file_lock(lock_path):
                 order.append("first-acquired")
                 first_acquired.set()
-                assert first_can_release.wait(timeout=5)
+                assert first_can_release.wait(SYNC_TIMEOUT)
                 order.append("first-released")
 
         def second():
-            assert first_acquired.wait(timeout=5)
+            assert first_acquired.wait(SYNC_TIMEOUT)
             second_attempting.set()
             with advisory_file_lock(lock_path):
                 order.append("second-acquired")
@@ -159,13 +161,13 @@ class TestAdvisoryFileLockExclusivity:
         t1.start()
         t2.start()
         try:
-            assert first_acquired.wait(timeout=5)
-            assert second_attempting.wait(timeout=5)
+            assert first_acquired.wait(SYNC_TIMEOUT)
+            assert second_attempting.wait(SYNC_TIMEOUT)
             assert order == ["first-acquired"]
         finally:
             first_can_release.set()
-            t1.join(timeout=5)
-            t2.join(timeout=5)
+            t1.join(SYNC_TIMEOUT)
+            t2.join(SYNC_TIMEOUT)
         assert not t1.is_alive()
         assert not t2.is_alive()
         assert order == ["first-acquired", "first-released", "second-acquired"]

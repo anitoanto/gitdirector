@@ -14,10 +14,11 @@ from gitdirector.integrations.tmux import (
     sync_panel_tmux_config,
 )
 
+from .._timeouts import POLL_TIMEOUT, TMUX_CMD_TIMEOUT
 from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 
-def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
+def _wait_for(predicate, timeout: float = POLL_TIMEOUT, interval: float = 0.05) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -52,7 +53,7 @@ class TestPanelExitIntegration:
                     capture_output=True,
                     text=True,
                     check=check,
-                    timeout=10,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
 
             try:
@@ -108,7 +109,11 @@ class TestPanelExitIntegration:
                 assert any(line.startswith("2|") for line in pane_commands)
             finally:
                 subprocess.run(
-                    ["tmux", "kill-server"], capture_output=True, text=True, check=False, timeout=10
+                    ["tmux", "kill-server"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
                 _cleanup_tmux_tmpdir(tmux_dir)
 
@@ -147,7 +152,7 @@ class TestPanelRebuildOrphanIntegration:
                     capture_output=True,
                     text=True,
                     check=check,
-                    timeout=10,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
 
             try:
@@ -186,7 +191,11 @@ class TestPanelRebuildOrphanIntegration:
                     assert s in after, f"Reconfigure killed inner session {s}"
             finally:
                 subprocess.run(
-                    ["tmux", "kill-server"], capture_output=True, text=True, check=False, timeout=10
+                    ["tmux", "kill-server"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
                 _cleanup_tmux_tmpdir(tmux_dir)
 
@@ -216,7 +225,7 @@ class TestPanelRebuildOrphanIntegration:
                     capture_output=True,
                     text=True,
                     check=check,
-                    timeout=10,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
 
             try:
@@ -240,7 +249,11 @@ class TestPanelRebuildOrphanIntegration:
                     assert s in after, f"Inner session killed: {s}"
             finally:
                 subprocess.run(
-                    ["tmux", "kill-server"], capture_output=True, text=True, check=False, timeout=10
+                    ["tmux", "kill-server"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
                 _cleanup_tmux_tmpdir(tmux_dir)
 
@@ -299,6 +312,10 @@ class TestTempWrapperIntegration:
                 assert temp_wrapper not in config_text
             finally:
                 subprocess.run(
-                    ["tmux", "kill-server"], capture_output=True, text=True, check=False, timeout=10
+                    ["tmux", "kill-server"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=TMUX_CMD_TIMEOUT,
                 )
                 _cleanup_tmux_tmpdir(tmux_dir)

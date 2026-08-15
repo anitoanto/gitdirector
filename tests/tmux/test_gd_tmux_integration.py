@@ -22,6 +22,7 @@ from gitdirector.integrations.tmux import (
     sync_panel_tmux_config,
 )
 
+from .._timeouts import POLL_TIMEOUT, TMUX_CMD_TIMEOUT
 from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 
@@ -31,11 +32,11 @@ def _run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str
         capture_output=True,
         text=True,
         check=check,
-        timeout=10,
+        timeout=TMUX_CMD_TIMEOUT,
     )
 
 
-def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
+def _wait_for(predicate, timeout: float = POLL_TIMEOUT, interval: float = 0.05) -> bool:
     """Poll *predicate* until it returns truthy or *timeout* elapses."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

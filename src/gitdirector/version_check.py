@@ -19,6 +19,8 @@ except ImportError:  # pragma: no cover - optional dependency
     Version = None
 
 _PACKAGE_NAME = "gitdirector"
+# Shown when package metadata is absent, e.g. an uninstalled source checkout.
+UNKNOWN_VERSION = "unknown"
 _PYPI_JSON_URL = f"https://pypi.org/pypi/{_PACKAGE_NAME}/json"
 _VERSION_CACHE_TTL = timedelta(hours=6)
 _VERSION_CHECK_TIMEOUT_SECS = 1.0
@@ -128,18 +130,31 @@ def _is_version_newer(latest_version: str, current_version: str) -> bool:
 
 @lru_cache(maxsize=1)
 def get_installed_version() -> str:
-    from importlib.metadata import version
+    from importlib.metadata import PackageNotFoundError, version
 
-    return version(_PACKAGE_NAME)
+    try:
+        return version(_PACKAGE_NAME)
+    except PackageNotFoundError:
+        # Running from a source tree that was never installed. This value is
+        # only ever displayed, and it feeds the CLI header on every command,
+        # so degrade to a placeholder rather than taking the whole CLI down.
+        return UNKNOWN_VERSION
 
 
 def get_cached_update_status() -> UpdateStatus | None:
+    current_version = get_installed_version()
+    if current_version == UNKNOWN_VERSION:
+        return None
     _, latest_version = _read_cache()
-    return UpdateStatus(get_installed_version(), latest_version)
+    return UpdateStatus(current_version, latest_version)
 
 
 def get_update_status() -> UpdateStatus | None:
     current_version = get_installed_version()
+    # Without a real installed version every comparison would read as
+    # "out of date", so report unknown instead of nagging about a fake update.
+    if current_version == UNKNOWN_VERSION:
+        return None
     now = _utcnow()
     checked_at, cached_latest_version = _read_cache()
 

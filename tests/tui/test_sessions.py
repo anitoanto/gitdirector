@@ -16,7 +16,14 @@ from gitdirector.commands.tui.app_sessions import (
 )
 from gitdirector.integrations.tmux.core import _repo_session_name_segment
 
-from .conftest import SAMPLE_SESSIONS, _make_info, _mock_manager
+from .._timeouts import SYNC_TIMEOUT
+from .conftest import (
+    SAMPLE_SESSIONS,
+    _make_info,
+    _mock_manager,
+    patch_sessions,
+    sample_sessions,
+)
 
 
 def _session_row_lines(app, table, row_key: str) -> list[str]:
@@ -255,7 +262,7 @@ class TestSessionsTab:
 
 
 class TestSessionsSearchAndSort:
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_filters_sessions_by_repo(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -268,7 +275,7 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_filters_sessions_by_purpose(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -281,7 +288,7 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_filters_sessions_by_session_name(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -294,7 +301,7 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_no_match_sessions(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -331,7 +338,7 @@ class TestSessionsSearchAndSort:
             status_text = app.query_one("#status-bar", Static).content
             assert "sort:" not in status_text
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sort_sessions_by_repo(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -348,7 +355,7 @@ class TestSessionsSearchAndSort:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/alpha/shell/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sort_sessions_by_repo_descending(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -364,7 +371,7 @@ class TestSessionsSearchAndSort:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/gamma/copilot/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sort_sessions_by_session_name(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -380,7 +387,7 @@ class TestSessionsSearchAndSort:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/alpha/shell/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sort_sessions_combined_with_search(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -398,7 +405,7 @@ class TestSessionsSearchAndSort:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/gamma/copilot/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sessions_status_bar_with_filter(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -412,7 +419,7 @@ class TestSessionsSearchAndSort:
             assert "1 of 3" in status_text
             assert "filter:" in status_text
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sessions_status_bar_with_sort(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -428,7 +435,7 @@ class TestSessionsSearchAndSort:
             assert "Repository" in status_text
             assert "\u25bc" in status_text
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_status_refresh_does_not_resort_rows_when_sorted_by_status(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -460,7 +467,7 @@ class TestSessionsSearchAndSort:
             generation = app._next_sessions_snapshot_generation()
             app._apply_sessions_snapshot(
                 generation,
-                [entry.copy() for entry in SAMPLE_SESSIONS],
+                sample_sessions(),
                 app._session_statuses,
                 False,
             )
@@ -470,7 +477,7 @@ class TestSessionsSearchAndSort:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/alpha/shell/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sort_action_on_sessions_tab(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -484,7 +491,7 @@ class TestSessionsSearchAndSort:
             menu = app.screen.query_one("#action-menu", OptionList)
             assert menu.option_count == 5
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_on_sessions_tab_via_input(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -500,7 +507,7 @@ class TestSessionsSearchAndSort:
             assert table.row_count == 1
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_submit_on_sessions_tab_hides_input_and_filters(
         self, _mock_list, _mock_status
     ):
@@ -524,7 +531,7 @@ class TestSessionsSearchAndSort:
             assert table.row_count == 1
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_escape_on_sessions_tab_clears_live_search(self, _mock_list, _mock_status):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -546,7 +553,7 @@ class TestSessionsSearchAndSort:
             assert app._search_query == ""
             assert table.row_count == 3
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_handle_sessions_sort_selection_none(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -603,7 +610,7 @@ class TestBuildSessionsLoadedStatus:
 
 
 class TestTabRestorationAfterSuspend:
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_spurious_tab_reset_redirected_back_to_sessions(self, _mock):
         """When TabbedContent resets to repos after suspend, the guard redirects back."""
         app = GitDirectorConsole()
@@ -627,7 +634,7 @@ class TestTabRestorationAfterSuspend:
             assert app._active_tab == "sessions"
             assert app._resume_target_tab == "sessions"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_guard_persists_when_no_spurious_event(self, _mock):
         """If no spurious tab reset happens, guard persists harmlessly."""
         app = GitDirectorConsole()
@@ -644,7 +651,7 @@ class TestTabRestorationAfterSuspend:
             tabs = app.query_one("#tabs", TabbedContent)
             assert tabs.active == "sessions"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_mismatched_tab_action_is_ignored_while_restore_pending(self, _mock):
         """A tab action for the wrong tab must not break the pending restore."""
         app = GitDirectorConsole()
@@ -663,7 +670,7 @@ class TestTabRestorationAfterSuspend:
             tabs = app.query_one("#tabs", TabbedContent)
             assert tabs.active == "sessions"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_resume_hook_restores_target_tab_and_clears_guard(self, _mock):
         """The app resume hook restores the target tab and then clears the guard."""
         app = GitDirectorConsole()
@@ -690,7 +697,7 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_target_tab is None
             app._load_sessions.assert_called_once()
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_resume_tab_activation_guard_suppresses_reload(self, _mock):
         """The one-shot resume activation guard must suppress a duplicate reload."""
         app = GitDirectorConsole()
@@ -712,7 +719,7 @@ class TestTabRestorationAfterSuspend:
             app._load_sessions.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_resume_restores_selected_session_row(self, _mock_list, _mock_status):
         """Returning from a session keeps the same session row selected."""
         app = GitDirectorConsole()
@@ -832,7 +839,7 @@ class TestTabRestorationAfterSuspend:
 
                 app.manager.get_repository_status.assert_called_once_with(beta.path, fetch=True)
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_repos_tab_guard_redirects_wrong_tab(self, _mock):
         """Guard for repos tab redirects a spurious sessions switch back."""
         app = GitDirectorConsole()
@@ -850,7 +857,7 @@ class TestTabRestorationAfterSuspend:
             assert app._active_tab == "repos"
             assert app._resume_target_tab == "repos"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_guard_survives_multiple_spurious_resets(self, _mock):
         """Guard keeps redirecting even after multiple spurious tab resets."""
         app = GitDirectorConsole()
@@ -934,7 +941,7 @@ class TestTabRestorationAfterSuspend:
             assert table.cursor_coordinate.row == 3
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sessions_table_restore_falls_back_to_saved_row_position(
         self, _mock_list, _mock_status
     ):
@@ -950,7 +957,8 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             app._capture_resume_selection("sessions")
-            app._sessions_entries = [SAMPLE_SESSIONS[0], SAMPLE_SESSIONS[2]]
+            _entries = sample_sessions()
+            app._sessions_entries = [_entries[0], _entries[2]]
             app._apply_sessions_filter_and_sort()
             await pilot.pause()
 
@@ -959,7 +967,7 @@ class TestTabRestorationAfterSuspend:
             assert str(row_key.value) == "gd/gamma/copilot/1"
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sessions_table_restore_clears_saved_selection_when_empty(
         self, _mock_list, _mock_status
     ):
@@ -985,7 +993,7 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_selection_row is None
 
     @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sessions_table_refresh_preserves_selected_row(self, _mock_list, _mock_status):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1044,9 +1052,9 @@ class TestSessionsRefreshOnReturn:
             calls += 1
             if calls == 1:
                 full_load_started.set()
-                release_full_load.wait(timeout=2)
+                assert release_full_load.wait(SYNC_TIMEOUT)
                 return []
-            return [entry.copy() for entry in SAMPLE_SESSIONS]
+            return sample_sessions()
 
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1054,7 +1062,9 @@ class TestSessionsRefreshOnReturn:
             async with app.run_test(size=(120, 30)) as pilot:
                 app._active_tab = "sessions"
                 stale_worker = app._load_sessions()
-                await asyncio.wait_for(asyncio.to_thread(full_load_started.wait), timeout=1)
+                await asyncio.wait_for(
+                    asyncio.to_thread(full_load_started.wait), timeout=SYNC_TIMEOUT
+                )
 
                 poll_worker = app._poll_session_statuses()
                 await poll_worker.wait()
@@ -1081,16 +1091,16 @@ class TestSessionsRefreshOnReturn:
             calls += 1
             if calls == 1:
                 first_started.set()
-                release_first.wait(timeout=2)
+                assert release_first.wait(SYNC_TIMEOUT)
                 return []
-            return [entry.copy() for entry in SAMPLE_SESSIONS]
+            return sample_sessions()
 
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         with patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=list_sessions):
             async with app.run_test(size=(120, 30)) as pilot:
                 stale_worker = app._load_sessions()
-                await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=1)
+                await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=SYNC_TIMEOUT)
 
                 current_worker = app._load_sessions()
                 await current_worker.wait()
@@ -1174,7 +1184,7 @@ class TestSessionsRefreshOnReturn:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         app._active_tab = "sessions"
-        app._sessions_entries = list(SAMPLE_SESSIONS)
+        app._sessions_entries = sample_sessions()
         app._apply_sessions_filter_and_sort = MagicMock()
         event = MagicMock()
         event.input.id = "search-bar"
@@ -1198,7 +1208,7 @@ class TestSessionsRefreshOnReturn:
 
 class TestRemoveSessionUpdatesTable:
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_do_remove_updates_sessions_table(self, _mock_list, _mock_kill):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1214,7 +1224,7 @@ class TestRemoveSessionUpdatesTable:
             _mock_kill.assert_called_once_with("gd/alpha/shell/1")
 
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_do_remove_removes_from_sessions_entries(self, _mock_list, _mock_kill):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1229,7 +1239,7 @@ class TestRemoveSessionUpdatesTable:
             assert len(remaining) == 2
 
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_do_remove_updates_status_bar(self, _mock_list, _mock_kill):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1262,7 +1272,7 @@ class TestRemoveSessionUpdatesTable:
             assert table.row_count == 0
 
     @patch("gitdirector.integrations.tmux.kill_tmux_session")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_do_remove_not_confirmed_does_nothing(self, _mock_list, _mock_kill):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1300,7 +1310,7 @@ class TestRemoveSessionUpdatesTable:
 
 
 class TestSessionDescription:
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_description_column_uses_placeholder_when_unset(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1311,7 +1321,7 @@ class TestSessionDescription:
             table = app.query_one("#sessions-table", DataTable)
             assert _session_row_lines(app, table, "gd/alpha/shell/1")[0].endswith("-")
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_search_matches_description(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1330,7 +1340,7 @@ class TestSessionDescription:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/alpha/shell/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sort_sessions_by_description(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1348,7 +1358,7 @@ class TestSessionDescription:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/beta/claude/1"
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_long_description_wraps_to_max_width(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1378,7 +1388,7 @@ class TestSessionDescription:
         assert narrow.description >= _MIN_SESSIONS_DESCRIPTION_WIDTH
         assert wide.total <= 160
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_sessions_column_spans_the_resolved_width(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1395,7 +1405,7 @@ class TestSessionDescription:
 
     @patch("gitdirector.integrations.tmux.core._set_session_description")
     @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_d_key_opens_description_editor(self, _mock_list, _mock_get_desc, _mock_set_desc):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1438,7 +1448,7 @@ class TestSessionDescription:
 
     @patch("gitdirector.integrations.tmux.core._set_session_description")
     @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_handle_description_edit_persists_value(
         self, _mock_list, _mock_get_desc, mock_set_desc
     ):
@@ -1456,7 +1466,7 @@ class TestSessionDescription:
 
     @patch("gitdirector.integrations.tmux.core._set_session_description")
     @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_handle_description_edit_empty_resets_to_placeholder(
         self, _mock_list, _mock_get_desc, mock_set_desc
     ):
@@ -1473,7 +1483,7 @@ class TestSessionDescription:
             assert matching[0]["description"] == "-"
 
     @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_action_edit_session_description_noop_on_other_tabs(
         self, _mock_list, _mock_get_desc
     ):

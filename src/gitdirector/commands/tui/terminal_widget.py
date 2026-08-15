@@ -33,6 +33,9 @@ from .terminal_caps import host_color_system, no_color_requested
 
 logger = logging.getLogger(__name__)
 
+# A clipboard helper that never returns must not wedge the paste path.
+_CLIPBOARD_COMMAND_TIMEOUT = 5
+
 _RE_ANSI_SEQUENCE = re.compile(r"\x1b\[[0-9;:?]*[a-zA-Z]")
 _RE_SGR_SEQUENCE = re.compile(r"\x1b\[([0-9;:]*)m")
 _RE_HEX_COLOR = re.compile(r"^[0-9a-fA-F]{6}$")
@@ -137,6 +140,7 @@ def _copy_to_system_clipboard(text: str) -> bool:
                 text=True,
                 check=True,
                 capture_output=True,
+                timeout=_CLIPBOARD_COMMAND_TIMEOUT,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.debug("%s clipboard copy failed: %s", command[0], exc)

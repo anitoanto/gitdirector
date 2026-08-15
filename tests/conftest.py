@@ -15,6 +15,22 @@ def _no_tmux_monitor():
 
 
 @pytest.fixture(autouse=True)
+def _reset_tmux_server_prepared_latch():
+    """Reset the once-per-process ``tmux start-server`` latch between tests.
+
+    ``_ensure_clean_tmux_server`` sets a module global the first time it runs and
+    then short-circuits forever. Left alone, whether it actually runs in a given
+    test depends on which tests happened to precede it in the same worker
+    process, which ``pytest -n auto`` reshuffles on every run.
+    """
+    import gitdirector.integrations.tmux.core as tmux_core
+
+    tmux_core._TMUX_SERVER_ENVIRONMENT_PREPARED = False
+    yield
+    tmux_core._TMUX_SERVER_ENVIRONMENT_PREPARED = False
+
+
+@pytest.fixture(autouse=True)
 def _isolate_version_check_cache(monkeypatch, tmp_path):
     cache_dir = tmp_path / ".gitdirector"
     monkeypatch.setattr(

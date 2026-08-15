@@ -9,7 +9,7 @@ from textual.widgets import DataTable, Input, Static
 
 from gitdirector.commands.tui import GitDirectorConsole, Panel
 
-from .conftest import SAMPLE_SESSIONS, _make_info, _mock_manager
+from .conftest import _make_info, _mock_manager, patch_sessions
 
 
 class TestSearch:
@@ -203,7 +203,7 @@ class TestEscapeClearsFilter:
             assert table.row_count == 3
             assert app._visible_repo_count == 2
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=SAMPLE_SESSIONS)
+    @patch_sessions()
     async def test_escape_clears_active_filter_sessions(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()

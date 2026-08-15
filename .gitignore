@@ -1,21 +1,48 @@
-# Python-generated files
+# Byte-compiled / cached
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.eggs/
 
 # Virtual environments
-.venv
+.venv/
+venv/
+.env
+.envrc
+.direnv/
 
-# Ruff cache
-.ruff_cache
+# uv — uv.lock IS committed; only the local cache is ignored
+.uv-cache/
 
-# Pytest cache
-.pytest_cache
-
+# Testing / coverage
+.pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+.hypothesis/
+
+# Task runners / type checkers / linters
+.nox/
+.tox/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.pytype/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
-.mypy_cache
+Thumbs.db

@@ -1,292 +1,119 @@
 # GitDirector
 
-A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place.
-
-## Why GitDirector?
-
-If you work across more than a handful of repositories, the overhead adds up fast. Jumping between terminals to check states, pull changes, and babysit agents is friction you don't need.
-
-GitDirector gives you a single cockpit for all of it. See every repo's status, drop into any of them. Run AI agents in parallel, each isolated in its own tmux session, while you monitor everything from the dashboard. Less tab-switching, more shipping.
-
-## Installation
+A terminal control plane for working across many git repositories. See every
+repo's state in one dashboard, and run AI coding agents and long-lived commands
+in parallel tmux sessions you can monitor from the same place.
 
 ```bash
 pip install gitdirector
-```
-
-Requires Python 3.10+.
-
-## Support
-
-If you find GitDirector useful, please star this repository on GitHub, we need more stars to qualify for inclusion in Homebrew. Your support helps a lot, thank you!
-
-## Usage
-
-| Command                                                    | Description                                            |
-| ---------------------------------------------------------- | ------------------------------------------------------ |
-| `gitdirector console`                                      | Open the interactive TUI dashboard                     |
-| `gitdirector link PATH [--discover]`                       | Link a repository or discover all under a path (no-op if none) |
-| `gitdirector unlink PATH\|NAME [--discover]`               | Unlink a repository by path, name, or all under a path |
-| `gitdirector list`                                         | List all tracked repositories with live status         |
-| `gitdirector status`                                       | Show repositories with staged/unstaged files           |
-| `gitdirector pull [--yes]`                                 | Pull latest changes for all tracked repositories       |
-| `gitdirector cd NAME`                                      | Open or switch to a tmux session for a repository      |
-| `gitdirector autoclean`                                    | Remove broken repository links from tracking           |
-| `gitdirector reset [--yes]`                                | Kill all sessions and panels, wipe ~/.gitdirector, and recreate the config |
-| `gitdirector info PATH\|NAME [--full]`                     | Show file statistics for a repository                  |
-| `gitdirector doctor`                                       | Check local setup for tmux, clipboard, config, completion, and agent tools |
-| `gitdirector gd-tmux PATH\|NAME "command" [--description TEXT]` | Create a gd tmux session and run a command in it       |
-| `gitdirector gd-capture SESSION [--lines N] [--full]`      | Print the scrollback of a live gd tmux session         |
-| `gitdirector gd-send SESSION [TEXT] [--enter\|--key C-c]` | Send text or Ctrl-C to a live gd tmux session          |
-| `gitdirector completion SHELL`                             | Print shell completion setup for bash, zsh, or fish    |
-| `gitdirector help`                                         | Show help                                              |
-
-### link
-
-```bash
-gitdirector link /path/to/repo
-gitdirector link /path/to/folder --discover   # recursively find and link all repos
-```
-
-`link --discover` succeeds without changes when the path contains no new repositories.
-
-### console
-
-```bash
 gitdirector console
 ```
 
-Opens a full interactive TUI dashboard.
+Requires Python 3.10+, git, and [tmux](https://github.com/tmux/tmux) ≥ 3.2a for
+anything session-related.
 
-Features:
+> If GitDirector is useful to you, please star the repo — it needs stars to
+> qualify for Homebrew inclusion.
 
-- Live table with sync state, branch, changes, last commit, and active tmux sessions
-- Tabs for `[1] Repositories`, `[2] Sessions`, and `[3] Panels`
-- `j`/`k` or arrow keys to navigate
-- `/` to filter the active tab
-- `s` to sort the active table
-- `i` to show repository info (file count, lines, tokens, max depth, top file types)
-- `g` on the Repositories tab to open Git operations: status, timeline, branches, remotes, pull, push, and a **Diff Viewer** section with **Review Diff** for uncommitted changes
-- `r` to refresh all statuses
-- Press `enter` on any repository to open an action menu:
-    - **New tmux session** — create and attach a session for the repository
-    - **Attach existing session** — switch to any already-running tmux session
-    - **Launch AI agent** — open OpenCode, Claude Code, GitHub Copilot, Codex, or Pi in a new tmux session
-    - **Remove session** — kill a running tmux session
-- **Review Diff** (from the `g` Git menu) — open a two-pane viewer for uncommitted changes (left: file list with GitHub-style status pills and +/- counts; right: per-file unified diff with GitHub-dark syntax highlighting, line numbers, and green/red backgrounds for added/removed lines). Navigate files with `j`/`k`, `n`/`p`, `g`/`G`, or `]`/`[`. Switch the focused panel with `tab`. `r` refreshes, `esc` closes.
-- **Repository groups** appear directly in the Repositories tab when linked repositories share the same parent directory. Group rows can be expanded/collapsed with `space`; press `enter` on a group to start, attach, remove, or launch AI-agent sessions rooted at that parent directory.
-- **Sessions tab** (press `2`) lists every active `gd/*` tmux session with its status, purpose, repository, **description**, and full session name. The description column is free-form text stored on the session (default `"-"`), with a width that scales to your terminal and wraps long text. Highlight a row and press `d` to edit its description.
-- **Panels tab** (press `3`) manages reusable tmux panel layouts. Press `n` to create a panel, or `enter` on a panel to open, reconfigure, rename, or delete it. Inside a panel you can **drag with the mouse to select text and copy it to the OS clipboard** on release; pressing `y` copies the entire visible pane as a fallback. GitDirector prefers native clipboard tools such as `pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`, and falls back to OSC 52 when needed.
+## Commands
 
-### unlink
+| Command | Description |
+| --- | --- |
+| `console` | Interactive TUI dashboard |
+| `link PATH [--discover]` | Track a repo, or every repo under a path |
+| `unlink PATH\|NAME [--discover]` | Stop tracking |
+| `list` | All tracked repos with live status |
+| `status` | Only repos with uncommitted changes |
+| `pull [--yes]` | Fast-forward pull every tracked repo, concurrently |
+| `cd NAME` | Open or switch to a tmux session for a repo |
+| `info PATH\|NAME [--full]` | File, line, and token statistics |
+| `doctor` | Check tmux, clipboard, config, completion, agent CLIs |
+| `autoclean` | Drop links whose paths no longer exist |
+| `reset [--yes]` | Kill all sessions, wipe `~/.gitdirector`, start fresh |
+| `gd-tmux PATH\|NAME "cmd" [-d TEXT]` | Run a command in a new background session |
+| `gd-capture SESSION [--lines N\|--full]` | Print a live session's scrollback |
+| `gd-send SESSION [TEXT] [--enter\|--key C-c]` | Send input to a live session |
+| `completion SHELL` | Completion setup for bash, zsh, or fish |
 
-```bash
-gitdirector unlink /path/to/repo         # unlink by full path
-gitdirector unlink my-repo               # unlink by repository name
-gitdirector unlink /path/to/folder --discover  # unlink all repos under a path
-```
+Repo arguments accept an absolute path or the directory basename. If two tracked
+repos share a basename, GitDirector refuses and lists both so you can
+disambiguate with the full path.
 
-If multiple tracked repositories share the same name, `gitdirector` will refuse and list the conflicting paths so you can use the full path instead.
+## Console
 
-### info
+The TUI has three tabs: `[1]` Repositories, `[2]` Sessions, `[3]` Panels.
 
-```bash
-gitdirector info /path/to/repo        # by path
-gitdirector info my-repo               # by name
-gitdirector info my-repo --full        # show all file extensions
-```
+Navigate with `j`/`k` or arrows, `/` to filter, `s` to sort, `r` to refresh,
+`enter` to act on the highlighted row.
 
-Shows file statistics for a repository:
+**Repositories** shows sync state, branch, changes, last commit, size, and
+active sessions. Repos sharing a parent directory collapse into a group row
+(`space` to expand). Press `i` for repo info, or `g` for git operations —
+status, timeline, branches, remotes, pull, push, and **Review Diff**, a two-pane
+viewer for uncommitted changes with syntax-highlighted per-file diffs. `enter`
+opens an action menu: new session, attach existing, launch an AI agent
+(OpenCode, Claude Code, Copilot, Codex, Pi), or remove a session.
 
-- Total file count, line count, token count, and max directory depth
-- Top 10 file types by count with line and token breakdowns (use `--full` to show all)
-- Files without extensions grouped as `(no ext)`
-- Remaining types grouped as `others`
-- Binary files show `-` for lines and tokens
-- All operations respect `.gitignore` at every level
+**Sessions** lists every `gd/*` session with status, purpose, repo, and a
+free-form description (`d` to edit).
 
-Also available in the TUI console by pressing `i` on a selected repository.
+**Panels** manages reusable tmux layouts (`n` to create). Drag with the mouse to
+select and copy text, or `y` to copy the visible pane. Uses `pbcopy`, `wl-copy`,
+`xclip`, `xsel`, or `clip.exe`, falling back to OSC 52.
 
-### doctor
+## Background sessions
 
-```bash
-gitdirector doctor
-```
-
-Checks common local setup problems and reports whether GitDirector can find:
-
-- `tmux`
-- a supported clipboard tool (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`)
-- a writable `~/.gitdirector` config directory
-- shell completion setup for your current shell (`bash`, `zsh`, or `fish`)
-- common AI agent CLIs such as OpenCode, Claude Code, GitHub Copilot, Codex, and Pi
-
-### list
-
-Displays a live table of all tracked repositories with:
-
-- Sync state: `up to date`, `ahead`, `behind`, `diverged`, or `unknown`
-- Current branch
-- Staged/unstaged changes
-- Last commit (relative time)
-- Tracked file size
-- Path
-
-Checks run concurrently (default: 10 workers, configurable from 1 to 32).
-
-### status
-
-Shows repositories with uncommitted changes (staged and/or unstaged files). Prints a summary of total, clean, and changed repo counts.
-
-### pull
+`gd-tmux` runs a command in a detached `gd/<repo>/shell/<N>` session and prints
+the session name, so scripts can capture it:
 
 ```bash
-gitdirector pull          # prompts before pulling
-gitdirector pull --yes    # skip confirmation
-gitdirector pull -y       # short form
-```
-
-Pulls all tracked repositories concurrently using fast-forward only on each repository's current branch (`git pull --ff-only origin <current-branch>`). Reports success or failure per repository.
-
-By default, `pull` asks for confirmation after listing the repositories it will update. Use `--yes` / `-y` for non-interactive runs.
-
-### cd
-
-```bash
-gitdirector cd my-repo
-```
-
-Opens a [tmux](https://github.com/tmux/tmux) session rooted at the repository directory, or switches to it if a session for that repo already exists.
-
-- **Inside tmux** — switches the current client to the target session.
-- **Outside tmux** — replaces the current process with `tmux attach-session`, handing the terminal over to tmux.
-
-> **Requires tmux to be installed on your system.**
->
-> macOS: `brew install tmux`  
-> Debian/Ubuntu: `sudo apt install tmux`  
-> Arch: `sudo pacman -S tmux`
-
-### gd-tmux
-
-```bash
-gitdirector gd-tmux my-repo "npm test"
-gitdirector gd-tmux /path/to/my-repo "make build"
-gitdirector gd-tmux my-repo 'echo "hello world"'
-gitdirector gd-tmux my-repo "opencode" --description "OpenCode: refactor auth middleware"
-```
-
-Creates a new gd tmux session rooted at the given repository, runs the supplied command inside it, and returns immediately without attaching. The session is a real `gd/{repo}/shell/{N}` session, visible in the Sessions tab of `gitdirector console`, and it self-destructs when the command exits. `N` is allocated as one higher than the highest currently running matching shell session number.
-
-- `PATH|NAME` — accept either an absolute path to a tracked repository or its basename, with the same disambiguation rules as `gitdirector unlink`.
-- `"command"` — the shell command to run inside the new session. Pass it quoted so the shell hands the whole string to gitdirector; quotes and arguments are preserved verbatim.
-- `--description` / `-d` — optional. Free-text description stored on the session and shown in the Sessions tab. Accepts both `--description "text"` and `--description=text` forms. When omitted, the column displays `"-"`.
-
-The full session name (e.g. `gd/myrepo/shell/1`) is printed to stdout right after the background session is created, so scripts and agents can capture it for later use with `gd-capture`:
-
-```bash
-SESSION=$(gitdirector gd-tmux /path/to/repo opencode --description "OpenCode: refactor auth")
+SESSION=$(gitdirector gd-tmux /path/to/repo "npm run dev" -d "Vite: dev server")
 gitdirector gd-capture "$SESSION" --lines 100
+gitdirector gd-send "$SESSION" --key C-c
 ```
 
-Use this from any shell to start a background command without entering the TUI first. The new session shows up in the Sessions tab immediately. Inside the TUI, highlight any session row and press `d` to edit its description.
+The session self-destructs when the command exits, taking its scrollback with
+it. To keep output, redirect inside the command:
+`"make test 2>&1 | tee /tmp/run.log"`.
 
-### autoclean
-
-```bash
-gitdirector autoclean
-```
-
-Scans the tracked repositories in `~/.gitdirector/config.yaml` for paths that no longer exist on disk and removes them from the config. Lists any broken links for review and asks for confirmation before deleting them.
-
-### reset
-
-```bash
-gitdirector reset          # asks for confirmation
-gitdirector reset --yes    # skip the confirmation prompt
-```
-
-Destructive cleanup. Kills every `gd/*` tmux session (regular sessions and panels), wipes the entire `~/.gitdirector/` directory, and recreates an empty `config.yaml` with defaults. Useful when the local state is corrupted or you want to start fresh — all linked repositories, panel layouts, version-check cache, and tmux theme files are removed in one step.
-
-### gd-capture
-
-```bash
-gitdirector gd-capture gd/myrepo/shell/1                # last 200 lines
-gitdirector gd-capture gd/myrepo/shell/1 --lines 50    # last 50 lines
-gitdirector gd-capture gd/myrepo/shell/1 --full        # entire scrollback
-```
-
-Prints the current scrollback of a live `gd/*` tmux session to stdout (plain text, pipeable into `grep`/`less`/etc.). The argument is the full session name as shown in the TUI Sessions tab. It must match the `gd/<repo>/<purpose>/<N>` shape; sessions created by `gd-tmux` use `gd/<repo>/shell/<N>`.
-
-**Only running sessions can be captured.** `gd-tmux` sessions self-destruct when their command exits (success or failure), so for any *finished* session you have to have redirected the command's own output to a file:
-
-```bash
-gitdirector gd-tmux myrepo "make test 2>&1 | tee /tmp/run.log"
-```
-
-The session is gone the moment the command exits; the scrollback lives on only as the bytes the process actually wrote.
-
-### gd-send
-
-```bash
-gitdirector gd-send gd/myrepo/opencode/1 "continue and run the tests"
-gitdirector gd-send gd/myrepo/shell/1 "npm test" --enter
-gitdirector gd-send gd/myrepo/shell/1 --key C-c
-```
-
-Sends input to a live `gd/*` tmux session. The session argument must be the full session name shown in the TUI Sessions tab, for example `gd/myrepo/shell/1`.
-
-- `TEXT` is pasted into the active pane. It does not press Enter unless `--enter` is provided.
-- `--enter` presses Enter after pasting `TEXT`, useful for running shell commands.
-- `--key C-c` sends Ctrl-C to the active pane, useful for stopping a running foreground process without killing the tmux session.
-
-Accepted `--key` values: `C-c`.
-
-## For AI coding agents
-
-If you are an AI coding agent (Claude Code, OpenCode, GitHub Copilot, Codex, Pi, or any other tool that drives a shell on the user's behalf), the rules for integrating with the user's GitDirector workflow — including `gd-tmux` background sessions, `gd-capture`, and the mandatory `--description` flag — live in [`LLMS.md`](./LLMS.md). Read that file end-to-end before running any commands.
+**AI coding agents:** the rules for driving GitDirector headlessly live in
+[`SKILL.md`](./SKILL.md). Read it before running these commands.
 
 ## Configuration
 
-Main config is stored at `~/.gitdirector/config.yaml`:
+`~/.gitdirector/config.yaml`:
 
 ```yaml
 repositories:
     - /path/to/repo1
-    - /path/to/repo2
-max_workers: 10 # optional, valid range 1-32, default 10
-theme: rose-pine # optional, default rose-pine
+max_workers: 10   # optional, 1-32, default 10
+theme: rose-pine  # optional
 ```
 
-Secrets (GitHub credentials) are stored in a separate file at `~/.gitdirector/secrets.yaml`:
-
-```yaml
-github_username: your-github-username # optional
-github_PAT: github_pat_or_classic_pat # optional
-```
+Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`, `gruvbox`,
+`dracula`, `tokyo-night`, `monokai`, `flexoki`, `solarized-light`,
+`solarized-dark`, `atom-one-dark`, `atom-one-light`, `rose-pine`,
+`rose-pine-moon`, `rose-pine-dawn`, `catppuccin-latte`, `catppuccin-frappe`,
+`catppuccin-macchiato`, `catppuccin-mocha`.
 
 ### GitHub PAT fallback
 
-GitDirector first runs git commands using your normal local git credentials. If a git command fails with an authentication error and both `github_username` and `github_PAT` are configured, GitDirector retries the command with a temporary Git credential helper for `https://github.com` remotes.
+Credentials live separately in `~/.gitdirector/secrets.yaml`:
 
-- This only applies to HTTPS GitHub remotes.
-- SSH remotes still use your normal SSH key/agent setup.
-- The PAT is stored in plaintext in `~/.gitdirector/secrets.yaml`; use an appropriately scoped token and protect that file.
-- The PAT is not passed on the command line or shown in TUI command output.
+```yaml
+github_username: your-username
+github_PAT: github_pat_...
+```
 
-### Available Themes
-
-`textual-dark`, `textual-light`, `nord`, `gruvbox`, `catppuccin-mocha`, `textual-ansi`, `dracula`, `tokyo-night`, `monokai`, `flexoki`, `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`, `solarized-light`, `solarized-dark`, `rose-pine`, `rose-pine-moon`, `rose-pine-dawn`, `atom-one-dark`, `atom-one-light`
-
-## Requirements
-
-- Python 3.10+
-- Git
-- [tmux](https://github.com/tmux/tmux) ≥ 3.2a (for `gitdirector cd`, `gitdirector console` sessions, `gitdirector gd-tmux`, `gitdirector gd-capture`, and `gitdirector gd-send`)
+Git commands run with your normal credentials first. Only if one fails with an
+auth error, and both values are set, does GitDirector retry via a temporary
+credential helper for HTTPS GitHub remotes. SSH remotes are untouched. The PAT
+never appears on the command line or in TUI output, but it is stored in
+plaintext — scope it narrowly and protect the file.
 
 ## Shell completion
 
-Generate shell completions for `bash`, `zsh`, or `fish`. Completion includes subcommands, options, and linked repository names for repo-target commands.
+Completion covers subcommands, options, and tracked repo names.
 
 ```bash
 eval "$(gitdirector completion bash)"
@@ -294,7 +121,7 @@ eval "$(gitdirector completion zsh)"
 gitdirector completion fish | source
 ```
 
-The `zsh` script auto-loads `compinit` if `compdef` is not yet available, so the `eval` form works in fresh shells. For the fastest setup (no subprocess on every `TAB`), write the script to a file in your `$fpath` (commonly `~/.zsh/completions/_gitdirector`) and let `compinit` autoload it:
+For zsh, writing the script into your `$fpath` avoids a subprocess on every TAB:
 
 ```bash
 gitdirector completion zsh > "${fpath[1]}/_gitdirector"

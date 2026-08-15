@@ -15,6 +15,8 @@ from gitdirector.repo import (
     _github_credentials_from_config,
 )
 
+from ._timeouts import SYNC_TIMEOUT
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -215,7 +217,7 @@ class TestRunGit:
 
             def communicate(self, timeout=None):
                 started.set()
-                if not killed.wait(timeout or 1):
+                if not killed.wait(timeout or SYNC_TIMEOUT):
                     raise AssertionError("expected running git command to be killed")
                 return "", ""
 
@@ -235,11 +237,11 @@ class TestRunGit:
         )
         worker.start()
 
-        assert started.wait(5)
+        assert started.wait(SYNC_TIMEOUT)
 
         Repository.kill_running_git_commands()
 
-        worker.join(timeout=5)
+        worker.join(SYNC_TIMEOUT)
         assert not worker.is_alive()
         assert result["value"] == (1, "", "git command cancelled")
         killpg.assert_called_once()
@@ -1289,3 +1291,45 @@ class TestReadFileText:
         (fake_git_repo / "u.txt").write_text("héllo wörld 🚀\n", encoding="utf-8")
         repo = Repository(fake_git_repo)
         assert repo.read_file_text("u.txt") == "héllo wörld 🚀\n"
+
+
+class TestReadFileTextBinaryDetection:
+    """Binary detection must apply to large files too.
+
+    The oversized branch read only the first ``max_bytes`` and returned it
+    without the NUL check the small-file branch does, so a large binary came
+    back as a screenful of replacement characters instead of the ``None`` the
+    docstring promises.
+    """
+
+    def test_large_binary_file_returns_none(self, fake_git_repo):
+        blob = fake_git_repo / "big.bin"
+        blob.write_bytes(b"\x00\xff" * 4096)
+        repo = Repository(fake_git_repo)
+
+        assert repo.read_file_text("big.bin", max_bytes=64) is None
+
+    def test_small_binary_file_returns_none(self, fake_git_repo):
+        blob = fake_git_repo / "small.bin"
+        blob.write_bytes(b"\x00\xff" * 8)
+        repo = Repository(fake_git_repo)
+
+        assert repo.read_file_text("small.bin") is None
+
+    def test_large_text_file_is_truncated_and_marked(self, fake_git_repo):
+        target = fake_git_repo / "big.txt"
+        target.write_text("a" * 4096)
+        repo = Repository(fake_git_repo)
+
+        result = repo.read_file_text("big.txt", max_bytes=64)
+
+        assert result is not None
+        assert result.startswith("a" * 64)
+        assert result.endswith("[gd-truncated]\n")
+
+    def test_small_text_file_is_returned_whole(self, fake_git_repo):
+        target = fake_git_repo / "small.txt"
+        target.write_text("hello\n")
+        repo = Repository(fake_git_repo)
+
+        assert repo.read_file_text("small.txt") == "hello\n"

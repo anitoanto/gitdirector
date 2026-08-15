@@ -1,6 +1,7 @@
 """tmux integration via subprocess."""
 
 import hashlib
+import itertools
 import logging
 import os
 import re
@@ -49,6 +50,19 @@ _TMUX_CHILD_ENV = {"TERM": _TMUX_TERMINAL_NAME, **_TMUX_COLOR_ENV}
 # Set once per process by :func:`_ensure_clean_tmux_server`.
 _TMUX_SERVER_ENVIRONMENT_PREPARED = False
 
+# Wall-clock cap for a single tmux/ps invocation.
+#
+# tmux commands are normally instant, but a wedged or unresponsive server makes
+# the client block forever. Without a cap that hang propagates: the session
+# monitor thread stops polling and the Sessions tab silently freezes, and any
+# foreground call takes the TUI down with it. Treat a command that exceeds this
+# as a failure rather than waiting on it.
+TMUX_COMMAND_TIMEOUT = 10
+
+# Distinguishes concurrent send-text buffers within a process.
+# ``itertools.count`` increments atomically, so no lock is needed.
+_SEND_BUFFER_COUNTER = itertools.count()
+
 
 class TmuxError(RuntimeError):
     def __init__(
@@ -91,8 +105,16 @@ def _run_tmux(
     # created afterwards. Sanitizing here keeps a gitdirector-started
     # server clean from birth.
     kwargs["env"] = sanitized_environ()
+    kwargs.setdefault("timeout", TMUX_COMMAND_TIMEOUT)
     try:
         result = subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        # Callers branch on returncode, so surface a hung server as an ordinary
+        # failure instead of an exception they are not written to handle.
+        if check:
+            raise TmuxError("tmux command timed out", args_list=command, returncode=None) from exc
+        empty: str | bytes = "" if text else b""
+        return subprocess.CompletedProcess(command, 1, empty, empty)
     except subprocess.CalledProcessError as exc:
         raise TmuxError(
             "tmux command failed",
@@ -127,7 +149,7 @@ def _sanitize_repo_name(name: str) -> str:
 
 def _repo_id_suffix(repo_path: Path) -> str:
     normalized_path = normalize_repository_path(repo_path)
-    digest = hashlib.sha1(str(normalized_path).encode("utf-8")).digest()
+    digest = hashlib.sha1(str(normalized_path).encode("utf-8"), usedforsecurity=False).digest()
     return b32encode(digest).decode("ascii").lower().rstrip("=")[:_REPO_ID_LENGTH]
 
 
@@ -751,7 +773,7 @@ def _sanitize_panel_name(name: str) -> str:
     clean = _sanitize_repo_name(name)
     if clean:
         return clean
-    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
     return f"panel-{digest}"
 
 
@@ -856,7 +878,7 @@ def capture_pane(
         cmd.extend(["-S", "-"])
     elif lines is not None and lines > 0:
         cmd.extend(["-S", f"-{lines}"])
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=TMUX_COMMAND_TIMEOUT)
     if result.returncode != 0:
         return None
     return result.stdout
@@ -869,6 +891,7 @@ def send_key_to_session(session_name: str, key: str) -> bool:
         ["tmux", "send-keys", "-t", _active_pane_target(session_name), key],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     return result.returncode == 0
 
@@ -877,12 +900,17 @@ def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -
     if not _session_exists(session_name):
         return False
 
-    buffer_name = f"gitdirector-send-{os.getpid()}"
+    # The buffer is a server-wide named slot, so a pid-only name collides
+    # whenever two sends overlap -- the second load overwrites the first, and
+    # both panes get the same text while one paste fails on a deleted buffer.
+    # The counter makes each send own its own buffer.
+    buffer_name = f"gitdirector-send-{os.getpid()}-{next(_SEND_BUFFER_COUNTER)}"
     load_result = subprocess.run(
         ["tmux", "load-buffer", "-b", buffer_name, "-"],
         input=text,
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if load_result.returncode != 0:
         return False
@@ -891,8 +919,14 @@ def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -
         ["tmux", "paste-buffer", "-b", buffer_name, "-t", _active_pane_target(session_name)],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
-    subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], capture_output=True, text=True)
+    subprocess.run(
+        ["tmux", "delete-buffer", "-b", buffer_name],
+        capture_output=True,
+        text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
+    )
     if paste_result.returncode != 0:
         return False
     if enter:
@@ -918,6 +952,7 @@ def _get_session_repo_label(session_name: str) -> str | None:
         ],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode != 0:
         return None
@@ -941,6 +976,7 @@ def _set_session_repo_label(session_name: str, repo_label: str) -> None:
             clean,
         ],
         capture_output=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
 
 
@@ -963,6 +999,7 @@ def _get_session_description(session_name: str) -> str:
         ],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode != 0:
         return GD_DEFAULT_DESCRIPTION
@@ -990,6 +1027,7 @@ def _set_session_description(session_name: str, description: str) -> None:
                 clean,
             ],
             capture_output=True,
+            timeout=TMUX_COMMAND_TIMEOUT,
         )
     else:
         subprocess.run(
@@ -1002,6 +1040,7 @@ def _set_session_description(session_name: str, description: str) -> None:
                 GD_DESCRIPTION_OPTION,
             ],
             capture_output=True,
+            timeout=TMUX_COMMAND_TIMEOUT,
         )
 
 
@@ -1075,6 +1114,7 @@ def _current_window_target(session_name: str) -> str:
         ],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode == 0:
         target = result.stdout.strip()
@@ -1260,14 +1300,17 @@ def _ensure_panel_resize_tracking(session_name: str) -> None:
     subprocess.run(
         ["tmux", "set-window-option", "-q", "-t", window_target, "aggressive-resize", "on"],
         check=False,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     subprocess.run(
         ["tmux", "set-hook", "-t", session_target, "client-resized", hook_command],
         check=False,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     subprocess.run(
         ["tmux", "set-hook", "-w", "-t", window_target, "window-resized", hook_command],
         check=False,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
 
 

@@ -62,6 +62,7 @@ class TestLaunchCommandInTmuxSession:
             ],
             capture_output=True,
             env=ANY,
+            timeout=ANY,
         )
         # The agent command carries its own last-resort scrub, so a leak
         # survives neither the session environment nor the command itself.

@@ -54,3 +54,46 @@ class TestGetUpdateStatus:
         assert status is not None
         assert status.latest_version == "1.5.0"
         assert status.update_available is True
+
+
+class TestMissingPackageMetadata:
+    """An uninstalled source checkout must not take the CLI down.
+
+    ``get_installed_version`` feeds the header printed by every command, so an
+    unguarded ``PackageNotFoundError`` there made the whole CLI unusable rather
+    than just hiding the version.
+    """
+
+    def _uninstalled(self):
+        from importlib.metadata import PackageNotFoundError
+        from unittest.mock import patch
+
+        version_check.get_installed_version.cache_clear()
+        return patch("importlib.metadata.version", side_effect=PackageNotFoundError("gitdirector"))
+
+    def teardown_method(self):
+        # Both are process-global and would otherwise carry the placeholder
+        # version into whichever test the runner schedules next.
+        from gitdirector import commands
+
+        version_check.get_installed_version.cache_clear()
+        commands.__version__ = None
+
+    def test_version_falls_back_to_placeholder(self):
+        with self._uninstalled():
+            assert version_check.get_installed_version() == version_check.UNKNOWN_VERSION
+
+    def test_cli_version_helper_does_not_raise(self):
+        from gitdirector import commands
+
+        with self._uninstalled():
+            commands.__version__ = None
+            assert commands.get_version() == version_check.UNKNOWN_VERSION
+        commands.__version__ = None
+
+    def test_update_status_reports_unknown_instead_of_a_fake_update(self):
+        """Comparing against a placeholder would read as permanently outdated."""
+        with self._uninstalled():
+            assert version_check.get_update_status() is None
+            assert version_check.get_cached_update_status() is None
+            assert version_check.get_update_notice() is None

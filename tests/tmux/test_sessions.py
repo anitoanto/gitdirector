@@ -239,6 +239,7 @@ class TestSessionExists:
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
             capture_output=True,
             env=ANY,
+            timeout=ANY,
         )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -386,11 +387,13 @@ class TestCreateTmuxSession:
             capture_output=True,
             text=True,
             env=ANY,
+            timeout=ANY,
         )
         mock_run.assert_any_call(
             ["tmux", "set-option", "-t", f"={session_name}:", "destroy-unattached", "off"],
             capture_output=True,
             env=ANY,
+            timeout=ANY,
         )
         mock_sync.assert_called_once_with()
 
@@ -523,6 +526,7 @@ class TestCreateTmuxSession:
             capture_output=True,
             text=True,
             env=ANY,
+            timeout=ANY,
         )
         mock_sync.assert_called_once_with()
 
@@ -839,7 +843,11 @@ class TestKillPanelTmuxSession:
         assert mock_run.call_args_list[0].args == (
             ["tmux", "kill-session", "-t", "=gd/panel/main"],
         )
-        assert mock_run.call_args_list[0].kwargs == {"capture_output": True, "env": ANY}
+        assert mock_run.call_args_list[0].kwargs == {
+            "capture_output": True,
+            "env": ANY,
+            "timeout": ANY,
+        }
 
 
 class TestAttachTmuxSession:
@@ -904,7 +912,7 @@ class TestAttachTmuxSession:
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("plain-session")
         mock_run.assert_called_once_with(
-            ["tmux", "attach-session", "-t", "=plain-session"], env=ANY
+            ["tmux", "attach-session", "-t", "=plain-session"], env=ANY, timeout=ANY
         )
         mock_sync.assert_not_called()
         mock_ensure.assert_not_called()

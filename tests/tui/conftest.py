@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import MappingProxyType
+from unittest.mock import MagicMock, patch
 
 import pytest
 from textual.css.query import NoMatches
@@ -13,12 +15,20 @@ from textual.worker_manager import WorkerManager
 
 from gitdirector.repo import RepositoryInfo, RepoStatus
 
+from .._timeouts import SYNC_TIMEOUT
+
 _LOADING_STATUS_PREFIXES = ("Loading ", "Checking ")
 _LOADING_STATUS_MARKERS = (" remaining...", " done, ")
-_MAX_TUI_SETTLE_ROUNDS = 10
+
+# A worker finishing can schedule follow-up work, so ``wait_for_complete`` has
+# to be retried until the app is genuinely idle. This bound is a deadlock
+# backstop, not a timing expectation: a fixed, small round count instead gave up
+# while the app was still loading whenever a CI runner was slow enough, and the
+# test then asserted against a half-populated screen. See tests/_timeouts.py.
+_MAX_TUI_SETTLE_ROUNDS = 500
 
 
-async def _wait_for_refresh(widget, timeout: float = 5.0) -> None:
+async def _wait_for_refresh(widget, timeout: float = SYNC_TIMEOUT) -> None:
     refreshed = asyncio.Event()
     widget.call_after_refresh(refreshed.set)
     await asyncio.wait_for(refreshed.wait(), timeout=timeout)
@@ -71,6 +81,7 @@ def _stabilize_tui_worker_wait(monkeypatch):
 
         app = getattr(self, "_app", None)
 
+        deadline = time.monotonic() + SYNC_TIMEOUT
         for _ in range(_MAX_TUI_SETTLE_ROUNDS):
             await asyncio.sleep(0)
             result = await original_wait(self)
@@ -78,6 +89,8 @@ def _stabilize_tui_worker_wait(monkeypatch):
                 return result
             await asyncio.sleep(0)
             if len(self) == 0 and not _status_is_loading(app):
+                break
+            if time.monotonic() > deadline:
                 break
         return result
 
@@ -126,26 +139,58 @@ def _mock_manager(repos: list[RepositoryInfo] | None = None):
     return mgr
 
 
-SAMPLE_SESSIONS = [
-    {
-        "session_name": "gd/alpha/shell/1",
-        "repo": "alpha",
-        "repo_slug": "alpha",
-        "purpose": "shell",
-        "description": "-",
-    },
-    {
-        "session_name": "gd/beta/claude/1",
-        "repo": "beta",
-        "repo_slug": "beta",
-        "purpose": "claude",
-        "description": "-",
-    },
-    {
-        "session_name": "gd/gamma/copilot/1",
-        "repo": "gamma",
-        "repo_slug": "gamma",
-        "purpose": "copilot",
-        "description": "-",
-    },
-]
+# Read-only master copy of the sample session entries.
+#
+# The app keeps the dicts it receives from ``list_all_gd_sessions`` by reference
+# in ``app._sessions_entries`` and edits them in place (description edits, status
+# merges). Handing these dicts straight to the app therefore leaks one test's
+# mutations into every later test sharing the process, which surfaces as
+# order-dependent failures under ``pytest -n auto``. The entries are mapping
+# proxies so that any such write raises instead of silently corrupting state --
+# use :func:`sample_sessions` or :func:`patch_sessions` to get mutable copies.
+SAMPLE_SESSIONS = (
+    MappingProxyType(
+        {
+            "session_name": "gd/alpha/shell/1",
+            "repo": "alpha",
+            "repo_slug": "alpha",
+            "purpose": "shell",
+            "description": "-",
+        }
+    ),
+    MappingProxyType(
+        {
+            "session_name": "gd/beta/claude/1",
+            "repo": "beta",
+            "repo_slug": "beta",
+            "purpose": "claude",
+            "description": "-",
+        }
+    ),
+    MappingProxyType(
+        {
+            "session_name": "gd/gamma/copilot/1",
+            "repo": "gamma",
+            "repo_slug": "gamma",
+            "purpose": "copilot",
+            "description": "-",
+        }
+    ),
+)
+
+
+def sample_sessions(entries=None) -> list[dict[str, str]]:
+    """Return fresh, independently mutable copies of the sample session entries."""
+    return [dict(entry) for entry in (SAMPLE_SESSIONS if entries is None else entries)]
+
+
+def patch_sessions(entries=None):
+    """Patch ``list_all_gd_sessions`` to return fresh entries on every call.
+
+    Each call yields new dicts, so a test that edits them cannot affect any
+    other test -- or even its own later calls.
+    """
+    return patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        side_effect=lambda *_args, **_kwargs: sample_sessions(entries),
+    )

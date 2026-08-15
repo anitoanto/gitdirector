@@ -1,0 +1,80 @@
+name: Main
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  version-gate:
+    name: Check Published Version
+    runs-on: ubuntu-latest
+    needs: checks
+    if: github.event_name == 'push'
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      should-publish: ${{ steps.check.outputs.should-publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compare pyproject version against PyPI
+        id: check
+        run: |
+          set -euo pipefail
+
+          version="$(python -c '
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              print(tomllib.load(fh)["project"]["version"])
+          ')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          http_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/gitdirector/$version/json")"
+
+          case "$http_status" in
+            404)
+              echo "Version $version is not on PyPI - publishing."
+              echo "should-publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            200)
+              echo "Version $version is already on PyPI - skipping publish."
+              echo "should-publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unexpected response from PyPI (HTTP $http_status)." >&2
+              exit 1
+              ;;
+          esac
+
+  release:
+    name: Release
+    needs: version-gate
+    if: needs.version-gate.outputs.should-publish == 'true'
+    # A called workflow can only narrow what the caller grants, so contents:
+    # write has to be granted here for the tag/release step. The build and
+    # publish jobs inside release.yml still declare read-only for themselves.
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.version-gate.outputs.version }}

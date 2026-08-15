@@ -16,6 +16,8 @@ import tiktoken
 _GIT_LS_FILES_TIMEOUT = 30
 _INFO_PENDING_MULTIPLIER = 2
 _MAX_INFO_WORKERS = 8
+# Well above any real source file, so ordinary repositories are unaffected.
+_MAX_TEXT_BYTES = 10 * 1024 * 1024
 
 _BINARY_EXTENSIONS = frozenset(
     {
@@ -128,9 +130,19 @@ def _get_non_ignored_files(repo_path: Path) -> list[str]:
     return [f for f in result.stdout.decode("utf-8", errors="replace").split("\0") if f]
 
 
-def _read_text(file_path: Path) -> str | None:
+def _read_text(file_path: Path, *, max_bytes: int | None = None) -> str | None:
+    # Resolved here rather than as a default so the module constant stays the
+    # single source of truth; a default would freeze its value at import.
+    limit = _MAX_TEXT_BYTES if max_bytes is None else max_bytes
     try:
         with open(file_path, "rb") as f:
+            # gather_repo_info reads every non-ignored file, across a thread
+            # pool. Without a cap one oversized artifact that git happens to
+            # track -- a checked-in dataset, a vendored bundle -- is pulled
+            # into memory in full and then tokenized, which can exhaust RAM.
+            # Oversized files are reported like binaries: counted, not measured.
+            if os.fstat(f.fileno()).st_size > limit:
+                return None
             chunk = f.read(8192)
             if b"\x00" in chunk:
                 return None

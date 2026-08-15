@@ -26,6 +26,7 @@ from gitdirector.integrations.tmux.core import _repo_session_name_segment
 from gitdirector.repo import Repository, RepoStatus
 from gitdirector.storage import load_yaml_mapping
 
+from .._timeouts import SYNC_TIMEOUT
 from .conftest import _make_info, _mock_manager
 
 
@@ -46,7 +47,7 @@ class TestGitDirectorConsole:
 
         def delayed_status(*_args, **_kwargs):
             fetch_started.set()
-            assert release_fetch.wait(timeout=1)
+            assert release_fetch.wait(SYNC_TIMEOUT)
             return refreshed
 
         app.manager.get_repository_status.side_effect = delayed_status
@@ -82,7 +83,7 @@ class TestGitDirectorConsole:
 
         def delayed_status(*_args, **_kwargs):
             fetch_started.set()
-            assert release_fetch.wait(timeout=1)
+            assert release_fetch.wait(SYNC_TIMEOUT)
             return info
 
         app.manager.get_repository_status.side_effect = delayed_status

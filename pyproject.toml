@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "gitdirector"
-version = "1.7.8"
+version = "1.8.2"
 description = "A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place."
 readme = "README.md"
 license = { text = "MIT" }
@@ -42,10 +42,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "nox>=2024.4.15",
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "pytest-mock>=3.0",
+    "pytest-randomly>=3.15",
+    "pytest-timeout>=2.3",
     "pytest-xdist>=3.8.0",
     "ruff>=0.1.0",
 ]
@@ -64,10 +67,13 @@ managed = true
 
 [dependency-groups]
 dev = [
+    "nox>=2024.4.15",
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "pytest-mock>=3.0",
+    "pytest-randomly>=3.15",
+    "pytest-timeout>=2.3",
     "pytest-xdist>=3.8.0",
     "ruff>=0.1.0",
 ]
@@ -85,5 +91,13 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-n auto --cov=src/gitdirector --cov-report=term-missing"
+# pytest-randomly shuffles test order every run and prints the seed it used.
+# The suite runs under `-n auto`, which already hands tests to workers in a
+# different grouping each run, so order-dependent state leaks between tests
+# used to surface as unreproducible CI failures. Shuffling makes them show up
+# far more often, and the printed seed makes them replayable with
+# `--randomly-seed=<seed>`. Use `-p no:randomly` to pin the original order.
+# timeout is a deadlock backstop only -- the whole suite runs in well under a
+# minute, so no healthy test comes close to it.
+addopts = "-n auto --cov=src/gitdirector --cov-report=term-missing --timeout=300"
 asyncio_mode = "auto"

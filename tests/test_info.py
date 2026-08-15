@@ -930,3 +930,46 @@ class TestGatherRepoInfoExtensionEdges:
         entry = next(item for item in gather_repo_info(repo).file_types if item.extension == ".dat")
         assert entry.count == 12
         assert entry.line_count is None
+
+
+class TestOversizedFilesAreNotReadIntoMemory:
+    """``gather_repo_info`` reads every tracked file across a thread pool.
+
+    Without a cap, one oversized artifact that git happens to track is pulled
+    into memory in full and then tokenized. Such files are counted like
+    binaries: present in the totals, but not measured.
+    """
+
+    def test_file_over_the_cap_reads_as_unmeasurable(self, tmp_path):
+        from gitdirector.info import _MAX_TEXT_BYTES, _read_text
+
+        big = tmp_path / "big.txt"
+        big.write_text("a" * 128)
+
+        assert _read_text(big, max_bytes=64) is None
+        assert _MAX_TEXT_BYTES > 1024 * 1024
+
+    def test_file_under_the_cap_is_read_normally(self, tmp_path):
+        from gitdirector.info import _read_text
+
+        small = tmp_path / "small.txt"
+        small.write_text("hello\n")
+
+        assert _read_text(small, max_bytes=64) == "hello\n"
+
+    def test_oversized_file_is_still_counted_in_totals(self, tmp_path):
+        from gitdirector.info import gather_repo_info
+
+        repo = _init_repo(tmp_path)
+        _write(repo, "huge.txt", "a" * 4096)
+        _commit_all(repo)
+
+        with patch("gitdirector.info._MAX_TEXT_BYTES", 64):
+            with patch("gitdirector.info._get_encoder", return_value=_TestEncoder()):
+                result = gather_repo_info(repo)
+
+        assert result.total_files == 1
+        assert result.total_lines == 0
+        entry = next(ft for ft in result.file_types if ft.extension == ".txt")
+        assert entry.count == 1
+        assert entry.line_count is None

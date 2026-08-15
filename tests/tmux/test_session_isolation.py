@@ -30,6 +30,7 @@ from gitdirector.integrations.tmux import (
     sync_panel_tmux_config,
 )
 
+from .._timeouts import TMUX_CMD_TIMEOUT
 from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 # Everything a `gd` started from inside an agent session would be holding.
@@ -84,7 +85,7 @@ def _tmux(*args: str, env: dict[str, str] | None = None) -> subprocess.Completed
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=TMUX_CMD_TIMEOUT,
         env=env,
     )
 

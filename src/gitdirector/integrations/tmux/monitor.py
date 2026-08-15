@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from .core import (
+    TMUX_COMMAND_TIMEOUT,
     TmuxError,
     _active_pane_target,
     _list_sessions,
@@ -153,6 +154,7 @@ def _get_process_snapshot() -> tuple[
             ["ps", "-axo", "pid=,ppid=,pgid=,tpgid=,args="],
             capture_output=True,
             text=True,
+            timeout=TMUX_COMMAND_TIMEOUT,
         )
     except Exception:
         return {}, {}, {}, {}
@@ -255,6 +257,7 @@ def get_all_session_statuses() -> dict[str, dict[str, object]]:
         ],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode != 0:
         return {}
@@ -357,6 +360,7 @@ def _capture_pane_text(session_name: str) -> str | None:
         ["tmux", "capture-pane", "-p", "-t", _active_pane_target(session_name)],
         capture_output=True,
         text=True,
+        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode != 0:
         return None
@@ -364,7 +368,9 @@ def _capture_pane_text(session_name: str) -> str | None:
 
 
 def _hash_content(text: str) -> str:
-    return hashlib.md5(text.encode()).hexdigest()
+    # Identity only -- names a pane's content so changes can be detected.
+    # usedforsecurity=False keeps it working where FIPS disables md5.
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 class _ControlModeReader:
@@ -447,6 +453,15 @@ class _ControlModeReader:
             proc = self._process
             self._process = None
             if proc is not None:
+                # Readers are started and torn down for the lifetime of the
+                # TUI, so leaving the pipes to the garbage collector leaks a
+                # pair of file descriptors per session churn.
+                for stream in (proc.stdout, proc.stdin):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
                 try:
                     proc.terminate()
                     try:

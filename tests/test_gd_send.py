@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 from click.testing import CliRunner
 
@@ -123,6 +123,7 @@ class TestSendKeyToSession:
             ["tmux", "send-keys", "-t", "=gd/repo/shell/1:", "C-c"],
             capture_output=True,
             text=True,
+            timeout=ANY,
         )
 
 

@@ -500,6 +500,7 @@ class Repository:
             if attempt < attempts - 1 and "network error" in err:
                 continue
             return False, err
+        return False, "git pull failed"
 
     def add(self, paths: list[str] | None = None) -> tuple[bool, str]:
         """Stage files for the next commit.
@@ -571,10 +572,12 @@ class Repository:
             return False, err or "git diff failed", []
 
         untracked = self._list_untracked_files()
-        if len(diff_text.encode("utf-8", errors="replace")) > max_bytes:
-            truncated = diff_text.encode("utf-8", errors="replace")[:max_bytes].decode(
-                "utf-8", errors="replace"
-            )
+        # Encode once: a multi-megabyte diff is exactly the case this cap
+        # exists for, and encoding it repeatedly to measure then slice it
+        # costs more than the truncation saves.
+        encoded = diff_text.encode("utf-8", errors="replace")
+        if len(encoded) > max_bytes:
+            truncated = encoded[:max_bytes].decode("utf-8", errors="replace")
             diff_text = truncated + "\n[gd-truncated] diff exceeded size cap\n"
         elif diff_text and not diff_text.endswith("\n"):
             diff_text += "\n"
@@ -604,18 +607,16 @@ class Repository:
             size = candidate.stat().st_size
         except OSError:
             return None
-        if size > max_bytes:
-            try:
-                with candidate.open("rb") as fh:
-                    data = fh.read(max_bytes)
-            except OSError:
-                return None
-            return data.decode("utf-8", errors="replace") + "\n[gd-truncated]\n"
+        truncated = size > max_bytes
         try:
             with candidate.open("rb") as fh:
-                data = fh.read()
+                data = fh.read(max_bytes) if truncated else fh.read()
         except OSError:
             return None
+        # Applies to large files too: reading only the first max_bytes of a
+        # binary file used to skip this check and hand back a screenful of
+        # replacement characters instead of the documented None.
         if b"\x00" in data:
             return None
-        return data.decode("utf-8", errors="replace")
+        text = data.decode("utf-8", errors="replace")
+        return text + "\n[gd-truncated]\n" if truncated else text

@@ -1,60 +1,52 @@
 # Agent Instructions
 
-## Virtual Environment Setup
+## Environment
 
-Always setup the `.venv` correctly before running any commands or tests.
+This project uses **uv**. The `.venv` always lives in the project root.
 
-### Important Notes
-- The `.venv` directory is always present in the root of the project
-- This project uses **uv** as the package manager
-- All commands should be run with `uv run` to ensure the correct virtual environment is activated
+Run `uv sync` first, then prefix every command with `uv run` — it resolves the
+right environment automatically. Never activate `.venv` manually.
 
-### Setup Instructions
+```bash
+uv sync
+uv run pytest
+uv run gitdirector help
+uv run nox -s clean   # wipe caches, coverage, and build artifacts
+```
 
-1. **Ensure .venv is properly initialized:**
-   ```bash
-   uv sync
-   ```
+## Code style
 
-2. **Run commands using uv:**
-   ```bash
-   uv run <command>
-   ```
+Keep comments minimal — let the code speak for itself. Comment *why*, not
+*what*, and only where the reasoning is not obvious from the code.
 
-   Examples:
-   ```bash
-   uv run gitdirector help
-   uv run pytest
-   uv run ruff format src/
-   ```
+## Before pushing
 
-3. **Never manually activate the virtual environment** - `uv` handles this automatically
+Run all three unless the user says otherwise:
 
-### Why uv?
-- `uv` ensures consistent dependency management across all environments
-- It automatically uses the `.venv` in the project root
-- All team members get the same dependencies and versions
+```bash
+uv run pytest
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+```
 
-## Documentation
+If the format check reports files, run `uv run ruff format src/ tests/`, re-run
+the tests, and include the formatting fix with your changes.
 
-- **[DEV.md](DEV.md)** — Developer commands: setup, run, test, format, lint
-- **[README.md](README.md)** — Project overview, installation, usage, and configuration
-- **[LLMS.md](LLMS.md)** — GitDirector workflow rules for AI coding agents
+The test suite runs in randomized order. If a test fails, replay it with the
+seed pytest printed (`--randomly-seed=<seed>`) before assuming it is unrelated
+noise — see [DEV.md](DEV.md).
 
-## Code Style
+## Git requires explicit permission
 
-- Use very minimal comments in the codebase — let the code speak for itself
+Ask before any state-changing git operation: `add`, `commit`, `push`, `rebase`,
+`merge`, `reset`, `checkout` of another branch, force-push, or anything that
+alters history. Confirm the exact files, the commit message, and the target
+branch first.
 
-## Pre-push Checklist
+Read-only inspection (`status`, `diff`, `log`) needs no permission.
 
-Before pushing any code, always run the full test suite, linting, and formatting unless the user explicitly says not to:
+## Docs
 
-1. **Tests:** `uv run pytest`
-2. **Lint:** `uv run ruff check src/ tests/`
-3. **Format check:** `uv run ruff format --check src/ tests/`
-
-If `ruff format` reports files to reformat, run `uv run ruff format src/ tests/` to apply the changes, re-run the tests, then commit the formatting fix alongside the rest of the changes.
-
-## Git Actions Require User Permission
-
-Always ask for the user's explicit permission before performing any of the following git actions: `git add`, `git commit`, `git push`, `git rebase`, `git merge`, `git reset`, `git checkout` of other branches, force-push, or any other history-altering operation. Confirm the exact set of files to be staged, the commit message, and the target branch before running the command. The only exception is read-only inspection (`git status`, `git diff`, `git log`) which may be done freely.
+- [README.md](README.md) — overview, commands, configuration
+- [DEV.md](DEV.md) — dev workflow, test suite conventions, release
+- [SKILL.md](SKILL.md) — driving GitDirector headlessly from a shell

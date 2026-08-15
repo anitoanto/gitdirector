@@ -32,6 +32,7 @@ from gitdirector.commands.tui import (
 from gitdirector.commands.tui.screens.commit import CommitMessageScreen
 from gitdirector.commands.tui.screens.diff_files import FileTileList
 
+from .._timeouts import SYNC_TIMEOUT
 from .conftest import _make_info, _mock_manager, _wait_for_deferred_scroll, _wait_for_refresh
 
 
@@ -160,7 +161,7 @@ class TestDiffReviewScreenCompose:
 
         def pending_diff(self, **_kwargs):
             started.set()
-            assert release.wait(timeout=5)
+            assert release.wait(SYNC_TIMEOUT)
             return True, "", []
 
         mocker.patch.object(repo_mod.Repository, "get_diff_against_head", pending_diff)
@@ -171,7 +172,7 @@ class TestDiffReviewScreenCompose:
             app.push_screen(screen)
             await pilot.pause()
             try:
-                assert started.wait(timeout=5)
+                assert started.wait(SYNC_TIMEOUT)
                 loading_container = app.screen.query_one("#diff-loading")
                 assert loading_container.display is True
                 assert any(
