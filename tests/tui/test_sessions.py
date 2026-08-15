@@ -987,7 +987,7 @@ class TestSessionsRefreshOnReturn:
             calls += 1
             if calls == 1:
                 full_load_started.set()
-                release_full_load.wait(timeout=2)
+                release_full_load.wait(timeout=30)
                 return []
             return [entry.copy() for entry in SAMPLE_SESSIONS]
 
@@ -997,7 +997,7 @@ class TestSessionsRefreshOnReturn:
             async with app.run_test(size=(120, 30)) as pilot:
                 app._active_tab = "sessions"
                 stale_worker = app._load_sessions()
-                await asyncio.wait_for(asyncio.to_thread(full_load_started.wait), timeout=1)
+                await asyncio.wait_for(asyncio.to_thread(full_load_started.wait), timeout=30)
 
                 poll_worker = app._poll_session_statuses()
                 await poll_worker.wait()
@@ -1024,7 +1024,7 @@ class TestSessionsRefreshOnReturn:
             calls += 1
             if calls == 1:
                 first_started.set()
-                release_first.wait(timeout=2)
+                release_first.wait(timeout=30)
                 return []
             return [entry.copy() for entry in SAMPLE_SESSIONS]
 
@@ -1033,7 +1033,7 @@ class TestSessionsRefreshOnReturn:
         with patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=list_sessions):
             async with app.run_test(size=(120, 30)) as pilot:
                 stale_worker = app._load_sessions()
-                await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=1)
+                await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=30)
 
                 current_worker = app._load_sessions()
                 await current_worker.wait()

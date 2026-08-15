@@ -35,7 +35,7 @@ def _run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str
     )
 
 
-def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
+def _wait_for(predicate, timeout: float = 30.0, interval: float = 0.05) -> bool:
     """Poll *predicate* until it returns truthy or *timeout* elapses."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

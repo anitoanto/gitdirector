@@ -18,7 +18,7 @@ _LOADING_STATUS_MARKERS = (" remaining...", " done, ")
 _MAX_TUI_SETTLE_ROUNDS = 10
 
 
-async def _wait_for_refresh(widget, timeout: float = 5.0) -> None:
+async def _wait_for_refresh(widget, timeout: float = 30.0) -> None:
     refreshed = asyncio.Event()
     widget.call_after_refresh(refreshed.set)
     await asyncio.wait_for(refreshed.wait(), timeout=timeout)

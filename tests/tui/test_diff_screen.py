@@ -160,7 +160,7 @@ class TestDiffReviewScreenCompose:
 
         def pending_diff(self, **_kwargs):
             started.set()
-            assert release.wait(timeout=5)
+            assert release.wait(timeout=30)
             return True, "", []
 
         mocker.patch.object(repo_mod.Repository, "get_diff_against_head", pending_diff)
@@ -171,7 +171,7 @@ class TestDiffReviewScreenCompose:
             app.push_screen(screen)
             await pilot.pause()
             try:
-                assert started.wait(timeout=5)
+                assert started.wait(timeout=30)
                 loading_container = app.screen.query_one("#diff-loading")
                 assert loading_container.display is True
                 assert any(

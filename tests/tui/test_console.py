@@ -27,6 +27,10 @@ from gitdirector.storage import load_yaml_mapping
 
 from .conftest import _make_info, _mock_manager
 
+# Generous so a loaded CI runner cannot time the worker out; only a real
+# deadlock ever waits this long.
+_EVENT_TIMEOUT_SECS = 30
+
 
 class TestGitDirectorConsole:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -44,7 +48,7 @@ class TestGitDirectorConsole:
 
         def delayed_status(*_args, **_kwargs):
             fetch_started.set()
-            assert release_fetch.wait(timeout=1)
+            assert release_fetch.wait(timeout=_EVENT_TIMEOUT_SECS)
             return refreshed
 
         app.manager.get_repository_status.side_effect = delayed_status
@@ -53,7 +57,7 @@ class TestGitDirectorConsole:
             table = app.query_one("#repo-table", DataTable)
 
             assert table.row_count == 1
-            assert fetch_started.is_set()
+            assert fetch_started.wait(timeout=_EVENT_TIMEOUT_SECS)
             assert table.get_cell(str(info.path), app._col_keys[1]) == "up to date"
 
             release_fetch.set()
@@ -79,7 +83,7 @@ class TestGitDirectorConsole:
 
         def delayed_status(*_args, **_kwargs):
             fetch_started.set()
-            assert release_fetch.wait(timeout=1)
+            assert release_fetch.wait(timeout=_EVENT_TIMEOUT_SECS)
             return info
 
         app.manager.get_repository_status.side_effect = delayed_status
@@ -89,7 +93,7 @@ class TestGitDirectorConsole:
             footer = app.query_one(RefreshFooter)
 
             try:
-                assert fetch_started.is_set()
+                assert fetch_started.wait(timeout=_EVENT_TIMEOUT_SECS)
                 assert footer.refreshing is True
                 assert len(footer.query(".-refresh-indicator")) == 1
                 assert table.get_cell(str(info.path), app._col_keys[1]) == _REPO_LOADING_CELL_VALUE

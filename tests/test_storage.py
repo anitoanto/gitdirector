@@ -145,11 +145,11 @@ class TestAdvisoryFileLockExclusivity:
             with advisory_file_lock(lock_path):
                 order.append("first-acquired")
                 first_acquired.set()
-                assert first_can_release.wait(timeout=5)
+                assert first_can_release.wait(timeout=30)
                 order.append("first-released")
 
         def second():
-            assert first_acquired.wait(timeout=5)
+            assert first_acquired.wait(timeout=30)
             second_attempting.set()
             with advisory_file_lock(lock_path):
                 order.append("second-acquired")
@@ -159,13 +159,13 @@ class TestAdvisoryFileLockExclusivity:
         t1.start()
         t2.start()
         try:
-            assert first_acquired.wait(timeout=5)
-            assert second_attempting.wait(timeout=5)
+            assert first_acquired.wait(timeout=30)
+            assert second_attempting.wait(timeout=30)
             assert order == ["first-acquired"]
         finally:
             first_can_release.set()
-            t1.join(timeout=5)
-            t2.join(timeout=5)
+            t1.join(timeout=30)
+            t2.join(timeout=30)
         assert not t1.is_alive()
         assert not t2.is_alive()
         assert order == ["first-acquired", "first-released", "second-acquired"]

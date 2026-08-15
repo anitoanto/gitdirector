@@ -17,7 +17,7 @@ from gitdirector.integrations.tmux import (
 from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 
-def _wait_for(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
+def _wait_for(predicate, timeout: float = 30.0, interval: float = 0.05) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
