@@ -135,7 +135,7 @@ class TestActionMenuScreen:
             branch_label = app.screen.query_one("#menu-branch", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
             assert "main" in branch_label.content
-            assert menu.option_count == 8
+            assert menu.option_count == 9
             ids = [opt.id for opt in menu.options if opt.id is not None]
             assert "review_diff" not in ids
 
@@ -213,7 +213,7 @@ class TestActionMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 14
+            assert menu.option_count == 15
 
 
 class TestGitOperationsMenuScreen:

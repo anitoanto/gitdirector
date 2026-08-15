@@ -96,6 +96,15 @@ _SESSION_STATUS_LABEL = {
     "idle": "[dim]○ idle[/dim]",
 }
 
+# Plain text + style pairs for the sessions rows. The sessions table renders
+# each row as a single composed ``Text`` block, so it needs the label and the
+# style separately instead of a console-markup string.
+_SESSION_STATUS_DISPLAY = {
+    "waiting": ("● waiting", "bold yellow"),
+    "running": ("● running", "green"),
+    "idle": ("○ idle", "dim"),
+}
+
 _SESSION_STATUS_ORDER = {
     "waiting": 0,
     "running": 1,
