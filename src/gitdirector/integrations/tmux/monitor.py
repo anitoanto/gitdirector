@@ -111,7 +111,20 @@ _SHELL_COMMANDS = frozenset(
     }
 )
 
-_AGENT_PURPOSES = frozenset({"opencode", "claude", "copilot", "codex", "pi"})
+AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS = "claude-dangerously-skip-permissions"
+
+# Session purpose -> the process name the agent actually runs as. They differ
+# when the purpose encodes launch flags.
+_AGENT_PURPOSE_PROCESSES = {
+    "opencode": "opencode",
+    "claude": "claude",
+    AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS: "claude",
+    "copilot": "copilot",
+    "codex": "codex",
+    "pi": "pi",
+}
+
+_AGENT_PURPOSES = frozenset(_AGENT_PURPOSE_PROCESSES)
 
 _SILENCE_THRESHOLD_SECS = 10
 _OUTPUT_ACTIVITY_GRACE_SECS = 4.0
@@ -197,11 +210,12 @@ def _resolve_pane_command(
     if not non_shell_descendants:
         return max(descendants, key=lambda descendant: (descendant[0], descendant[1]))[2]
 
-    if purpose in _AGENT_PURPOSES:
+    agent_process = _AGENT_PURPOSE_PROCESSES.get(purpose)
+    if agent_process:
         matching_agent_descendants = [
             descendant
             for descendant in non_shell_descendants
-            if descendant[2].lstrip("-") == purpose
+            if descendant[2].lstrip("-") == agent_process
         ]
         if matching_agent_descendants:
             return min(
@@ -331,7 +345,7 @@ def resolve_pane_status(
             return "running"
         return "idle"
     last_change = last_content_change_time or last_output_time
-    if purpose in _AGENT_PURPOSES and clean_cmd == purpose and last_change > 0:
+    if clean_cmd == _AGENT_PURPOSE_PROCESSES.get(purpose) and last_change > 0:
         elapsed = now - last_change
         if elapsed >= _SILENCE_THRESHOLD_SECS:
             return "idle"
@@ -624,6 +638,7 @@ class TmuxMonitor:
 
 
 __all__ = [
+    "AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS",
     "TmuxMonitor",
     "get_all_session_statuses",
     "launch_command_in_tmux_session",

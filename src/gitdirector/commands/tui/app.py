@@ -21,8 +21,10 @@ from textual.widgets._footer import FooterKey, FooterLabel
 from textual.worker import NoActiveWorker, Worker, get_current_worker
 
 from ... import version_check
+from ...integrations.tmux.monitor import AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS
 from ...manager import RepositoryManager
 from ...repo import Repository, RepositoryInfo
+from ...storage import normalize_repository_path
 from .. import get_version
 from . import app_panels as _app_panels
 from .app_groups import ConsoleGroupsMixin
@@ -262,6 +264,7 @@ class GitDirectorConsole(
         self._sessions_entries: list[dict[str, str]] = []
         self._sessions_sort_column: int = _DEFAULT_SESSIONS_SORT_COLUMN
         self._sessions_sort_reverse: bool = False
+        self._sessions_layout = None
         self._panels_entries: list[Panel] = []
         self._panels_sort_column: int = _DEFAULT_PANELS_SORT_COLUMN
         self._panels_sort_reverse: bool = False
@@ -336,10 +339,11 @@ class GitDirectorConsole(
             "Repository", "Sync", "Branch", "Changes", "Last Commit", "Path"
         )
         sessions_table = self.query_one("#sessions-table", DataTable)
-        self._sess_col_keys = sessions_table.add_columns(
-            "Status", "Session", "Repository", "Session Name", "Description"
-        )
-        self._apply_sessions_description_column_width()
+        # The sessions tab renders each row as one composed full-width block
+        # (columns on the first line, tmux session name on the second), so it
+        # uses a single column whose header carries the column titles.
+        self._sess_col_keys = sessions_table.add_columns("Sessions")
+        self._apply_sessions_column_layout()
         panels_table = self.query_one("#panels-table", DataTable)
         self._panels_col_keys = panels_table.add_columns(
             "Map", "Name", "TMUX", "Layout", "Panes", "Status"
@@ -494,8 +498,14 @@ class GitDirectorConsole(
         agent_cmd: str | None = None,
         *,
         description: str | None = None,
+        purpose: str | None = None,
     ) -> None:
-        """Create a new tmux session and optionally launch an AI agent in it."""
+        """Create a new tmux session and optionally launch an AI agent in it.
+
+        *purpose* overrides the session-name label, which otherwise defaults to
+        *agent_cmd* (or ``shell``). Agents launched with flags need it so the
+        session name stays readable.
+        """
         path = self._get_selected_path()
         if path is None:
             return
@@ -507,7 +517,7 @@ class GitDirectorConsole(
         )
 
         launch_tab = self._active_tab
-        purpose = agent_cmd if agent_cmd else "shell"
+        purpose = purpose or agent_cmd or "shell"
         session_kwargs = {"purpose": purpose, "description": description}
         if launch_tab == "repos" and self._selected_repo_row_is_group():
             repo_label = self._get_selected_group_session_repo_label()
@@ -608,8 +618,10 @@ class GitDirectorConsole(
         restore_tab = self._active_tab
         self._resume_target_tab = restore_tab
         selected_repo_group = restore_tab == "repos" and self._selected_repo_row_is_group()
-        self._resume_refresh_path = (
-            path if restore_tab == "repos" and not selected_repo_group else None
+        refresh_path = None if selected_repo_group else path
+        self._resume_refresh_path = self._resolve_repo_refresh_path(
+            session_name,
+            refresh_path,
         )
         if row_key is None and restore_tab in {"panels", "repos"}:
             try:
@@ -670,6 +682,51 @@ class GitDirectorConsole(
                 self._apply_filter_and_sort()
         elif launch_tab == "sessions":
             self._load_sessions()
+
+    def _resolve_repo_refresh_path(
+        self, session_name: str, path: Path | None = None
+    ) -> Path | None:
+        if path is not None:
+            return normalize_repository_path(path)
+
+        from ...integrations.tmux.core import (
+            _parse_gd_session_name,
+            _repo_label_from_segment,
+            _repo_session_name_segment,
+        )
+
+        parsed = _parse_gd_session_name(session_name)
+        if parsed is None:
+            return None
+
+        repo_segment, _purpose, _sequence = parsed
+        tracked_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        for repo_path in [*self.manager.config.repositories, *self._repo_paths]:
+            normalized_path = normalize_repository_path(repo_path)
+            if normalized_path in seen_paths:
+                continue
+            seen_paths.add(normalized_path)
+            tracked_paths.append(normalized_path)
+
+        exact_matches = [
+            repo_path
+            for repo_path in tracked_paths
+            if _repo_session_name_segment(repo_path) == repo_segment
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+
+        repo_label = _repo_label_from_segment(repo_segment)
+        label_matches = [
+            repo_path
+            for repo_path in tracked_paths
+            if _repo_label_from_segment(_repo_session_name_segment(repo_path)) == repo_label
+        ]
+        if len(label_matches) == 1:
+            return label_matches[0]
+
+        return None
 
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:
@@ -794,7 +851,7 @@ class GitDirectorConsole(
     def on_resize(self, event) -> None:
         if not hasattr(self, "_sess_col_keys"):
             return
-        self._apply_sessions_description_column_width()
+        self._apply_sessions_column_layout()
         if self._active_tab == "sessions" and self._sessions_entries:
             self._apply_sessions_filter_and_sort()
 
@@ -1146,9 +1203,17 @@ class GitDirectorConsole(
     _AGENT_COMMANDS = {
         "agent:opencode": "opencode",
         "agent:claude": "claude",
+        "agent:claude-skip-permissions": "claude --dangerously-skip-permissions",
         "agent:copilot": "copilot",
         "agent:codex": "codex",
         "agent:pi": "pi",
+    }
+
+    # Session-name purposes for agents whose command carries flags. Without an
+    # override the purpose is the launch command, which would be sanitized into
+    # an unreadable label.
+    _AGENT_SESSION_PURPOSES = {
+        "agent:claude-skip-permissions": AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS,
     }
 
     def _handle_menu_action(self, action: str | None) -> None:
@@ -1157,7 +1222,11 @@ class GitDirectorConsole(
         if action == "new_session":
             self.action_open_tmux()
         elif action in self._AGENT_COMMANDS:
-            self.action_open_tmux(agent_cmd=self._AGENT_COMMANDS[action])
+            kwargs = {}
+            purpose = self._AGENT_SESSION_PURPOSES.get(action)
+            if purpose:
+                kwargs["purpose"] = purpose
+            self.action_open_tmux(agent_cmd=self._AGENT_COMMANDS[action], **kwargs)
         elif action.startswith("attach:"):
             session_name = action[len("attach:") :]
             path = self._get_selected_path()

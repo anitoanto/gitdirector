@@ -12,6 +12,7 @@ from .commands import (
     cd,
     completion,
     console,
+    doctor,
     gd_send,
     gd_tmux,
     help,
@@ -45,7 +46,7 @@ class _HelpGroup(click.Group):
 @click.group(cls=_HelpGroup, invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
-    if not ctx.resilient_parsing and ctx.invoked_subcommand != "completion":
+    if not ctx.resilient_parsing and ctx.invoked_subcommand not in {"completion", "doctor"}:
         print_update_notice()
     if ctx.invoked_subcommand is None:
         show_help()
@@ -66,6 +67,7 @@ gd_tmux.register(cli)
 capture.register(cli)
 gd_send.register(cli)
 completion.register(cli)
+doctor.register(cli)
 
 
 def main():

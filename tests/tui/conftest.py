@@ -112,6 +112,8 @@ def _mock_manager(repos: list[RepositoryInfo] | None = None):
         repos = []
     mgr = MagicMock()
     mgr.config.repositories = [r.path for r in repos]
+    mgr.config.repository_cache_token.return_value = {}
+    mgr.config.reload_if_changed.return_value = False
     mgr.config.max_workers = 2
 
     def fake_status(path, fetch=False, include_size=False):

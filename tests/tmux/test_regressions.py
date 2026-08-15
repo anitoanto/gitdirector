@@ -688,3 +688,46 @@ class TestExactMatchSourceCodeAudit:
         assert violations == [], (
             "tmux subprocess -t targets missing '=' exact-match prefix:\n" + "\n".join(violations)
         )
+
+
+class TestTmuxServerDeathIsReportedClearly:
+    """A dead tmux server must not read as a generic command failure.
+
+    The server has been observed to die mid-command (tmux itself crashing
+    inside ``respawn-pane``). Every session on it is gone at that point, so
+    reporting only "command exited 1" sends the reader looking for a bug in
+    the command instead of at the missing server.
+    """
+
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_respawn_pane_reports_a_dead_server(self, mock_run, _mock_sleep):
+        from gitdirector.integrations.tmux import TmuxError
+
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="server exited unexpectedly\n"
+        )
+
+        with pytest.raises(TmuxError, match="tmux server exited"):
+            _respawn_pane("%1", "cat")
+
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_no_server_running_is_reported_the_same_way(self, mock_run, _mock_sleep):
+        from gitdirector.integrations.tmux import TmuxError
+
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr=b"no server running on /tmp/tmux-501/default\n"
+        )
+
+        with pytest.raises(TmuxError, match="tmux server exited"):
+            _tmux_output("list-panes")
+
+    @patch("gitdirector.integrations.tmux.panels.time.sleep")
+    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
+    def test_ordinary_failures_are_left_alone(self, mock_run, _mock_sleep):
+        """Only server death is reclassified; other failures keep their type."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no such pane")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _respawn_pane("%1", "cat")

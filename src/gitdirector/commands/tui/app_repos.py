@@ -39,6 +39,7 @@ class ConsoleReposMixin:
         saved_at = time() if updated_at is None else updated_at
         data = {
             "updated_at": saved_at,
+            "config_token": self.manager.config.repository_cache_token(),
             "repositories": [
                 {
                     "path": str(info.path),
@@ -68,8 +69,11 @@ class ConsoleReposMixin:
         try:
             data = load_yaml_mapping(self._repos_cache_file, description="repository cache")
             updated_at = data["updated_at"]
+            config_token = data.get("config_token")
             entries = data["repositories"]
             if isinstance(updated_at, bool) or not isinstance(updated_at, (int, float)):
+                return False
+            if config_token != self.manager.config.repository_cache_token():
                 return False
             if not isinstance(entries, list):
                 return False
@@ -231,7 +235,16 @@ class ConsoleReposMixin:
         updated_at = self._repos_cache_updated_at
         return updated_at is None or monotonic() - updated_at >= _REPO_CACHE_TTL_SECS
 
+    def _reload_config_if_changed(self) -> bool:
+        if not self.manager.config.reload_if_changed():
+            return False
+        self._repos_cache_updated_at = None
+        self._repos_cache_saved_at = None
+        return True
+
     def _refresh_repos(self, *, show_loading: bool = False) -> None:
+        if self._reload_config_if_changed():
+            show_loading = True
         if self._repos_refreshing:
             return
         self._repos_refreshing = True

@@ -22,6 +22,7 @@ from gitdirector.commands.tui.app_groups import RepoGroup
 from gitdirector.commands.tui.app_repos import _REPO_LOADING_CELL_VALUE
 from gitdirector.commands.tui.constants import _REPO_CACHE_TTL_SECS
 from gitdirector.info import FileTypeInfo, RepoInfoResult
+from gitdirector.integrations.tmux.core import _repo_session_name_segment
 from gitdirector.repo import Repository, RepoStatus
 from gitdirector.storage import load_yaml_mapping
 
@@ -34,6 +35,7 @@ class TestGitDirectorConsole:
         info = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
         refreshed = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.BEHIND, "main")
         cached_app = GitDirectorConsole()
+        cached_app.manager = _mock_manager([info])
         cached_app._results = {str(info.path): info}
         cached_app._save_repos_cache()
 
@@ -67,6 +69,7 @@ class TestGitDirectorConsole:
     async def test_startup_refreshes_stale_repository_cache(self, _mock_sessions, mock_time):
         info = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
         cached_app = GitDirectorConsole()
+        cached_app.manager = _mock_manager([info])
         cached_app._results = {str(info.path): info}
         mock_time.return_value = 1_000
         cached_app._save_repos_cache()
@@ -119,6 +122,22 @@ class TestGitDirectorConsole:
         cached = load_yaml_mapping(app._repos_cache_file, description="repository cache")
         assert cached["updated_at"] == 1_000
         assert cached["repositories"][0]["status"] == RepoStatus.BEHIND.value
+
+    def test_load_repos_from_cache_rejects_changed_config_token(self):
+        info = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([info])
+        app._results = {str(info.path): info}
+
+        app._save_repos_cache()
+
+        app._results = {}
+        app.manager.config.repository_cache_token.return_value = {
+            "config": [True, 999, 1],
+            "secrets": [False, None, None],
+        }
+
+        assert app._load_repos_from_cache() is False
 
     async def test_compose_widgets(self):
         app = GitDirectorConsole()
@@ -527,6 +546,19 @@ class TestGitDirectorConsoleActionRouting:
             await pilot.pause()
             app._handle_menu_action("agent:copilot")
             app.action_open_tmux.assert_called_once_with(agent_cmd="copilot")
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_handle_menu_action_claude_skip_permissions(self, _):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        app.action_open_tmux = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app._handle_menu_action("agent:claude-skip-permissions")
+            app.action_open_tmux.assert_called_once_with(
+                agent_cmd="claude --dangerously-skip-permissions",
+                purpose="claude-dangerously-skip-permissions",
+            )
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch(
@@ -1520,6 +1552,31 @@ class TestGitDirectorConsoleDirectBranches:
         app._resume_session_status_tracking.assert_called_once_with()
         app._update_status.assert_called_once()
 
+    def test_resolve_repo_refresh_path_matches_current_session_names(self):
+        path = Path("/tmp/beta")
+        session_name = f"gd/{_repo_session_name_segment(path)}/shell/1"
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("beta", path)])
+
+        assert app._resolve_repo_refresh_path(session_name) == path
+
+    def test_resolve_repo_refresh_path_uses_legacy_single_match_fallback(self):
+        path = Path("/tmp/beta")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("beta", path)])
+
+        assert app._resolve_repo_refresh_path("gd/beta/shell/1") == path
+
+    def test_resolve_repo_refresh_path_skips_ambiguous_legacy_matches(self):
+        repos = [
+            _make_info("beta", Path("/tmp/team-a/beta")),
+            _make_info("beta", Path("/tmp/team-b/beta")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+
+        assert app._resolve_repo_refresh_path("gd/beta/shell/1") is None
+
     def test_action_select_row_noops_when_sessions_table_empty(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
@@ -1716,10 +1773,25 @@ class TestGitDirectorConsoleDirectBranches:
         app._show_refresh_indicator.assert_called_once_with()
         app._load_repos.assert_called_once_with()
 
+    def test_refresh_repos_forces_loading_after_config_change(self):
+        app = GitDirectorConsole()
+        result = object()
+        app._results = {"/tmp/alpha": result}
+        app._reload_config_if_changed = MagicMock(return_value=True)
+        app._show_refresh_indicator = MagicMock()
+        app._load_repos = MagicMock()
+
+        app._refresh_repos()
+
+        assert app._results == {}
+        app._show_refresh_indicator.assert_called_once_with()
+        app._load_repos.assert_called_once_with()
+
     def test_expired_repos_cache_refreshes_in_place_on_tab_activation(self):
         app = GitDirectorConsole()
         app.refresh_bindings = MagicMock()
         app._sync_session_status_tracking = MagicMock()
+        app._reload_config_if_changed = MagicMock(return_value=False)
         app._repo_cache_expired = MagicMock(return_value=True)
         app._refresh_repos = MagicMock()
         event = MagicMock()
@@ -1727,7 +1799,21 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.on_tabbed_content_tab_activated(event)
 
-        app._refresh_repos.assert_called_once_with()
+        app._refresh_repos.assert_called_once_with(show_loading=True)
+
+    def test_repo_tab_activation_refreshes_when_config_changed(self):
+        app = GitDirectorConsole()
+        app.refresh_bindings = MagicMock()
+        app._sync_session_status_tracking = MagicMock()
+        app._reload_config_if_changed = MagicMock(return_value=True)
+        app._repo_cache_expired = MagicMock(return_value=False)
+        app._refresh_repos = MagicMock()
+        event = MagicMock()
+        event.pane.id = "repos"
+
+        app.on_tabbed_content_tab_activated(event)
+
+        app._refresh_repos.assert_called_once_with(show_loading=True)
 
     @patch("gitdirector.commands.tui.app.GitDirectorConsole")
     def test_run_console_stops_monitor_when_run_raises(self, mock_console_cls):

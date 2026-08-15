@@ -1354,3 +1354,42 @@ class TestGitDirectorConsolePanels:
         assert app.manager.config.theme == "nord"
         app.manager.config.save.assert_called_once_with()
         mock_sync.assert_called_once_with("nord")
+
+
+class TestPanelOpenFailureIsContained:
+    """A panel that cannot be built must not take the TUI down with it.
+
+    Building a panel drives a long sequence of tmux commands, and the tmux
+    server can die partway through. That used to propagate straight out of
+    the event loop.
+    """
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_build_failure_reports_and_keeps_running(self, _mock_sessions):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([])
+
+        panel = Panel(name="work", rows=1, cols=1, panes={1: None})
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = panel
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            with (
+                patch(
+                    "gitdirector.integrations.tmux._session_exists",
+                    return_value=False,
+                ),
+                patch(
+                    "gitdirector.integrations.tmux.rebuild_panel_tmux_session",
+                    side_effect=RuntimeError("the tmux server exited"),
+                ),
+                patch.object(app, "_suspend_and_attach") as mock_attach,
+            ):
+                app._open_panel("work")
+                await pilot.pause()
+
+            mock_attach.assert_not_called()
+            assert app.is_running
+            assert "failed to open" in app._status_message
+            assert "the tmux server exited" in app._status_message

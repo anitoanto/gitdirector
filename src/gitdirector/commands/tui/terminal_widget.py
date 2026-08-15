@@ -279,10 +279,15 @@ class _Emulator:
         import shlex
         from pathlib import Path
 
+        from ...integrations.tmux.session_env import sanitized_environ
+
         argv = shlex.split(command)
         pid, fd = pty.fork()
         if pid == 0:
-            env = dict(os.environ)
+            # The child is a tmux client, and a tmux client that starts
+            # the server hands it this environment for the rest of the
+            # server's life. Never give it gitdirector's own.
+            env = sanitized_environ()
             env.update(TERM="xterm-256color", HOME=str(Path.home()))
             if not no_color_requested():
                 env.update(COLORTERM="truecolor", FORCE_COLOR="3", CLICOLOR_FORCE="1")

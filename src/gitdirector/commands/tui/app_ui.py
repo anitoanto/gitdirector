@@ -114,8 +114,8 @@ class ConsoleUIHelpersMixin:
         elif tab_id == "panels":
             self._load_panels()
         elif tab_id == "repos":
-            if self._repo_cache_expired():
-                self._refresh_repos()
+            if self._reload_config_if_changed() or self._repo_cache_expired():
+                self._refresh_repos(show_loading=True)
             else:
                 total = len(self._results)
                 try:
@@ -201,14 +201,23 @@ class ConsoleUIHelpersMixin:
             panel_ind.display = False
 
     def _get_selected_path(self) -> Path | None:
+        """Filesystem path of the selected row, or None when it has none.
+
+        Only the repos table keys its rows by path. The sessions and
+        panels tables key theirs by tmux session name and panel name, so
+        ``Path(row_key)`` there would hand callers a relative path built
+        from a session name (``gd/repo/claude/1``) that looks usable and
+        is not.
+        """
+        if self._active_tab != "repos":
+            return None
         table = self._get_active_table()
         row_key = self._get_selected_row_key(table)
         if row_key is None:
             return None
-        if self._active_tab == "repos":
-            group_path = self._group_path_from_row_key(row_key)
-            if group_path is not None:
-                return group_path
+        group_path = self._group_path_from_row_key(row_key)
+        if group_path is not None:
+            return group_path
         return Path(row_key)
 
     def _get_selected_row_key(self, table: DataTable) -> str | None:

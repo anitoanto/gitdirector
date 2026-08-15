@@ -47,6 +47,7 @@ from .monitor import (
     _CONTROL_MODE_STOP_WAIT_SECS,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
+    AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS,
     TmuxMonitor,
     _capture_pane_text,
     _ControlModeReader,
@@ -81,8 +82,16 @@ from .panels import (
     panel_tmux_session_exists,
     rebuild_panel_tmux_session,
 )
+from .session_env import (
+    SCRUB_POLICY_ENV_VAR,
+    leaked_names,
+    sanitized_environ,
+    session_scrub_names,
+)
 
 __all__ = [
+    "AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS",
+    "SCRUB_POLICY_ENV_VAR",
     "TmuxError",
     "TmuxMonitor",
     "attach_tmux_session",
@@ -97,12 +106,15 @@ __all__ = [
     "panel_tmux_session_exists",
     "kill_tmux_session",
     "launch_command_in_tmux_session",
+    "leaked_names",
     "list_all_gd_sessions",
     "list_repo_sessions",
     "open_in_tmux",
     "rebuild_panel_tmux_session",
     "resolve_pane_status",
+    "sanitized_environ",
     "send_key_to_session",
     "send_text_to_session",
+    "session_scrub_names",
     "sync_panel_tmux_config",
 ]

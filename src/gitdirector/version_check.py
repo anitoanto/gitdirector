@@ -146,11 +146,17 @@ def get_update_status() -> UpdateStatus | None:
     if checked_at is not None and now - checked_at <= _VERSION_CACHE_TTL:
         return UpdateStatus(current_version, cached_latest_version)
 
+    # Keep the cached value on *any* fetch failure. _fetch_latest_version
+    # signals a malformed payload by returning None rather than raising,
+    # so assigning its result directly would discard the cached version
+    # and then persist that loss for a full TTL.
     latest_version = cached_latest_version
     try:
-        latest_version = _fetch_latest_version()
+        fetched_version = _fetch_latest_version()
     except Exception:
-        pass
+        fetched_version = None
+    if fetched_version is not None:
+        latest_version = fetched_version
 
     _write_cache(now, latest_version)
     return UpdateStatus(current_version, latest_version)
