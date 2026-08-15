@@ -911,9 +911,12 @@ class TestAttachTmuxSession:
     def test_non_gd_session_skips_theme_sync(self, mock_run, mock_sync, mock_ensure):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("plain-session")
+        # The interactive attach blocks until detach, so it must run without
+        # the default tmux command timeout.
         mock_run.assert_called_once_with(
-            ["tmux", "attach-session", "-t", "=plain-session"], env=ANY, timeout=ANY
+            ["tmux", "attach-session", "-t", "=plain-session"], env=ANY
         )
+        assert "timeout" not in mock_run.call_args.kwargs
         mock_sync.assert_not_called()
         mock_ensure.assert_not_called()
 

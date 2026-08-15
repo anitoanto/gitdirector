@@ -93,6 +93,7 @@ def _run_tmux(
     check: bool = False,
     capture_output: bool = True,
     text: bool = False,
+    timeout: float | None = TMUX_COMMAND_TIMEOUT,
 ) -> subprocess.CompletedProcess:
     command = ["tmux", *args]
     kwargs: dict[str, object] = {}
@@ -105,7 +106,8 @@ def _run_tmux(
     # created afterwards. Sanitizing here keeps a gitdirector-started
     # server clean from birth.
     kwargs["env"] = sanitized_environ()
-    kwargs.setdefault("timeout", TMUX_COMMAND_TIMEOUT)
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     try:
         result = subprocess.run(command, **kwargs)
     except subprocess.TimeoutExpired as exc:
@@ -752,7 +754,16 @@ def attach_tmux_session(
         _run_tmux(["switch-client", "-t", f"={target_session}"], check=True, capture_output=False)
         return False
     try:
-        _run_tmux(["attach-session", "-t", f"={target_session}"], check=True, capture_output=False)
+        # The attach client blocks for the entire interactive session, so it
+        # must never inherit the default command timeout: a timeout here
+        # SIGKILLs the tmux client mid-session, which the user experiences as
+        # a random detach with the terminal left in tmux's alternate screen.
+        _run_tmux(
+            ["attach-session", "-t", f"={target_session}"],
+            check=True,
+            capture_output=False,
+            timeout=None,
+        )
     finally:
         if temp_panel_session_name is not None:
             cleanup_temp_panel_tmux_session(temp_panel_session_name)
