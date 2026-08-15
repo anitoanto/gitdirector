@@ -9,10 +9,13 @@ import yaml
 from gitdirector.commands.completion import complete_repository_names
 
 
-def test_complete_repository_names_dedupes_when_two_repos_share_basename(config_dir, monkeypatch):
-    """When two tracked repos share a basename (different paths), the
-    completion list should still present each unique name only once
-    per prefix — duplicate tabs are noisy and confusing.
+def test_complete_repository_names_offers_paths_when_basenames_collide(config_dir, monkeypatch):
+    """Two repos sharing a basename complete to their paths, not the name.
+
+    Emitting the bare name twice is noisy and confusing, but emitting it
+    once is worse: a shared basename is exactly the input every command
+    rejects with "use the full path". So the completion offers the paths,
+    which are distinct and actually accepted.
     """
 
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -30,9 +33,16 @@ def test_complete_repository_names_dedupes_when_two_repos_share_basename(config_
 
     items = complete_repository_names(None, None, "")
     values = [item.value for item in items]
-    assert values.count("same-name") == 1, (
-        f"expected one completion entry per unique name, got {values}"
+    assert len(values) == len(set(values)), f"duplicate completion entries: {values}"
+    assert "same-name" not in values, (
+        f"bare ambiguous name offered; every command would reject it: {values}"
     )
+    assert sorted(values) == sorted(
+        [
+            str(config_dir.parent / "projects" / "same-name"),
+            str(config_dir.parent / "work" / "same-name"),
+        ]
+    ), values
 
 
 def test_complete_repository_names_sorts_by_name_case_insensitive(config_dir, monkeypatch):

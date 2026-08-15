@@ -67,6 +67,11 @@ class SessionActionMenuScreen(ModalScreen[str]):
             Option("[white]◆[/white] [bold]Pi[/bold]", id="agent:pi"),
             Option("[white]◆[/white] [bold]OpenCode[/bold]", id="agent:opencode"),
             Option("[white]◆[/white] [bold]Claude Code[/bold]", id="agent:claude"),
+            Option(
+                "[white]◆[/white] [bold]Claude Code[/bold]"
+                " [dim]--dangerously-skip-permissions[/dim]",
+                id="agent:claude-skip-permissions",
+            ),
             Option("[white]◆[/white] [bold]GitHub Copilot[/bold]", id="agent:copilot"),
             Option("[white]◆[/white] [bold]Codex[/bold]", id="agent:codex"),
         ]

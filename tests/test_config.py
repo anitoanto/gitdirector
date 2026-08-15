@@ -125,6 +125,15 @@ class TestConfigAddRepository:
         assert result is True
         assert Path("/tmp/repo") in config.repositories
 
+    def test_add_invalidates_repository_cache(self, config):
+        cache_file = config.config_dir / "cache" / "repos.yaml"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text("cached")
+
+        config.add_repository(Path("/tmp/repo"))
+
+        assert not cache_file.exists()
+
     def test_add_duplicate_returns_false(self, config):
         config.add_repository(Path("/tmp/repo"))
         result = config.add_repository(Path("/tmp/repo"))
@@ -153,6 +162,16 @@ class TestConfigRemoveRepository:
         config.remove_repository(Path("/tmp/repo"))
         data = yaml.safe_load(config.config_file.read_text())
         assert data["repositories"] == []
+
+    def test_remove_invalidates_repository_cache(self, config):
+        config.add_repository(Path("/tmp/repo"))
+        cache_file = config.config_dir / "cache" / "repos.yaml"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text("cached")
+
+        config.remove_repository(Path("/tmp/repo"))
+
+        assert not cache_file.exists()
 
 
 class TestConfigHasRepository:
@@ -197,6 +216,16 @@ class TestConfigTheme:
         config.save()
         data = yaml.safe_load(config.config_file.read_text())
         assert data["theme"] == "nord"
+
+    def test_save_invalidates_repository_cache(self, config):
+        cache_file = config.config_dir / "cache" / "repos.yaml"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text("cached")
+
+        config.theme = "nord"
+        config.save()
+
+        assert not cache_file.exists()
 
     def test_default_theme_not_saved(self, config):
         config.save()
@@ -277,6 +306,21 @@ class TestConfigSaveRoundtrip:
         config.save()
         data = yaml.safe_load(config.config_file.read_text())
         assert "max_workers" not in data
+
+
+class TestConfigReloadIfChanged:
+    def test_reload_if_changed_invalidates_repository_cache(self, config):
+        cache_file = config.config_dir / "cache" / "repos.yaml"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text("cached")
+        config.config_file.write_text(yaml.dump({"repositories": [], "theme": "nord"}))
+
+        assert config.reload_if_changed() is True
+        assert config.theme == "nord"
+        assert not cache_file.exists()
+
+    def test_reload_if_changed_returns_false_without_fs_change(self, config):
+        assert config.reload_if_changed() is False
 
 
 class TestConfigGitHubAuth:

@@ -59,15 +59,25 @@ def complete_repository_names(
         return []
 
     prefix = incomplete.lower()
-    seen: set[str] = set()
+    ordered = sorted(repositories, key=lambda path: (path.name.lower(), str(path)))
+    name_counts: dict[str, int] = {}
+    for repo in ordered:
+        name_counts[repo.name] = name_counts.get(repo.name, 0) + 1
+
     items: list[CompletionItem] = []
-    for repo in sorted(repositories, key=lambda path: (path.name.lower(), str(path))):
+    emitted_names: set[str] = set()
+    for repo in ordered:
         name = repo.name
-        if not name.lower().startswith(prefix):
+        # A shared basename is exactly the case where the commands demand a
+        # full path, so completing only the name would offer a value that is
+        # guaranteed to be rejected. Complete the paths instead.
+        if name_counts[name] > 1:
+            if str(repo).lower().startswith(prefix) or name.lower().startswith(prefix):
+                items.append(CompletionItem(str(repo), help=f"{name} (ambiguous name)"))
             continue
-        if name in seen:
+        if not name.lower().startswith(prefix) or name in emitted_names:
             continue
-        seen.add(name)
+        emitted_names.add(name)
         items.append(CompletionItem(name, help=str(repo)))
     return items
 

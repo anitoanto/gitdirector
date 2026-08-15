@@ -39,6 +39,7 @@ def show_help():
         ("autoclean", "Remove broken repository links from tracking"),
         ("reset [--yes]", "Kill all sessions and panels, wipe ~/.gitdirector, recreate config"),
         ("info PATH|NAME [--full]", "Show file statistics for a repository"),
+        ("doctor", "Check tmux, clipboard, config, completion, and agent-tool setup"),
         (
             'gd-tmux PATH|NAME "cmd" [--description "..."]',
             "Create a gd tmux session and run a command in it",

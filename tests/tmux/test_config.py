@@ -1,7 +1,7 @@
 """Theme and config tests for tmux panel behavior."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from gitdirector.integrations.tmux import (
     _configure_panel_window,
@@ -178,7 +178,7 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/panel/main: status-position bottom" in content
         assert "set-window-option -t =gd/panel/main:0 pane-border-lines heavy" in content
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)], capture_output=True
+            ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY
         )
 
     @patch("gitdirector.integrations.tmux.core._session_exists", side_effect=[True, False])
@@ -212,7 +212,7 @@ class TestPanelPaneTitles:
         assert "set-option -t =gd/panel/main: status-position bottom" in content
         assert "set-option -t =gd/panel/me2: status-position bottom" in content
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)], capture_output=True
+            ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY
         )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -239,7 +239,7 @@ class TestPanelPaneTitles:
         assert "SHELL" in content
         assert "set-window-option -t =gd/my-repo/shell/1:2 pane-border-style" in content
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)], capture_output=True
+            ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY
         )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -290,7 +290,7 @@ class TestPanelPaneTitles:
         assert written_path == config_path
         assert config_path.exists()
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)], capture_output=True
+            ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY
         )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")

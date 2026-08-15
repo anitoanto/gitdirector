@@ -505,49 +505,57 @@ class TestRebuildPanelTmuxSession:
             )
             build_session_name = new_session_command[new_session_command.index("-s") + 1]
             assert build_session_name.startswith("gd/temp/panel/build-")
-            assert commands[-3:] == [
-                [
-                    "tmux",
-                    "new-session",
-                    "-d",
-                    "-e",
-                    "TERM=tmux-256color",
-                    "-e",
-                    "COLORTERM=truecolor",
-                    "-e",
-                    "FORCE_COLOR=3",
-                    "-e",
-                    "CLICOLOR_FORCE=1",
-                    "-e",
-                    "CLAUDE_CODE_TMUX_TRUECOLOR=1",
-                    "-s",
-                    build_session_name,
-                    "-n",
-                    "Main",
-                    "-x",
-                    "80",
-                    "-y",
-                    "24",
-                    "-c",
-                    str(Path.home()),
-                    "cat",
-                ],
-                [
-                    "tmux",
-                    "set-option",
-                    "-t",
-                    f"={build_session_name}:",
-                    "destroy-unattached",
-                    "off",
-                ],
-                [
-                    "tmux",
-                    "set-window-option",
-                    "-t",
-                    f"={build_session_name}:0",
-                    "pane-border-status",
-                    "top",
-                ],
+            assert new_session_command == [
+                "tmux",
+                "new-session",
+                "-d",
+                "-e",
+                "TERM=tmux-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "-e",
+                "FORCE_COLOR=3",
+                "-e",
+                "CLICOLOR_FORCE=1",
+                "-e",
+                "CLAUDE_CODE_TMUX_TRUECOLOR=1",
+                "-s",
+                build_session_name,
+                "-n",
+                "Main",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "-c",
+                str(Path.home()),
+                "cat",
+            ]
+
+            protect_command = [
+                "tmux",
+                "set-option",
+                "-t",
+                f"={build_session_name}:",
+                "destroy-unattached",
+                "off",
+            ]
+            assert commands.index(protect_command) > commands.index(new_session_command)
+
+            # The panel session is isolated from gitdirector's launch
+            # context before any pane of it is respawned.
+            scrub_command = next(command for command in commands if "set-environment" in command)
+            assert "CLAUDE_CODE_SESSION_ID" in scrub_command
+            assert commands.index(scrub_command) > commands.index(protect_command)
+
+            # The point of the test: headers are on before the layout is built.
+            assert commands[-1] == [
+                "tmux",
+                "set-window-option",
+                "-t",
+                f"={build_session_name}:0",
+                "pane-border-status",
+                "top",
             ]
             return ["%0", "%1", "%2", "%3"]
 

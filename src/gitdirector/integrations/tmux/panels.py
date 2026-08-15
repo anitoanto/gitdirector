@@ -13,7 +13,9 @@ from .core import (
     _PANEL_CLIENT_COUNT_OPTION,
     _PANEL_STATUS_RESTORE_OPTION,
     _PANEL_WINDOW_RESTORE_OPTION,
+    TmuxError,
     _current_window_target,
+    _ensure_clean_tmux_server,
     _ensure_panel_resize_tracking,
     _is_temp_panel_session,
     _load_panel_tmux_config,
@@ -21,6 +23,7 @@ from .core import (
     _panel_pane_title,
     _protect_session,
     _resolved_panel_theme_name,
+    _scrub_session_environment,
     _session_exists,
     _session_option_target,
     _session_tmux_config,
@@ -32,6 +35,7 @@ from .core import (
     make_temp_panel_session_name,
     sync_panel_tmux_config,
 )
+from .session_env import sanitized_environ
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +59,37 @@ def _run_tmux_with_fork_retry(args: list[str]) -> subprocess.CompletedProcess[st
     return last_result
 
 
+# The tmux server can die mid-command -- it has been observed to crash
+# inside `respawn-pane`. Every session on that server goes with it, so the
+# failure needs to read as "the server is gone", not as a generic non-zero
+# exit from whatever command happened to be in flight.
+_TMUX_SERVER_GONE_MARKERS = (
+    "server exited unexpectedly",
+    "no server running",
+    "lost server",
+)
+
+
+def _tmux_server_is_gone(stderr: object) -> bool:
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    if not isinstance(stderr, str):
+        return False
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _TMUX_SERVER_GONE_MARKERS)
+
+
 def _raise_for_tmux_result(result: subprocess.CompletedProcess[str]) -> None:
     if result.returncode == 0:
         return
+    if _tmux_server_is_gone(result.stderr):
+        raise TmuxError(
+            "the tmux server exited while gitdirector was talking to it; "
+            "any sessions it held are gone",
+            args_list=list(result.args) if isinstance(result.args, list) else None,
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
     raise subprocess.CalledProcessError(
         result.returncode,
         result.args,
@@ -791,6 +823,7 @@ def rebuild_panel_tmux_session(
     )
     renamed_to_final = False
 
+    _ensure_clean_tmux_server()
     try:
         term_cols, term_lines = shutil.get_terminal_size()
         subprocess.run(
@@ -812,8 +845,12 @@ def rebuild_panel_tmux_session(
                 "cat",
             ],
             check=True,
+            env=sanitized_environ(),
         )
         _protect_session(build_session_name)
+        # Panel panes are respawned below, so scrubbing here is enough to
+        # keep gitdirector's launch context out of every one of them.
+        _scrub_session_environment(build_session_name)
         subprocess.run(
             [
                 "tmux",
@@ -1055,6 +1092,7 @@ def _create_temp_panel_tmux_session(
     temp_panel_name = _temp_panel_display_name(session_name)
     theme_name = _resolved_panel_theme_name(theme_name)
 
+    _ensure_clean_tmux_server()
     try:
         term_cols, term_lines = shutil.get_terminal_size()
         # `-P -F #{pane_id}` returns the new pane's ID on stdout so we can
@@ -1084,10 +1122,12 @@ def _create_temp_panel_tmux_session(
             check=True,
             capture_output=True,
             text=True,
+            env=sanitized_environ(),
         )
         pane_id = new_session.stdout.strip()
 
         _protect_session(temp_panel_session_name)
+        _scrub_session_environment(temp_panel_session_name)
         _configure_panel_window(
             temp_panel_session_name,
             [pane_id],

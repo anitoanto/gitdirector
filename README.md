@@ -34,6 +34,7 @@ If you find GitDirector useful, please star this repository on GitHub, we need m
 | `gitdirector autoclean`                                    | Remove broken repository links from tracking           |
 | `gitdirector reset [--yes]`                                | Kill all sessions and panels, wipe ~/.gitdirector, and recreate the config |
 | `gitdirector info PATH\|NAME [--full]`                     | Show file statistics for a repository                  |
+| `gitdirector doctor`                                       | Check local setup for tmux, clipboard, config, completion, and agent tools |
 | `gitdirector gd-tmux PATH\|NAME "command" [--description TEXT]` | Create a gd tmux session and run a command in it       |
 | `gitdirector gd-capture SESSION [--lines N] [--full]`      | Print the scrollback of a live gd tmux session         |
 | `gitdirector gd-send SESSION [TEXT] [--enter\|--key C-c]` | Send text or Ctrl-C to a live gd tmux session          |
@@ -105,6 +106,20 @@ Shows file statistics for a repository:
 - All operations respect `.gitignore` at every level
 
 Also available in the TUI console by pressing `i` on a selected repository.
+
+### doctor
+
+```bash
+gitdirector doctor
+```
+
+Checks common local setup problems and reports whether GitDirector can find:
+
+- `tmux`
+- a supported clipboard tool (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`)
+- a writable `~/.gitdirector` config directory
+- shell completion setup for your current shell (`bash`, `zsh`, or `fish`)
+- common AI agent CLIs such as OpenCode, Claude Code, GitHub Copilot, Codex, and Pi
 
 ### list
 

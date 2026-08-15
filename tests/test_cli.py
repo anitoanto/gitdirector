@@ -658,10 +658,18 @@ class TestCdCommand:
         path_b = tmp_path / "work" / "my-repo"
         mgr = _mock_manager()
         mgr.config.repositories = [path_a, path_b]
+        mgr.resolve_repository_target = MagicMock(return_value=(None, [path_a, path_b], False))
         with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["cd", "my-repo"])
         assert result.exit_code == 1
         assert "my-repo" in result.output
+        assert "use the full path" in result.output
+        # The advice has to be actionable: both paths are shown, and the
+        # command accepts a path (see test_cd_accepts_a_path). Compared
+        # with whitespace stripped because rich wraps long paths.
+        flattened = "".join(result.output.split())
+        assert "".join(str(path_a).split()) in flattened
+        assert "".join(str(path_b).split()) in flattened
 
     def test_cd_success(self, runner, tmp_path):
         import sys
@@ -669,6 +677,7 @@ class TestCdCommand:
         repo = tmp_path / "my-repo"
         mgr = _mock_manager()
         mgr.config.repositories = [repo]
+        mgr.resolve_repository_target = MagicMock(return_value=(repo, [], False))
         mock_tmux = MagicMock()
         fake_tmux_module = MagicMock()
         fake_tmux_module.open_in_tmux = mock_tmux
@@ -678,12 +687,39 @@ class TestCdCommand:
         mock_tmux.assert_called_once_with("my-repo", repo)
         assert result.exit_code == 0
 
+    def test_cd_accepts_a_path(self, runner, tmp_path):
+        """A path is the documented way out of an ambiguous name."""
+        import sys
+
+        repo = tmp_path / "work" / "my-repo"
+        mgr = _mock_manager()
+        mgr.resolve_repository_target = MagicMock(return_value=(repo, [], True))
+        mock_tmux = MagicMock()
+        fake_tmux_module = MagicMock()
+        fake_tmux_module.open_in_tmux = mock_tmux
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
+            with patch.dict(sys.modules, {"gitdirector.integrations.tmux": fake_tmux_module}):
+                result = runner.invoke(cli, ["cd", str(repo)])
+        mgr.resolve_repository_target.assert_called_once_with(str(repo))
+        mock_tmux.assert_called_once_with("my-repo", repo)
+        assert result.exit_code == 0
+
+    def test_cd_untracked_path_reports_path_not_name(self, runner, tmp_path):
+        repo = tmp_path / "work" / "my-repo"
+        mgr = _mock_manager()
+        mgr.resolve_repository_target = MagicMock(return_value=(None, [], True))
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["cd", str(repo)])
+        assert result.exit_code == 1
+        assert "No tracked repository at path" in result.output
+
     def test_cd_tmux_integration_unavailable(self, runner, tmp_path):
         import sys
 
         repo = tmp_path / "my-repo"
         mgr = _mock_manager()
         mgr.config.repositories = [repo]
+        mgr.resolve_repository_target = MagicMock(return_value=(repo, [], False))
         # Setting the module entry to None causes ImportError on 'from ... import'
         with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
             with patch.dict(sys.modules, {"gitdirector.integrations.tmux": None}):
