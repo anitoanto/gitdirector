@@ -65,16 +65,99 @@ jobs:
               ;;
           esac
 
-  release:
-    name: Release
+  # The release jobs below deliberately live in this file rather than a
+  # reusable workflow. PyPI verifies an upload's PEP 740 attestation against
+  # the certificate's Build Config URI, which Fulcio always fills in from the
+  # *entrypoint* workflow. Behind a `workflow_call` the publish job signs as
+  # the reusable workflow but the certificate still says this file, so PyPI
+  # rejects the upload. Keeping publish here makes both match .github/
+  # workflows/main.yml, which is what the Trusted Publisher must be set to.
+  build:
+    name: Build Distribution
+    runs-on: ubuntu-latest
     needs: version-gate
     if: needs.version-gate.outputs.should-publish == 'true'
-    # A called workflow can only narrow what the caller grants, so contents:
-    # write has to be granted here for the tag/release step. The build and
-    # publish jobs inside release.yml still declare read-only for themselves.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: pypi
+      url: https://pypi.org/project/gitdirector/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    # Runs only after a successful publish, so a tag exists only for a version
+    # that actually reached PyPI -- no orphan tags from a failed build.
+    needs: [version-gate, publish]
     permissions:
       contents: write
-      id-token: write
-    uses: ./.github/workflows/release.yml
-    with:
-      version: ${{ needs.version-gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version-gate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          tag="v${VERSION}"
+
+          # The version gate keys off PyPI, not off tags, so a half-failed run
+          # (tag created, publish failed) could leave the tag behind. Treat an
+          # existing release as success rather than failing the whole workflow.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists - nothing to do."
+            exit 0
+          fi
+
+          # Creates the tag at this exact commit as a side effect, so no tag
+          # ever has to be pushed by hand.
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --generate-notes \
+            dist/*
