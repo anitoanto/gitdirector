@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from rich.markup import escape
+from rich.text import Text
 from textual import work
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
@@ -12,35 +14,98 @@ from textual.worker import Worker
 
 from .constants import (
     _DEFAULT_SESSIONS_SORT_COLUMN,
-    _SESSION_STATUS_LABEL,
+    _SESSION_STATUS_DISPLAY,
     _SESSION_STATUS_ORDER,
-    _SESSIONS_COL_DESCRIPTION,
     _SESSIONS_SORT_COLUMN_NAMES,
 )
-from .table_text import resolve_wrapped_column_width, wrap_table_cell_text
+from .table_text import wrap_table_cell_text
 
 logger = logging.getLogger(__name__)
 
 _MIN_SESSIONS_DESCRIPTION_WIDTH = 12
-_MAX_SESSIONS_DESCRIPTION_WIDTH = 48
-_SESSIONS_DESCRIPTION_WIDTH_DIVISOR = 3
+_PREFERRED_SESSIONS_DESCRIPTION_WIDTH = 30
+_SESSIONS_COL_GAP = 2
+_SESSIONS_STATUS_WIDTH = 9
+_SESSIONS_MAX_PURPOSE_WIDTH = 36
+_SESSIONS_MAX_REPO_WIDTH = 26
+_SESSIONS_MIN_PURPOSE_WIDTH = 14
+_SESSIONS_MIN_REPO_WIDTH = 12
+_SESSIONS_FALLBACK_TOTAL_WIDTH = 80
+# The DataTable adds a cell padding of one cell on each side and the widget
+# itself has ``padding: 0 1``; reserve those plus a column for the scrollbar.
+_SESSIONS_TABLE_CHROME_WIDTH = 6
+# Repository names share the yellow accent used for repo state elsewhere.
+_SESSION_REPO_STYLE = "bright_yellow"
 
 
-def _resolve_sessions_description_width(screen_width: int) -> int:
-    """Return the max width (in cells) for the description column.
+@dataclass(frozen=True)
+class SessionsLayout:
+    """Resolved column offsets for the composed sessions rows."""
 
-    The width scales with the available screen size: roughly
-    ``screen_width / 3`` with a sensible floor and ceiling so the column
-    never collapses or eats the whole table.
-    """
+    status: int
+    purpose: int
+    repo: int
+    description: int
+
+    @property
+    def description_offset(self) -> int:
+        return self.status + self.purpose + self.repo + _SESSIONS_COL_GAP * 3
+
+    @property
+    def total(self) -> int:
+        return self.description_offset + self.description
+
+
+def _resolve_sessions_total_width(screen_width: int) -> int:
     if screen_width <= 0:
-        return _MIN_SESSIONS_DESCRIPTION_WIDTH
-    return resolve_wrapped_column_width(
-        screen_width,
-        min_width=_MIN_SESSIONS_DESCRIPTION_WIDTH,
-        max_width=_MAX_SESSIONS_DESCRIPTION_WIDTH,
-        divisor=_SESSIONS_DESCRIPTION_WIDTH_DIVISOR,
+        return _SESSIONS_FALLBACK_TOTAL_WIDTH
+    return max(40, screen_width - _SESSIONS_TABLE_CHROME_WIDTH)
+
+
+def _fit(values, header: str, max_width: int) -> int:
+    widest = max((len(value) for value in values), default=0)
+    return max(len(header), min(max_width, widest))
+
+
+def _resolve_sessions_layout(entries: list[dict[str, str]], screen_width: int) -> SessionsLayout:
+    """Size the row columns from the data, giving the rest to the description."""
+    total = _resolve_sessions_total_width(screen_width)
+    purpose = _fit(
+        (entry.get("purpose", "") for entry in entries), "Session", _SESSIONS_MAX_PURPOSE_WIDTH
     )
+    repo = _fit(
+        (entry.get("repo", "") for entry in entries), "Repository", _SESSIONS_MAX_REPO_WIDTH
+    )
+    fixed = _SESSIONS_STATUS_WIDTH + _SESSIONS_COL_GAP * 3
+
+    # On narrow terminals give the description room to breathe by trimming the
+    # widest of the two truncatable columns first; both stay readable because
+    # the tmux session name below the row spells the session out in full.
+    while total - fixed - purpose - repo < _PREFERRED_SESSIONS_DESCRIPTION_WIDTH:
+        if purpose > _SESSIONS_MIN_PURPOSE_WIDTH and purpose >= repo:
+            purpose -= 1
+        elif repo > _SESSIONS_MIN_REPO_WIDTH:
+            repo -= 1
+        else:
+            break
+
+    description = max(_MIN_SESSIONS_DESCRIPTION_WIDTH, total - fixed - purpose - repo)
+    return SessionsLayout(
+        status=_SESSIONS_STATUS_WIDTH,
+        purpose=purpose,
+        repo=repo,
+        description=description,
+    )
+
+
+def _truncate(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return "…"
+    return text[: width - 1] + "…"
 
 
 def _wrap_session_description(text: str, max_width: int) -> str:
@@ -50,6 +115,65 @@ def _wrap_session_description(text: str, max_width: int) -> str:
     have to special-case "-".
     """
     return wrap_table_cell_text(text, max_width)
+
+
+def _sessions_header(layout: SessionsLayout) -> Text:
+    header = (
+        "Status".ljust(layout.status)
+        + " " * _SESSIONS_COL_GAP
+        + "Session".ljust(layout.purpose)
+        + " " * _SESSIONS_COL_GAP
+        + "Repository".ljust(layout.repo)
+        + " " * _SESSIONS_COL_GAP
+        + "Description"
+    )
+    return Text(header.ljust(layout.total), no_wrap=True, overflow="ignore")
+
+
+def _render_session_row(entry: dict[str, str], layout: SessionsLayout) -> tuple[Text, int]:
+    """Render one session as a two-line block plus a trailing blank line.
+
+    The first line holds the aligned columns, the second holds the tmux
+    session name spanning the full row width, and the third is left empty so
+    consecutive sessions stay visually separated.
+    """
+    status = entry.get("status", "running")
+    status_label, status_style = _SESSION_STATUS_DISPLAY.get(
+        status, _SESSION_STATUS_DISPLAY["running"]
+    )
+    description = _wrap_session_description(
+        entry.get("description", "-") or "-", layout.description
+    )
+    description_lines = description.split("\n")
+
+    text = Text(no_wrap=True, overflow="ignore")
+    text.append(status_label.ljust(layout.status), style=status_style)
+    text.append(" " * _SESSIONS_COL_GAP)
+    text.append(_truncate(entry.get("purpose", ""), layout.purpose).ljust(layout.purpose))
+    text.append(" " * _SESSIONS_COL_GAP)
+    text.append(
+        _truncate(entry.get("repo", ""), layout.repo).ljust(layout.repo),
+        style=_SESSION_REPO_STYLE,
+    )
+    text.append(" " * _SESSIONS_COL_GAP)
+    text.append(description_lines[0].ljust(layout.description))
+
+    lines = 1
+    for extra in description_lines[1:]:
+        text.append("\n")
+        text.append(" " * layout.description_offset)
+        text.append(extra.ljust(layout.description))
+        lines += 1
+
+    text.append("\n")
+    text.append("  ")
+    text.append(
+        _truncate(entry.get("session_name", ""), layout.total - 2).ljust(layout.total - 2),
+        style="dim italic",
+    )
+    text.append("\n")
+    text.append(" " * layout.total)
+    return text, lines + 2
 
 
 class ConsoleSessionsMixin:
@@ -102,30 +226,32 @@ class ConsoleSessionsMixin:
         self._sessions_entries = entries
         self._apply_sessions_filter_and_sort()
 
-    def _apply_sessions_description_column_width(self) -> None:
+    def _apply_sessions_column_layout(self, layout: SessionsLayout | None = None) -> None:
+        """Resize the single sessions column and refresh its composed header."""
         try:
             table = self.query_one("#sessions-table", DataTable)
         except NoMatches:
             return
         col_keys = getattr(self, "_sess_col_keys", None)
-        if not col_keys or len(col_keys) <= _SESSIONS_COL_DESCRIPTION:
+        if not col_keys:
             return
-        col_key = col_keys[_SESSIONS_COL_DESCRIPTION]
-        width = _resolve_sessions_description_width(self.size.width)
+        if layout is None:
+            layout = _resolve_sessions_layout(self._sessions_entries, self.size.width)
+        self._sessions_layout = layout
         try:
-            column = table.columns[col_key]
+            column = table.columns[col_keys[0]]
         except (KeyError, IndexError):
             return
         column.auto_width = False
-        column.width = width
+        column.width = layout.total
+        column.label = _sessions_header(layout)
+        table.refresh()
 
     def _apply_sessions_filter_and_sort(self) -> None:
         try:
             table = self.query_one("#sessions-table", DataTable)
         except NoMatches:
             return
-        self._apply_sessions_description_column_width()
-        description_width = _resolve_sessions_description_width(self.size.width)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -165,24 +291,16 @@ class ConsoleSessionsMixin:
         )
         entries.sort(key=key_func, reverse=self._sessions_sort_reverse)
 
+        layout = _resolve_sessions_layout(entries, self.size.width)
+        self._apply_sessions_column_layout(layout)
+
         is_empty = not entries and total == 0 and not self._search_query
         self._set_table_empty_state(table, no_msg, is_empty=is_empty)
         table.clear()
         if not is_empty:
             for entry in entries:
-                status = entry.get("status", "running")
-                description = _wrap_session_description(
-                    entry.get("description", "-"), description_width
-                )
-                table.add_row(
-                    _SESSION_STATUS_LABEL.get(status, "● running"),
-                    entry["purpose"],
-                    entry["repo"],
-                    entry["session_name"],
-                    description,
-                    height=None,
-                    key=entry["session_name"],
-                )
+                row, height = _render_session_row(entry, layout)
+                table.add_row(row, height=height, key=entry["session_name"])
 
         if self._resume_selection_tab == "sessions":
             self._restore_resume_selection("sessions")
@@ -345,15 +463,15 @@ class ConsoleSessionsMixin:
             table = self.query_one("#sessions-table", DataTable)
         except NoMatches:
             return
+        layout = getattr(self, "_sessions_layout", None) or _resolve_sessions_layout(
+            self._sessions_entries, self.size.width
+        )
         for entry in self._sessions_entries:
             status = self._resolve_session_status(entry)
             entry["status"] = status
             try:
-                table.update_cell(
-                    entry["session_name"],
-                    self._sess_col_keys[0],
-                    _SESSION_STATUS_LABEL.get(status, "● running"),
-                )
+                row, _height = _render_session_row(entry, layout)
+                table.update_cell(entry["session_name"], self._sess_col_keys[0], row)
             except Exception:
                 logger.debug(
                     "Failed to update session status cell %s",

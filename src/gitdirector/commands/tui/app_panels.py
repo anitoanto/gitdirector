@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from rich.markup import escape
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
@@ -18,6 +20,8 @@ from .screens.panels import (
     PanelActionMenuScreen,
     RenamePanelScreen,
 )
+
+logger = logging.getLogger(__name__)
 
 _PANEL_PREVIEW_FILLED = "■"
 _PANEL_PREVIEW_OPEN = "□"
@@ -307,14 +311,23 @@ class ConsolePanelsMixin:
         if _session_exists(session_name):
             _protect_session(session_name)
         else:
-            session_name = rebuild_panel_tmux_session(
-                panel.name,
-                panel.rows,
-                panel.cols,
-                panel.panes,
-                closed_panes=panel.closed_panes,
-                layout_key=panel.layout.key,
-            )
+            # Building a panel drives a long sequence of tmux commands, any
+            # of which can fail (up to and including the server dying under
+            # us). Letting that escape would take the whole TUI down instead
+            # of just failing to open one panel.
+            try:
+                session_name = rebuild_panel_tmux_session(
+                    panel.name,
+                    panel.rows,
+                    panel.cols,
+                    panel.panes,
+                    closed_panes=panel.closed_panes,
+                    layout_key=panel.layout.key,
+                )
+            except Exception as exc:
+                logger.warning("panel %s failed to build", panel_name, exc_info=True)
+                self._update_status(f"panel '{panel_name}' failed to open: {exc}")
+                return
         self._suspend_and_attach(session_name, row_key=panel.name)
 
     def action_new_panel(self) -> None:

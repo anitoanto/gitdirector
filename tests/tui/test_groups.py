@@ -256,8 +256,9 @@ class TestRepositoryGroups:
             table = app.query_one("#sessions-table", DataTable)
             row_key = "gd/work/shell/1"
             assert table.row_count == 1
-            assert table.get_cell(row_key, app._sess_col_keys[2]) == "group_work"
-            assert table.get_cell(row_key, app._sess_col_keys[3]) == row_key
+            cell = table.get_cell(row_key, app._sess_col_keys[0]).plain
+            assert "group_work" in cell
+            assert row_key in cell
 
 
 class TestGroupActionMenuScreen:
@@ -276,7 +277,7 @@ class TestGroupActionMenuScreen:
 
             assert "work" in title.content
             assert "alpha, beta" in branch_label.content
-            assert menu.option_count == 8
+            assert menu.option_count == 9
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_select_new_session(self, _mock_sessions):

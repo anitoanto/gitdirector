@@ -3,7 +3,7 @@
 import shlex
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from gitdirector.integrations.tmux import (
     _AGENT_PURPOSES,
@@ -23,6 +23,7 @@ from gitdirector.integrations.tmux import (
     launch_command_in_tmux_session,
     resolve_pane_status,
 )
+from gitdirector.integrations.tmux.core import _tmux_child_environment_command
 
 from ._shared import REAL_TMUX_MONITOR_START, REAL_TMUX_MONITOR_STOP
 
@@ -48,11 +49,7 @@ class TestLaunchCommandInTmuxSession:
             "/tmp/gitdirector-agent.ready.failed >/dev/null 2>&1 || true; "
             "exit $status"
         )
-        expected_command = (
-            "env -u NO_COLOR TERM=tmux-256color COLORTERM=truecolor "
-            "FORCE_COLOR=3 CLICOLOR_FORCE=1 CLAUDE_CODE_TMUX_TRUECOLOR=1 "
-            f"sh -lc {shlex.quote(cleanup_script)}"
-        )
+        expected_command = _tmux_child_environment_command(f"sh -lc {shlex.quote(cleanup_script)}")
         assert ready_marker == Path("/tmp/gitdirector-agent.ready")
         mock_run.assert_called_once_with(
             [
@@ -64,7 +61,13 @@ class TestLaunchCommandInTmuxSession:
                 expected_command,
             ],
             capture_output=True,
+            env=ANY,
         )
+        # The agent command carries its own last-resort scrub, so a leak
+        # survives neither the session environment nor the command itself.
+        assert "-u CLAUDE_CODE_SESSION_ID " in expected_command
+        assert "-u NO_COLOR " in expected_command
+        assert "TERM=tmux-256color" in expected_command
 
     @patch(
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
@@ -84,10 +87,7 @@ class TestLaunchCommandInTmuxSession:
         assert 'echo "hello world"' in wrapped_script
         # The outer wrapping still uses shlex.quote so single-quote–bearing
         # commands survive the tmux command boundary intact.
-        assert wrapped_script.startswith(
-            "env -u NO_COLOR TERM=tmux-256color COLORTERM=truecolor "
-            "FORCE_COLOR=3 CLICOLOR_FORCE=1 CLAUDE_CODE_TMUX_TRUECOLOR=1 sh -lc "
-        )
+        assert wrapped_script.startswith(_tmux_child_environment_command("sh -lc "))
 
 
 def _inner_shell_script(mock_run) -> str:
@@ -570,7 +570,27 @@ class TestResolvePaneStatus:
         )
 
     def test_known_agent_purposes(self):
-        assert _AGENT_PURPOSES == {"opencode", "claude", "copilot", "codex", "pi"}
+        assert _AGENT_PURPOSES == {
+            "opencode",
+            "claude",
+            "claude-dangerously-skip-permissions",
+            "copilot",
+            "codex",
+            "pi",
+        }
+
+    @patch("gitdirector.integrations.tmux.monitor.time")
+    def test_claude_skip_permissions_purpose_uses_claude_process(self, mock_time):
+        mock_time.time.return_value = 1700000100.0
+        assert (
+            resolve_pane_status(
+                "claude-dangerously-skip-permissions",
+                "claude",
+                dead=False,
+                last_output_time=1700000000.0,
+            )
+            == "idle"
+        )
 
     @patch("gitdirector.integrations.tmux.monitor.time")
     def test_shell_purpose_ignores_silence_threshold(self, mock_time):

@@ -14,6 +14,7 @@ from pathlib import Path
 from ...config import Config
 from ...storage import atomic_write_text, normalize_repository_path
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
+from .session_env import child_unset_names, sanitized_environ, session_scrub_names
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ _TMUX_TERMINAL_FALLBACK = "screen-256color"
 _TMUX_TRUECOLOR_FEATURES = "*:RGB"
 _TMUX_TRUECOLOR_OVERRIDES = "*:Tc"
 _TMUX_TRUECOLOR_OPTION_INDEX = 90
+# Colour-policy opt-out gitdirector overrides on purpose. The rest of
+# what gets stripped from a pane is the leak policy in
+# :mod:`.session_env`; see :func:`_tmux_child_unset_names`.
 _TMUX_CHILD_ENV_UNSET = ("NO_COLOR",)
 # Standard color-capability advertisement, honoured by well-behaved
 # terminal programs (supports-color/chalk, termenv, Rich, ...).
@@ -42,6 +46,8 @@ _TMUX_AGENT_TRUECOLOR_OPT_OUTS = {
 }
 _TMUX_COLOR_ENV = {**_TMUX_STANDARD_COLOR_ENV, **_TMUX_AGENT_TRUECOLOR_OPT_OUTS}
 _TMUX_CHILD_ENV = {"TERM": _TMUX_TERMINAL_NAME, **_TMUX_COLOR_ENV}
+# Set once per process by :func:`_ensure_clean_tmux_server`.
+_TMUX_SERVER_ENVIRONMENT_PREPARED = False
 
 
 class TmuxError(RuntimeError):
@@ -80,6 +86,11 @@ def _run_tmux(
         kwargs["capture_output"] = True
     if text:
         kwargs["text"] = True
+    # A tmux client that ends up starting the server hands it its own
+    # environment, and that snapshot becomes the baseline for every pane
+    # created afterwards. Sanitizing here keeps a gitdirector-started
+    # server clean from birth.
+    kwargs["env"] = sanitized_environ()
     try:
         result = subprocess.run(command, **kwargs)
     except subprocess.CalledProcessError as exc:
@@ -224,8 +235,18 @@ def _detached_session_size_args() -> list[str]:
     return ["-x", str(cols), "-y", str(lines)]
 
 
+def _tmux_child_unset_names() -> tuple[str, ...]:
+    """Every variable stripped from a pane gitdirector spawns a command in.
+
+    Combines the colour-policy opt-out with the launch-context leak
+    policy. Order is stable and duplicates are collapsed so the generated
+    shell fragments stay comparable between runs.
+    """
+    return tuple(dict.fromkeys((*_TMUX_CHILD_ENV_UNSET, *child_unset_names())))
+
+
 def _tmux_child_environment_prefix() -> str:
-    unset_args = " ".join(f"-u {name}" for name in _TMUX_CHILD_ENV_UNSET)
+    unset_args = " ".join(f"-u {shlex.quote(name)}" for name in _tmux_child_unset_names())
     set_args = " ".join(f"{name}={shlex.quote(value)}" for name, value in _TMUX_CHILD_ENV.items())
     return f"{unset_args} {set_args}".strip()
 
@@ -241,8 +262,137 @@ def _tmux_new_session_environment_args() -> list[str]:
     return args
 
 
+def _ensure_clean_tmux_server() -> None:
+    """Start the tmux server from a sanitized environment, once per process.
+
+    Only has an effect when no server is running: tmux snapshots its
+    global environment from whichever client starts it, and that snapshot
+    is inherited by every pane created for the rest of the server's life.
+    Starting it ourselves means the snapshot is clean from birth.
+
+    An already-running server is deliberately left alone -- it may be the
+    user's own, and rewriting its global environment would reach into
+    sessions gitdirector does not manage. :func:`_scrub_session_environment`
+    covers that case at session scope instead.
+    """
+    global _TMUX_SERVER_ENVIRONMENT_PREPARED
+    if _TMUX_SERVER_ENVIRONMENT_PREPARED:
+        return
+    _TMUX_SERVER_ENVIRONMENT_PREPARED = True
+    try:
+        subprocess.run(
+            ["tmux", "start-server"],
+            capture_output=True,
+            env=sanitized_environ(),
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("tmux start-server failed while preparing the server", exc_info=True)
+
+
+def _tmux_global_environment_names() -> tuple[str, ...]:
+    """Variable names currently in the tmux server's global environment."""
+    result = _run_tmux(["show-environment", "-g"], text=True)
+    if result.returncode != 0 or not result.stdout:
+        return ()
+    names: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # tmux prints "-NAME" for variables marked for removal and
+        # "NAME=value" for the rest.
+        name = line[1:] if line.startswith("-") else line.partition("=")[0]
+        if name:
+            names.append(name)
+    return tuple(names)
+
+
+def _scrub_session_environment(session_name: str) -> tuple[str, ...]:
+    """Remove gitdirector's launch context from *session_name*'s environment.
+
+    A pane's environment is the tmux server's global environment merged
+    with its session's, and the global one belongs to whichever process
+    started the server -- often ``gd`` itself, sometimes a tmux the user
+    started hours earlier from an entirely different directory. Session
+    scope overrides global scope, so removing the names here is what
+    actually guarantees the isolation, regardless of how the server came
+    to exist or what it was holding.
+
+    The server's live environment is inspected as well as the static
+    policy list, so prefix rules catch variables gitdirector never saw in
+    its own environment. Returns the names that were removed.
+    """
+    names = session_scrub_names(_tmux_global_environment_names())
+    if not names:
+        return ()
+    target = _session_option_target(session_name)
+    args: list[str] = []
+    for name in names:
+        if args:
+            args.append(";")
+        args.extend(["set-environment", "-r", "-t", target, name])
+    result = _run_tmux(args)
+    if isinstance(result.returncode, int) and result.returncode != 0:
+        raise TmuxError(
+            "tmux set-environment failed while isolating the session environment",
+            args_list=["tmux", *args],
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
+    return names
+
+
+def _respawn_session_shell(session_name: str) -> None:
+    """Restart the session's first shell so it picks up the scrubbed environment.
+
+    ``new-session`` spawns its shell before gitdirector has a chance to
+    remove anything, so that first shell still holds whatever leaked.
+    Respawning with no command reuses tmux's ``default-command`` /
+    ``default-shell`` and the pane's original start directory, so the
+    result is indistinguishable from a freshly created shell -- minus the
+    leak. Nothing has been typed into the pane at this point, so the
+    restart is invisible.
+    """
+    result = _run_tmux(["respawn-pane", "-k", "-t", _active_pane_target(session_name)])
+    if isinstance(result.returncode, int) and result.returncode != 0:
+        raise TmuxError(
+            "tmux respawn-pane failed while isolating the session environment",
+            args_list=["tmux", "respawn-pane", "-k", "-t", _active_pane_target(session_name)],
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
+
+
+def _session_pane_path(session_name: str) -> str | None:
+    """Return the working directory of *session_name*'s active pane."""
+    result = _run_tmux(
+        [
+            "display-message",
+            "-p",
+            "-t",
+            _active_pane_target(session_name),
+            "#{pane_current_path}",
+        ],
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout.strip() or None
+
+
+def _same_directory(left: str | Path, right: str | Path) -> bool:
+    try:
+        return os.path.realpath(str(left)) == os.path.realpath(str(right))
+    except OSError:
+        return False
+
+
 def _tmux_color_environment_config(quoted_session: str) -> list[str]:
-    lines = [f"set-environment -r -t {quoted_session} {name}" for name in _TMUX_CHILD_ENV_UNSET]
+    lines = [
+        f"set-environment -r -t {quoted_session} {shlex.quote(name)}"
+        for name in _tmux_child_unset_names()
+    ]
     lines.extend(
         f"set-environment -t {quoted_session} {name} {shlex.quote(value)}"
         for name, value in _TMUX_COLOR_ENV.items()
@@ -351,11 +501,26 @@ def create_tmux_session(
 ) -> str:
     """Create a new detached tmux session with a unique name and return it.
 
+    The session is isolated from gitdirector's own launch context: its
+    working directory is *path* and nothing else, and the variables
+    describing where and how ``gd`` was started are removed before the
+    session's shell is allowed to run. See :mod:`.session_env`.
+
     The optional *description* is stored in the session's
     ``@gitdirector_description`` tmux option so it can be displayed in
     the TUI Sessions tab. A value of ``None`` or ``""`` leaves the option
     unset (the next read returns the default ``"-"`` placeholder).
+
+    Raises :class:`TmuxError` when *path* is not a directory. tmux itself
+    would not: ``new-session -c`` on a missing directory exits 0 and
+    silently starts the session in ``$HOME``, so a repository that has
+    been moved or deleted would otherwise hand an agent the user's home
+    directory while still labelling the session with the repo's name.
     """
+    if not path.is_dir():
+        raise TmuxError(f"repository path is not a directory: {path}")
+
+    _ensure_clean_tmux_server()
     sessions = _list_sessions()
     environment_args = _tmux_new_session_environment_args()
     max_attempts = 5
@@ -393,6 +558,18 @@ def create_tmux_session(
         )
     try:
         _protect_session(session_name)
+        # Order matters: scrub first so the removals are in place, then
+        # respawn the shell that new-session already started with the
+        # unscrubbed environment.
+        _scrub_session_environment(session_name)
+        _respawn_session_shell(session_name)
+
+        pane_path = _session_pane_path(session_name)
+        if pane_path is not None and not _same_directory(pane_path, path):
+            raise TmuxError(
+                f"tmux session started in {pane_path} instead of the repository path {path}"
+            )
+
         if repo_label is not None and repo_label.strip():
             _set_session_repo_label(session_name, repo_label)
         if description is not None and description.strip():

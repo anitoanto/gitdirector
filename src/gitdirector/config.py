@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -10,6 +11,8 @@ from .storage import (
     normalize_repository_path,
     write_yaml_atomic,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -34,8 +37,36 @@ class Config:
         self._snapshot_theme = self.DEFAULT_THEME
         self._snapshot_github_username: str | None = None
         self._snapshot_github_PAT: str | None = None
+        self._config_state_snapshot: dict[str, list[bool | int | None]] = self._cache_token()
         self._ensure_config_dir()
         self._load()
+
+    @staticmethod
+    def _path_state(path: Path) -> list[bool | int | None]:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return [False, None, None]
+        return [True, stat.st_mtime_ns, stat.st_size]
+
+    def _cache_token(self) -> dict[str, list[bool | int | None]]:
+        return {
+            "config": self._path_state(self.config_file),
+            "secrets": self._path_state(self.secrets_file),
+        }
+
+    def repository_cache_token(self) -> dict[str, list[bool | int | None]]:
+        return {key: value.copy() for key, value in self._cache_token().items()}
+
+    def _refresh_config_state_snapshot(self) -> None:
+        self._config_state_snapshot = self._cache_token()
+
+    def _invalidate_repository_cache(self) -> None:
+        cache_file = self.config_dir / "cache" / "repos.yaml"
+        try:
+            cache_file.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to remove repository cache", exc_info=True)
 
     def _ensure_config_dir(self) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -193,9 +224,20 @@ class Config:
         elif self.secrets_file.exists():
             self.secrets_file.unlink()
         self._load_data(main_data, secrets_data)
+        self._refresh_config_state_snapshot()
+        self._invalidate_repository_cache()
 
     def _load(self) -> None:
         self._load_data(self._read_main_unlocked(), self._read_secrets_unlocked())
+
+        self._refresh_config_state_snapshot()
+
+    def reload_if_changed(self) -> bool:
+        if self._cache_token() == self._config_state_snapshot:
+            return False
+        self._load()
+        self._invalidate_repository_cache()
+        return True
 
     def save(self) -> None:
         repositories = list(self.repositories)

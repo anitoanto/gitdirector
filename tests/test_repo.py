@@ -239,7 +239,7 @@ class TestRunGit:
 
         Repository.kill_running_git_commands()
 
-        worker.join(timeout=30)
+        worker.join(timeout=5)
         assert not worker.is_alive()
         assert result["value"] == (1, "", "git command cancelled")
         killpg.assert_called_once()

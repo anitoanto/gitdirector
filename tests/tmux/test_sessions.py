@@ -40,6 +40,32 @@ _TMUX_ENV_ARGS = [
 ]
 
 
+def _fake_tmux_run(repo_path, *, new_session=None):
+    """A ``subprocess.run`` stand-in that behaves like a real tmux server.
+
+    ``create_tmux_session`` reads the server's environment (to know what
+    to scrub) and reads the new pane's working directory back (to prove
+    the session landed in the repository), so a blanket
+    ``MagicMock(returncode=0)`` is no longer a faithful stand-in: the
+    pane path would come back as a mock and fail verification.
+
+    *new_session* optionally overrides the result of ``new-session``
+    calls, for collision-retry tests.
+    """
+
+    def run(args, **_kwargs):
+        argv = list(args)
+        if new_session is not None and argv[:3] == ["tmux", "new-session", "-d"]:
+            return new_session(argv)
+        if "show-environment" in argv:
+            return MagicMock(returncode=0, stdout="")
+        if "display-message" in argv:
+            return MagicMock(returncode=0, stdout=f"{repo_path}\n")
+        return MagicMock(returncode=0)
+
+    return run
+
+
 class TestMakeSessionName:
     @patch(
         "gitdirector.integrations.tmux.core._list_sessions",
@@ -212,6 +238,7 @@ class TestSessionExists:
         mock_run.assert_called_once_with(
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
             capture_output=True,
+            env=ANY,
         )
 
     @patch("gitdirector.integrations.tmux.subprocess.run")
@@ -332,15 +359,15 @@ class TestCreateTmuxSession:
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_creates_and_returns_name(self, mock_run, _mock_list, mock_sync):
-        mock_run.return_value = MagicMock(returncode=0)
-        path = Path("/tmp/my-repo")
+    def test_creates_and_returns_name(self, mock_run, _mock_list, mock_sync, tmp_path):
+        path = tmp_path / "my-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
         session_name = f"gd/{_repo_session_name_segment(path)}/shell/1"
 
         name = create_tmux_session("my-repo", path)
 
         assert name == session_name
-        assert mock_run.call_count == 2
         mock_run.assert_any_call(
             [
                 "tmux",
@@ -354,16 +381,65 @@ class TestCreateTmuxSession:
                 "-y",
                 ANY,
                 "-c",
-                "/tmp/my-repo",
+                str(path),
             ],
             capture_output=True,
             text=True,
+            env=ANY,
         )
         mock_run.assert_any_call(
             ["tmux", "set-option", "-t", f"={session_name}:", "destroy-unattached", "off"],
             capture_output=True,
+            env=ANY,
         )
         mock_sync.assert_called_once_with()
+
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_scrubs_launch_context_and_restarts_the_shell(
+        self, mock_run, _mock_list, _mock_sync, tmp_path
+    ):
+        """The session must not inherit gitdirector's own environment.
+
+        tmux hands a pane the server's global environment, so the leak has
+        to be removed at session scope and the shell that ``new-session``
+        already started has to be replaced.
+        """
+        path = tmp_path / "iso-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
+
+        session_name = create_tmux_session("iso-repo", path)
+
+        argv_calls = [list(call.args[0]) for call in mock_run.call_args_list]
+        scrub = next(argv for argv in argv_calls if "set-environment" in argv)
+        for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "VIRTUAL_ENV", "PWD"):
+            assert name in scrub, f"{name} was not scrubbed from the session"
+        assert "-r" in scrub
+
+        assert ["tmux", "respawn-pane", "-k", "-t", f"={session_name}:"] in argv_calls
+
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.core.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.subprocess.run")
+    def test_rejects_a_session_that_did_not_land_in_the_repository(
+        self, mock_run, mock_kill, _mock_list, _mock_sync, tmp_path
+    ):
+        """tmux falls back to ``$HOME`` silently; that must not pass."""
+        path = tmp_path / "real-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(tmp_path / "somewhere-else")
+
+        with pytest.raises(TmuxError, match="instead of the repository path"):
+            create_tmux_session("real-repo", path)
+
+        mock_kill.assert_called_once()
+
+    def test_rejects_a_missing_repository_path(self, tmp_path):
+        with pytest.raises(TmuxError, match="not a directory"):
+            create_tmux_session("gone", tmp_path / "does-not-exist")
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch(
@@ -372,8 +448,10 @@ class TestCreateTmuxSession:
     )
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_raises_when_tmux_new_session_fails_without_collision(
-        self, mock_run, _mock_list, mock_sync
+        self, mock_run, _mock_list, mock_sync, tmp_path
     ):
+        repo = tmp_path / "r"
+        repo.mkdir()
         mock_run.return_value = subprocess.CompletedProcess(
             ["tmux", "new-session"],
             returncode=1,
@@ -381,7 +459,7 @@ class TestCreateTmuxSession:
         )
 
         with pytest.raises(TmuxError):
-            create_tmux_session("r", Path("/tmp/r"))
+            create_tmux_session("r", repo)
 
         mock_sync.assert_not_called()
 
@@ -389,21 +467,20 @@ class TestCreateTmuxSession:
     @patch("gitdirector.integrations.tmux.core._list_sessions")
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_retries_on_tmux_name_collision_with_fresh_session_list(
-        self, mock_run, mock_list, mock_sync
+        self, mock_run, mock_list, mock_sync, tmp_path
     ):
-        path = Path("/tmp/r")
+        path = tmp_path / "r"
+        path.mkdir()
         repo_slug = _repo_session_name_segment(path)
         first_name = f"gd/{repo_slug}/shell/1"
         second_name = f"gd/{repo_slug}/shell/2"
         mock_list.side_effect = [[], [first_name]]
 
-        def fake_run(args, **_kwargs):
-            if args[:3] == ["tmux", "new-session", "-d"]:
-                session_name = args[args.index("-s") + 1]
-                return MagicMock(returncode=1 if session_name == first_name else 0)
-            return MagicMock(returncode=0)
+        def new_session(argv):
+            session_name = argv[argv.index("-s") + 1]
+            return MagicMock(returncode=1 if session_name == first_name else 0)
 
-        mock_run.side_effect = fake_run
+        mock_run.side_effect = _fake_tmux_run(path, new_session=new_session)
 
         name = create_tmux_session("r", path)
 
@@ -419,37 +496,46 @@ class TestCreateTmuxSession:
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_creates_with_purpose(self, mock_run, _mock_list, mock_sync):
-        mock_run.return_value = MagicMock(returncode=0)
-        path = Path("/tmp/my-repo")
+    def test_creates_with_purpose(self, mock_run, _mock_list, mock_sync, tmp_path):
+        path = tmp_path / "my-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
         session_name = f"gd/{_repo_session_name_segment(path)}/claude/1"
 
         name = create_tmux_session("my-repo", path, purpose="claude")
 
         assert name == session_name
-        assert mock_run.call_args_list[0].args[0] == [
-            "tmux",
-            "new-session",
-            "-d",
-            *_TMUX_ENV_ARGS,
-            "-s",
-            session_name,
-            "-x",
-            ANY,
-            "-y",
-            ANY,
-            "-c",
-            "/tmp/my-repo",
-        ]
+        mock_run.assert_any_call(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                *_TMUX_ENV_ARGS,
+                "-s",
+                session_name,
+                "-x",
+                ANY,
+                "-y",
+                ANY,
+                "-c",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            env=ANY,
+        )
         mock_sync.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._set_session_repo_label")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_creates_with_repo_label(self, mock_run, _mock_list, mock_set_label, _mock_sync):
-        mock_run.return_value = MagicMock(returncode=0)
-        path = Path("/tmp/work")
+    def test_creates_with_repo_label(
+        self, mock_run, _mock_list, mock_set_label, _mock_sync, tmp_path
+    ):
+        path = tmp_path / "work"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
         session_name = f"gd/{_repo_session_name_segment(path)}/shell/1"
 
         name = create_tmux_session("work", path, repo_label="group_work")
@@ -461,9 +547,12 @@ class TestCreateTmuxSession:
     @patch("gitdirector.integrations.tmux.core._set_session_description")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_creates_with_description(self, mock_run, _mock_list, mock_set_desc, _mock_sync):
-        mock_run.return_value = MagicMock(returncode=0)
-        path = Path("/tmp/my-repo")
+    def test_creates_with_description(
+        self, mock_run, _mock_list, mock_set_desc, _mock_sync, tmp_path
+    ):
+        path = tmp_path / "my-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
         session_name = f"gd/{_repo_session_name_segment(path)}/shell/1"
 
         name = create_tmux_session("my-repo", path, description="ready to ship")
@@ -476,10 +565,11 @@ class TestCreateTmuxSession:
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("gitdirector.integrations.tmux.subprocess.run")
     def test_creates_without_description_does_not_set_option(
-        self, mock_run, _mock_list, mock_set_desc, _mock_sync
+        self, mock_run, _mock_list, mock_set_desc, _mock_sync, tmp_path
     ):
-        mock_run.return_value = MagicMock(returncode=0)
-        path = Path("/tmp/my-repo")
+        path = tmp_path / "my-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
         session_name = f"gd/{_repo_session_name_segment(path)}/shell/1"
 
         name = create_tmux_session("my-repo", path)
@@ -559,7 +649,15 @@ class TestEnsureTempPanelTmuxSession:
         session_name = ensure_temp_panel_tmux_session("gd/my-repo/shell/1", "rose-pine")
 
         assert session_name == "gd/temp/panel/my-repo/shell/1"
-        assert mock_run.call_args_list[0].args[0] == [
+        # Located by name rather than by index: gitdirector may prepare the
+        # tmux server before creating a session, and whether that call has
+        # already happened depends on what else ran in this process.
+        new_session_command = next(
+            command
+            for command in (call.args[0] for call in mock_run.call_args_list)
+            if command[1] == "new-session"
+        )
+        assert new_session_command == [
             "tmux",
             "new-session",
             "-d",
@@ -741,7 +839,7 @@ class TestKillPanelTmuxSession:
         assert mock_run.call_args_list[0].args == (
             ["tmux", "kill-session", "-t", "=gd/panel/main"],
         )
-        assert mock_run.call_args_list[0].kwargs == {"capture_output": True}
+        assert mock_run.call_args_list[0].kwargs == {"capture_output": True, "env": ANY}
 
 
 class TestAttachTmuxSession:
@@ -805,7 +903,9 @@ class TestAttachTmuxSession:
     def test_non_gd_session_skips_theme_sync(self, mock_run, mock_sync, mock_ensure):
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("plain-session")
-        mock_run.assert_called_once_with(["tmux", "attach-session", "-t", "=plain-session"])
+        mock_run.assert_called_once_with(
+            ["tmux", "attach-session", "-t", "=plain-session"], env=ANY
+        )
         mock_sync.assert_not_called()
         mock_ensure.assert_not_called()
 
