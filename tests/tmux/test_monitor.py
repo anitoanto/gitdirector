@@ -1,29 +1,41 @@
 """Monitoring and pane-status tests for tmux integration."""
 
 import shlex
+import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 from gitdirector.integrations.tmux import (
-    _AGENT_PURPOSES,
-    _BELL_GRACE_SECS,
-    _CONTROL_MODE_STOP_WAIT_SECS,
-    _SHELL_COMMANDS,
-    _SILENCE_THRESHOLD_SECS,
     TmuxMonitor,
-    _capture_pane_text,
-    _ControlModeReader,
-    _get_process_snapshot,
-    _hash_content,
-    _make_agent_ready_marker,
-    _normalize_process_command,
-    _resolve_pane_command,
-    get_all_session_statuses,
     launch_command_in_tmux_session,
     resolve_pane_status,
 )
-from gitdirector.integrations.tmux.core import _tmux_child_environment_command
+from gitdirector.integrations.tmux.core import TmuxError, _tmux_child_environment_command
+from gitdirector.integrations.tmux.monitor import (
+    _AGENT_REPORT_STALE_SECS,
+    _BELL_GRACE_SECS,
+    _CONTROL_MODE_STOP_WAIT_SECS,
+    _SHELL_ACTIVITY_GRACE_SECS,
+    _SHELL_COMMANDS,
+    _SILENCE_THRESHOLD_SECS,
+    PaneSample,
+    ProcessSnapshot,
+    _capture_pane_text,
+    _ControlModeReader,
+    _get_process_snapshot,
+    _is_cursor_blink,
+    _list_gd_panes,
+    _make_agent_ready_marker,
+    _normalize_process_command,
+    _parse_cpu_seconds,
+    _resolve_pane_command,
+    _tree_cpu_seconds,
+    _tty_is_raw,
+)
 
 from ._shared import REAL_TMUX_MONITOR_START, REAL_TMUX_MONITOR_STOP
 
@@ -33,20 +45,16 @@ class TestLaunchCommandInTmuxSession:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_queues_cleanup_script(self, mock_run, _mock_marker):
         ready_marker = launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         cleanup_script = (
             "clear; "
             "touch /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "sh -lc copilot; status=$?; "
-            'if [ "$status" -eq 0 ]; then touch /tmp/gitdirector-agent.ready.done >/dev/null 2>&1 || true; '
-            "else printf '%s\\n' \"$status\" > /tmp/gitdirector-agent.ready.failed 2>/dev/null || true; "
-            "touch /tmp/gitdirector-agent.ready.done >/dev/null 2>&1 || true; fi; "
             f"tmux detach-client -s {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
-            "rm -f /tmp/gitdirector-agent.ready /tmp/gitdirector-agent.ready.done "
-            "/tmp/gitdirector-agent.ready.failed >/dev/null 2>&1 || true; "
+            "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "exit $status"
         )
         expected_command = _tmux_child_environment_command(f"sh -lc {shlex.quote(cleanup_script)}")
@@ -74,7 +82,7 @@ class TestLaunchCommandInTmuxSession:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_preserves_command_with_quotes_verbatim(self, mock_run, _mock_marker):
         """The user-supplied command is embedded as-is, not shell-normalized.
 
@@ -129,7 +137,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_double_quoted_argument(self, mock_run, _mock_marker):
         cmd = 'echo "hello world"'
         launch_command_in_tmux_session("gd/my-repo/echo/1", cmd)
@@ -139,7 +147,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_single_quoted_argument(self, mock_run, _mock_marker):
         """Single quotes inside the command must survive shlex.quote round-trip.
 
@@ -155,7 +163,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_backslashes(self, mock_run, _mock_marker):
         """Backslashes are preserved verbatim in the inner script.
 
@@ -171,7 +179,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_mixed_quotes_and_backslashes(self, mock_run, _mock_marker):
         cmd = '''python -c "print('a\\\\\\\\b')"'''
         launch_command_in_tmux_session("gd/my-repo/echo/1", cmd)
@@ -181,7 +189,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_shell_metacharacters(self, mock_run, _mock_marker):
         """``;``, ``&&``, ``|``, ``>`` are part of the user command and must
         be embedded verbatim — the inner shell interprets them.
@@ -201,7 +209,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_command_substitution(self, mock_run, _mock_marker):
         """``$(...)`` and backticks are preserved — the inner shell expands them."""
         for cmd in [
@@ -217,7 +225,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_command_with_newlines(self, mock_run, _mock_marker):
         """Newlines in the command are preserved as-is and will be treated by
         the inner shell as command separators (since the script is parsed
@@ -232,7 +240,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_exit_command_cannot_skip_outer_cleanup(self, mock_run, _mock_marker):
         cmd = "exit 7"
         launch_command_in_tmux_session("gd/my-repo/cmd/1", cmd)
@@ -245,7 +253,7 @@ class TestCommandQuotingInCleanupScript:
         "gitdirector.integrations.tmux.monitor._make_agent_ready_marker",
         return_value=Path("/tmp/gitdirector-agent.ready"),
     )
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_session_name_does_not_break_quoted_purpose(self, mock_run, _mock_marker):
         """The session name's ``purpose`` segment can contain spaces and
         quotes — the cleanup script must still quote the *session name*,
@@ -296,329 +304,354 @@ class TestNormalizeProcessCommand:
         assert _normalize_process_command("/usr/local/bin/claude --model sonnet") == "claude"
 
 
+class TestParseCpuSeconds:
+    def test_macos_centiseconds(self):
+        assert _parse_cpu_seconds("1:02.50") == 62.5
+
+    def test_linux_hours(self):
+        assert _parse_cpu_seconds("01:02:03") == 3723.0
+
+    def test_days_prefix(self):
+        assert _parse_cpu_seconds("1-00:00:01") == 86401.0
+
+    def test_garbage_is_zero(self):
+        assert _parse_cpu_seconds("n/a") == 0.0
+        assert _parse_cpu_seconds("x-00:01") == 0.0
+
+
+def _snapshot(children=None, commands=None, pgid=None, tpgid=None, cpu=None) -> ProcessSnapshot:
+    return ProcessSnapshot(children or {}, commands or {}, pgid or {}, tpgid or {}, cpu or {})
+
+
 class TestGetProcessSnapshot:
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_failure_returns_empty_mappings(self, mock_run):
+    @patch("subprocess.run")
+    def test_failure_returns_empty_snapshot(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="")
 
-        assert _get_process_snapshot() == ({}, {}, {}, {})
+        assert _get_process_snapshot() == ProcessSnapshot.empty()
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_skips_malformed_rows(self, mock_run):
+    @patch("subprocess.run", side_effect=OSError("no ps"))
+    def test_missing_ps_returns_empty_snapshot(self, _mock_run):
+        assert _get_process_snapshot() == ProcessSnapshot.empty()
+
+    @patch("subprocess.run")
+    def test_parses_rows_and_skips_malformed_ones(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="malformed row\n101 1 101 101 -zsh\n",
+            stdout="malformed row\n101 1 101 101 0:01.50 -zsh\n102 101 102 101 00:00:03 node app.js\n",
         )
 
-        children_by_parent, commands_by_pid, pgid_by_pid, tpgid_by_pid = _get_process_snapshot()
+        snapshot = _get_process_snapshot()
 
-        assert children_by_parent == {1: [101]}
-        assert commands_by_pid == {101: "-zsh"}
-        assert pgid_by_pid == {101: 101}
-        assert tpgid_by_pid == {101: 101}
+        assert snapshot.children_by_parent == {1: [101], 101: [102]}
+        assert snapshot.commands_by_pid == {101: "-zsh", 102: "node"}
+        assert snapshot.pgid_by_pid == {101: 101, 102: 102}
+        assert snapshot.tpgid_by_pid == {101: 101, 102: 101}
+        assert snapshot.cpu_seconds_by_pid == {101: 1.5, 102: 3.0}
 
 
 class TestResolvePaneCommand:
     def test_no_descendants_uses_fallback(self):
-        assert _resolve_pane_command(1, "shell", "bash", {}, {}, {}, {}) == "bash"
+        assert _resolve_pane_command(1, "bash", _snapshot()) == "bash"
 
     def test_cycle_skips_seen_pids(self):
-        assert (
-            _resolve_pane_command(
-                1,
-                "shell",
-                "bash",
-                {1: [2], 2: [1]},
-                {2: "python"},
-                {},
-                {},
-            )
-            == "python"
-        )
+        snapshot = _snapshot(children={1: [2], 2: [1]}, commands={2: "python"})
+        assert _resolve_pane_command(1, "bash", snapshot) == "python"
 
     def test_only_shell_descendants_pick_deepest_shell(self):
-        assert (
-            _resolve_pane_command(
-                1,
-                "shell",
-                "bash",
-                {1: [2], 2: [3]},
-                {2: "-zsh", 3: "sh"},
-                {},
-                {},
-            )
-            == "sh"
-        )
+        snapshot = _snapshot(children={1: [2], 2: [3]}, commands={2: "-zsh", 3: "sh"})
+        assert _resolve_pane_command(1, "bash", snapshot) == "sh"
 
     def test_prefers_foreground_process_group(self):
-        assert (
-            _resolve_pane_command(
-                1,
-                "shell",
-                "bash",
-                {1: [2, 3]},
-                {2: "git", 3: "python"},
-                {2: 200, 3: 300},
-                {1: 300},
-            )
-            == "python"
+        snapshot = _snapshot(
+            children={1: [2, 3]},
+            commands={2: "git", 3: "python"},
+            pgid={2: 200, 3: 300},
+            tpgid={1: 300},
         )
+        assert _resolve_pane_command(1, "bash", snapshot) == "python"
+
+    def test_picks_shallowest_foreground_process_not_its_helpers(self):
+        """The launched program wins over the children it spawns.
+
+        No agent names are involved: whatever sits at the top of the
+        foreground job is the program the user started.
+        """
+        snapshot = _snapshot(
+            children={70539: [70619], 70619: [70624], 70624: [70625]},
+            commands={70619: "sh", 70624: "some-agent", 70625: "git"},
+            pgid={70619: 70619, 70624: 70619, 70625: 70619},
+            tpgid={70539: 70619},
+        )
+        assert _resolve_pane_command(70539, "bash", snapshot) == "some-agent"
 
     def test_falls_back_to_deepest_non_shell_without_foreground_match(self):
-        assert (
-            _resolve_pane_command(
-                1,
-                "shell",
-                "bash",
-                {1: [2, 3], 2: [4]},
-                {2: "git", 3: "python", 4: "rg"},
-                {2: 200, 3: 300, 4: 400},
-                {1: 999},
+        snapshot = _snapshot(
+            children={1: [2, 3], 2: [4]},
+            commands={2: "git", 3: "python", 4: "rg"},
+            pgid={2: 200, 3: 300, 4: 400},
+            tpgid={1: 999},
+        )
+        assert _resolve_pane_command(1, "bash", snapshot) == "rg"
+
+
+class TestTreeCpuSeconds:
+    def test_sums_pane_and_descendants(self):
+        snapshot = _snapshot(
+            children={1: [2], 2: [3]},
+            commands={2: "node", 3: "git"},
+            cpu={1: 0.5, 2: 2.0, 3: 0.25, 99: 100.0},
+        )
+        assert _tree_cpu_seconds(1, snapshot) == 2.75
+
+
+class TestTtyIsRaw:
+    def test_empty_tty_is_unknown(self):
+        assert _tty_is_raw("") is None
+
+    def test_missing_tty_is_unknown(self):
+        assert _tty_is_raw("/dev/gitdirector-no-such-tty") is None
+
+    @patch("gitdirector.integrations.tmux.monitor.termios.tcgetattr")
+    @patch("gitdirector.integrations.tmux.monitor.os.close")
+    @patch("gitdirector.integrations.tmux.monitor.os.open", return_value=7)
+    def test_canonical_mode_is_not_raw(self, _mock_open, mock_close, mock_tcgetattr):
+        import termios
+
+        mock_tcgetattr.return_value = [0, 0, 0, termios.ICANON | termios.ECHO, 0, 0, []]
+        assert _tty_is_raw("/dev/ttys001") is False
+        mock_close.assert_called_once_with(7)
+
+    @patch("gitdirector.integrations.tmux.monitor.termios.tcgetattr")
+    @patch("gitdirector.integrations.tmux.monitor.os.close")
+    @patch("gitdirector.integrations.tmux.monitor.os.open", return_value=7)
+    def test_raw_mode_is_raw(self, _mock_open, mock_close, mock_tcgetattr):
+        mock_tcgetattr.return_value = [0, 0, 0, 0, 0, 0, []]
+        assert _tty_is_raw("/dev/ttys001") is True
+        mock_close.assert_called_once_with(7)
+
+
+def _pane_line(
+    session,
+    command="bash",
+    dead="0",
+    pid="101",
+    bell="0",
+    active="1",
+    tty="/dev/ttys001",
+    activity="1700000000",
+    mouse="0",
+    alt="0",
+    agent="",
+    interrupts="",
+    label="",
+    description="",
+) -> str:
+    return "\t".join(
+        [
+            session,
+            command,
+            dead,
+            pid,
+            bell,
+            active,
+            tty,
+            activity,
+            mouse,
+            alt,
+            agent,
+            interrupts,
+            label,
+            description,
+        ]
+    )
+
+
+class TestListGdPanes:
+    @patch("subprocess.run")
+    def test_failure_returns_none(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="oops")
+        assert _list_gd_panes() is None
+
+    @patch("subprocess.run")
+    def test_timeout_returns_none(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(["tmux"], 1)
+        assert _list_gd_panes() is None
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "no server running on /tmp/tmux-501/default\n",
+            "error connecting to /tmp/tmux-501/default (No such file or directory)\n",
+            "error connecting to /tmp/tmux-501/default (Connection refused)\n",
+            "lost server\n",
+        ],
+    )
+    @patch("subprocess.run")
+    def test_no_server_means_no_sessions(self, mock_run, stderr):
+        """tmux exits with its last session; that is an answer, not a failure."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=stderr)
+        assert _list_gd_panes() == {}
+
+    @patch("subprocess.run")
+    def test_parses_active_gd_panes_only(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    _pane_line("gd/alpha/shell/1", command="zsh"),
+                    _pane_line("gd/beta/claude/1", command="node", pid="201", bell="1", mouse="1"),
+                    _pane_line("gd/beta/claude/1", command="cat", pid="202", active="0"),
+                    _pane_line("gd/panel/main", command="cat"),
+                    _pane_line("gd/temp/panel/alpha/shell/1", command="cat"),
+                    _pane_line("other-session", command="bash"),
+                    "malformed",
+                ]
             )
-            == "rg"
+            + "\n",
         )
 
+        panes = _list_gd_panes()
 
-class TestGetAllSessionStatuses:
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_empty_when_no_gd_panes_exist(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="other-session|bash|0|301|0\n")
+        assert set(panes) == {"gd/alpha/shell/1", "gd/beta/claude/1"}
+        assert panes["gd/alpha/shell/1"] == PaneSample(
+            "gd/alpha/shell/1",
+            "zsh",
+            False,
+            101,
+            False,
+            "/dev/ttys001",
+            1700000000,
+            False,
+            "",
+            False,
+            "",
+            "",
+        )
+        beta = panes["gd/beta/claude/1"]
+        assert beta.command == "node"
+        assert beta.pane_pid == 201
+        assert beta.bell is True
+        assert beta.interactive_hint is True
 
-        assert get_all_session_statuses() == {}
+    @patch("subprocess.run")
+    def test_dead_pane_and_bad_pid(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_pane_line("gd/alpha/shell/1", dead="1", pid="?", activity="x") + "\n",
+        )
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_parses_output(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout=(
-                    "gd/alpha/shell/1|zsh|0|101|0\n"
-                    "gd/beta/claude/1|bash|0|201|1\n"
-                    "other-session|bash|0|301|0\n"
-                ),
-            ),
-            MagicMock(
-                returncode=0,
-                stdout=(
-                    "201 1 201 202 -zsh\n202 201 202 202 sh -lc claude\n203 202 202 202 claude\n"
-                ),
-            ),
-        ]
-        result = get_all_session_statuses()
-        assert result == {
-            "gd/alpha/shell/1": {
-                "command": "zsh",
-                "dead": False,
-                "bell": False,
-            },
-            "gd/beta/claude/1": {
-                "command": "claude",
-                "dead": False,
-                "bell": True,
-            },
-        }
+        pane = _list_gd_panes()["gd/alpha/shell/1"]
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_skips_panel_and_temp_wrapper_sessions(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout=(
-                    "gd/panel/main|cat|0|101|0\n"
-                    "gd/temp/panel/repo/shell/1|zsh|0|201|0\n"
-                    "gd/repo/shell/1|zsh|0|301|0\n"
-                ),
-            ),
-        ]
+        assert pane.dead is True
+        assert pane.pane_pid == 0
+        assert pane.activity == 0
 
-        assert get_all_session_statuses() == {
-            "gd/repo/shell/1": {
-                "command": "zsh",
-                "dead": False,
-                "bell": False,
-            }
-        }
+    @patch("subprocess.run")
+    def test_parses_agent_reported_state(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=_pane_line("gd/alpha/claude/1", agent="waiting") + "\n"
+        )
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_empty_on_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
-        assert get_all_session_statuses() == {}
+        assert _list_gd_panes()["gd/alpha/claude/1"].agent_state == "waiting"
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_dead_pane(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout="gd/repo/shell/1|zsh|1|101|0\n",
-            ),
-        ]
-        result = get_all_session_statuses()
-        assert result["gd/repo/shell/1"]["dead"] is True
+    @patch("subprocess.run")
+    def test_parses_agent_interrupt_flag(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_pane_line("gd/a/claude/1", agent="running", interrupts="unreported")
+            + "\n"
+            + _pane_line("gd/b/opencode/1", agent="running")
+            + "\n",
+        )
+        panes = _list_gd_panes()
+        assert panes["gd/a/claude/1"].agent_interrupts_unreported is True
+        assert panes["gd/b/opencode/1"].agent_interrupts_unreported is False
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_skips_malformed_lines(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout="gd/repo/bad\ngd/repo/shell/1|zsh|0|101|0\n",
-            ),
-        ]
-        result = get_all_session_statuses()
-        assert len(result) == 1
-        assert "gd/repo/shell/1" in result
+    @patch("subprocess.run")
+    def test_tolerates_older_tmux_without_trailing_fields(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="gd/alpha/shell/1\tzsh\t0\t101\t0\t1\n"
+        )
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_invalid_pid_defaults_to_zero(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout="gd/repo/shell/1|zsh|0|badnum|0\n",
-            ),
-        ]
-        result = get_all_session_statuses()
-        assert "gd/repo/shell/1" in result
+        pane = _list_gd_panes()["gd/alpha/shell/1"]
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
-    def test_prefers_agent_command_over_helper_descendant(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout="gd/repo/copilot/1|bash|0|70539|0\n",
-            ),
-            MagicMock(
-                returncode=0,
-                stdout=(
-                    "70539 1 70539 70619 -zsh\n"
-                    "70619 70539 70619 70619 sh -lc copilot\n"
-                    "70624 70619 70619 70619 copilot\n"
-                    "70625 70624 70619 70619 git status\n"
-                ),
-            ),
-        ]
+        assert pane.tty == ""
+        assert pane.activity == 0
+        assert pane.interactive_hint is False
 
-        result = get_all_session_statuses()
 
-        assert result["gd/repo/copilot/1"]["command"] == "copilot"
+class TestCursorBlinkFilter:
+    def test_single_cell_flip_back_is_noise(self):
+        assert _is_cursor_blink("> hello\u258c", "> hello", "> hello") is True
+
+    def test_flip_back_with_many_cells_is_real(self):
+        assert _is_cursor_blink("line one", "completely new", "completely new") is False
+
+    def test_change_that_does_not_restore_previous_frame_is_real(self):
+        # A spinner touches one cell too, but cycles through many frames.
+        assert _is_cursor_blink("spin \u280b", "spin \u2819", "spin \u2839") is False
+
+    def test_needs_history(self):
+        assert _is_cursor_blink("a", "b", None) is False
 
 
 class TestResolvePaneStatus:
-    def test_dead_returns_idle(self):
-        assert resolve_pane_status("shell", "zsh", dead=True) == "idle"
-
-    def test_shell_with_shell_purpose_returns_idle(self):
-        assert resolve_pane_status("shell", "zsh", dead=False) == "idle"
-
-    def test_shell_with_agent_purpose_returns_idle(self):
-        assert resolve_pane_status("claude", "zsh", dead=False) == "idle"
-
-    def test_agent_running_returns_running(self):
-        assert resolve_pane_status("claude", "claude", dead=False) == "running"
-
-    def test_login_shell_detected(self):
-        assert resolve_pane_status("shell", "-zsh", dead=False) == "idle"
-
-    def test_login_shell_with_agent_purpose(self):
-        assert resolve_pane_status("opencode", "-bash", dead=False) == "idle"
-
-    def test_non_shell_command_returns_running(self):
-        assert resolve_pane_status("shell", "python", dead=False) == "running"
-
-    def test_all_known_shells(self):
-        for shell in _SHELL_COMMANDS:
-            assert resolve_pane_status("shell", shell, dead=False) == "idle"
-
-    def test_bell_returns_waiting(self):
-        assert resolve_pane_status("shell", "zsh", dead=False, bell=True) == "waiting"
-
-    def test_bell_overrides_idle(self):
-        assert resolve_pane_status("shell", "zsh", dead=True, bell=True) == "waiting"
-
-    def test_bell_overrides_running(self):
-        assert resolve_pane_status("claude", "claude", dead=False, bell=True) == "waiting"
-
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_agent_silent_returns_idle(self, mock_time):
-        mock_time.time.return_value = 1700000020.0
-        old_output = 1700000020.0 - _SILENCE_THRESHOLD_SECS
-        assert (
-            resolve_pane_status("opencode", "opencode", dead=False, last_output_time=old_output)
-            == "idle"
-        )
-
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_agent_recent_activity_returns_running(self, mock_time):
-        mock_time.time.return_value = 1700000020.0
-        recent = 1700000020.0 - _SILENCE_THRESHOLD_SECS + 1
-        assert (
-            resolve_pane_status("claude", "claude", dead=False, last_output_time=recent)
-            == "running"
-        )
-
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_agent_child_command_ignores_silence_threshold(self, mock_time):
-        mock_time.time.return_value = 1700000100.0
-        assert (
-            resolve_pane_status("copilot", "git", dead=False, last_output_time=1700000000.0)
-            == "running"
-        )
-
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_non_agent_purpose_ignores_silence_threshold(self, mock_time):
-        mock_time.time.return_value = 1700000100.0
-        assert (
-            resolve_pane_status("lazygit", "lazygit", dead=False, last_output_time=1700000000.0)
-            == "running"
-        )
-
-    def test_known_agent_purposes(self):
-        assert _AGENT_PURPOSES == {
-            "opencode",
-            "claude",
-            "claude-dangerously-skip-permissions",
-            "copilot",
-            "codex",
-            "pi",
+    def _status(self, **overrides):
+        kwargs = {
+            "dead": False,
+            "bell": False,
+            "command": "some-program",
+            "interactive": True,
+            "change_age": 100.0,
+            "cpu_age": 100.0,
         }
+        kwargs.update(overrides)
+        return resolve_pane_status(**kwargs)
 
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_claude_skip_permissions_purpose_uses_claude_process(self, mock_time):
-        mock_time.time.return_value = 1700000100.0
+    def test_dead_returns_idle_even_with_bell(self):
+        assert self._status(dead=True, bell=True) == "idle"
+
+    def test_bell_returns_waiting_regardless_of_activity(self):
+        assert self._status(bell=True, change_age=0.0) == "waiting"
+        assert self._status(bell=True, command="zsh") == "waiting"
+
+    def test_shell_prompt_is_idle(self):
+        for shell in _SHELL_COMMANDS:
+            assert self._status(command=shell) == "idle"
+            assert self._status(command=f"-{shell}") == "idle"
+
+    def test_shell_with_fresh_output_is_running(self):
+        assert self._status(command="zsh", change_age=_SHELL_ACTIVITY_GRACE_SECS - 0.5) == "running"
+        assert self._status(command="zsh", change_age=_SHELL_ACTIVITY_GRACE_SECS) == "idle"
+
+    def test_recent_content_change_is_running(self):
+        assert self._status(change_age=_SILENCE_THRESHOLD_SECS - 0.5) == "running"
+
+    def test_recent_cpu_is_running_even_without_output(self):
+        assert self._status(cpu_age=_SILENCE_THRESHOLD_SECS - 0.5) == "running"
+
+    def test_quiet_interactive_program_is_waiting(self):
+        assert self._status(interactive=True) == "waiting"
+
+    def test_quiet_non_interactive_program_is_idle(self):
+        assert self._status(interactive=False) == "idle"
+
+    def test_exactly_at_threshold_is_quiet(self):
         assert (
-            resolve_pane_status(
-                "claude-dangerously-skip-permissions",
-                "claude",
-                dead=False,
-                last_output_time=1700000000.0,
-            )
-            == "idle"
+            self._status(change_age=_SILENCE_THRESHOLD_SECS, cpu_age=_SILENCE_THRESHOLD_SECS)
+            == "waiting"
         )
 
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_shell_purpose_ignores_silence_threshold(self, mock_time):
-        mock_time.time.return_value = 1700000100.0
-        assert (
-            resolve_pane_status("shell", "python", dead=False, last_output_time=1700000000.0)
-            == "running"
-        )
-
-    def test_zero_output_time_no_idle(self):
-        assert (
-            resolve_pane_status("opencode", "opencode", dead=False, last_output_time=0.0)
-            == "running"
-        )
-
-    @patch("gitdirector.integrations.tmux.monitor.time")
-    def test_exactly_at_threshold_returns_idle(self, mock_time):
-        mock_time.time.return_value = 1700000010.0
-        output_time = 1700000010.0 - _SILENCE_THRESHOLD_SECS
-        assert (
-            resolve_pane_status("opencode", "opencode", dead=False, last_output_time=output_time)
-            == "idle"
-        )
+    def test_does_not_depend_on_program_name(self):
+        for command in ("claude", "opencode", "codex", "vim", "python", "node", "my-own-tool"):
+            assert self._status(command=command, change_age=1.0) == "running"
+            assert self._status(command=command) == "waiting"
+            assert self._status(command=command, interactive=False) == "idle"
 
 
 class TestControlModeReader:
-    @patch("gitdirector.integrations.tmux.threading.Thread")
+    @patch("threading.Thread")
     def test_start_spawns_thread(self, mock_thread_cls):
         thread = MagicMock()
         mock_thread_cls.return_value = thread
@@ -681,11 +714,11 @@ class TestControlModeReader:
         reader._parse_line("%bell @0 0")
         assert events == [("gd/repo/shell/1", "bell")]
 
-    def test_parse_output(self):
+    def test_parse_output_is_ignored(self):
         events = []
         reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
         reader._parse_line("%output %0 some data here")
-        assert events == [("gd/repo/shell/1", "output")]
+        assert events == []
 
     def test_parse_exit(self):
         reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
@@ -702,7 +735,7 @@ class TestControlModeReader:
         reader._parse_line("some random text")
         assert events == []
 
-    @patch("gitdirector.integrations.tmux.subprocess.Popen")
+    @patch("subprocess.Popen")
     def test_run_parses_output_and_cleans_up(self, mock_popen):
         events = []
         process = MagicMock()
@@ -713,16 +746,13 @@ class TestControlModeReader:
 
         reader._run()
 
-        assert events == [
-            ("gd/repo/shell/1", "bell"),
-            ("gd/repo/shell/1", "output"),
-        ]
+        assert events == [("gd/repo/shell/1", "bell")]
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
         assert reader._running is False
         assert reader._process is None
 
-    @patch("gitdirector.integrations.tmux.subprocess.Popen")
+    @patch("subprocess.Popen")
     def test_run_stops_before_parsing_when_not_running(self, mock_popen):
         events = []
         process = MagicMock()
@@ -737,7 +767,7 @@ class TestControlModeReader:
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
 
-    @patch("gitdirector.integrations.tmux.subprocess.Popen")
+    @patch("subprocess.Popen")
     def test_run_ignores_kill_failure_during_cleanup(self, mock_popen):
         process = MagicMock()
         process.stdout = iter(())
@@ -753,7 +783,7 @@ class TestControlModeReader:
         assert reader._running is False
         assert reader._process is None
 
-    @patch("gitdirector.integrations.tmux.subprocess.Popen", side_effect=RuntimeError("boom"))
+    @patch("subprocess.Popen", side_effect=RuntimeError("boom"))
     def test_run_ignores_popen_errors(self, _mock_popen):
         reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
         reader._running = True
@@ -765,7 +795,7 @@ class TestControlModeReader:
 
 
 class TestTmuxMonitor:
-    @patch("gitdirector.integrations.tmux.threading.Thread")
+    @patch("threading.Thread")
     def test_start_spawns_sync_thread_once(self, mock_thread_cls):
         monitor = TmuxMonitor()
         thread = MagicMock()
@@ -826,6 +856,21 @@ class TestTmuxMonitor:
         assert monitor._sync_thread is None
         sync_thread.join.assert_called_once_with(timeout=3)
 
+    def test_stop_stops_readers_attached_while_stopping(self):
+        monitor = TmuxMonitor()
+        late_reader = MagicMock()
+        sync_thread = MagicMock()
+        sync_thread.is_alive.return_value = True
+        sync_thread.join.side_effect = lambda timeout: monitor._readers.__setitem__(
+            "gd/late/shell/1", late_reader
+        )
+        monitor._sync_thread = sync_thread
+
+        REAL_TMUX_MONITOR_STOP(monitor)
+
+        late_reader.stop.assert_called_once_with(wait=False)
+        assert monitor._readers == {}
+
     @patch("gitdirector.integrations.tmux.monitor._ControlModeReader")
     def test_add_reader_starts_control_reader(self, mock_reader_cls):
         monitor = TmuxMonitor()
@@ -837,113 +882,448 @@ class TestTmuxMonitor:
         assert monitor._readers["gd/repo/shell/1"] is reader
         reader.start.assert_called_once_with()
 
-    def test_bell_event_sets_state(self):
+    def test_bell_event_sets_state_and_status(self):
         monitor = TmuxMonitor()
         monitor._on_event("gd/repo/shell/1", "bell")
         assert monitor.get_bell_state("gd/repo/shell/1") is True
+        assert monitor.status_for("gd/repo/shell/1") == "waiting"
 
-    def test_output_event_updates_time(self):
+    def test_other_events_are_ignored(self):
         monitor = TmuxMonitor()
-        before = time.time()
         monitor._on_event("gd/repo/shell/1", "output")
-        after = time.time()
-        last_output = monitor.get_last_output_time("gd/repo/shell/1")
-        assert before <= last_output <= after
-
-    def test_output_clears_bell_after_grace_period(self):
-        monitor = TmuxMonitor()
-        monitor._on_event("gd/repo/shell/1", "bell")
-        assert monitor.get_bell_state("gd/repo/shell/1") is True
-
-        with patch("gitdirector.integrations.tmux.monitor.time") as mock_time:
-            bell_time = monitor._bell_time["gd/repo/shell/1"]
-            mock_time.time.return_value = bell_time + _BELL_GRACE_SECS + 0.1
-            monitor._on_event("gd/repo/shell/1", "output")
-
-        assert monitor.get_bell_state("gd/repo/shell/1") is False
-
-    def test_output_does_not_clear_bell_during_grace_period(self):
-        monitor = TmuxMonitor()
-        monitor._on_event("gd/repo/shell/1", "bell")
-        bell_time = monitor._bell_time["gd/repo/shell/1"]
-
-        with patch("gitdirector.integrations.tmux.monitor.time") as mock_time:
-            mock_time.time.return_value = bell_time + _BELL_GRACE_SECS - 0.1
-            monitor._on_event("gd/repo/shell/1", "output")
-
-        assert monitor.get_bell_state("gd/repo/shell/1") is True
+        assert monitor.statuses() == {}
 
     def test_clear_bell(self):
         monitor = TmuxMonitor()
         monitor._on_event("gd/repo/shell/1", "bell")
-        assert monitor.get_bell_state("gd/repo/shell/1") is True
         monitor.clear_bell("gd/repo/shell/1")
         assert monitor.get_bell_state("gd/repo/shell/1") is False
 
     def test_default_states(self):
         monitor = TmuxMonitor()
         assert monitor.get_bell_state("nonexistent") is False
-        assert monitor.get_last_output_time("nonexistent") == 0.0
-        assert monitor.get_last_content_change_time("nonexistent") == 0.0
+        assert monitor.status_for("nonexistent") is None
+        assert monitor.statuses() == {}
 
-    def test_remove_reader_clears_state(self):
-        monitor = TmuxMonitor()
-        monitor._on_event("gd/repo/shell/1", "bell")
-        monitor._on_event("gd/repo/shell/1", "output")
-        monitor._content_hashes["gd/repo/shell/1"] = "abc"
-        monitor._last_content_change_time["gd/repo/shell/1"] = 100.0
-        reader = MagicMock()
-        monitor._readers["gd/repo/shell/1"] = reader
-        monitor._remove_reader("gd/repo/shell/1")
-        assert monitor.get_bell_state("gd/repo/shell/1") is False
-        assert monitor.get_last_output_time("gd/repo/shell/1") == 0.0
-        assert monitor.get_last_content_change_time("gd/repo/shell/1") == 0.0
-        reader.stop.assert_called_once()
 
-    @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
-    def test_poll_content_changes_detects_new_content(self, mock_capture):
-        monitor = TmuxMonitor()
-        mock_capture.return_value = "hello world"
-        monitor._poll_content_changes({"gd/repo/claude/1"})
-        assert monitor.get_last_content_change_time("gd/repo/claude/1") > 0.0
-        assert monitor._content_hashes["gd/repo/claude/1"] == _hash_content("hello world")
+class _FakeTmux:
+    """Scripted tmux/ps/tty world for exercising ``TmuxMonitor.refresh``."""
 
-    @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
-    def test_poll_content_changes_ignores_same_content(self, mock_capture):
-        monitor = TmuxMonitor()
-        mock_capture.return_value = "static screen"
-        monitor._poll_content_changes({"gd/repo/claude/1"})
-        first_time = monitor.get_last_content_change_time("gd/repo/claude/1")
+    def __init__(self):
+        self.panes: dict[str, PaneSample] = {}
+        self.snapshot = ProcessSnapshot.empty()
+        self.content: dict[str, str | None] = {}
+        self.raw: dict[str, bool | None] = {}
+        self.captures: list[str] = []
+        self.now = 1_700_000_000.0
 
-        monitor._poll_content_changes({"gd/repo/claude/1"})
-        assert monitor.get_last_content_change_time("gd/repo/claude/1") == first_time
+    def install(self, stack):
+        stack.enter_context(
+            patch("gitdirector.integrations.tmux.monitor._list_gd_panes", lambda: dict(self.panes))
+        )
+        stack.enter_context(
+            patch(
+                "gitdirector.integrations.tmux.monitor._get_process_snapshot", lambda: self.snapshot
+            )
+        )
+        stack.enter_context(
+            patch("gitdirector.integrations.tmux.monitor._capture_pane_text", self._capture)
+        )
+        stack.enter_context(
+            patch(
+                "gitdirector.integrations.tmux.monitor._tty_is_raw", lambda tty: self.raw.get(tty)
+            )
+        )
+        stack.enter_context(
+            patch("gitdirector.integrations.tmux.monitor.time.time", lambda: self.now)
+        )
 
-    @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
-    def test_poll_content_changes_updates_on_change(self, mock_capture):
-        monitor = TmuxMonitor()
-        mock_capture.return_value = "screen v1"
-        monitor._poll_content_changes({"gd/repo/claude/1"})
-        first_time = monitor.get_last_content_change_time("gd/repo/claude/1")
+    def _capture(self, session_name):
+        self.captures.append(session_name)
+        return self.content.get(session_name)
 
-        mock_capture.return_value = "screen v2"
-        monitor._poll_content_changes({"gd/repo/claude/1"})
-        assert monitor.get_last_content_change_time("gd/repo/claude/1") > first_time
+    def pane(self, session_name, **overrides):
+        base = {
+            "session_name": session_name,
+            "command": "bash",
+            "dead": False,
+            "pane_pid": 100,
+            "bell": False,
+            "tty": "/dev/ttys001",
+            "activity": int(self.now),
+            "interactive_hint": False,
+            "agent_state": "",
+            "agent_interrupts_unreported": False,
+            "repo_label": "",
+            "description": "",
+        }
+        base.update(overrides)
+        self.panes[session_name] = PaneSample(**base)
+        return self.panes[session_name]
 
-    @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
-    def test_poll_content_changes_skips_failed_capture(self, mock_capture):
-        monitor = TmuxMonitor()
-        mock_capture.return_value = None
-        monitor._poll_content_changes({"gd/repo/claude/1"})
-        assert monitor.get_last_content_change_time("gd/repo/claude/1") == 0.0
+    def run_program(self, session_name, command, *, cpu=0.0, raw=True):
+        """Put *command* in the foreground under the pane's shell."""
+        pane = self.panes[session_name]
+        self.snapshot = ProcessSnapshot(
+            {pane.pane_pid: [pane.pane_pid + 1]},
+            {pane.pane_pid + 1: command},
+            {pane.pane_pid + 1: pane.pane_pid + 1},
+            {pane.pane_pid: pane.pane_pid + 1},
+            {pane.pane_pid: 0.0, pane.pane_pid + 1: cpu},
+        )
+        self.raw[pane.tty] = raw
 
-    @patch("gitdirector.integrations.tmux.monitor._capture_pane_text")
-    def test_poll_content_changes_skips_non_agent_sessions(self, mock_capture):
-        monitor = TmuxMonitor()
-        monitor._poll_content_changes({"gd/repo/shell/1"})
-        mock_capture.assert_not_called()
+    def advance(self, seconds, session_name=None, content=None, output=True):
+        """Move the clock; optionally show *content* in *session_name*.
 
-    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
-    def test_sync_sessions_removes_dead_readers_and_polls(self, mock_list_sessions):
+        With *output* tmux's activity stamp advances too, as it would for
+        real output.
+        """
+        self.now += seconds
+        if session_name is not None and content is not None:
+            self.content[session_name] = content
+            if output:
+                self.panes[session_name] = replace(self.panes[session_name], activity=int(self.now))
+
+
+class TestTmuxMonitorRefresh:
+    def _world(self):
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        world = _FakeTmux()
+        world.install(stack)
+        return stack, world
+
+    def test_entries_come_from_the_same_sample(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            assert monitor.entries() is None
+            world.pane("gd/alpha_abc23/shell/1", command="zsh", repo_label="", description="")
+            world.pane("gd/beta/claude/2", command="zsh", repo_label="Beta", description="wip")
+            monitor.refresh()
+            assert monitor.entries() == [
+                {
+                    "session_name": "gd/alpha_abc23/shell/1",
+                    "repo": "alpha",
+                    "repo_slug": "alpha_abc23",
+                    "purpose": "shell",
+                    "description": "-",
+                },
+                {
+                    "session_name": "gd/beta/claude/2",
+                    "repo": "Beta",
+                    "repo_slug": "beta",
+                    "purpose": "claude",
+                    "description": "wip",
+                },
+            ]
+
+    def test_failed_listing_keeps_previous_statuses(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            world.content["gd/repo/shell/1"] = "$ "
+            assert monitor.refresh() == {"gd/repo/shell/1": "running"}
+
+            with patch("gitdirector.integrations.tmux.monitor._list_gd_panes", lambda: None):
+                assert monitor.refresh() == {"gd/repo/shell/1": "running"}
+
+    def test_tmux_error_keeps_previous_statuses(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            monitor.refresh()
+
+            def boom():
+                raise TmuxError("gone")
+
+            with patch("gitdirector.integrations.tmux.monitor._list_gd_panes", boom):
+                assert monitor.refresh() == {"gd/repo/shell/1": "running"}
+
+    def test_server_exit_forgets_every_session(self):
+        """The last gd session closing takes the tmux server with it.
+
+        Regression: the Sessions tab kept showing an exited session because
+        the monitor read the resulting listing failure as "tmux unavailable"
+        and held on to its previous entries and statuses.
+        """
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            world.content["gd/repo/shell/1"] = "$ "
+            monitor.refresh()
+            assert monitor.entries() != []
+
+            with patch("gitdirector.integrations.tmux.monitor._list_gd_panes", lambda: {}):
+                assert monitor.refresh() == {}
+            assert monitor.entries() == []
+            assert monitor.status_for("gd/repo/shell/1") is None
+
+    def test_vanished_sessions_are_forgotten(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            monitor.refresh()
+            world.panes.clear()
+            assert monitor.refresh() == {}
+            assert monitor.status_for("gd/repo/shell/1") is None
+
+    def test_first_sample_seeds_quiet_time_from_tmux_activity(self):
+        """A session that has been silent for a minute is idle immediately."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh", activity=int(world.now) - 60)
+            world.content["gd/repo/shell/1"] = "$ "
+            assert monitor.refresh() == {"gd/repo/shell/1": "idle"}
+
+    def test_shell_prompt_goes_idle_after_grace(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            world.content["gd/repo/shell/1"] = "$ "
+            assert monitor.refresh()["gd/repo/shell/1"] == "running"
+            world.advance(_SHELL_ACTIVITY_GRACE_SECS + 0.5)
+            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+
+    def test_interactive_program_running_then_waiting(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "working \u280b"
+            world.run_program("gd/repo/agent/1", "some-agent", raw=True)
+            monitor.refresh()
+            for frame in ("working \u2819", "working \u2839", "done.\n> "):
+                world.advance(1.0, "gd/repo/agent/1", frame)
+                assert monitor.refresh()["gd/repo/agent/1"] == "running"
+
+            world.advance(_SILENCE_THRESHOLD_SECS)
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+
+    def test_non_interactive_program_quiet_is_idle(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1")
+            world.content["gd/repo/shell/1"] = "listening on :5173"
+            world.run_program("gd/repo/shell/1", "node", raw=False)
+            monitor.refresh()
+            world.advance(_SILENCE_THRESHOLD_SECS + 1)
+            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+
+    def test_tmux_hint_used_when_tty_cannot_be_read(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", interactive_hint=True)
+            world.content["gd/repo/shell/1"] = "editor"
+            world.run_program("gd/repo/shell/1", "vim", raw=None)
+            monitor.refresh()
+            world.advance(_SILENCE_THRESHOLD_SECS + 1)
+            assert monitor.refresh()["gd/repo/shell/1"] == "waiting"
+
+    def test_sustained_cpu_counts_as_running_without_output(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1")
+            world.content["gd/repo/shell/1"] = "compiling..."
+            cpu = 1.0
+            world.run_program("gd/repo/shell/1", "cc", cpu=cpu, raw=False)
+            monitor.refresh()
+            world.advance(_SILENCE_THRESHOLD_SECS + 1)
+            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+            # A compiler pegs the CPU: a full second of work every second.
+            for _ in range(3):
+                world.advance(1.0)
+                cpu += 1.0
+                world.run_program("gd/repo/shell/1", "cc", cpu=cpu, raw=False)
+                monitor.refresh()
+            assert monitor.status_for("gd/repo/shell/1") == "running"
+            world.advance(_SILENCE_THRESHOLD_SECS + 1)
+            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+
+    def test_idle_housekeeping_cpu_bursts_do_not_flap_to_running(self):
+        """An agent at its prompt burns a little CPU now and then; that is not work."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "> "
+            cpu = 5.0
+            world.run_program("gd/repo/agent/1", "some-agent", cpu=cpu, raw=True)
+            monitor.refresh()
+            world.advance(_SILENCE_THRESHOLD_SECS + 1)
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+            for burst in (0.0, 0.07, 0.01, 0.0, 0.02, 0.0, 0.09, 0.01):
+                world.advance(1.0)
+                cpu += burst
+                world.run_program("gd/repo/agent/1", "some-agent", cpu=cpu, raw=True)
+                assert monitor.refresh()["gd/repo/agent/1"] == "waiting", burst
+
+    def test_self_drawn_cursor_blink_does_not_count_as_activity(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "> \u258c"
+            world.run_program("gd/repo/agent/1", "some-agent", raw=True)
+            monitor.refresh()
+            frames = ["> ", "> \u258c"] * 4
+            for frame in frames:
+                world.advance(1.0, "gd/repo/agent/1", frame)
+                monitor.refresh()
+            assert monitor.status_for("gd/repo/agent/1") == "waiting"
+
+    def test_capture_only_when_tmux_reports_new_output(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            world.content["gd/repo/shell/1"] = "$ "
+            monitor.refresh()
+            monitor.refresh()
+            monitor.refresh()
+            assert world.captures == ["gd/repo/shell/1"]
+            world.advance(1.0, "gd/repo/shell/1", "$ ls")
+            monitor.refresh()
+            assert world.captures == ["gd/repo/shell/1", "gd/repo/shell/1"]
+
+    def test_bell_flag_makes_waiting_until_real_output(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "spinning \u280b"
+            world.run_program("gd/repo/agent/1", "some-agent")
+            monitor.refresh()
+            world.pane("gd/repo/agent/1", bell=True)
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+
+            # Output inside the grace period is the bell's own render.
+            world.advance(_BELL_GRACE_SECS / 2, "gd/repo/agent/1", "result shown")
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+
+            # Later output means the program moved on.
+            world.advance(_BELL_GRACE_SECS, "gd/repo/agent/1", "working again \u2819")
+            assert monitor.refresh()["gd/repo/agent/1"] == "running"
+
+    def test_control_mode_bell_is_cleared_by_later_output(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "frame 1"
+            world.run_program("gd/repo/agent/1", "some-agent")
+            monitor.refresh()
+            monitor._on_event("gd/repo/agent/1", "bell")
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+            world.advance(_BELL_GRACE_SECS + 1, "gd/repo/agent/1", "frame 2 with more text")
+            assert monitor.refresh()["gd/repo/agent/1"] == "running"
+
+    def test_agent_reported_state_wins_over_heuristics(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="idle")
+            world.content["gd/repo/claude/1"] = "spinning \u280b"
+            world.run_program("gd/repo/claude/1", "claude", cpu=50.0, raw=True)
+            monitor.refresh()
+            monitor._on_event("gd/repo/claude/1", "bell")
+            # Fresh output, CPU, raw tty, even a bell: the hook report is the truth.
+            world.advance(1.0, "gd/repo/claude/1", "spinning \u2819")
+            assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+            assert monitor.get_bell_state("gd/repo/claude/1") is False
+
+            world.pane("gd/repo/claude/1", agent_state="waiting")
+            assert monitor.refresh()["gd/repo/claude/1"] == "waiting"
+            world.pane("gd/repo/claude/1", agent_state="running")
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
+
+    def test_reported_running_that_goes_silent_was_interrupted(self):
+        """Escape during a turn fires no hook; a working agent never goes static."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="running", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "working \u280b"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            for frame in ("working \u2819", "working \u2839", "working \u2838"):
+                world.advance(1.0, "gd/repo/claude/1", frame)
+                assert monitor.refresh()["gd/repo/claude/1"] == "running"
+            world.advance(1.0, "gd/repo/claude/1", "Interrupted. > ")
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
+            world.advance(_AGENT_REPORT_STALE_SECS)
+            assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+    def test_reported_waiting_stays_while_the_prompt_is_on_screen(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="running", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "working \u280b"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.pane("gd/repo/claude/1", agent_state="waiting", agent_interrupts_unreported=True)
+            world.advance(0.5, "gd/repo/claude/1", "Do you want to create probe.txt? 1. Yes 2. No")
+            monitor.refresh()
+            world.advance(_AGENT_REPORT_STALE_SECS * 20)
+            assert monitor.refresh()["gd/repo/claude/1"] == "waiting"
+
+    def test_reported_waiting_whose_prompt_vanished_becomes_idle(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="waiting", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "Do you want to create probe.txt? 1. Yes 2. No"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(3.0, "gd/repo/claude/1", "User rejected write. > ")
+            assert monitor.refresh()["gd/repo/claude/1"] == "waiting"
+            world.advance(_AGENT_REPORT_STALE_SECS)
+            assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+    def test_unknown_agent_state_falls_back_to_heuristics(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh", agent_state="bogus")
+            world.content["gd/repo/shell/1"] = "$ "
+            monitor.refresh()
+            world.advance(_SHELL_ACTIVITY_GRACE_SECS + 1)
+            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+
+    def test_reported_running_is_trusted_when_the_agent_reports_interrupts(self):
+        """OpenCode turns idle itself on Escape, so a static screen is not suspect."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/opencode/1", agent_state="running")
+            world.content["gd/repo/opencode/1"] = "thinking"
+            world.run_program("gd/repo/opencode/1", "opencode", raw=True)
+            monitor.refresh()
+            world.advance(_AGENT_REPORT_STALE_SECS * 10)
+            assert monitor.refresh()["gd/repo/opencode/1"] == "running"
+
+    def test_dead_pane_is_idle(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", dead=True, pane_pid=0, bell=True)
+            assert monitor.refresh() == {"gd/repo/shell/1": "idle"}
+
+
+class TestSyncReaders:
+    def test_removes_dead_readers_and_adds_new_ones(self):
         monitor = TmuxMonitor()
         monitor._running = True
         stale_reader = MagicMock()
@@ -953,10 +1333,12 @@ class TestTmuxMonitor:
             "gd/stale/shell/1": stale_reader,
             "gd/existing/shell/1": existing_reader,
         }
-        mock_list_sessions.return_value = [
+        live = [
             "gd/new/shell/1",
             "gd/existing/shell/1",
             "other-session",
+            "gd/panel/main",
+            "gd/temp/panel/repo/shell/1",
         ]
         added: list[str] = []
         removed: list[str] = []
@@ -973,88 +1355,52 @@ class TestTmuxMonitor:
 
         monitor._add_reader = MagicMock(side_effect=add_reader)
         monitor._remove_reader = MagicMock(side_effect=remove_reader)
-        monitor._poll_content_changes = MagicMock(
-            side_effect=lambda sessions: setattr(monitor, "_running", False)
-        )
 
-        monitor._sync_sessions()
+        monitor._sync_readers(live)
 
         assert set(added) == {"gd/new/shell/1"}
         assert set(removed) == {"gd/stale/shell/1", "gd/existing/shell/1"}
         assert monitor._reader_failure_backoff["gd/existing/shell/1"] > time.time()
-        monitor._poll_content_changes.assert_called_once_with(
-            {"gd/new/shell/1", "gd/existing/shell/1"}
-        )
 
-    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
-    def test_sync_sessions_skips_reader_retry_during_backoff(self, mock_list_sessions):
+    def test_skips_reader_retry_during_backoff(self):
         monitor = TmuxMonitor()
         monitor._running = True
         monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() + 60
-        mock_list_sessions.return_value = ["gd/repo/shell/1"]
-
         monitor._add_reader = MagicMock()
-        monitor._poll_content_changes = MagicMock(
-            side_effect=lambda sessions: setattr(monitor, "_running", False)
-        )
 
-        monitor._sync_sessions()
+        monitor._sync_readers(["gd/repo/shell/1"])
 
         monitor._add_reader.assert_not_called()
-        monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
 
-    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
-    def test_sync_sessions_clears_backoff_after_successful_reader_start(self, mock_list_sessions):
+    def test_clears_backoff_after_successful_reader_start(self):
         monitor = TmuxMonitor()
         monitor._running = True
         monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() - 1
-        mock_list_sessions.return_value = ["gd/repo/shell/1"]
 
         def add_reader(session_name: str):
             monitor._readers[session_name] = MagicMock(is_alive=MagicMock(return_value=True))
 
         monitor._add_reader = MagicMock(side_effect=add_reader)
-        monitor._poll_content_changes = MagicMock(
-            side_effect=lambda sessions: setattr(monitor, "_running", False)
-        )
 
-        monitor._sync_sessions()
+        monitor._sync_readers(["gd/repo/shell/1"])
 
         monitor._add_reader.assert_called_once_with("gd/repo/shell/1")
         assert "gd/repo/shell/1" not in monitor._reader_failure_backoff
 
-    @patch("gitdirector.integrations.tmux.monitor._list_sessions")
-    def test_sync_sessions_skips_panel_and_temp_wrapper_sessions(self, mock_list_sessions):
+    def test_does_not_add_readers_once_stopped(self):
         monitor = TmuxMonitor()
-        monitor._running = True
-        mock_list_sessions.return_value = [
-            "gd/repo/shell/1",
-            "gd/panel/main",
-            "gd/temp/panel/repo/shell/1",
-        ]
+        monitor._running = False
+        monitor._add_reader = MagicMock()
 
-        added: list[str] = []
+        monitor._sync_readers(["gd/repo/shell/1"])
 
-        def add_reader(session_name: str):
-            added.append(session_name)
-            monitor._readers[session_name] = MagicMock(is_alive=MagicMock(return_value=True))
-
-        monitor._add_reader = MagicMock(side_effect=add_reader)
-        monitor._remove_reader = MagicMock()
-        monitor._poll_content_changes = MagicMock(
-            side_effect=lambda sessions: setattr(monitor, "_running", False)
-        )
-
-        monitor._sync_sessions()
-
-        assert added == ["gd/repo/shell/1"]
-        monitor._poll_content_changes.assert_called_once_with({"gd/repo/shell/1"})
+        monitor._add_reader.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.monitor.time.sleep")
-    @patch("gitdirector.integrations.tmux.monitor._list_sessions", side_effect=RuntimeError("boom"))
-    def test_sync_sessions_ignores_list_errors(self, _mock_list_sessions, mock_sleep):
+    def test_sync_loop_survives_errors(self, mock_sleep):
         monitor = TmuxMonitor()
         monitor._running = True
+        monitor.refresh = MagicMock(side_effect=RuntimeError("boom"))
 
         def stop_after_first_sleep(_seconds: float):
             monitor._running = False
@@ -1067,12 +1413,12 @@ class TestTmuxMonitor:
 
 
 class TestCapturePaneText:
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_returns_stdout(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="pane content\nhere\n")
         assert _capture_pane_text("gd/repo/shell/1") == "pane content\nhere\n"
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_returns_none_on_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         assert _capture_pane_text("gd/repo/shell/1") is None

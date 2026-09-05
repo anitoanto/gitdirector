@@ -37,11 +37,11 @@ class RemoveSessionScreen(ModalScreen[str | None]):
         sessions = list_repo_sessions(self.repo_path)
 
         with Vertical(id="menu-container"):
-            yield Static("[bold white]Select session to remove[/bold white]", id="menu-title")
+            yield Static("[bold $text]Select session to remove[/]", id="menu-title")
             if sessions:
                 options = [
                     Option(
-                        f"[red]●[/red] [bold]"
+                        f"[$text-error]●[/] [bold]"
                         f"{'/'.join(s.split('/')[2:]) if '/' in s else s}"
                         f"[/bold] [dim]{s}[/dim]",
                         id=s,
@@ -98,13 +98,13 @@ class SelectSessionScreen(ModalScreen[str | None]):
 
         with Vertical(id="menu-container"):
             yield Static(
-                f"[bold white]Assign Session to Pane {self.pane_index}[/bold white]",
+                f"[bold $text]Assign Session to Pane {self.pane_index}[/]",
                 id="menu-title",
             )
             items: list[Option] = []
             if self.current_session:
                 items.append(
-                    Option("[red]✕[/red] [dim]Clear pane[/dim]", id="__clear__"),
+                    Option("[$text-error]✕[/] [dim]Clear pane[/dim]", id="__clear__"),
                 )
                 items.append(Option("", disabled=True))
             if sessions:
@@ -112,10 +112,12 @@ class SelectSessionScreen(ModalScreen[str | None]):
                     sn = entry["session_name"]
                     repo = entry["repo"]
                     purpose = entry["purpose"]
-                    current_marker = " [cyan]◄ current[/cyan]" if sn == self.current_session else ""
+                    current_marker = (
+                        " [$text-primary]◄ current[/]" if sn == self.current_session else ""
+                    )
                     items.append(
                         Option(
-                            f"[white]●[/white] [bold]{purpose}[/bold]"
+                            f"[$text]●[/] [bold]{purpose}[/bold]"
                             f" [dim]{repo}[/dim]  {sn}{current_marker}",
                             id=sn,
                         )
@@ -200,7 +202,7 @@ class EditSessionDescriptionScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static("[bold white]Edit Description[/bold white]", id="menu-title")
+            yield Static("[bold $text]Edit Description[/]", id="menu-title")
             yield Static(f"[dim]{self.session_name}[/dim]", id="description-session-name")
             yield DescriptionTextArea(
                 self._initial_value,

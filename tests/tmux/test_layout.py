@@ -3,15 +3,15 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from gitdirector.integrations.tmux import (
+from gitdirector.integrations.tmux import rebuild_panel_tmux_session
+from gitdirector.integrations.tmux.core import _sanitize_repo_name
+from gitdirector.integrations.tmux.panels import (
     _build_layout_spec,
     _build_panel_layout,
     _distribute_equal,
     _ensure_panel_prefix_bindings,
     _layout_checksum,
-    _sanitize_repo_name,
     _span_size,
-    rebuild_panel_tmux_session,
 )
 
 
@@ -468,7 +468,7 @@ class TestBuildPanelLayout:
 
 
 class TestRebuildPanelTmuxSession:
-    @patch("gitdirector.integrations.tmux.shutil.get_terminal_size", return_value=(80, 24))
+    @patch("shutil.get_terminal_size", return_value=(80, 24))
     @patch("gitdirector.integrations.tmux.panels._ensure_panel_prefix_bindings")
     @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.panels._load_panel_tmux_config")
@@ -481,7 +481,7 @@ class TestRebuildPanelTmuxSession:
     @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
     @patch("gitdirector.integrations.tmux.panels.kill_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=False)
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_enables_pane_headers_before_building_layout(
         self,
         mock_run,
@@ -580,7 +580,7 @@ class TestRebuildPanelTmuxSession:
 
 
 class TestPanelPrefixBindings:
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_panel_prefix_bindings_include_overlay_alias_and_numeric_focus(self, mock_run):
         _ensure_panel_prefix_bindings()
 

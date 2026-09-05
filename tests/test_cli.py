@@ -7,14 +7,8 @@ import pytest
 from click.utils import strip_ansi
 from rich.console import Console
 
-from gitdirector.cli import (
-    _changes_text,
-    _format_size,
-    _path_text,
-    _status_text,
-    cli,
-    main,
-)
+from gitdirector.cli import cli, main
+from gitdirector.commands import _changes_text, _format_size, _path_text, _status_text
 from gitdirector.repo import RepositoryInfo, RepoStatus
 
 # ---------------------------------------------------------------------------
@@ -151,7 +145,7 @@ class TestLinkCommand:
 
     def test_link_discover_none_found(self, runner, tmp_path):
         """--discover finds no repositories: should print message and succeed."""
-        mgr = _mock_manager(add_repository=(False, "No git repositories found", [], []))
+        mgr = _mock_manager(add_repository=(True, "No git repositories found", [], []))
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
         assert result.exit_code == 0
@@ -210,28 +204,26 @@ class TestUnlinkCommand:
         assert result.exit_code == 1
         assert "multiple" in result.output.lower()
 
-    def test_unlink_by_path_does_not_call_remove_by_name(self, runner, tmp_path):
-        """Full paths that fail should NOT fall back to remove_by_name."""
+    def test_unlink_by_path_does_not_fall_back_to_name_lookup(self, runner, tmp_path):
+        """A path that is not tracked must fail instead of being retried as a name."""
         mgr = _mock_manager(
             remove_repository=(False, "Repository not tracked: /some/path/repo", []),
         )
-        mgr.remove_by_name = MagicMock()
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", str(tmp_path / "repo")])
         assert result.exit_code == 1
-        mgr.remove_by_name.assert_not_called()
+        mgr.remove_repository.assert_not_called()
 
     @pytest.mark.parametrize("dot_target", [".", ".."])
-    def test_unlink_dot_does_not_call_remove_by_name(self, runner, dot_target):
+    def test_unlink_dot_is_treated_as_a_path(self, runner, dot_target):
         """. and .. should be treated as paths, not names, and must not fall back."""
         mgr = _mock_manager(
             remove_repository=(False, f"Repository not tracked: {dot_target}", []),
         )
-        mgr.remove_by_name = MagicMock()
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", dot_target])
         assert result.exit_code == 1
-        mgr.remove_by_name.assert_not_called()
+        mgr.remove_repository.assert_not_called()
 
 
 class TestListCommand:
@@ -436,7 +428,7 @@ class TestConsoleCommand:
         assert result.exit_code == 0
         mock_run_console.assert_called_once_with()
 
-    def test_console_command_prints_update_notice(self, runner):
+    def test_console_command_leaves_the_update_notice_to_the_dashboard(self, runner):
         with patch(
             "gitdirector.version_check.get_update_notice",
             return_value="Update available: v1.5.0 (current v1.4.2)",
@@ -445,7 +437,7 @@ class TestConsoleCommand:
                 result = runner.invoke(cli, ["console"])
 
         assert result.exit_code == 0
-        assert "Update available: v1.5.0 (current v1.4.2)" in result.output
+        assert "Update available" not in result.output
 
 
 class TestMainEntry:
@@ -487,8 +479,51 @@ class TestHelpCommand:
         result = runner.invoke(cli, ["help"])
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
-        assert "pull [--yes]" in result.output
-        assert "gd-send SESSION [TEXT] [--enter | --key C-c]" in result.output
+        # Every registered command appears with the first line of its docstring.
+        for name, command in cli.commands.items():
+            assert name in result.output
+            assert command.get_short_help_str(limit=90).split()[0] in result.output
+        assert "gitdirector COMMAND --help" in result.output
+
+    def test_dash_h_is_an_alias_for_help_everywhere(self, runner):
+        assert "GITDIRECTOR" in runner.invoke(cli, ["-h"]).output
+        result = runner.invoke(cli, ["link", "-h"], prog_name="gitdirector")
+        assert result.exit_code == 0
+        assert "Usage: gitdirector link [OPTIONS] PATH" in result.output
+        assert "-h, --help" in result.output
+
+    def test_version_flag(self, runner):
+        from gitdirector.commands import get_version
+
+        for flag in ("--version", "-V"):
+            result = runner.invoke(cli, [flag])
+            assert result.exit_code == 0
+            assert result.output.strip() == f"gitdirector {get_version()}"
+
+    def test_update_notice_is_deferred_and_goes_to_stderr(self, runner):
+        mgr = _mock_manager()
+        with patch(
+            "gitdirector.version_check.get_update_notice",
+            return_value="Update available: v9.9.9 (current v1.0.0)",
+        ):
+            with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+                result = runner.invoke(cli, ["list"])
+
+        assert result.exit_code == 0
+        assert "Update available: v9.9.9" in result.stderr
+        assert "Update available" not in result.stdout
+        # Printed after the command's own output, not before it.
+        assert result.output.index("No repositories linked") < result.output.index(
+            "Update available"
+        )
+
+    def test_errors_go_to_stderr(self, runner, tmp_path):
+        mgr = _mock_manager(add_repository=(False, "Not a git repository: /x", [], []))
+        with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["link", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "Error: Not a git repository: /x" in result.stderr
+        assert "Not a git repository" not in result.stdout
 
     def test_no_args_shows_help(self, runner):
         result = runner.invoke(cli, [])
@@ -712,20 +747,6 @@ class TestCdCommand:
             result = runner.invoke(cli, ["cd", str(repo)])
         assert result.exit_code == 1
         assert "No tracked repository at path" in result.output
-
-    def test_cd_tmux_integration_unavailable(self, runner, tmp_path):
-        import sys
-
-        repo = tmp_path / "my-repo"
-        mgr = _mock_manager()
-        mgr.config.repositories = [repo]
-        mgr.resolve_repository_target = MagicMock(return_value=(repo, [], False))
-        # Setting the module entry to None causes ImportError on 'from ... import'
-        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
-            with patch.dict(sys.modules, {"gitdirector.integrations.tmux": None}):
-                result = runner.invoke(cli, ["cd", "my-repo"])
-        assert result.exit_code == 1
-        assert "tmux integration" in result.output
 
 
 class TestHelpGroup:

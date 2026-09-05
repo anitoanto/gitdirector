@@ -345,7 +345,7 @@ class TestPanelsSort:
             assert str(row_key.value) == "Main"
 
     @patch(
-        "gitdirector.integrations.tmux._list_sessions",
+        "gitdirector.integrations.tmux.core._list_sessions",
         return_value=["gd/alpha/shell/1"],
     )
     async def test_sort_panels_by_panes_descending_counts_only_live_sessions(self, _mock_list):

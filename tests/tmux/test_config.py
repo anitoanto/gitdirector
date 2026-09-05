@@ -3,30 +3,28 @@
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
-from gitdirector.integrations.tmux import (
-    _configure_panel_window,
-    _embedded_tmux_attach_command,
+from gitdirector.integrations.tmux import sync_panel_tmux_config
+from gitdirector.integrations.tmux.core import (
     _live_panel_sessions,
     _live_repo_tmux_sessions,
     _load_panel_tmux_config,
     _panel_border_format,
-    _panel_pane_command,
     _panel_pane_title,
     _panel_tmux_config,
     _panel_window_status_format,
     _resolved_panel_theme_name,
     _session_tmux_config,
-    sync_panel_tmux_config,
 )
+from gitdirector.integrations.tmux.panels import _configure_panel_window, _panel_pane_command
 from gitdirector.ui_theme import resolve_panel_theme
 
 
 class TestPanelPaneTitles:
     def test_panel_pane_title_uses_session_slug(self):
-        assert _panel_pane_title(1, "gd/my-repo/copilot/3") == "copilot my-repo/3"
+        assert _panel_pane_title("gd/my-repo/copilot/3") == "copilot my-repo/3"
 
     def test_panel_pane_title_marks_empty_slots(self):
-        assert _panel_pane_title(2, None) == "empty"
+        assert _panel_pane_title(None) == "empty"
 
     def test_panel_border_format_styles_badge_separately(self):
         theme = resolve_panel_theme("rose-pine")
@@ -104,16 +102,6 @@ class TestPanelPaneTitles:
         assert "Once all panes are closed, this panel will autodelete" not in command
         assert "Pane 1: unassigned" not in command
 
-    def test_embedded_tmux_attach_command_reapplies_session_chrome_when_not_in_panel(self):
-        command = _embedded_tmux_attach_command("gd/my-repo/copilot/3")
-
-        assert command.startswith("sh -c ")
-        assert "tmux set-option -t =gd/my-repo/copilot/3: status-position bottom" in command
-        assert "tmux set-option -t =gd/my-repo/copilot/3: status-left" in command
-        assert "tmux set-option -q -t =gd/my-repo/copilot/3: status off" not in command
-        assert 'tmux set-window-option -q -t "$panel_window" pane-border-status off' not in command
-        assert "tmux attach-session -t =gd/my-repo/copilot/3" in command
-
     @patch(
         "gitdirector.integrations.tmux.core._current_window_target",
         return_value="gd/my-repo/shell/1:2",
@@ -163,7 +151,7 @@ class TestPanelPaneTitles:
             config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
         assert "set-option -t =gd/panel/main: set-clipboard on" in config
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_load_panel_tmux_config_writes_and_sources_file(self, mock_run, tmp_path):
         config_path = tmp_path / "tmux_design.conf"
 
@@ -191,7 +179,7 @@ class TestPanelPaneTitles:
 
         assert _live_panel_sessions() == [("Main", "gd/panel/main")]
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_sync_panel_tmux_config_writes_all_live_sessions(self, mock_run, tmp_path):
         config_path = tmp_path / "tmux_design.conf"
         with patch(
@@ -215,7 +203,7 @@ class TestPanelPaneTitles:
             ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY, timeout=ANY
         )
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_sync_panel_tmux_config_writes_regular_sessions(self, mock_run, tmp_path):
         config_path = tmp_path / "tmux_design.conf"
         with patch(
@@ -242,7 +230,7 @@ class TestPanelPaneTitles:
             ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY, timeout=ANY
         )
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_sync_panel_tmux_config_skips_source_when_no_live_sessions(self, mock_run, tmp_path):
         config_path = tmp_path / "tmux_design.conf"
         with patch(
@@ -266,7 +254,7 @@ class TestPanelPaneTitles:
     def test_live_repo_tmux_sessions_handles_listing_error(self, _mock_list):
         assert _live_repo_tmux_sessions() == []
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_sync_panel_tmux_config_ignores_source_file_failure(self, mock_run, tmp_path):
         config_path = tmp_path / "tmux_design.conf"
         mock_run.side_effect = __import__("subprocess").CalledProcessError(
@@ -293,7 +281,7 @@ class TestPanelPaneTitles:
             ["tmux", "source-file", str(config_path)], capture_output=True, env=ANY, timeout=ANY
         )
 
-    @patch("gitdirector.integrations.tmux.subprocess.run")
+    @patch("subprocess.run")
     def test_configure_panel_window_sets_titles_with_slugs(self, mock_run):
         theme = resolve_panel_theme("nord")
         _configure_panel_window(

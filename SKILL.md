@@ -32,6 +32,7 @@ gitdirector gd-capture SESSION [--lines N] [--full]     # default: last 200 line
 # Write.
 gitdirector gd-send SESSION "text" [--enter]            # paste; --enter runs it
 gitdirector gd-send SESSION --key C-c                   # stop foreground process
+                                                        # keys: C-c C-d C-z C-l Enter Escape Tab Up Down
 ```
 
 Read-only inspection is also safe headlessly: `gitdirector list`, `status`,
@@ -75,6 +76,12 @@ gitdirector gd-tmux /path/to/repo "make watch 2>&1 | tee /tmp/watch.log" \
 ## More examples
 
 ```bash
-gitdirector gd-tmux /path/to/repo opencode --description "OpenCode: refactor auth middleware"
-gitdirector gd-send gd/myrepo/opencode/1 "continue and run the tests" --enter
+SESSION=$(gitdirector gd-tmux /path/to/repo opencode \
+  --description "OpenCode: refactor auth middleware")
+gitdirector gd-send "$SESSION" "continue and run the tests" --enter
 ```
+
+Sessions started from the console's agent menu are named after the agent
+instead (`gd/<repo>/claude/1`, `gd/<repo>/opencode/2`, ...). The console's
+Sessions tab (or `tmux list-sessions`) shows every live session name, and
+`gd-capture`/`gd-send` accept any of them.

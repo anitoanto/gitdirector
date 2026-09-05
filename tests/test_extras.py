@@ -38,20 +38,20 @@ class TestManagerAddErrors:
         assert "Error adding repository" in msg
 
     def test_discover_config_save_failure(self, manager, tmp_path, mocker):
-        """When config.add_repositories raises during discover, the exception propagates."""
-        repos = []
+        """A config write failure during discover is reported like a single add."""
         for i in range(2):
             r = tmp_path / f"repo-{i}"
             r.mkdir()
             (r / ".git").mkdir()
-            repos.append(r)
 
         mocker.patch.object(
             manager.config, "add_repositories", side_effect=Exception("Write failed")
         )
 
-        with pytest.raises(Exception, match="Write failed"):
-            manager.add_repository(tmp_path, discover=True)
+        ok, msg, added, skipped = manager.add_repository(tmp_path, discover=True)
+        assert ok is False
+        assert "Error adding repositories: Write failed" in msg
+        assert added == []
 
     def test_add_discover_not_a_directory(self, manager, tmp_path):
         """When discover path is not a directory, error is returned."""
@@ -106,7 +106,7 @@ class TestRepoTimestampErrors:
     def test_last_commit_info_non_integer_timestamp(self, fake_git_repo, mocker):
         """When git returns non-integer timestamp, None is returned for ts."""
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=MagicMock(returncode=0, stdout="2 days ago\nnot-an-int\n", stderr=""),
         )
         repo = Repository(fake_git_repo)
@@ -117,7 +117,7 @@ class TestRepoTimestampErrors:
     def test_last_commit_info_empty_output(self, fake_git_repo, mocker):
         """When git returns empty output, None is returned."""
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=MagicMock(returncode=0, stdout="", stderr=""),
         )
         repo = Repository(fake_git_repo)
@@ -137,7 +137,7 @@ class TestRepoTrackedSizeErrors:
     def test_tracked_size_git_failure(self, fake_git_repo, mocker):
         """When git ls-files fails, None is returned."""
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=MagicMock(returncode=1, stdout="", stderr="error"),
         )
         repo = Repository(fake_git_repo)
@@ -147,7 +147,7 @@ class TestRepoTrackedSizeErrors:
     def test_tracked_size_empty_output(self, fake_git_repo, mocker):
         """When git ls-files returns no files, None is returned."""
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=MagicMock(returncode=0, stdout="", stderr=""),
         )
         repo = Repository(fake_git_repo)
@@ -166,7 +166,7 @@ class TestRepoPullErrors:
     def test_pull_with_auth_error(self, fake_git_repo, mocker):
         """Pull returns auth error message when git pull fails with auth error."""
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             side_effect=[
                 MagicMock(returncode=0, stdout="main\n", stderr=""),
                 MagicMock(
@@ -184,7 +184,7 @@ class TestRepoPullErrors:
     def test_pull_with_generic_error(self, fake_git_repo, mocker):
         """Pull returns generic error when git pull fails."""
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             side_effect=[
                 MagicMock(returncode=0, stdout="main\n", stderr=""),
                 MagicMock(
@@ -263,7 +263,7 @@ class TestRepoGetStatusParsingErrors:
                 return MagicMock(returncode=0, stdout="0\t0\n", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        mocker.patch("subprocess.run", side_effect=mock_run)
+        mocker.patch("gitdirector.repo._run_git_process", side_effect=mock_run)
         repo = Repository(fake_git_repo)
         status = repo.get_status()
         assert status.status == RepoStatus.UP_TO_DATE
@@ -280,7 +280,7 @@ class TestRepoGetStatusParsingErrors:
                 return MagicMock(returncode=1, stdout="", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        mocker.patch("subprocess.run", side_effect=mock_run)
+        mocker.patch("gitdirector.repo._run_git_process", side_effect=mock_run)
         repo = Repository(fake_git_repo)
         status = repo.get_status()
         assert status.status == RepoStatus.UNKNOWN
@@ -315,7 +315,7 @@ class TestPullOne:
         from gitdirector.commands.pull import _pull_one
 
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=MagicMock(returncode=0, stdout="Already up to date.\n", stderr=""),
         )
         name, ok, msg = _pull_one(fake_git_repo)

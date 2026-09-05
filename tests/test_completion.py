@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from gitdirector.commands.completion import complete_repository_names
+from gitdirector.commands.completion import complete_repository_names, complete_session_names
 
 
 def test_complete_repository_names_offers_paths_when_basenames_collide(config_dir, monkeypatch):
@@ -91,3 +91,24 @@ def test_complete_repository_names_filters_by_incomplete_prefix(config_dir, monk
 
     items = complete_repository_names(None, None, "fro")
     assert [item.value for item in items] == ["frontend-app"]
+
+
+def test_complete_session_names_filters_live_sessions(monkeypatch):
+    monkeypatch.setattr(
+        "gitdirector.commands.completion.list_all_gd_sessions",
+        lambda: [
+            {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
+            {"session_name": "gd/beta/claude/2", "repo": "beta", "purpose": "claude"},
+        ],
+    )
+    items = complete_session_names(None, None, "gd/b")
+    assert [item.value for item in items] == ["gd/beta/claude/2"]
+    assert items[0].help == "claude in beta"
+
+
+def test_complete_session_names_survives_tmux_failures(monkeypatch):
+    def boom():
+        raise RuntimeError("no tmux")
+
+    monkeypatch.setattr("gitdirector.commands.completion.list_all_gd_sessions", boom)
+    assert complete_session_names(None, None, "") == []

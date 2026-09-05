@@ -89,10 +89,6 @@ class PanelLayout:
     def menu_display_label(self) -> str:
         return f"{self.icon} {self.menu_label}"
 
-    @property
-    def display_label(self) -> str:
-        return f"{self.icon} {self.layout_label}"
-
 
 def _make_grid_layout(rows: int, cols: int, *, sort_rank: int) -> PanelLayout:
     menu_descriptions = {
@@ -454,13 +450,6 @@ class Panel:
         return self.filled_panes == 0 and not self.closed_panes
 
     @property
-    def all_panes_closed(self) -> bool:
-        return self.total_panes > 0 and all(
-            pane_index in self.closed_panes and not self.panes.get(pane_index)
-            for pane_index in range(1, self.total_panes + 1)
-        )
-
-    @property
     def layout_label(self) -> str:
         return self.layout.layout_label
 
@@ -471,9 +460,6 @@ class Panel:
     @property
     def pane_placements(self) -> tuple[PanePlacement, ...]:
         return self.layout.placements
-
-    def is_pane_closed(self, pane_index: int) -> bool:
-        return pane_index in self.closed_panes
 
 
 class PanelStore:
@@ -606,9 +592,6 @@ class PanelStore:
         self.config_dir.mkdir(exist_ok=True)
         data: dict = {"panels": []}
         for panel in self._panels:
-            panes_data: dict[int, str | None] = {}
-            for k, v in panel.panes.items():
-                panes_data[k] = v
             closed_panes = sorted(
                 pane_index
                 for pane_index in panel.closed_panes
@@ -621,7 +604,7 @@ class PanelStore:
                     "cols": panel.cols,
                     "layout": panel.layout.key,
                     "closed_panes": closed_panes,
-                    "panes": panes_data,
+                    "panes": dict(panel.panes),
                 }
             )
         with advisory_file_lock(self.lock_file):
@@ -768,28 +751,6 @@ class PanelStore:
         panel.closed_panes = set()
         self._save()
         self._cleanup_inner_panel_sessions(inner_sessions)
-        return True
-
-    def update_pane(
-        self,
-        panel_name: str,
-        pane_index: int,
-        session_name: str | None,
-        *,
-        closed: bool = False,
-    ) -> bool:
-        panel = self.get(panel_name)
-        if not panel or not (1 <= pane_index <= panel.total_panes):
-            return False
-
-        panel.panes[pane_index] = session_name or None
-        if session_name:
-            panel.closed_panes.discard(pane_index)
-        elif closed:
-            panel.closed_panes.add(pane_index)
-        else:
-            panel.closed_panes.discard(pane_index)
-        self._save()
         return True
 
     def reload(self) -> None:

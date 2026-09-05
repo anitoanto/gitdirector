@@ -49,7 +49,7 @@ class TestGdSendCLIShape:
 
     def test_rejects_unsupported_key(self):
         runner = CliRunner()
-        result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "--key", "C-d"])
+        result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "--key", "C-x"])
 
         assert result.exit_code != 0
         assert "Invalid value" in result.output
@@ -123,6 +123,7 @@ class TestSendKeyToSession:
             ["tmux", "send-keys", "-t", "=gd/repo/shell/1:", "C-c"],
             capture_output=True,
             text=True,
+            env=ANY,
             timeout=ANY,
         )
 

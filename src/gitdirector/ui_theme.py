@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from textual.color import Color
-from textual.theme import BUILTIN_THEMES, Theme
+if TYPE_CHECKING:
+    from textual.color import Color
+    from textual.theme import Theme
 
 DEFAULT_THEME_NAME = "rose-pine"
 
@@ -32,17 +34,76 @@ class PanelTheme:
 
 
 def _resolve_theme(theme_name: str | None) -> Theme:
+    # Imported lazily: this module is reached from plain CLI commands through
+    # the tmux integration, and loading Textual there is a visible startup cost.
+    from textual.theme import BUILTIN_THEMES
+
     if theme_name and theme_name in BUILTIN_THEMES:
         return BUILTIN_THEMES[theme_name]
     return BUILTIN_THEMES.get(DEFAULT_THEME_NAME, next(iter(BUILTIN_THEMES.values())))
 
 
 def _parse_color(value: str | None, fallback: str) -> Color:
+    from textual.color import Color
+
     return Color.parse(value or fallback)
 
 
 def _hex(color: Color) -> str:
     return color.hex6
+
+
+def _relative_luminance(color: Color) -> float:
+    def channel(value: int) -> float:
+        scaled = value / 255
+        return scaled / 12.92 if scaled <= 0.03928 else ((scaled + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+
+
+def contrast_ratio(foreground: Color, background: Color) -> float:
+    """WCAG contrast ratio between two opaque colours (1.0 to 21.0)."""
+    lighter = _relative_luminance(foreground)
+    darker = _relative_luminance(background)
+    if lighter < darker:
+        lighter, darker = darker, lighter
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def readable_on(color: Color, *backgrounds: Color, minimum: float = 4.5) -> Color:
+    """Return *color*, pushed toward black or white until it reads on every background.
+
+    The hue is kept; only lightness moves, and only as far as needed, so a
+    theme's green stays green on a light and on a dark surface. Both
+    directions are tried because a mid-tone highlight can sit between two
+    backgrounds; the one that clears *minimum* on all of them wins, and
+    otherwise the best achievable candidate is returned. ANSI colours are
+    returned untouched because their real value is the terminal's.
+    """
+    from textual.color import Color
+
+    def worst(candidate: Color) -> float:
+        return min(contrast_ratio(candidate, background) for background in backgrounds)
+
+    if color.ansi is not None or not backgrounds or worst(color) >= minimum:
+        return color
+
+    average_luminance = sum(_relative_luminance(b) for b in backgrounds) / len(backgrounds)
+    poles = [Color(255, 255, 255), Color(0, 0, 0)]
+    if average_luminance > 0.5:
+        poles.reverse()
+
+    best = color
+    best_ratio = worst(color)
+    for pole in poles:
+        for step in range(1, 21):
+            candidate = color.blend(pole, step * 0.05)
+            ratio = worst(candidate)
+            if ratio >= minimum:
+                return candidate
+            if ratio > best_ratio:
+                best, best_ratio = candidate, ratio
+    return best
 
 
 def resolve_panel_theme(theme_name: str | None) -> PanelTheme:

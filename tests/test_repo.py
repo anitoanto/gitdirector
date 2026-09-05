@@ -101,7 +101,7 @@ class TestIsGitRepo:
 class TestRunGit:
     def test_success(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "ok\n", ""),
         )
         repo = Repository(fake_git_repo)
@@ -111,7 +111,7 @@ class TestRunGit:
 
     def test_failure(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(128, "", "fatal: error\n"),
         )
         repo = Repository(fake_git_repo)
@@ -121,7 +121,7 @@ class TestRunGit:
 
     def test_timeout(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             side_effect=subprocess.TimeoutExpired(cmd="git", timeout=10),
         )
         repo = Repository(fake_git_repo)
@@ -130,7 +130,7 @@ class TestRunGit:
         assert "timed out" in err
 
     def test_git_not_found(self, fake_git_repo, mocker):
-        mocker.patch("subprocess.run", side_effect=FileNotFoundError)
+        mocker.patch("gitdirector.repo._run_git_process", side_effect=FileNotFoundError)
         repo = Repository(fake_git_repo)
         code, out, err = repo._run_git("status")
         assert code == 1
@@ -146,7 +146,7 @@ class TestRunGit:
         config.github_PAT = "ghp_secret"
         config.save()
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             side_effect=[
                 _make_run_result(
                     128,
@@ -183,7 +183,7 @@ class TestRunGit:
     ):
         mocker.patch("gitdirector.repo._github_credentials_from_config", return_value=None)
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 128,
                 "",
@@ -255,7 +255,7 @@ class TestRunGit:
 class TestGetCurrentBranch:
     def test_success(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "main\n", ""),
         )
         repo = Repository(fake_git_repo)
@@ -263,7 +263,7 @@ class TestGetCurrentBranch:
 
     def test_failure_returns_none(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(128, "", "fatal\n"),
         )
         repo = Repository(fake_git_repo)
@@ -278,7 +278,7 @@ class TestGetCurrentBranch:
 class TestGetLastCommitInfo:
     def test_success(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "2 hours ago\n1700000000\n", ""),
         )
         repo = Repository(fake_git_repo)
@@ -288,7 +288,7 @@ class TestGetLastCommitInfo:
 
     def test_empty_repo(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
@@ -305,7 +305,7 @@ class TestGetLastCommitInfo:
 class TestGetTrackedSize:
     def test_computes_total(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 0,
                 "100644 blob abc123       5\ta.txt\n100644 blob def456       6\tb.txt\n",
@@ -317,7 +317,7 @@ class TestGetTrackedSize:
 
     def test_git_failure(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(1, "", "error"),
         )
         repo = Repository(fake_git_repo)
@@ -325,7 +325,7 @@ class TestGetTrackedSize:
 
     def test_empty_output(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
@@ -384,8 +384,55 @@ def _setup_status_mocks(
             return _make_run_result(0, "", "")
         return _make_run_result(0, "", "")
 
-    mocker.patch("subprocess.run", side_effect=side_effect)
+    mocker.patch("gitdirector.repo._run_git_process", side_effect=side_effect)
     return calls
+
+
+class TestGetStatusFromPorcelainHeaders:
+    """``git status --porcelain=v2`` already compares HEAD with origin/<branch>."""
+
+    def _mock(self, mocker, headers: str):
+        calls: list[list[str]] = []
+
+        def side_effect(cmd, **kwargs):
+            git_args = cmd[3:]
+            calls.append(git_args)
+            if "status" in git_args:
+                return _make_run_result(0, headers, "")
+            if git_args[:3] == ["rev-list", "--left-right", "--count"]:
+                return _make_run_result(0, "0\t0\n", "")
+            return _make_run_result(0, "", "")
+
+        mocker.patch("gitdirector.repo._run_git_process", side_effect=side_effect)
+        return calls
+
+    def test_uses_branch_ab_when_upstream_is_origin(self, fake_git_repo, mocker):
+        calls = self._mock(
+            mocker,
+            "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -3\n",
+        )
+        info = Repository(fake_git_repo).get_status()
+        assert info.status == RepoStatus.DIVERGED
+        assert info.message == "ahead 2, behind 3"
+        assert not any(args[:1] == ["show-ref"] or args[:1] == ["rev-list"] for args in calls)
+
+    def test_other_upstream_falls_back_to_origin_comparison(self, fake_git_repo, mocker):
+        calls = self._mock(
+            mocker,
+            "# branch.oid abc\n# branch.head main\n# branch.upstream fork/main\n# branch.ab +5 -0\n",
+        )
+        info = Repository(fake_git_repo).get_status()
+        assert info.status == RepoStatus.UP_TO_DATE
+        assert any(args[:1] == ["rev-list"] for args in calls)
+
+    def test_fetch_ignores_pre_fetch_counts(self, fake_git_repo, mocker):
+        calls = self._mock(
+            mocker,
+            "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -9\n",
+        )
+        info = Repository(fake_git_repo).get_status(fetch=True)
+        assert info.status == RepoStatus.UP_TO_DATE
+        assert any(args[:1] == ["rev-list"] for args in calls)
 
 
 class TestGetStatusSync:
@@ -450,7 +497,7 @@ class TestGetStatusSync:
                 return _make_run_result(1, "", "error")
             return _make_run_result(0, "", "")
 
-        mocker.patch("subprocess.run", side_effect=side_effect)
+        mocker.patch("gitdirector.repo._run_git_process", side_effect=side_effect)
         info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.UNKNOWN
         assert info.message == "git status failed"
@@ -540,7 +587,7 @@ def _setup_raw_status(mocker, status_output):
             return _make_run_result(0, "", "")
         return _make_run_result(0, "", "")
 
-    mocker.patch("subprocess.run", side_effect=side_effect)
+    mocker.patch("gitdirector.repo._run_git_process", side_effect=side_effect)
 
 
 class TestGetStatusDetachedHead:
@@ -619,7 +666,7 @@ def _setup_pull_mocks(
             return _make_run_result(*result)
         return _make_run_result(0, "", "")
 
-    mocker.patch("subprocess.run", side_effect=side_effect)
+    mocker.patch("gitdirector.repo._run_git_process", side_effect=side_effect)
     return calls
 
 
@@ -644,7 +691,7 @@ class TestPull:
 
     def test_status_output_success(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 0,
                 "On branch main\nnothing to commit, working tree clean\n",
@@ -660,7 +707,7 @@ class TestPull:
 
     def test_status_output_failure(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(1, "", "fatal: status failed\n"),
         )
         repo = Repository(fake_git_repo)
@@ -677,7 +724,7 @@ class TestAddCommitPush:
 
     def test_add_all(self, fake_git_repo, mocker):
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
@@ -692,7 +739,7 @@ class TestAddCommitPush:
 
     def test_add_specific_paths(self, fake_git_repo, mocker):
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
@@ -705,7 +752,7 @@ class TestAddCommitPush:
 
     def test_add_failure(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(1, "", "fatal: pathspec 'nope' did not match\n"),
         )
         repo = Repository(fake_git_repo)
@@ -717,7 +764,7 @@ class TestAddCommitPush:
 
     def test_commit_success(self, fake_git_repo, mocker):
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "[main abc1234] test\n", ""),
         )
         repo = Repository(fake_git_repo)
@@ -730,7 +777,7 @@ class TestAddCommitPush:
         assert argv[3:6] == ["commit", "-m", "test"]
 
     def test_commit_empty_message_rejected_locally(self, fake_git_repo, mocker):
-        run_git = mocker.patch("subprocess.run")
+        run_git = mocker.patch("gitdirector.repo._run_git_process")
         repo = Repository(fake_git_repo)
 
         ok, msg = repo.commit("   ")
@@ -741,7 +788,7 @@ class TestAddCommitPush:
 
     def test_commit_failure(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(1, "", "error: nothing to commit\n"),
         )
         repo = Repository(fake_git_repo)
@@ -753,7 +800,7 @@ class TestAddCommitPush:
 
     def test_push_plain(self, fake_git_repo, mocker):
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "To origin\n", ""),
         )
         repo = Repository(fake_git_repo)
@@ -766,7 +813,7 @@ class TestAddCommitPush:
 
     def test_push_set_upstream(self, fake_git_repo, mocker):
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             side_effect=[
                 _make_run_result(0, "main\n", ""),  # get_current_branch
                 _make_run_result(0, "To origin\n", ""),  # push
@@ -782,7 +829,7 @@ class TestAddCommitPush:
 
     def test_push_set_upstream_without_branch(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(128, "", "fatal: not a git repo\n"),
         )
         repo = Repository(fake_git_repo)
@@ -796,7 +843,7 @@ class TestAddCommitPush:
 class TestTimelineOutput:
     def test_success(self, fake_git_repo, mocker):
         run_git = mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 0,
                 "* abc1234 2026-04-20  (HEAD -> main) Add timeline view\n",
@@ -814,7 +861,7 @@ class TestTimelineOutput:
 
     def test_no_commits_returns_empty_message(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 128,
                 "",
@@ -832,7 +879,7 @@ class TestTimelineOutput:
 class TestBranchesOutput:
     def test_success(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "* main\n  remotes/origin/main\n", ""),
         )
         repo = Repository(fake_git_repo)
@@ -845,7 +892,7 @@ class TestBranchesOutput:
 
     def test_empty_branch_list_returns_fallback(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
@@ -859,7 +906,7 @@ class TestBranchesOutput:
 class TestRemotesOutput:
     def test_success(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 0,
                 "origin\thttps://example.com/repo.git (fetch)\n"
@@ -877,7 +924,7 @@ class TestRemotesOutput:
 
     def test_empty_remote_list_returns_fallback(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(0, "", ""),
         )
         repo = Repository(fake_git_repo)
@@ -987,7 +1034,7 @@ class TestClassifyRemoteError:
 class TestRunGitErrorClassification:
     def test_network_error_classified(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(128, "", "connection refused\n"),
         )
         repo = Repository(fake_git_repo)
@@ -997,7 +1044,7 @@ class TestRunGitErrorClassification:
 
     def test_auth_error_classified(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(128, "", "authentication failed\n"),
         )
         repo = Repository(fake_git_repo)
@@ -1014,7 +1061,7 @@ class TestRunGitErrorClassification:
 class TestGetTrackedSizeValueError:
     def test_non_integer_size_field(self, fake_git_repo, mocker):
         mocker.patch(
-            "subprocess.run",
+            "gitdirector.repo._run_git_process",
             return_value=_make_run_result(
                 0,
                 "100644 blob abc123       NaN\ta.txt\n100644 blob def456       6\tb.txt\n",
@@ -1179,6 +1226,7 @@ class TestGetDiffAgainstHead:
         assert untracked == ["untracked.py"]
         assert calls == [
             ("diff", "HEAD", "--no-color"),
+            ("hash-object", "-t", "tree", "--stdin"),
             ("diff", empty_tree, "--no-color"),
             ("ls-files", "--others", "--exclude-standard", "-z"),
         ]

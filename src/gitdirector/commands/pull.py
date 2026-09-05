@@ -1,16 +1,13 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import click
 from rich import box
-from rich.live import Live
-from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
 from ..manager import RepositoryManager
-from ..repo import Repository
-from . import console
+from ..repo import Repository, is_git_repository
+from . import console, count_noun, run_concurrently
 
 
 def _pull_table() -> Table:
@@ -43,7 +40,7 @@ def _build_pull_table(results: list) -> tuple[Table, int, int]:
 
 def pull_repository(path: Path) -> tuple[str, bool, str]:
     name = path.name
-    if not path.exists() or not (path / ".git").is_dir():
+    if not is_git_repository(path):
         return name, False, "path not found"
     try:
         repo = Repository(path)
@@ -62,8 +59,9 @@ def _pull_one(path: Path) -> tuple[str, bool, str]:
 
 def register(cli: click.Group):
     @cli.command()
-    @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt.")
+    @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt")
     def pull(yes):
+        """Fast-forward pull every tracked repository"""
         manager = RepositoryManager()
         paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
@@ -84,42 +82,22 @@ def register(cli: click.Group):
                 return
             console.print()
 
-        results = []
-        with Live(
-            console=console, refresh_per_second=12, transient=True, vertical_overflow="visible"
-        ) as live:
-            with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
-                futures = {executor.submit(_pull_one, path): path for path in paths}
-                remaining = len(futures)
-                live.update(
-                    Spinner("dots", text=f"  [dim]pulling {remaining} repositories...[/dim]")
-                )
-                for future in as_completed(futures):
-                    remaining -= 1
-                    path = futures[future]
-                    try:
-                        results.append(future.result())
-                    except Exception as exc:
-                        results.append((path.name, False, str(exc)))
-                    done = len(results)
-                    if remaining > 0:
-                        live.update(
-                            Spinner(
-                                "dots",
-                                text=f"  [dim]{done} done, {remaining} remaining...[/dim]",
-                            )
-                        )
-                    else:
-                        live.update(Spinner("dots", text="  [dim]done[/dim]"))
+        results = run_concurrently(
+            paths,
+            _pull_one,
+            max_workers=manager.config.max_workers,
+            verb="pulling",
+            on_error=lambda path, exc: (path.name, False, str(exc)),
+        )
 
         table, success_count, failed_count = _build_pull_table(results)
         console.print(table)
 
         console.print()
         if failed_count:
-            noun = "repository" if failed_count == 1 else "repositories"
-            console.print(f" [red]{failed_count} {noun} failed[/red]\n")
+            failed = count_noun(failed_count, "repository", "repositories")
+            console.print(f" [red]{failed} failed[/red]\n")
             raise SystemExit(1)
-        else:
-            noun = "repository" if success_count == 1 else "repositories"
-            console.print(f" [green]{success_count} {noun}[/green]\n")
+        console.print(
+            f" [green]{count_noun(success_count, 'repository', 'repositories')}[/green]\n"
+        )

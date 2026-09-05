@@ -47,6 +47,12 @@ async def _wait_for_animated_scroll(pilot, widget) -> None:
 @pytest.fixture(autouse=True)
 def _isolate_tui_tmux_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # Sampling would otherwise talk to whatever tmux server is running on
+    # the developer's machine; tests hand the app statuses directly.
+    monkeypatch.setattr(
+        "gitdirector.integrations.tmux.monitor.TmuxMonitor.refresh",
+        lambda self: self.statuses(),
+    )
     monkeypatch.setattr(
         "gitdirector.integrations.tmux.sync_panel_tmux_config",
         lambda *_args, **_kwargs: tmp_path / ".gitdirector" / "tmux.conf",

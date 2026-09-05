@@ -160,13 +160,6 @@ def _count_lines_from_text(text: str) -> int:
     return text.count("\n") + (0 if text.endswith("\n") else 1)
 
 
-def _count_lines(file_path: Path) -> int | None:
-    text = _read_text(file_path)
-    if text is None:
-        return None
-    return _count_lines_from_text(text)
-
-
 @lru_cache(maxsize=1)
 def _get_encoder():
     return tiktoken.get_encoding("cl100k_base")

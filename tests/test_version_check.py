@@ -72,12 +72,9 @@ class TestMissingPackageMetadata:
         return patch("importlib.metadata.version", side_effect=PackageNotFoundError("gitdirector"))
 
     def teardown_method(self):
-        # Both are process-global and would otherwise carry the placeholder
-        # version into whichever test the runner schedules next.
-        from gitdirector import commands
-
+        # Process-global; it would otherwise carry the placeholder version
+        # into whichever test the runner schedules next.
         version_check.get_installed_version.cache_clear()
-        commands.__version__ = None
 
     def test_version_falls_back_to_placeholder(self):
         with self._uninstalled():
@@ -87,9 +84,7 @@ class TestMissingPackageMetadata:
         from gitdirector import commands
 
         with self._uninstalled():
-            commands.__version__ = None
             assert commands.get_version() == version_check.UNKNOWN_VERSION
-        commands.__version__ = None
 
     def test_update_status_reports_unknown_instead_of_a_fake_update(self):
         """Comparing against a placeholder would read as permanently outdated."""

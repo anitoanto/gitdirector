@@ -2,6 +2,7 @@ import click
 from click.shell_completion import CompletionItem, get_completion_class
 
 from ..config import Config
+from ..integrations.tmux import list_all_gd_sessions
 
 SUPPORTED_SHELLS = ("bash", "zsh", "fish")
 
@@ -82,9 +83,32 @@ def complete_repository_names(
     return items
 
 
+def complete_session_names(
+    _ctx: click.Context, _param: click.Parameter, incomplete: str
+) -> list[CompletionItem]:
+    """Complete live ``gd/<repo>/<purpose>/<N>`` session names."""
+    try:
+        entries = list_all_gd_sessions()
+    except Exception:
+        return []
+    prefix = incomplete.lower()
+    return [
+        CompletionItem(entry["session_name"], help=f"{entry['purpose']} in {entry['repo']}")
+        for entry in entries
+        if entry["session_name"].lower().startswith(prefix)
+    ]
+
+
 def register(cli: click.Group):
     @cli.command()
     @click.argument("shell", type=click.Choice(SUPPORTED_SHELLS))
     def completion(shell: str):
-        """Print shell completion setup for bash, zsh, or fish."""
+        """Print the shell completion script for bash, zsh, or fish
+
+        \b
+        Enable it with one of:
+          eval "$(gitdirector completion bash)"
+          eval "$(gitdirector completion zsh)"
+          gitdirector completion fish | source
+        """
         click.echo(completion_source(cli, shell), nl=False)

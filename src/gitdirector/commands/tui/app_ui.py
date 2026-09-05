@@ -68,7 +68,7 @@ class ConsoleUIHelpersMixin:
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "new_panel":
             return self._active_tab == "panels"
-        if action == "toggle_group":
+        if action in {"toggle_group", "toggle_all_groups"}:
             return self._active_tab == "repos"
         if action in {"show_git_menu", "show_info"}:
             return self._active_tab == "repos"

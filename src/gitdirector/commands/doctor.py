@@ -9,25 +9,10 @@ from pathlib import Path
 import click
 
 from .. import version_check
+from ..agents import agent_tools
 from ..config import Config
 from ..storage import load_yaml_mapping
 from . import console
-
-_CLIPBOARD_COMMANDS: tuple[tuple[str, ...], ...] = (
-    ("pbcopy",),
-    ("wl-copy",),
-    ("xclip", "-selection", "clipboard"),
-    ("xsel", "--clipboard", "--input"),
-    ("clip.exe",),
-)
-
-_AGENT_TOOLS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("OpenCode", ("opencode",)),
-    ("Claude Code", ("claude", "claude-code")),
-    ("GitHub Copilot", ("copilot", "github-copilot-cli")),
-    ("Codex", ("codex",)),
-    ("Pi", ("pi",)),
-)
 
 
 @dataclass(frozen=True)
@@ -46,16 +31,6 @@ def _which(*names: str) -> str | None:
         if resolved is not None:
             return resolved
     return None
-
-
-def _clipboard_tools_available() -> list[str]:
-    available: list[str] = []
-    for command in _CLIPBOARD_COMMANDS:
-        resolved = _which(command[0])
-        if resolved is None:
-            continue
-        available.append(resolved)
-    return available
 
 
 def _current_shell_name() -> str | None:
@@ -263,29 +238,6 @@ def run_doctor_checks() -> list[DoctorCheck]:
             )
         )
 
-    clipboard_tools = _clipboard_tools_available()
-    if clipboard_tools:
-        checks.append(
-            DoctorCheck(
-                "Clipboard Integration",
-                "ok",
-                "optional",
-                "supported clipboard integration is available",
-                (f"Detected tools: {', '.join(clipboard_tools)}",),
-            )
-        )
-    else:
-        checks.append(
-            DoctorCheck(
-                "Clipboard Integration",
-                "warn",
-                "optional",
-                "no supported clipboard tool was found",
-                ("Looked for: pbcopy, wl-copy, xclip, xsel, clip.exe.",),
-                "Install a clipboard tool.",
-            )
-        )
-
     try:
         config = Config()
     except (OSError, RuntimeError, ValueError) as exc:
@@ -367,7 +319,7 @@ def run_doctor_checks() -> list[DoctorCheck]:
 
     available_agents: list[tuple[str, str]] = []
     missing_agents: list[str] = []
-    for label, names in _AGENT_TOOLS:
+    for label, names in agent_tools():
         resolved = _which(*names)
         if resolved is None:
             missing_agents.append(label)
@@ -394,7 +346,7 @@ def run_doctor_checks() -> list[DoctorCheck]:
                 "warn",
                 "optional",
                 "no supported agent CLI was found",
-                tuple(f"{label}: not installed" for label, _names in _AGENT_TOOLS),
+                tuple(f"{label}: not installed" for label, _names in agent_tools()),
                 "Install desired agent CLIs.",
             )
         )
@@ -432,7 +384,7 @@ def _print_check(check: DoctorCheck) -> None:
 def register(cli: click.Group):
     @cli.command()
     def doctor():
-        """Check GitDirector environment setup and common integrations."""
+        """Check tmux, config, shell completion, and agent CLIs"""
         checks = run_doctor_checks()
         for check in checks:
             _print_check(check)

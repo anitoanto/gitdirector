@@ -128,7 +128,57 @@ class TestRepositoryGroups:
             assert table.row_count == 3
             assert "▾" in str(table.get_cell(group_key, app._col_keys[0]))
 
-    async def test_group_toggle_during_loading_preserves_loaded_status_cells(self):
+    async def test_toggle_all_groups_collapses_then_expands_every_group(self):
+        repos = [
+            _make_info("alpha", Path("/tmp/work/alpha")),
+            _make_info("beta", Path("/tmp/work/beta")),
+            _make_info("gamma", Path("/tmp/play/gamma")),
+            _make_info("delta", Path("/tmp/play/delta")),
+            _make_info("solo", Path("/tmp/other/solo")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            assert table.row_count == 7
+            assert "[shift+space] toggle all" in app.query_one("#status-bar", Static).content
+
+            # One group already collapsed: the others still collapse.
+            table.move_cursor(row=0)
+            app.action_toggle_group()
+            await pilot.press("shift+space")
+            await pilot.pause()
+            assert table.row_count == 3
+            for parent in (Path("/tmp/work"), Path("/tmp/play")):
+                assert "▸" in str(table.get_cell(group_row_key(parent), app._col_keys[0]))
+
+            # Every group collapsed: the next press expands them all.
+            await pilot.press("shift+space")
+            await pilot.pause()
+            assert table.row_count == 7
+            for parent in (Path("/tmp/work"), Path("/tmp/play")):
+                assert "▾" in str(table.get_cell(group_row_key(parent), app._col_keys[0]))
+
+    async def test_toggle_all_groups_is_inert_off_the_repos_tab(self):
+        repos = [
+            _make_info("alpha", Path("/tmp/work/alpha")),
+            _make_info("beta", Path("/tmp/work/beta")),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("3")
+            await pilot.press("shift+space")
+            await pilot.pause()
+
+            assert app._collapsed_groups == set()
+
         repos = [
             _make_info("alpha", Path("/tmp/work/alpha")),
             _make_info("beta", Path("/tmp/work/beta")),

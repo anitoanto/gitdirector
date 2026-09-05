@@ -1,41 +1,48 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import click
 from rich.console import Group
-from rich.live import Live
 from rich.spinner import Spinner
 from rich.text import Text
 
 from ..manager import RepositoryManager
 from ..repo import RepositoryInfo, RepoStatus
-from . import console
+from . import console, run_concurrently
+
+
+def _is_dirty(info: RepositoryInfo) -> bool:
+    return info.staged or info.unstaged
 
 
 def _build_dirty_display(results: list[RepositoryInfo]) -> Text:
-    dirty_repos = sorted(
-        [r for r in results if r.staged or r.unstaged], key=lambda r: r.name.lower()
-    )
+    dirty_repos = sorted((r for r in results if _is_dirty(r)), key=lambda r: r.name.lower())
     output = Text()
     for repo in dirty_repos:
         output.append(f"  {repo.name}", style="bold white")
         output.append(f"  {repo.branch or '—'}\n", style="dim")
-        if repo.staged_files:
-            for f in repo.staged_files:
-                output.append("    ")
-                output.append("staged:", style="cyan")
-                output.append(f"   {f}\n")
-        if repo.unstaged_files:
-            for f in repo.unstaged_files:
-                output.append("    ")
-                output.append("unstaged:", style="yellow")
-                output.append(f" {f}\n")
+        for f in repo.staged_files or ():
+            output.append("    ")
+            output.append("staged:", style="cyan")
+            output.append(f"   {f}\n")
+        for f in repo.unstaged_files or ():
+            output.append("    ")
+            output.append("unstaged:", style="yellow")
+            output.append(f" {f}\n")
         output.append("\n")
     return output
+
+
+def _render_progress(results: list[RepositoryInfo], remaining: int):
+    display = _build_dirty_display(results)
+    if not results and remaining:
+        return Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]")
+    if remaining:
+        return Group(display, Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"))
+    return display
 
 
 def register(cli: click.Group):
     @cli.command()
     def status():
+        """Show tracked repositories with uncommitted changes"""
         manager = RepositoryManager()
         paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
@@ -44,40 +51,20 @@ def register(cli: click.Group):
             console.print("  [dim]No repositories linked[/dim]\n")
             return
 
-        results = []
-        dirty_results: list[RepositoryInfo] = []
-        with Live(console=console, refresh_per_second=12, transient=False) as live:
-            with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
-                futures = {
-                    executor.submit(manager.get_repository_status, path): path for path in paths
-                }
-                remaining = len(futures)
-                live.update(
-                    Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]")
-                )
-                for future in as_completed(futures):
-                    remaining -= 1
-                    path = futures[future]
-                    try:
-                        info = future.result()
-                    except Exception as exc:
-                        info = RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
-                    results.append(info)
-                    if info.staged or info.unstaged:
-                        dirty_results.append(info)
-                    display = _build_dirty_display(dirty_results)
-                    if remaining > 0:
-                        live.update(
-                            Group(
-                                display,
-                                Spinner("dots", text=f"  [dim]{remaining} remaining...[/dim]"),
-                            )
-                        )
-                    else:
-                        live.update(display)
+        results = run_concurrently(
+            paths,
+            manager.get_repository_status,
+            max_workers=manager.config.max_workers,
+            verb="checking",
+            on_error=lambda path, exc: RepositoryInfo(
+                path, path.name, RepoStatus.UNKNOWN, None, str(exc)
+            ),
+            render=_render_progress,
+            transient=False,
+        )
 
         total = len(results)
-        dirty = sum(1 for r in results if r.staged or r.unstaged)
+        dirty = sum(1 for r in results if _is_dirty(r))
         clean = total - dirty
 
         if not dirty:

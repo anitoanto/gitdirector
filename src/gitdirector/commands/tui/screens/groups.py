@@ -27,4 +27,4 @@ class GroupActionMenuScreen(SessionActionMenuScreen):
 
     def _subtitle(self) -> str:
         repo_label = "repository" if self.repo_count == 1 else "repositories"
-        return f"[dim]{self.repo_count} {repo_label}:[/dim] [cyan]{escape(self.repo_names)}[/cyan]"
+        return f"[dim]{self.repo_count} {repo_label}:[/dim] [$text-primary]{escape(self.repo_names)}[/]"

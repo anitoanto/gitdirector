@@ -12,7 +12,6 @@ import pytest
 from gitdirector.info import (
     FileTypeInfo,
     RepoInfoResult,
-    _count_lines,
     _count_tokens,
     _get_non_ignored_files,
     _read_text,
@@ -63,58 +62,6 @@ def _commit_all(repo: Path, msg: str = "commit") -> None:
 
 
 # ---------------------------------------------------------------------------
-# _count_lines
-# ---------------------------------------------------------------------------
-
-
-class TestCountLines:
-    def test_empty_file(self, tmp_path):
-        f = tmp_path / "empty.txt"
-        f.write_bytes(b"")
-        assert _count_lines(f) == 0
-
-    def test_single_line_no_newline(self, tmp_path):
-        f = tmp_path / "a.txt"
-        f.write_bytes(b"hello")
-        assert _count_lines(f) == 1
-
-    def test_single_line_with_newline(self, tmp_path):
-        f = tmp_path / "a.txt"
-        f.write_bytes(b"hello\n")
-        assert _count_lines(f) == 1
-
-    def test_multiple_lines(self, tmp_path):
-        f = tmp_path / "a.txt"
-        f.write_bytes(b"line1\nline2\nline3\n")
-        assert _count_lines(f) == 3
-
-    def test_multiple_lines_no_trailing_newline(self, tmp_path):
-        f = tmp_path / "a.txt"
-        f.write_bytes(b"a\nb\nc")
-        assert _count_lines(f) == 3
-
-    def test_binary_file_returns_none(self, tmp_path):
-        f = tmp_path / "bin"
-        f.write_bytes(b"\x00\x01\x02\x03")
-        assert _count_lines(f) is None
-
-    def test_binary_null_after_text(self, tmp_path):
-        f = tmp_path / "mixed"
-        f.write_bytes(b"text here\x00more binary")
-        assert _count_lines(f) is None
-
-    def test_nonexistent_file(self, tmp_path):
-        assert _count_lines(tmp_path / "no-such-file") is None
-
-    def test_large_text_file(self, tmp_path):
-        f = tmp_path / "big.txt"
-        f.write_bytes(b"line\n" * 10_000)
-        assert _count_lines(f) == 10_000
-
-    def test_binary_null_beyond_first_chunk(self, tmp_path):
-        f = tmp_path / "late_null"
-        f.write_bytes(b"a" * 9000 + b"\x00")
-        assert _count_lines(f) is None
 
 
 class TestCountTokens:

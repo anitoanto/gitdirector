@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -25,8 +24,6 @@ from ..panels import (
 )
 from ..terminal_caps import strip_unsupported_css as _safe_css
 from ._shared import ConfirmScreen, SortMenuScreen  # re-export for backward compat
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "AgentLoadingScreen",
@@ -105,16 +102,16 @@ class PanelActionMenuScreen(ModalScreen[str]):
         session_name = make_panel_session_name(self.panel.name)
 
         with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.panel.name}[/bold white]", id="menu-title")
+            yield Static(f"[bold $text]{self.panel.name}[/]", id="menu-title")
             yield Static(f"[dim]{session_name}[/dim]", id="menu-branch")
             with Horizontal(id="panel-action-layout"):
                 with Vertical(id="panel-action-main"):
                     yield OptionList(
-                        Option("[white]▶[/white] [bold]Open[/bold]", id="open"),
-                        Option("[white]↺[/white] [bold]Reconfigure[/bold]", id="reconfigure"),
-                        Option("[white]✎[/white] [bold]Rename[/bold]", id="rename"),
+                        Option("[$text]▶[/] [bold]Open[/bold]", id="open"),
+                        Option("[$text]↺[/] [bold]Reconfigure[/bold]", id="reconfigure"),
+                        Option("[$text]✎[/] [bold]Rename[/bold]", id="rename"),
                         Option("", disabled=True),
-                        Option("[red]✕[/red] [bold]Delete[/bold]", id="delete"),
+                        Option("[$text-error]✕[/] [bold]Delete[/bold]", id="delete"),
                         id="action-menu",
                     )
                     yield Static(
@@ -164,7 +161,7 @@ class RenamePanelScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static("[bold white]Rename Panel[/bold white]", id="menu-title")
+            yield Static("[bold $text]Rename Panel[/]", id="menu-title")
             yield Static(f"[dim]Current: {self.current_name}[/dim]", id="menu-branch")
             yield Input(value=self.current_name, id="rename-input")
             yield Static("\\[enter] confirm    \\[esc] cancel", id="menu-hint")
@@ -215,7 +212,7 @@ class AgentLoadingScreen(ModalScreen[None]):
     }
     #loading-text {
         text-align: center;
-        color: white;
+        color: $text;
         padding: 1 0 0 0;
     }
     #loading-hint {
@@ -238,8 +235,6 @@ class AgentLoadingScreen(ModalScreen[None]):
         self._agent_cmd = agent_cmd
         self._session_name = session_name
         self._ready_marker = ready_marker
-        self._done_marker = Path(f"{ready_marker}.done") if ready_marker else None
-        self._failed_marker = Path(f"{ready_marker}.failed") if ready_marker else None
         self._loading_hint = loading_hint
         self._on_attach = on_attach
         self._dismissed = False
@@ -287,68 +282,15 @@ class AgentLoadingScreen(ModalScreen[None]):
         self._do_dismiss()
 
     def _do_dismiss(self) -> None:
-        import os
-        import sys
-        import termios
-
-        from ....integrations.tmux import attach_tmux_session
-
+        # The marker only signals startup; once the screen goes away nothing
+        # reads it, and the session's own cleanup cannot remove it if the
+        # session is killed early.
+        if self._ready_marker is not None:
+            self._ready_marker.unlink(missing_ok=True)
         if self._on_attach is not None:
             self._on_attach()
-            self.dismiss(None)
-            return
-
-        session_name = self._session_name
-        for marker in (self._ready_marker, self._done_marker, self._failed_marker):
-            if marker is None:
-                continue
-            try:
-                marker.unlink()
-            except FileNotFoundError:
-                pass
-
-        app = self.app
-        app._pause_session_status_tracking()
-
-        try:
-            try:
-                with app.suspend():
-                    entered_manual_alt_screen = False
-                    try:
-                        if not os.environ.get("TMUX"):
-                            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-                            sys.stdout.flush()
-                            entered_manual_alt_screen = True
-                        attach_tmux_session(session_name, skip_config_sync=True)
-                    finally:
-                        if entered_manual_alt_screen:
-                            sys.stdout.write("\033[?25h")
-                            sys.stdout.flush()
-                        try:
-                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                        except (AttributeError, OSError):
-                            pass
-            except Exception as exc:
-                # Headless / agent environments can't actually attach to tmux.
-                # We must still restore the terminal and dismiss the modal so
-                # the user is not left looking at a stuck spinner.
-                logger.warning("tmux attach failed (headless environment?): %s", exc)
-                try:
-                    app._update_status(f"tmux attach failed: {exc}")
-                except Exception:
-                    pass
-                try:
-                    sys.stdout.write("\033[?25h\033[?1049l")
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-        finally:
-            try:
-                app._arm_resume_new_panel_guard(app._active_tab)
-                app._resume_session_status_tracking()
-            except Exception:
-                logger.debug("Failed to resume session status tracking", exc_info=True)
-
+        else:
+            self.app._suspend_and_attach(self._session_name, skip_config_sync=True)
         self.dismiss(None)
 
 
@@ -522,9 +464,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             with Vertical(id="step-1"):
                 if self._editing:
                     yield Static("[dim]Panel[/dim]", id="panel-name-label")
-                    yield Static(
-                        f"[bold white]{self._panel_name}[/bold white]", id="panel-name-value"
-                    )
+                    yield Static(f"[bold $text]{self._panel_name}[/]", id="panel-name-value")
                 else:
                     yield Static("[dim]Name[/dim]", id="panel-name-label")
                     yield Input(placeholder="panel name...", id="panel-name-input")
@@ -534,7 +474,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
                         items = []
                         for layout in get_create_panel_layouts():
                             marker = (
-                                "[cyan]● [/cyan]"
+                                "[$text-primary]● [/]"
                                 if layout.key == self._selected_layout_key
                                 else "  "
                             )
@@ -605,10 +545,10 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def _step_title_markup(self) -> str:
         if self._editing:
-            return "[bold white]Reconfigure Panel[/bold white]"
+            return "[bold $text]Reconfigure Panel[/]"
         if self._step == 1:
-            return "[bold white]Create Panel[/bold white]"
-        return "[bold white]Configure Panes[/bold white]"
+            return "[bold $text]Create Panel[/]"
+        return "[bold $text]Configure Panes[/]"
 
     def _step_1_hint(self) -> str:
         if self._editing:
@@ -661,7 +601,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def _hint_markup(self, hint: str) -> str:
         if not self._validation_message:
             return hint
-        return f"[red]{escape(self._validation_message)}[/red]\n{hint}"
+        return f"[$text-error]{escape(self._validation_message)}[/]\n{hint}"
 
     def _update_hint(self) -> None:
         hint = self._step_1_hint() if self._step == 1 else self._step_2_hint()
@@ -753,7 +693,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     @staticmethod
     def _step2_subtitle_markup(name: str, layout_label: str) -> str:
-        return f'[bold white]"{name}"[/bold white]    [dim]{layout_label}[/dim]'
+        return f'[bold $text]"{name}"[/]    [dim]{layout_label}[/dim]'
 
     @classmethod
     def _layout_preview_markup(cls, layout_key: str | None) -> str:
@@ -817,7 +757,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         ]
         active = self._active_pane_count()
         for pane_index in range(1, 10):
-            marker = "[cyan]● [/cyan]" if pane_index == self._selected_pane_index else "  "
+            marker = "[$text-primary]● [/]" if pane_index == self._selected_pane_index else "  "
             if pane_index <= active:
                 prompt = (
                     f"{marker}[bold]{pane_index}[/bold]  "
@@ -832,7 +772,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         current = self._pane_assignments.get(self._selected_pane_index)
         options = [
             Option(
-                ("[cyan]● [/cyan]" if current is None else "  ") + "[dim]Unassigned[/dim]",
+                ("[$text-primary]● [/]" if current is None else "  ") + "[dim]Unassigned[/dim]",
                 id="__clear__",
             )
         ]
@@ -847,7 +787,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             return options
         for entry in self._session_entries:
             sn = entry["session_name"]
-            marker = "[cyan]● [/cyan]" if sn == current else "  "
+            marker = "[$text-primary]● [/]" if sn == current else "  "
             options.append(
                 Option(
                     f"{marker}[bold]{entry['purpose']}[/bold] [dim]{entry['repo']}[/dim]  {sn}",
@@ -934,7 +874,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         for layout in get_create_panel_layouts():
             oid = f"layout:{layout.key}"
             if layout.key == self._selected_layout_key:
-                menu.replace_option_prompt(oid, f"[cyan]● [/cyan]{layout.menu_display_label}")
+                menu.replace_option_prompt(oid, f"[$text-primary]● [/]{layout.menu_display_label}")
             else:
                 menu.replace_option_prompt(oid, f"  {layout.menu_display_label}")
 
@@ -942,7 +882,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         menu = self.query_one("#pane-slot-menu", OptionList)
         active = self._active_pane_count()
         for pane_index in range(1, 10):
-            marker = "[cyan]● [/cyan]" if pane_index == self._selected_pane_index else "  "
+            marker = "[$text-primary]● [/]" if pane_index == self._selected_pane_index else "  "
             if pane_index <= active:
                 prompt = (
                     f"{marker}[bold]{pane_index}[/bold]  "
@@ -958,11 +898,13 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         except NoMatches:
             return
         current = self._pane_assignments.get(self._selected_pane_index)
-        clear_prompt = ("[cyan]● [/cyan]" if current is None else "  ") + "[dim]Unassigned[/dim]"
+        clear_prompt = (
+            "[$text-primary]● [/]" if current is None else "  "
+        ) + "[dim]Unassigned[/dim]"
         menu.replace_option_prompt("__clear__", clear_prompt)
         for entry in self._session_entries:
             sn = entry["session_name"]
-            marker = "[cyan]● [/cyan]" if sn == current else "  "
+            marker = "[$text-primary]● [/]" if sn == current else "  "
             menu.replace_option_prompt(
                 sn,
                 f"{marker}[bold]{entry['purpose']}[/bold] [dim]{entry['repo']}[/dim]  {sn}",

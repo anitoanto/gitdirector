@@ -83,15 +83,18 @@ class TestAddDiscover:
         assert len(skipped) == 1
 
     def test_discover_no_repos(self, manager, tmp_path):
-        ok, msg, _, _ = manager.add_repository(tmp_path, discover=True)
-        assert ok is False
+        ok, msg, added, _ = manager.add_repository(tmp_path, discover=True)
+        assert ok is True
+        assert added == []
         assert "no git repositories" in msg.lower()
 
     def test_discover_all_existing(self, manager, tmp_path):
         repos = self._make_repos(tmp_path, 1)
         manager.add_repository(repos[0])
         ok, msg, added, skipped = manager.add_repository(tmp_path, discover=True)
-        assert ok is False
+        assert ok is True
+        assert added == []
+        assert skipped == repos
         assert "no new repositories" in msg.lower()
 
     def test_discover_nonexistent_path(self, manager, tmp_path):
@@ -116,48 +119,6 @@ class TestRemoveSingle:
         ok, msg, _ = manager.remove_repository(tmp_path / "nope")
         assert ok is False
         assert "not tracked" in msg.lower()
-
-
-# ---------------------------------------------------------------------------
-# remove – by name
-# ---------------------------------------------------------------------------
-
-
-class TestRemoveByName:
-    def test_remove_by_name_success(self, manager, fake_git_repo):
-        manager.add_repository(fake_git_repo)
-        ok, msg, removed = manager.remove_by_name(fake_git_repo.name)
-        assert ok is True
-        assert len(removed) == 1
-        assert fake_git_repo.resolve() not in manager.config.repositories
-
-    def test_remove_by_name_not_found(self, manager):
-        ok, msg, removed = manager.remove_by_name("nonexistent-repo")
-        assert ok is False
-        assert "no tracked repository named" in msg.lower()
-        assert removed == []
-
-    def test_remove_by_name_ambiguous(self, manager, tmp_path):
-        for folder in ("dir1", "dir2"):
-            r = tmp_path / folder / "my-repo"
-            r.mkdir(parents=True)
-            (r / ".git").mkdir()
-            manager.add_repository(r)
-
-        ok, msg, removed = manager.remove_by_name("my-repo")
-        assert ok is False
-        assert "multiple" in msg.lower()
-        assert removed == []
-
-    def test_remove_by_name_config_exception(self, manager, fake_git_repo, mocker):
-        manager.add_repository(fake_git_repo)
-        mocker.patch.object(
-            manager.config, "remove_repository", side_effect=Exception("Write failed")
-        )
-        ok, msg, removed = manager.remove_by_name(fake_git_repo.name)
-        assert ok is False
-        assert "Error removing repository" in msg
-        assert removed == []
 
 
 # ---------------------------------------------------------------------------

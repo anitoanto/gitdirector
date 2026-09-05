@@ -13,7 +13,6 @@ from .core import (
     _PANEL_CLIENT_COUNT_OPTION,
     _PANEL_STATUS_RESTORE_OPTION,
     _PANEL_WINDOW_RESTORE_OPTION,
-    TMUX_COMMAND_TIMEOUT,
     TmuxError,
     _current_window_target,
     _ensure_clean_tmux_server,
@@ -24,19 +23,19 @@ from .core import (
     _panel_pane_title,
     _protect_session,
     _resolved_panel_theme_name,
+    _run_tmux,
     _scrub_session_environment,
     _session_exists,
     _session_option_target,
-    _session_tmux_config,
     _temp_panel_display_name,
     _tmux_child_environment_command,
     _tmux_new_session_environment_args,
+    _tmux_server_is_gone,
     kill_tmux_session,
     make_panel_session_name,
     make_temp_panel_session_name,
     sync_panel_tmux_config,
 )
-from .session_env import sanitized_environ
 
 logger = logging.getLogger(__name__)
 
@@ -45,41 +44,14 @@ _TMUX_FORK_RETRY_ATTEMPTS = 5
 
 
 def _run_tmux_with_fork_retry(args: list[str]) -> subprocess.CompletedProcess[str]:
-    command = ["tmux", *args]
-    last_result: subprocess.CompletedProcess[str] | None = None
+    """Retry a tmux command that failed only because the server could not fork."""
     for attempt in range(_TMUX_FORK_RETRY_ATTEMPTS):
-        result = subprocess.run(
-            command, capture_output=True, text=True, check=False, timeout=TMUX_COMMAND_TIMEOUT
-        )
-        last_result = result
+        result = _run_tmux(args, text=True)
         stderr = result.stderr if isinstance(result.stderr, str) else ""
         if result.returncode == 0 or "fork failed" not in stderr.lower():
             break
         time.sleep(0.05 * (attempt + 1))
-
-    if last_result is None:
-        raise RuntimeError("tmux command was not run")
-    return last_result
-
-
-# The tmux server can die mid-command -- it has been observed to crash
-# inside `respawn-pane`. Every session on that server goes with it, so the
-# failure needs to read as "the server is gone", not as a generic non-zero
-# exit from whatever command happened to be in flight.
-_TMUX_SERVER_GONE_MARKERS = (
-    "server exited unexpectedly",
-    "no server running",
-    "lost server",
-)
-
-
-def _tmux_server_is_gone(stderr: object) -> bool:
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode(errors="replace")
-    if not isinstance(stderr, str):
-        return False
-    lowered = stderr.lower()
-    return any(marker in lowered for marker in _TMUX_SERVER_GONE_MARKERS)
+    return result
 
 
 def _raise_for_tmux_result(result: subprocess.CompletedProcess[str]) -> None:
@@ -151,31 +123,17 @@ def _tmux_output(*args: str) -> str:
     return result.stdout.strip()
 
 
-def _tmux_option_value(target: str, option: str, *, window: bool = False) -> str | None:
-    command = "show-window-options" if window else "show-options"
-    result = subprocess.run(
-        ["tmux", command, "-q", "-v", "-t", target, option],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+def _tmux_option_value(target: str, option: str) -> str | None:
+    result = _run_tmux(["show-options", "-q", "-v", "-t", target, option], text=True)
     if result.returncode != 0:
         return None
-    value = result.stdout.strip()
-    return value or None
+    return result.stdout.strip() or None
 
 
 def _respawn_pane(pane_id: str, command: str, *, check: bool = True) -> subprocess.CompletedProcess:
-    args = [
-        "tmux",
-        "respawn-pane",
-        "-k",
-        "-t",
-        pane_id,
-        _tmux_child_environment_command(command),
-    ]
-    result = _run_tmux_with_fork_retry(args[1:])
+    result = _run_tmux_with_fork_retry(
+        ["respawn-pane", "-k", "-t", pane_id, _tmux_child_environment_command(command)]
+    )
     if check:
         _raise_for_tmux_result(result)
     return result
@@ -434,11 +392,7 @@ def _equalize_panel_layout(
     checksum = _layout_checksum(spec)
     layout_string = f"{checksum:04x},{spec}"
 
-    subprocess.run(
-        ["tmux", "select-layout", "-t", window_target, layout_string],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    _run_tmux(["select-layout", "-t", window_target, layout_string], check=True)
 
 
 def _printf_lines_command(lines: list[str]) -> str:
@@ -449,37 +403,25 @@ def _printf_lines_command(lines: list[str]) -> str:
 
 
 def _ensure_panel_prefix_bindings() -> None:
-    subprocess.run(
-        [
-            "tmux",
-            "bind-key",
-            "-T",
-            "prefix",
-            "b",
-            "if-shell",
-            "-F",
-            "#{m:gd/panel/*,#{session_name}}",
-            "display-panes",
-        ],
+    in_panel = "#{m:gd/panel/*,#{session_name}}"
+    _run_tmux(
+        ["bind-key", "-T", "prefix", "b", "if-shell", "-F", in_panel, "display-panes"],
         check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
     )
     for pane_number in range(1, 10):
-        subprocess.run(
+        _run_tmux(
             [
-                "tmux",
                 "bind-key",
                 "-T",
                 "prefix",
                 str(pane_number),
                 "if-shell",
                 "-F",
-                "#{m:gd/panel/*,#{session_name}}",
+                in_panel,
                 f"select-pane -t:.{pane_number}",
                 f"select-window -t :={pane_number}",
             ],
             check=True,
-            timeout=TMUX_COMMAND_TIMEOUT,
         )
 
 
@@ -493,75 +435,22 @@ def _configure_panel_window(
 ) -> None:
     window_target = f"={session_name}:0"
     theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
-    subprocess.run(
-        ["tmux", "set-window-option", "-t", window_target, "pane-base-index", "1"],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
+    window_options = (
+        ("pane-base-index", "1"),
+        ("pane-border-status", "top"),
+        ("pane-border-lines", "heavy"),
+        ("remain-on-exit", "on"),
+        ("pane-border-style", f"fg={theme.border_inactive}"),
+        ("pane-active-border-style", f"fg={theme.border_active}"),
+        ("pane-border-format", _panel_border_format(theme_name, show_pane_number=show_pane_number)),
     )
-    subprocess.run(
-        ["tmux", "set-window-option", "-t", window_target, "pane-border-status", "top"],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        ["tmux", "set-window-option", "-t", window_target, "pane-border-lines", "heavy"],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        ["tmux", "set-window-option", "-t", window_target, "remain-on-exit", "on"],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        [
-            "tmux",
-            "set-window-option",
-            "-t",
-            window_target,
-            "pane-border-style",
-            f"fg={theme.border_inactive}",
-        ],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        [
-            "tmux",
-            "set-window-option",
-            "-t",
-            window_target,
-            "pane-active-border-style",
-            f"fg={theme.border_active}",
-        ],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        [
-            "tmux",
-            "set-window-option",
-            "-t",
-            window_target,
-            "pane-border-format",
-            _panel_border_format(theme_name, show_pane_number=show_pane_number),
-        ],
-        check=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    for option, value in window_options:
+        _run_tmux(["set-window-option", "-t", window_target, option, value], check=True)
 
     for pane_number, pane_id in enumerate(pane_ids, start=1):
-        subprocess.run(
-            [
-                "tmux",
-                "select-pane",
-                "-t",
-                pane_id,
-                "-T",
-                _panel_pane_title(pane_number, panes.get(pane_number)),
-            ],
+        _run_tmux(
+            ["select-pane", "-t", pane_id, "-T", _panel_pane_title(panes.get(pane_number))],
             check=True,
-            timeout=TMUX_COMMAND_TIMEOUT,
         )
 
 
@@ -641,18 +530,15 @@ def cleanup_panel_attached_session(session_name: str, theme_name: str | None = N
     client_count = int(raw_client_count) if raw_client_count and raw_client_count.isdigit() else 0
 
     if client_count > 1:
-        subprocess.run(
+        _run_tmux(
             [
-                "tmux",
                 "set-option",
                 "-q",
                 "-t",
                 session_target,
                 _PANEL_CLIENT_COUNT_OPTION,
                 str(client_count - 1),
-            ],
-            check=False,
-            timeout=TMUX_COMMAND_TIMEOUT,
+            ]
         )
         return
 
@@ -669,23 +555,16 @@ def cleanup_panel_attached_session(session_name: str, theme_name: str | None = N
         restore_window if restore_window.startswith("=") else f"={restore_window}"
     )
 
-    subprocess.run(
-        ["tmux", "set-option", "-q", "-t", session_target, "status", restore_status],
-        check=False,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
+    _run_tmux(["set-option", "-q", "-t", session_target, "status", restore_status])
+    _run_tmux(
         [
-            "tmux",
             "set-window-option",
             "-q",
             "-t",
             exact_restore_window,
             "pane-border-status",
             restore_border,
-        ],
-        check=False,
-        timeout=TMUX_COMMAND_TIMEOUT,
+        ]
     )
     for option in (
         _PANEL_CLIENT_COUNT_OPTION,
@@ -693,27 +572,10 @@ def cleanup_panel_attached_session(session_name: str, theme_name: str | None = N
         _PANEL_BORDER_RESTORE_OPTION,
         _PANEL_WINDOW_RESTORE_OPTION,
     ):
-        subprocess.run(
-            ["tmux", "set-option", "-q", "-u", "-t", session_target, option],
-            check=False,
-            timeout=TMUX_COMMAND_TIMEOUT,
-        )
+        _run_tmux(["set-option", "-q", "-u", "-t", session_target, option])
 
     if session_name.startswith("gd/"):
         sync_panel_tmux_config(theme_name)
-
-
-def _standalone_attach_fragment(session_name: str) -> str:
-    quoted_session = shlex.quote(_session_option_target(session_name))
-    quoted_attach_target = shlex.quote(f"={session_name}")
-    config_lines = [
-        line.strip() for line in _session_tmux_config(session_name).splitlines() if line.strip()
-    ]
-    config_fragment = "".join(f"tmux {line} >/dev/null 2>&1 || true; " for line in config_lines)
-    return (
-        f"tmux set-option -q -t {quoted_session} destroy-unattached off >/dev/null 2>&1 || true; "
-        f"{config_fragment}env -u TMUX tmux attach-session -t {quoted_attach_target}; "
-    )
 
 
 def _temp_panel_pane_command(
@@ -744,29 +606,6 @@ def cleanup_temp_panel_tmux_session(temp_panel_session_name: str) -> bool:
     if not _is_temp_panel_session(temp_panel_session_name):
         raise ValueError(f"not a temp panel session: {temp_panel_session_name!r}")
     return kill_tmux_session(temp_panel_session_name)
-
-
-def _embedded_tmux_attach_command(
-    session_name: str,
-    panel_name: str | None = None,
-    pane_index: int | None = None,
-) -> str:
-    quoted_session_target = shlex.quote(f"={session_name}")
-    missing_message = _printf_lines_command(["", "MISSING SESSION", session_name])
-    attach_fragment = (
-        _panel_attach_fragment(session_name)
-        if panel_name is not None and pane_index is not None
-        else _standalone_attach_fragment(session_name)
-    )
-    script = (
-        "clear; "
-        f"if tmux has-session -t {quoted_session_target} >/dev/null 2>&1; then "
-        f"{attach_fragment}"
-        "else "
-        f"{missing_message}; "
-        "fi"
-    )
-    return f"sh -c {shlex.quote(script)}"
 
 
 def _panel_pane_command(
@@ -845,9 +684,8 @@ def rebuild_panel_tmux_session(
     _ensure_clean_tmux_server()
     try:
         term_cols, term_lines = shutil.get_terminal_size()
-        subprocess.run(
+        _run_tmux(
             [
-                "tmux",
                 "new-session",
                 "-d",
                 *_tmux_new_session_environment_args(),
@@ -864,24 +702,14 @@ def rebuild_panel_tmux_session(
                 "cat",
             ],
             check=True,
-            env=sanitized_environ(),
-            timeout=TMUX_COMMAND_TIMEOUT,
         )
         _protect_session(build_session_name)
         # Panel panes are respawned below, so scrubbing here is enough to
         # keep gitdirector's launch context out of every one of them.
         _scrub_session_environment(build_session_name)
-        subprocess.run(
-            [
-                "tmux",
-                "set-window-option",
-                "-t",
-                f"={build_session_name}:0",
-                "pane-border-status",
-                "top",
-            ],
+        _run_tmux(
+            ["set-window-option", "-t", f"={build_session_name}:0", "pane-border-status", "top"],
             check=True,
-            timeout=TMUX_COMMAND_TIMEOUT,
         )
 
         pane_ids = _build_panel_layout(build_session_name, layout.rows, layout.cols, layout.key)
@@ -909,16 +737,8 @@ def rebuild_panel_tmux_session(
             )
 
         if old_panel_exists:
-            subprocess.run(
-                ["tmux", "rename-session", "-t", f"={session_name}", orphan_session_name],
-                check=True,
-                timeout=TMUX_COMMAND_TIMEOUT,
-            )
-        subprocess.run(
-            ["tmux", "rename-session", "-t", f"={build_session_name}", session_name],
-            check=True,
-            timeout=TMUX_COMMAND_TIMEOUT,
-        )
+            _run_tmux(["rename-session", "-t", f"={session_name}", orphan_session_name], check=True)
+        _run_tmux(["rename-session", "-t", f"={build_session_name}", session_name], check=True)
         renamed_to_final = True
         _protect_session(session_name)
         _ensure_panel_resize_tracking(session_name)
@@ -931,38 +751,11 @@ def rebuild_panel_tmux_session(
                     cleanup_panel_attached_session(inner_session, theme_name)
             _kill_tmux_session_by_name(actual_orphan_session_name)
     except Exception:
-        if renamed_to_final:
-            kill_tmux_session(session_name)
-            if actual_orphan_session_name is not None and _session_exists(
-                actual_orphan_session_name
-            ):
-                subprocess.run(
-                    [
-                        "tmux",
-                        "rename-session",
-                        "-t",
-                        f"={actual_orphan_session_name}",
-                        session_name,
-                    ],
-                    check=False,
-                    timeout=TMUX_COMMAND_TIMEOUT,
-                )
-        else:
-            kill_tmux_session(build_session_name)
-            if actual_orphan_session_name is not None and _session_exists(
-                actual_orphan_session_name
-            ):
-                subprocess.run(
-                    [
-                        "tmux",
-                        "rename-session",
-                        "-t",
-                        f"={actual_orphan_session_name}",
-                        session_name,
-                    ],
-                    check=False,
-                    timeout=TMUX_COMMAND_TIMEOUT,
-                )
+        # Undo whichever half of the swap happened, then restore the old
+        # panel under its original name.
+        kill_tmux_session(session_name if renamed_to_final else build_session_name)
+        if actual_orphan_session_name is not None and _session_exists(actual_orphan_session_name):
+            _run_tmux(["rename-session", "-t", f"={actual_orphan_session_name}", session_name])
         raise
 
     return session_name
@@ -1017,19 +810,15 @@ def _kill_temp_panel_session_and_wait(temp_panel_session_name: str) -> bool:
 
 
 def _temp_panel_session_is_inactive(temp_panel_session_name: str) -> bool:
-    result = subprocess.run(
+    result = _run_tmux(
         [
-            "tmux",
             "list-panes",
             "-t",
             f"={temp_panel_session_name}:0",
             "-F",
             "#{session_attached}|#{pane_dead}",
         ],
-        check=False,
-        capture_output=True,
         text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode != 0:
         return True
@@ -1090,19 +879,8 @@ def _respawn_temp_panel_pane(
 
 
 def _first_pane_id(temp_panel_session_name: str) -> str | None:
-    result = subprocess.run(
-        [
-            "tmux",
-            "list-panes",
-            "-t",
-            f"={temp_panel_session_name}:0",
-            "-F",
-            "#{pane_id}",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
+    result = _run_tmux(
+        ["list-panes", "-t", f"={temp_panel_session_name}:0", "-F", "#{pane_id}"], text=True
     )
     if result.returncode != 0 or not result.stdout.strip():
         return None
@@ -1125,9 +903,8 @@ def _create_temp_panel_tmux_session(
         # `-P -F #{pane_id}` returns the new pane's ID on stdout so we can
         # use it directly for the respawn below (no follow-up `list-panes`
         # query that could race with the server's session initialization).
-        new_session = subprocess.run(
+        new_session = _run_tmux(
             [
-                "tmux",
                 "new-session",
                 "-d",
                 *_tmux_new_session_environment_args(),
@@ -1147,10 +924,7 @@ def _create_temp_panel_tmux_session(
                 "cat",
             ],
             check=True,
-            capture_output=True,
             text=True,
-            env=sanitized_environ(),
-            timeout=TMUX_COMMAND_TIMEOUT,
         )
         pane_id = new_session.stdout.strip()
 

@@ -12,6 +12,7 @@ from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent,
 from gitdirector.commands.tui import AgentLoadingScreen, GitDirectorConsole, SortMenuScreen
 from gitdirector.commands.tui.app_sessions import (
     _MIN_SESSIONS_DESCRIPTION_WIDTH,
+    _SESSIONS_REPO_WIDTH,
     _resolve_sessions_layout,
 )
 from gitdirector.integrations.tmux.core import _repo_session_name_segment
@@ -315,7 +316,6 @@ class TestSessionsSearchAndSort:
             assert table.row_count == 0
             assert table.display is True
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
@@ -324,7 +324,7 @@ class TestSessionsSearchAndSort:
             {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
         ],
     )
-    async def test_default_sessions_sort_is_session_name(self, _mock_list, _mock_status):
+    async def test_default_sessions_sort_is_session_name(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -447,9 +447,9 @@ class TestSessionsSearchAndSort:
             app._sessions_sort_column = 0
             app._sessions_sort_reverse = False
             app._session_statuses = {
-                "gd/alpha/shell/1": {"command": "python", "dead": False},
-                "gd/beta/claude/1": {"command": "zsh", "dead": False},
-                "gd/gamma/copilot/1": {"command": "zsh", "dead": False},
+                "gd/alpha/shell/1": "running",
+                "gd/beta/claude/1": "idle",
+                "gd/gamma/copilot/1": "idle",
             }
             app._apply_sessions_filter_and_sort()
 
@@ -459,9 +459,9 @@ class TestSessionsSearchAndSort:
             assert str(row_key.value) == "gd/alpha/shell/1"
 
             app._session_statuses = {
-                "gd/alpha/shell/1": {"command": "zsh", "dead": False},
-                "gd/beta/claude/1": {"command": "python", "dead": False},
-                "gd/gamma/copilot/1": {"command": "zsh", "dead": False},
+                "gd/alpha/shell/1": "idle",
+                "gd/beta/claude/1": "running",
+                "gd/gamma/copilot/1": "idle",
             }
             app._active_tab = "sessions"
             generation = app._next_sessions_snapshot_generation()
@@ -506,11 +506,8 @@ class TestSessionsSearchAndSort:
             table = app.query_one("#sessions-table", DataTable)
             assert table.row_count == 1
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch_sessions()
-    async def test_search_submit_on_sessions_tab_hides_input_and_filters(
-        self, _mock_list, _mock_status
-    ):
+    async def test_search_submit_on_sessions_tab_hides_input_and_filters(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -530,9 +527,8 @@ class TestSessionsSearchAndSort:
             assert container.display is False
             assert table.row_count == 1
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch_sessions()
-    async def test_search_escape_on_sessions_tab_clears_live_search(self, _mock_list, _mock_status):
+    async def test_search_escape_on_sessions_tab_clears_live_search(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -718,9 +714,8 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_tab_activation_guard is None
             app._load_sessions.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch_sessions()
-    async def test_resume_restores_selected_session_row(self, _mock_list, _mock_status):
+    async def test_resume_restores_selected_session_row(self, _mock_list):
         """Returning from a session keeps the same session row selected."""
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -940,11 +935,8 @@ class TestTabRestorationAfterSuspend:
             assert str(row_key.value) == str(repos[0].path)
             assert table.cursor_coordinate.row == 3
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch_sessions()
-    async def test_sessions_table_restore_falls_back_to_saved_row_position(
-        self, _mock_list, _mock_status
-    ):
+    async def test_sessions_table_restore_falls_back_to_saved_row_position(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -966,11 +958,8 @@ class TestTabRestorationAfterSuspend:
             assert table.cursor_coordinate.row == 1
             assert str(row_key.value) == "gd/gamma/copilot/1"
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch_sessions()
-    async def test_sessions_table_restore_clears_saved_selection_when_empty(
-        self, _mock_list, _mock_status
-    ):
+    async def test_sessions_table_restore_clears_saved_selection_when_empty(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -992,9 +981,8 @@ class TestTabRestorationAfterSuspend:
             assert app._resume_selection_key is None
             assert app._resume_selection_row is None
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
     @patch_sessions()
-    async def test_sessions_table_refresh_preserves_selected_row(self, _mock_list, _mock_status):
+    async def test_sessions_table_refresh_preserves_selected_row(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1041,8 +1029,7 @@ class TestTabRestorationAfterSuspend:
 
 
 class TestSessionsRefreshOnReturn:
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    async def test_status_poll_reconciles_rows_when_it_supersedes_full_load(self, _mock_statuses):
+    async def test_status_poll_reconciles_rows_when_it_supersedes_full_load(self):
         full_load_started = threading.Event()
         release_full_load = threading.Event()
         calls = 0
@@ -1080,8 +1067,7 @@ class TestSessionsRefreshOnReturn:
                     entry["session_name"] for entry in SAMPLE_SESSIONS
                 ]
 
-    @patch("gitdirector.integrations.tmux.get_all_session_statuses", return_value={})
-    async def test_stale_empty_refresh_does_not_replace_newer_sessions(self, _mock_statuses):
+    async def test_stale_empty_refresh_does_not_replace_newer_sessions(self):
         first_started = threading.Event()
         release_first = threading.Event()
         calls = 0
@@ -1128,6 +1114,56 @@ class TestSessionsRefreshOnReturn:
             with patch("sys.stdout"):
                 app._suspend_and_attach("gd-test-session")
         assert app._active_tab == "sessions"
+
+    async def test_suspend_and_attach_failure_still_resumes_app(self):
+        """An attach failure must not escape ``suspend`` (Textual never resumes)."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        suspend_exit = MagicMock(return_value=False)
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=suspend_exit)
+        )
+        app._update_status = MagicMock()
+        stdout = MagicMock()
+        with patch(
+            "gitdirector.integrations.tmux.attach_tmux_session",
+            side_effect=RuntimeError("tmux exploded"),
+        ):
+            with patch("sys.stdout", stdout), patch.dict("os.environ", {}, clear=True):
+                app._suspend_and_attach("gd-test-session")
+
+        # The context manager completed normally: no exception reached it.
+        suspend_exit.assert_called_once()
+        assert suspend_exit.call_args.args == (None, None, None)
+        # The manually entered alt screen was left and the cursor restored
+        # while stdout still pointed at the terminal, so no black screen.
+        written = "".join(call.args[0] for call in stdout.write.call_args_list)
+        assert "\033[?1049h" in written
+        assert written.endswith("\033[?25h\033[?1049l")
+        app._update_status.assert_called_once_with("tmux attach failed: tmux exploded")
+        assert app._active_tab == "sessions"
+        assert app._session_status_tracking_paused is False
+
+    async def test_suspend_and_attach_success_does_not_leave_alt_screen(self):
+        """tmux leaves the alt screen itself; only the cursor is restored."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        app._update_status = MagicMock()
+        stdout = MagicMock()
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout", stdout), patch.dict("os.environ", {}, clear=True):
+                app._suspend_and_attach("gd-test-session")
+        written = "".join(call.args[0] for call in stdout.write.call_args_list)
+        assert written.endswith("\033[?25h")
+        assert "\033[?1049l" not in written
+        app._update_status.assert_not_called()
 
     async def test_suspend_keeps_repository_cache_valid(self):
         app = GitDirectorConsole()
@@ -1378,6 +1414,15 @@ class TestSessionDescription:
             assert len(lines) > 3
             for line in lines:
                 assert len(line) <= layout.total
+
+    def test_resolve_sessions_layout_repo_width_is_independent_of_names(self):
+        short = _resolve_sessions_layout([{"purpose": "shell", "repo": "a"}], 160)
+        long = _resolve_sessions_layout(
+            [{"purpose": "shell", "repo": "a-very-long-repository-name-indeed"}], 160
+        )
+        empty = _resolve_sessions_layout([], 160)
+
+        assert short.repo == long.repo == empty.repo == _SESSIONS_REPO_WIDTH
 
     def test_resolve_sessions_layout_gives_description_the_remaining_width(self):
         entries = [{"purpose": "shell", "repo": "alpha"}]

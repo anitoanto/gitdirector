@@ -2,27 +2,120 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+
 from textual.binding import Binding
+from textual.color import Color
 
 from ...repo import RepositoryInfo, RepoStatus
+from ...ui_theme import readable_on
 
-_STATUS_LABEL = {
-    RepoStatus.UP_TO_DATE: "up to date",
-    RepoStatus.BEHIND: "[bold yellow]behind[/bold yellow]",
-    RepoStatus.AHEAD: "[bold yellow]ahead[/bold yellow]",
-    RepoStatus.DIVERGED: "[bold yellow]diverged[/bold yellow]",
-    RepoStatus.UNKNOWN: "[bold yellow]unknown[/bold yellow]",
-}
+# Rows are Rich markup, which cannot reference theme variables, so table
+# colours are resolved from the active theme into concrete values that are
+# guaranteed to read against both the table surface and the highlighted row.
+_CURSOR_TINT = 0.30
+_MIN_CONTRAST = 4.5
+_MUTED_CONTRAST = 3.5
+# The yellow used to flag attention (sync drift, uncommitted changes, a
+# waiting session, repo names). Fixed rather than taken from the theme so it
+# stays yellow in every theme; only its lightness adapts for contrast.
+_ATTENTION_YELLOW = "#ffd75f"
 
 
-def _changes_label(info: RepositoryInfo) -> str:
-    if info.staged and info.unstaged:
-        return "[bold yellow]staged+unstaged[/bold yellow]"
-    if info.staged:
-        return "[bold yellow]staged[/bold yellow]"
-    if info.unstaged:
-        return "[bold yellow]unstaged[/bold yellow]"
-    return "—"
+def _variable_color(variables: Mapping[str, str], name: str, fallback: str) -> Color:
+    try:
+        return Color.parse(variables.get(name) or fallback)
+    except Exception:
+        return Color.parse(fallback)
+
+
+def _markup_color(color: Color, source: str) -> str:
+    # Rich understands "green" but not "ansi_green"; ANSI themes keep the
+    # terminal's own palette on purpose.
+    if color.ansi is not None:
+        return source[5:] if source.startswith("ansi_") else source
+    return color.hex6
+
+
+@dataclass(frozen=True)
+class TablePalette:
+    """Colours for status cells, as Rich style strings."""
+
+    success: str
+    yellow: str
+    muted: str
+    primary: str
+
+    def sync_label(self, status: RepoStatus) -> str:
+        if status is RepoStatus.UP_TO_DATE:
+            return "up to date"
+        return f"[bold {self.yellow}]{status.value}[/]"
+
+    def changes_label(self, info: RepositoryInfo) -> str:
+        key = _changes_sort_key(info)
+        if key == "—":
+            return "—"
+        return f"[bold {self.yellow}]{key}[/]"
+
+    def group_label(self, text: str) -> str:
+        return f"[bold {self.primary}]{text}[/]"
+
+    def panel_status_label(self, state: str) -> str:
+        if state == "active":
+            return f"[{self.success}]● active[/]"
+        return f"[{self.muted}]○ empty[/]"
+
+    def session_status(self, status: str) -> tuple[str, str]:
+        """``(label, style)`` for a composed sessions row."""
+        if status == "waiting":
+            return "● waiting", f"bold {self.yellow}"
+        if status == "idle":
+            return "○ idle", self.muted
+        return "● running", self.success
+
+
+def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
+    """Build the palette for a theme from its CSS variables.
+
+    Every colour is checked against the plain surface and against the
+    highlighted row (surface tinted with the primary colour) and nudged
+    toward black or white until it clears the contrast threshold on both.
+    """
+    surface = _variable_color(variables, "surface", "#1e1e1e")
+    primary = _variable_color(variables, "primary", "#5fd7ff")
+    foreground = _variable_color(variables, "foreground", "#f0f0f0")
+    # ANSI themes name terminal palette slots; their real values are unknown,
+    # so no contrast math is possible and the slot names are used as-is.
+    ansi_theme = any(c.ansi is not None for c in (surface, primary, foreground))
+    if not ansi_theme:
+        # A focused table tints its surface 5% toward the foreground.
+        surface = surface.blend(foreground, 0.05)
+    tint = surface if ansi_theme else surface.blend(primary, _CURSOR_TINT)
+
+    def readable(name: str, fallback: str) -> str:
+        source = variables.get(name) or fallback
+        color = _variable_color(variables, name, fallback)
+        return _markup_color(readable_on(color, surface, tint, minimum=_MIN_CONTRAST), source)
+
+    if ansi_theme:
+        yellow = "yellow"
+        muted = "bright_black"
+    else:
+        yellow = _markup_color(
+            readable_on(Color.parse(_ATTENTION_YELLOW), surface, tint, minimum=_MIN_CONTRAST), ""
+        )
+        muted = _markup_color(
+            readable_on(foreground.blend(surface, 0.45), surface, tint, minimum=_MUTED_CONTRAST),
+            "",
+        )
+
+    return TablePalette(
+        success=readable("success", "#4ebe63"),
+        yellow=yellow,
+        muted=muted,
+        primary=readable("primary", "#5fd7ff"),
+    )
 
 
 def _changes_sort_key(info: RepositoryInfo) -> str:
@@ -72,7 +165,7 @@ _SESSIONS_COL_REPO = 2
 _SESSIONS_COL_SESSION_NAME = 3
 _SESSIONS_COL_DESCRIPTION = 4
 
-_SESSION_STATUS_POLL_INTERVAL_SECS = 3
+_SESSION_STATUS_POLL_INTERVAL_SECS = 1
 _REPO_CACHE_TTL_SECS = 30 * 60
 
 _PANELS_SORT_COLUMN_NAMES = {
@@ -84,26 +177,6 @@ _PANELS_SORT_COLUMN_NAMES = {
 }
 
 _DEFAULT_PANELS_SORT_COLUMN = 0
-
-_PANEL_STATUS_LABEL = {
-    "active": "[green]● active[/green]",
-    "empty": "[dim]○ empty[/dim]",
-}
-
-_SESSION_STATUS_LABEL = {
-    "waiting": "[bold yellow]● waiting[/bold yellow]",
-    "running": "[green]● running[/green]",
-    "idle": "[dim]○ idle[/dim]",
-}
-
-# Plain text + style pairs for the sessions rows. The sessions table renders
-# each row as a single composed ``Text`` block, so it needs the label and the
-# style separately instead of a console-markup string.
-_SESSION_STATUS_DISPLAY = {
-    "waiting": ("● waiting", "bold yellow"),
-    "running": ("● running", "green"),
-    "idle": ("○ idle", "dim"),
-}
 
 _SESSION_STATUS_ORDER = {
     "waiting": 0,

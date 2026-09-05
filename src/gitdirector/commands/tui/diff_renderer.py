@@ -593,10 +593,6 @@ def _status_pill_text(status: str) -> RichText:
     return RichText(f" {label} ", style=f"bold {fg} on {bg}")
 
 
-def _status_word(status: str) -> str:
-    return _STATUS_LABEL.get(status, "changed")
-
-
 def render_change_summary(
     file: ChangedFile, *, path_width: int = 56, show_new_badge: bool = True
 ) -> RichText:
@@ -722,26 +718,10 @@ def _render_diff_meta_lines(lines: list[str]) -> RenderableType:
     for i, line in enumerate(lines):
         if i:
             text.append("\n")
+        text.append("  ", style="dim")
         if line.startswith("diff --git "):
-            text.append("  ", style="dim")
             text.append(line, style=f"bold {GITHUB_DARK_HEADING}")
-        elif line.startswith("index "):
-            text.append("  ", style="dim")
-            text.append(line, style=f"italic {GITHUB_DARK_MUTED}")
-        elif line.startswith("--- ") or line.startswith("+++ "):
-            text.append("  ", style="dim")
-            text.append(line, style=f"italic {GITHUB_DARK_MUTED}")
-        elif line.startswith("new file mode") or line.startswith("deleted file mode"):
-            text.append("  ", style="dim")
-            text.append(line, style=f"italic {GITHUB_DARK_MUTED}")
-        elif line.startswith("rename ") or line.startswith("similarity "):
-            text.append("  ", style="dim")
-            text.append(line, style=f"italic {GITHUB_DARK_MUTED}")
-        elif line.startswith("Binary files "):
-            text.append("  ", style="dim")
-            text.append(line, style=f"italic {GITHUB_DARK_MUTED}")
         else:
-            text.append("  ", style="dim")
             text.append(line, style=f"italic {GITHUB_DARK_MUTED}")
     return Padding(text, (0, 2), style="on #161b22")
 

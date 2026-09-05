@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
 from pathspec import GitIgnoreSpec
 
 from .config import Config
-from .repo import Repository, RepositoryInfo, RepoStatus
+from .repo import Repository, RepositoryInfo, RepoStatus, is_git_repository
 from .storage import normalize_repository_path
 
 
@@ -32,6 +34,25 @@ def _is_ignored(directory: Path, ignore_specs: dict[Path, GitIgnoreSpec]) -> boo
     return ignored
 
 
+def _count_noun(count: int, noun: str, plural: str) -> str:
+    return f"{count} {noun if count == 1 else plural}"
+
+
+def describe_resolution_failure(target: str, matches: list[Path], path_attempted: bool) -> str:
+    """Explain why :meth:`RepositoryManager.resolve_repository_target` found nothing.
+
+    A module-level function so commands can format the message without a
+    manager instance; the wording is shared by every command that accepts a
+    ``PATH|NAME`` argument.
+    """
+    if path_attempted:
+        return f"No tracked repository at path: {target}"
+    if matches:
+        paths_list = "\n".join(f"  {path}" for path in matches)
+        return f"Multiple repositories named '{target}' — use the full path:\n{paths_list}"
+    return f"No tracked repository named: {target}"
+
+
 class RepositoryManager:
     def __init__(self):
         self.config = Config()
@@ -44,7 +65,13 @@ class RepositoryManager:
         allow_untracked_git_path: bool = False,
         fuzzy_names: bool = False,
     ) -> tuple[Path | None, list[Path], bool]:
-        """Resolve a command target while preserving its path/name policy."""
+        """Resolve a command target given as a path or a repository name.
+
+        Returns ``(path, matches, path_attempted)``. ``path`` is the single
+        resolved repository or ``None``; ``matches`` lists the candidates when
+        a name was ambiguous; ``path_attempted`` tells whether *target* was
+        treated as a filesystem path rather than a name.
+        """
         candidate = Path(target).expanduser()
         path_like = (
             "/" in target
@@ -57,7 +84,7 @@ class RepositoryManager:
 
         if not names_only and path_like:
             path = normalize_repository_path(candidate)
-            if allow_untracked_git_path and path.is_dir() and (path / ".git").is_dir():
+            if allow_untracked_git_path and is_git_repository(path):
                 return path, [], True
             if self.config.has_repository(path):
                 return path, [], True
@@ -82,8 +109,7 @@ class RepositoryManager:
     ) -> tuple[bool, str, list[Path], list[Path]]:
         if discover:
             return self._discover_and_add(path)
-        else:
-            return self._add_single(path)
+        return self._add_single(path)
 
     def _add_single(self, path: Path) -> tuple[bool, str, list[Path], list[Path]]:
         path = normalize_repository_path(path)
@@ -94,7 +120,7 @@ class RepositoryManager:
         if not path.is_dir():
             return False, f"Path is not a directory: {path}", [], []
 
-        if not (path / ".git").is_dir():
+        if not is_git_repository(path):
             return False, f"Not a git repository: {path}", [], []
 
         if self.config.has_repository(path):
@@ -102,11 +128,17 @@ class RepositoryManager:
 
         try:
             self.config.add_repository(path)
-            return True, f"Added repository: {path}", [path], []
-        except Exception as e:
-            return False, f"Error adding repository: {str(e)}", [], []
+        except Exception as exc:
+            return False, f"Error adding repository: {exc}", [], []
+        return True, f"Added repository: {path}", [path], []
 
     def _discover_and_add(self, root: Path) -> tuple[bool, str, list[Path], list[Path]]:
+        """Track every git checkout under *root*.
+
+        Finding nothing new is not an error: the result is still successful,
+        with an explanatory message and the already-tracked repositories in
+        the skipped list.
+        """
         root = normalize_repository_path(root)
 
         if not root.exists():
@@ -119,7 +151,7 @@ class RepositoryManager:
         skipped: list[Path] = []
         ignore_specs: dict[Path, GitIgnoreSpec] = {}
 
-        for current_root, dirs, _ in os.walk(root):
+        for current_root, dirs, files in os.walk(root):
             current_path = Path(current_root)
             ignore_specs = {
                 ignore_root: spec
@@ -134,35 +166,36 @@ class RepositoryManager:
                 for directory in dirs
                 if not _is_ignored(current_path / directory, ignore_specs)
             ]
-            if ".git" not in dirs:
+            if ".git" in dirs:
+                dirs.remove(".git")
+            elif ".git" not in files:
                 continue
-            dirs.remove(".git")
             repo_path = normalize_repository_path(current_path)
             if self.config.has_repository(repo_path):
                 skipped.append(repo_path)
                 continue
             repos.append(repo_path)
 
-        if repos:
-            self.config.add_repositories(repos)
-
         if not repos:
             msg = "No new repositories found" if skipped else "No git repositories found"
-            return False, msg, [], skipped
+            return True, msg, [], skipped
 
-        msg = (
-            f"Added {len(repos)} repository"
-            if len(repos) == 1
-            else f"Added {len(repos)} repositories"
+        try:
+            self.config.add_repositories(repos)
+        except Exception as exc:
+            return False, f"Error adding repositories: {exc}", [], skipped
+
+        return (
+            True,
+            f"Added {_count_noun(len(repos), 'repository', 'repositories')}",
+            repos,
+            skipped,
         )
-
-        return True, msg, repos, skipped
 
     def remove_repository(self, path: Path, discover: bool = False) -> tuple[bool, str, list[Path]]:
         if discover:
             return self._discover_and_remove(path)
-        else:
-            return self._remove_single(path)
+        return self._remove_single(path)
 
     def _remove_single(self, path: Path) -> tuple[bool, str, list[Path]]:
         path = normalize_repository_path(path)
@@ -172,30 +205,9 @@ class RepositoryManager:
 
         try:
             self.config.remove_repository(path)
-            return True, f"Removed repository: {path}", [path]
-        except Exception as e:
-            return False, f"Error removing repository: {str(e)}", []
-
-    def remove_by_name(self, name: str) -> tuple[bool, str, list[Path]]:
-        matches = [r for r in self.config.repositories if r.name == name]
-
-        if not matches:
-            return False, f"No tracked repository named: {name}", []
-
-        if len(matches) > 1:
-            paths_list = "\n".join(f"  {p}" for p in matches)
-            return (
-                False,
-                f"Multiple repositories named '{name}' — use the full path:\n{paths_list}",
-                [],
-            )
-
-        path = matches[0]
-        try:
-            self.config.remove_repository(path)
-            return True, f"Removed repository: {path}", [path]
-        except Exception as e:
-            return False, f"Error removing repository: {str(e)}", []
+        except Exception as exc:
+            return False, f"Error removing repository: {exc}", []
+        return True, f"Removed repository: {path}", [path]
 
     def _discover_and_remove(self, root: Path) -> tuple[bool, str, list[Path]]:
         root = normalize_repository_path(root)
@@ -207,15 +219,11 @@ class RepositoryManager:
 
         try:
             self.config.remove_repositories(repos_to_remove)
+        except Exception as exc:
+            return False, f"Error removing repositories: {exc}", []
 
-            msg = (
-                f"Removed {len(repos_to_remove)} repository"
-                if len(repos_to_remove) == 1
-                else f"Removed {len(repos_to_remove)} repositories"
-            )
-            return True, msg, repos_to_remove
-        except Exception as e:
-            return False, f"Error removing repositories: {str(e)}", []
+        msg = f"Removed {_count_noun(len(repos_to_remove), 'repository', 'repositories')}"
+        return True, msg, repos_to_remove
 
     def get_repository_status(
         self,
@@ -224,12 +232,12 @@ class RepositoryManager:
         fetch: bool = False,
         include_size: bool = False,
     ) -> RepositoryInfo:
-        if path.exists() and (path / ".git").is_dir():
+        if is_git_repository(path):
             try:
                 repo = Repository(path)
                 return repo.get_status(fetch=fetch, include_size=include_size)
-            except Exception as e:
-                return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(e))
+            except Exception as exc:
+                return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
         return RepositoryInfo(
             path,
             path.name,

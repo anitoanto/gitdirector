@@ -18,7 +18,6 @@ from gitdirector.commands.tui.terminal_caps import (
     host_supports_alpha,
     host_supports_hatch,
     host_supports_truecolor,
-    is_ci_environment,
     is_dumb_terminal,
     no_color_requested,
     strip_unsupported_css,
@@ -78,13 +77,6 @@ class TestHostCapabilityDetection:
     def test_dumb_terms_constant(self):
         assert "dumb" in _DUMB_TERMS
         assert "" in _DUMB_TERMS
-
-    def test_ci_detection(self, monkeypatch):
-        monkeypatch.setenv("CI", "true")
-        assert is_ci_environment() is True
-        monkeypatch.delenv("CI", raising=False)
-        monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        assert is_ci_environment() is True
 
     def test_no_color_zero_disables_color(self, monkeypatch):
         monkeypatch.setenv("TERM", "xterm-256color")

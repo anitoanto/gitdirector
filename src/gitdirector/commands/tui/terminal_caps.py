@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sys
 
 _DUMB_TERMS = frozenset({"dumb", ""})
@@ -38,11 +37,6 @@ def no_color_requested() -> bool:
     if is_dumb_terminal():
         return True
     return bool(os.environ.get("NO_COLOR", "").strip())
-
-
-def is_ci_environment() -> bool:
-    """Return ``True`` when running under a known CI runner."""
-    return bool(os.environ.get("CI")) or bool(os.environ.get("GITHUB_ACTIONS"))
 
 
 def host_color_system() -> str | None:
@@ -112,8 +106,6 @@ def host_supports_alpha() -> bool:
     background is computed.
     """
     if is_dumb_terminal():
-        return False
-    if not shutil.get_terminal_size((80, 24)).columns:
         return False
     return host_supports_truecolor()
 

@@ -14,10 +14,12 @@ uv run nox -s clean                  # delete caches, coverage, build artifacts
 ```
 
 `clean` walks the whole project — root, `src/`, `tests/`, every subfolder —
-removing `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.nox`,
-`.tox`, `htmlcov`, `build/`, `dist/`, `*.egg-info`, `.coverage*`, and stray
-`.pyc`/`.DS_Store` files. It never descends into `.venv` or `.git`, so it cannot
-break your environment.
+removing `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
+`.pytype`, `.hypothesis`, `.tox`, `htmlcov`, `build/`, `dist/`, `wheels/`,
+`*.egg-info`, coverage output (`.coverage*`, `coverage.xml`, `coverage.json`),
+and stray `*.pyc`/`*.pyo`/`*.pyd`/`.DS_Store` files. It never descends into
+`.git`, `.venv`, `venv`, `.env`, `.direnv`, `node_modules`, or `site-packages`,
+so it cannot break your environment.
 
 ## Test suite
 
@@ -45,28 +47,102 @@ serialized behind a file lock.
 
 ## Sessions tab status
 
-How the Sessions tab derives each status, refreshed every 3 seconds:
+### Agent-reported status
+
+An agent with lifecycle hooks can report its own status, which the monitor
+trusts over every heuristic below. The protocol is a tmux session option,
+`@gitdirector_agent_state`, holding `running`, `waiting`, or `idle`; the
+hook stamps it with `tmux set-option -t "$TMUX_PANE" ...`, which works
+whether or not GitDirector is running, and `list-panes` reads it back for
+free every second. An agent whose hooks cannot see a user interrupt also
+sets `@gitdirector_agent_interrupts unreported`, which enables the
+staleness check described below.
+
+**Claude Code.** Both Claude launch entries pass `--settings '{"hooks": ...}'`
+on the command line (Claude merges it with the user's own settings, which
+are never modified):
+
+| Hook | State |
+| --- | --- |
+| `SessionStart`, `Stop` (turn finished, prompt is back), `PermissionDenied` | `idle` |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `running` |
+| `PreToolUse` for `AskUserQuestion`, `PermissionRequest`, `Notification` (except `idle_prompt`) | `waiting` |
+| `SessionEnd` | option cleared |
+
+Claude Code fires no hook when the user interrupts a turn with Escape, so a
+reported `running` whose screen has not changed and whose process tree has
+burned no CPU for 5 s is shown as `idle` (a working Claude redraws its
+spinner every second). A reported `waiting` is trusted for as long as the
+prompt stays on screen; once the screen changes after the report and then
+goes quiet, it is `idle` too.
+
+The hook fragments live in `src/gitdirector/agents.py`.
+
+**OpenCode.** The launch entry sets `OPENCODE_CONFIG_CONTENT` to a config
+that adds one plugin, `src/gitdirector/integrations/opencode_status.js`
+(shipped in the wheel). OpenCode merges that JSON with the user's own
+config. The plugin subscribes to OpenCode's event bus and reports the most
+urgent state across every session the process holds:
+
+| Event | Effect |
+| --- | --- |
+| `permission.asked`, `question.asked` | the request is pending |
+| `permission.replied`, `question.replied`, `question.rejected` | the request is no longer pending |
+| `session.status` busy | the session has a turn in progress |
+| `session.status` not busy, `session.idle`, `session.error`, `session.deleted` | the session is no longer busy, and its pending requests are dropped |
+
+After every event the reported state is `waiting` if any request is pending,
+else `running` if any session is busy, else `idle`; the option is only
+rewritten when that state changes.
+
+OpenCode reports an interrupted turn as idle itself, so it does not set the
+interrupts flag. `opencode --pure` disables external plugins and therefore
+this reporting.
+
+An agent started some other way (`gd-tmux repo claude`, or by hand) has no
+hooks and falls back to the heuristics.
+
+### Heuristics for everything else
+
+Statuses are agent-agnostic: nothing is keyed on the session's purpose or on
+which program is running. `TmuxMonitor` samples every `gd/*` session once a
+second; the same sample also carries each session's repo label and
+description, so the Sessions tab lists sessions from it (`entries()`) without
+a separate `list-sessions` call and repaints only the rows whose status
+changed.
+
+Signals gathered per sample (one `tmux list-panes -a` and one `ps` call for
+all sessions, plus a `capture-pane` only for panes whose tmux activity stamp
+moved):
 
 ```text
-statuses = tmux list-panes for all gd/* sessions
-for each session:
-    command     = foreground command resolved from pane pid + process tree
-    bell        = monitor saw a tmux %bell event
-    last_change = last time visible pane content changed
+command      foreground program under the pane (process tree, shallowest
+             non-shell process in the tty's foreground process group)
+changed      visible pane content differs from the last capture, ignoring
+             a one-cell flip that restores the previous frame (a program
+             drawing its own blinking cursor)
+cpu          the process tree burned >= 0.5 s of CPU within the last 3 s
+             (a lone housekeeping burst from an idle agent does not count)
+interactive  the pane's tty is in raw mode (the program reads keystrokes);
+             tmux's mouse/alternate-screen flags are the fallback
+bell         tmux bell flag rose, or a control-mode %bell event arrived;
+             cleared by a real content change >= 1 s later or on attach
 
-    if bell:                                          waiting
-    elif pane is dead:                                idle
-    elif command is a plain shell (zsh/bash/sh/...):  idle
-    elif purpose is an agent (opencode/claude/copilot/codex/pi)
-         and command matches that agent
-         and now - last_change >= 10s:                idle
-    else:                                             running
+if pane is dead:                                        idle
+elif bell:                                              waiting
+elif command is a shell:   running if changed < 2 s ago, else idle
+elif changed < 4 s ago or cpu < 4 s ago:                running
+elif interactive:                                       waiting
+else:                                                   idle
 ```
 
-- `waiting` outranks every other state.
-- Agent idleness uses visible pane-content changes, not raw tmux output events.
-- Agent sessions prefer the real agent process over helper children like `node`.
-- Background refreshes update status cells in place and never reorder rows.
+- `waiting` means the program is alive and blocked on the user: an agent at
+  its prompt or a permission question, an editor, a REPL.
+- `idle` means nothing is happening: a shell prompt, or a non-interactive
+  program (dev server, build) that has gone quiet.
+- The first sample seeds the "last change" time from tmux's own
+  `window_activity` stamp, so a long-quiet session classifies correctly
+  immediately instead of after a settling period.
 
 ## Token counting
 
@@ -81,10 +157,12 @@ so counting never fails on source content.
 2. Run lint, format check, and tests.
 3. Merge to `main`.
 
-CI runs the shared checks, compares the version against PyPI, and — if that
-version is not yet released — publishes it, then creates the `v<version>` tag
-and a GitHub release with auto-generated notes and the built sdist/wheel
-attached.
+CI (`.github/workflows/main.yml`) runs the shared checks from `checks.yml`
+— `ruff format --check`, `ruff check`, and the test suite on Python 3.10
+through 3.14 — then compares the version against PyPI and, if that version
+is not yet released, builds and publishes it, then creates the `v<version>`
+tag and a GitHub release with auto-generated notes and the built sdist/wheel
+attached. Pull requests run only the checks.
 
 Never create the tag yourself. It is made by the release job at the exact
 commit that was published, and only after PyPI succeeds, so a failed build

@@ -8,11 +8,7 @@ from rich.markup import escape
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
-from .constants import (
-    _DEFAULT_PANELS_SORT_COLUMN,
-    _PANEL_STATUS_LABEL,
-    _PANELS_SORT_COLUMN_NAMES,
-)
+from .constants import _DEFAULT_PANELS_SORT_COLUMN, _PANELS_SORT_COLUMN_NAMES
 from .panels import Panel, render_panel_layout_preview
 from .screens.panels import (
     ConfirmScreen,
@@ -160,7 +156,7 @@ class ConsolePanelsMixin:
                 total_panes = panel.total_panes
                 panes_label = f"{filled}/{total_panes}" if filled else f"0/{total_panes}"
                 status_state = self._panel_status_state(panel, live_sessions)
-                status_label = _PANEL_STATUS_LABEL[status_state]
+                status_label = self._palette.panel_status_label(status_state)
                 preview = _render_panel_preview(panel, live_sessions)
                 table.add_row(
                     _panel_row_cell(preview),
@@ -242,15 +238,6 @@ class ConsolePanelsMixin:
             PanelActionMenuScreen(panel),
             callback=lambda action: self._handle_panel_action(action, panel_name),
         )
-
-    def _open_selected_panel(self) -> None:
-        panel_name = self._selected_panel_name()
-        if not panel_name:
-            return
-        panel = self._panel_store.get(panel_name)
-        if not panel:
-            return
-        self._open_panel(panel_name)
 
     def _handle_panel_action(self, action: str | None, panel_name: str) -> None:
         if action is None:
@@ -374,17 +361,6 @@ class ConsolePanelsMixin:
 
         self._load_panels()
         self._open_panel(panel_name)
-
-    def action_delete_panel(self) -> None:
-        if self._active_tab != "panels":
-            return
-        panel_name = self._selected_panel_name()
-        if not panel_name:
-            return
-        self.push_screen(
-            ConfirmScreen(f"Delete panel '{panel_name}'?"),
-            callback=lambda confirmed: self._do_delete_panel(confirmed, panel_name),
-        )
 
     def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
         if not confirmed:

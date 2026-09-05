@@ -29,7 +29,7 @@ class ActionMenuScreen(SessionActionMenuScreen):
         self.branch = branch
 
     def _subtitle(self) -> str:
-        return f"[dim]branch:[/dim] [cyan]{self.branch or '—'}[/cyan]"
+        return f"[dim]branch:[/dim] [$text-primary]{self.branch or '—'}[/]"
 
     def _primary_options(self) -> list[Option]:
         return super()._primary_options()
@@ -53,35 +53,34 @@ class GitOperationsMenuScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.repo_name}[/bold white]", id="menu-title")
+            yield Static(f"[bold $text]{self.repo_name}[/]", id="menu-title")
             yield Static(
-                f"[dim]branch:[/dim] [cyan]{self.branch or '—'}[/cyan]",
+                f"[dim]branch:[/dim] [$text-primary]{self.branch or '—'}[/]",
                 id="menu-branch",
             )
             yield OptionList(
-                Option("[white]>[/white] [bold]Status[/bold] [dim]git status[/dim]", id="status"),
+                Option("[$text]>[/] [bold]Status[/bold] [dim]git status[/dim]", id="status"),
                 Option(
-                    "[white]*[/white] [bold]Timeline[/bold] "
-                    "[dim]git log --graph --decorate --all[/dim]",
+                    "[$text]*[/] [bold]Timeline[/bold] [dim]git log --graph --decorate --all[/dim]",
                     id="timeline",
                 ),
                 Option(
-                    "[white]⑂[/white] [bold]Branches[/bold] [dim]git branch -a[/dim]",
+                    "[$text]⑂[/] [bold]Branches[/bold] [dim]git branch -a[/dim]",
                     id="branches",
                 ),
                 Option(
-                    "[white]◎[/white] [bold]Remotes[/bold] [dim]git remote -v[/dim]",
+                    "[$text]◎[/] [bold]Remotes[/bold] [dim]git remote -v[/dim]",
                     id="remotes",
                 ),
                 Option(
-                    "[white]↓[/white] [bold]Pull[/bold] [dim]git pull --ff-only[/dim]",
+                    "[$text]↓[/] [bold]Pull[/bold] [dim]git pull --ff-only[/dim]",
                     id="pull",
                 ),
-                Option("[white]↑[/white] [bold]Push[/bold] [dim]git push[/dim]", id="push"),
+                Option("[$text]↑[/] [bold]Push[/bold] [dim]git push[/dim]", id="push"),
                 Option("", disabled=True),
-                Option("[dim]Diff Viewer[/dim]", disabled=True),
+                Option("[dim]Review[/dim]", disabled=True),
                 Option(
-                    "[white]\u00b1[/white] [bold]Review Diff[/bold] [dim]uncommitted changes[/dim]",
+                    "[$text]\u00b1[/] [bold]Review Diff[/bold] [dim]uncommitted changes[/dim]",
                     id="review_diff",
                 ),
                 id="action-menu",
@@ -183,7 +182,7 @@ class GitCommandResultScreen(ModalScreen[str | None]):
 
         with Vertical(id="git-command-result-container"):
             yield Static(
-                f"[bold white]{escape(self.repo_name)}[/bold white]",
+                f"[bold $text]{escape(self.repo_name)}[/]",
                 id="git-command-result-title",
             )
             if self.command:
@@ -293,7 +292,7 @@ class PullResultScreen(ModalScreen[str | None]):
 
         with Vertical(id="pull-result-container"):
             yield Static(
-                f"[bold white]{escape(self.repo_name)}[/bold white]",
+                f"[bold $text]{escape(self.repo_name)}[/]",
                 id="pull-result-title",
             )
             if self.command:
@@ -344,7 +343,7 @@ class PullLoadingScreen(ModalScreen[None]):
     }
     #pull-loading-title {
         text-align: center;
-        color: white;
+        color: $text;
         padding: 1 0 0 0;
     }
     #pull-loading-command {
@@ -433,7 +432,7 @@ class RepoInfoScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="info-container"):
             yield Static(
-                f"[bold white]{self.repo_name}[/bold white]",
+                f"[bold $text]{self.repo_name}[/]",
                 id="info-title",
             )
             yield Static(
@@ -447,10 +446,10 @@ class RepoInfoScreen(ModalScreen[None]):
         self.query_one("#info-loading", LoadingIndicator).remove()
         r = result
         stats = Static(
-            f"[dim]Files[/dim]  [bold white]{r.total_files:,}[/bold white]    "
-            f"[dim]Lines[/dim]  [bold white]{r.total_lines:,}[/bold white]\n"
-            f"[dim]Tokens[/dim]  [bold white]{r.total_tokens:,}[/bold white]    "
-            f"[dim]Max Depth[/dim]  [bold white]{r.max_depth}[/bold white]",
+            f"[dim]Files[/dim]  [bold $text]{r.total_files:,}[/]    "
+            f"[dim]Lines[/dim]  [bold $text]{r.total_lines:,}[/]\n"
+            f"[dim]Tokens[/dim]  [bold $text]{r.total_tokens:,}[/]    "
+            f"[dim]Max Depth[/dim]  [bold $text]{r.max_depth}[/]",
             id="info-stats",
         )
         hint = self.query_one("#info-hint", Static)
@@ -464,8 +463,8 @@ class RepoInfoScreen(ModalScreen[None]):
                 lines_str = f"{ft.line_count:,}" if ft.line_count is not None else "-"
                 tokens_str = f"{ft.token_count:,}" if ft.token_count is not None else "-"
                 rows += (
-                    f"[cyan]  {ft.extension:<12}[/cyan]"
-                    f" [white]{ft.count:>6}[/white]"
+                    f"[$text-primary]  {ft.extension:<12}[/]"
+                    f" [$text]{ft.count:>6}[/]"
                     f"   [dim]{lines_str:>8}[/dim]"
                     f"   [dim]{tokens_str:>10}[/dim]\n"
                 )
@@ -478,7 +477,7 @@ class RepoInfoScreen(ModalScreen[None]):
         if loading:
             loading.first().remove()
         hint = self.query_one("#info-hint", Static)
-        hint.update(f"[red]{escape(message)}[/red]\n\\[esc] close")
+        hint.update(f"[$text-error]{escape(message)}[/]\n\\[esc] close")
 
     def action_cancel(self) -> None:
         self.dismiss(None)

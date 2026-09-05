@@ -2,25 +2,7 @@
 
 from __future__ import annotations
 
-from gitdirector.commands.tui.table_text import (
-    resolve_wrapped_column_width,
-    wrap_table_cell_text,
-)
-
-
-class TestResolveWrappedColumnWidth:
-    def test_zero_width_returns_min_width(self):
-        assert resolve_wrapped_column_width(0, min_width=4, max_width=20, divisor=3) == 4
-
-    def test_negative_width_returns_min_width(self):
-        assert resolve_wrapped_column_width(-100, min_width=4, max_width=20, divisor=3) == 4
-
-    def test_target_clamped_between_min_and_max(self):
-        assert resolve_wrapped_column_width(120, min_width=4, max_width=20, divisor=3) == 20
-
-    def test_target_within_window_returned(self):
-        result = resolve_wrapped_column_width(60, min_width=4, max_width=20, divisor=3)
-        assert 4 <= result <= 20
+from gitdirector.commands.tui.table_text import wrap_table_cell_text
 
 
 class TestWrapTableCellText:

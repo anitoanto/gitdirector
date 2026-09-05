@@ -13,10 +13,10 @@ def register(cli: click.Group):
         "--yes",
         "-y",
         is_flag=True,
-        help="Skip the confirmation prompt and reset immediately.",
+        help="Skip the confirmation prompt",
     )
     def reset(yes: bool):
-        """Kill all sessions and panels, wipe ~/.gitdirector, and recreate config."""
+        """Kill every session and panel and wipe ~/.gitdirector"""
         _reset(confirm=not yes)
 
 

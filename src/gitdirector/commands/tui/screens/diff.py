@@ -135,14 +135,6 @@ class DiffReviewScreen(ModalScreen[None]):
         padding: 0 0;
         background: $surface;
     }
-    #diff-files-list > .option-list--option-highlighted {
-        background: $accent;
-        color: $text;
-        text-style: bold;
-    }
-    #diff-files-list > .option-list--option {
-        padding: 0 1;
-    }
     #diff-content-pane {
         width: 1fr;
         height: 1fr;
@@ -221,8 +213,7 @@ class DiffReviewScreen(ModalScreen[None]):
         with Vertical(id="diff-container"):
             with Vertical(id="diff-header"):
                 yield Static(
-                    f"[bold white]{escape(self.repo_name)}[/bold white]"
-                    f"  [dim]\u2014  Review Diff[/dim]",
+                    f"[bold $text]{escape(self.repo_name)}[/]  [dim]\u2014  Review Diff[/dim]",
                     id="diff-title",
                 )
                 yield Static("", id="diff-summary")
@@ -380,7 +371,7 @@ class DiffReviewScreen(ModalScreen[None]):
         summary = self.query_one("#diff-summary", Static)
         if self._load_failed:
             summary.update(
-                f"[red]diff failed[/red]  [dim]\u2014  {escape(self._load_failed)}[/dim]"
+                f"[$text-error]diff failed[/]  [dim]\u2014  {escape(self._load_failed)}[/dim]"
             )
             return
         if self._loading:
@@ -388,20 +379,22 @@ class DiffReviewScreen(ModalScreen[None]):
             return
         if not self._files:
             branch_part = (
-                f"  [dim]branch:[/dim] [cyan]{escape(self.branch)}[/cyan]" if self.branch else ""
+                f"  [dim]branch:[/dim] [$text-primary]{escape(self.branch)}[/]"
+                if self.branch
+                else ""
             )
-            summary.update(f"[green]working tree clean[/green]{branch_part}")
+            summary.update(f"[$text-success]working tree clean[/]{branch_part}")
             return
         total_add = sum(f.additions for f in self._files)
         total_del = sum(f.deletions for f in self._files)
         count = len(self._files)
         noun = "file" if count == 1 else "files"
         branch_part = (
-            f"  [dim]branch:[/dim] [cyan]{escape(self.branch)}[/cyan]" if self.branch else ""
+            f"  [dim]branch:[/dim] [$text-primary]{escape(self.branch)}[/]" if self.branch else ""
         )
         summary.update(
-            f"[bold white]{count} {noun}[/bold white]"
-            f"  [green]+{total_add}[/green]  [red]-{total_del}[/red]"
+            f"[bold $text]{count} {noun}[/]"
+            f"  [$text-success]+{total_add}[/]  [$text-error]-{total_del}[/]"
             f"{branch_part}"
         )
 

@@ -4,7 +4,7 @@ import click
 
 from ..info import RepoInfoResult, gather_repo_info
 from ..manager import RepositoryManager
-from . import console
+from . import console, print_error
 from .completion import complete_repository_names
 
 
@@ -41,10 +41,13 @@ def register(cli: click.Group):
         "--full",
         is_flag=True,
         default=False,
-        help="Show all file extensions without the top 10 cap.",
+        help="List every file extension instead of the top 10",
     )
     def info(target: str, full: bool):
-        """Show file statistics for a repository."""
+        """Show file, line, and token statistics for a repository
+
+        PATH|NAME is a tracked repository, or the path of any git repository.
+        """
         manager = RepositoryManager()
         repo_path, matches, _path_attempted = manager.resolve_repository_target(
             target,
@@ -53,12 +56,10 @@ def register(cli: click.Group):
         )
         if repo_path is None:
             if not matches:
-                console.print(f"\n  [red]Repository '{target}' not found[/red]\n")
-                raise SystemExit(1)
-            console.print(f"\n  [red]Multiple repositories match '{target}':[/red]")
-            for match in matches:
-                console.print(f"    {match}")
-            console.print()
+                print_error(f"Repository '{target}' not found")
+            else:
+                listing = "\n".join(f"  {match}" for match in matches)
+                print_error(f"Multiple repositories match '{target}':\n{listing}")
             raise SystemExit(1)
 
         result = gather_repo_info(repo_path, full=full)

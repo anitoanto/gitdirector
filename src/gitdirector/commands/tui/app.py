@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-import click
 from rich.markup import escape
 from textual import work
 from textual.app import App, ComposeResult
@@ -21,7 +20,7 @@ from textual.widgets._footer import FooterKey, FooterLabel
 from textual.worker import NoActiveWorker, Worker, get_current_worker
 
 from ... import version_check
-from ...integrations.tmux.monitor import AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS
+from ...agents import AGENTS_BY_KEY
 from ...manager import RepositoryManager
 from ...repo import Repository, RepositoryInfo
 from ...storage import normalize_repository_path
@@ -37,6 +36,8 @@ from .constants import (
     _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
     _SESSION_STATUS_POLL_INTERVAL_SECS,
+    TablePalette,
+    resolve_table_palette,
 )
 from .panels import Panel, PanelStore
 from .screens.diff import DiffReviewScreen
@@ -61,7 +62,6 @@ __all__ = [
     "_panel_row_height",
     "_render_panel_preview",
     "_run_console",
-    "register",
 ]
 
 
@@ -122,7 +122,7 @@ class GitDirectorConsole(
         dock: bottom;
         height: 1;
         background: $panel;
-        color: white;
+        color: $text;
         padding: 0 2;
     }
     FooterLabel.-refresh-indicator {
@@ -159,6 +159,32 @@ class GitDirectorConsole(
         overflow-y: auto;
         padding: 0 1;
         scrollbar-size-horizontal: 0;
+    }
+    /* Highlight rows and options with a translucent tint of the theme's
+       primary colour instead of Textual's solid block cursor. A solid
+       primary block forces a contrasting text colour over the cell, which
+       erases status colours and turns dimmed text unreadable; a tint keeps
+       the row's own colours legible in both dark and light themes. */
+    DataTable > .datatable--cursor,
+    DataTable:focus > .datatable--cursor {
+        background: $primary 30%;
+        color: $text;
+        text-style: bold;
+    }
+    DataTable > .datatable--hover {
+        background: $primary 12%;
+    }
+    DataTable > .datatable--header-hover {
+        background: $primary 12%;
+    }
+    OptionList > .option-list--option-highlighted,
+    OptionList:focus > .option-list--option-highlighted {
+        background: $primary 30%;
+        color: $text;
+        text-style: bold;
+    }
+    OptionList > .option-list--option-hover {
+        background: $primary 12%;
     }
     #repo-table,
     #sessions-table,
@@ -233,6 +259,9 @@ class GitDirectorConsole(
         Binding("2", "tab_sessions", "Sessions", show=False),
         Binding("3", "tab_panels", "Panels", show=False),
         Binding("space", "toggle_group", "Toggle", show=True),
+        # Reaches us only from terminals that speak the kitty keyboard
+        # protocol; legacy terminals send a plain space for shift+space.
+        Binding("shift+space", "toggle_all_groups", "Toggle all", show=False),
         Binding("n", "new_panel", "New Panel", show=True),
     ]
 
@@ -277,7 +306,7 @@ class GitDirectorConsole(
         self._repos_cache_saved_at: float | None = None
         self._repos_refreshing = False
         self._monitor = TmuxMonitor()
-        self._session_statuses: dict[str, dict[str, object]] = {}
+        self._session_statuses: dict[str, str] = {}
         self._sessions_snapshot_generation = 0
         self._waiting_count: int = 0
         self._resume_target_tab: str | None = None
@@ -296,13 +325,24 @@ class GitDirectorConsole(
         self._repo_status_executor: ThreadPoolExecutor | None = None
         self._refresh_operations = 0
         self._refresh_frame = 0
+        self._palette_cache: tuple[str, TablePalette] | None = None
+
+    @property
+    def _palette(self) -> TablePalette:
+        """Table colours for the current theme, resolved once per theme."""
+        theme = self.theme
+        if self._palette_cache is None or self._palette_cache[0] != theme:
+            self._palette_cache = (theme, resolve_table_palette(self.get_css_variables()))
+        return self._palette_cache[1]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True, icon="☰")
         with TabbedContent(id="tabs"):
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
-                yield DataTable(id="repo-table", cursor_type="row")
+                yield DataTable(
+                    id="repo-table", cursor_type="row", cursor_foreground_priority="renderable"
+                )
                 yield Static(
                     "No repositories linked.  Run"
                     " [bold]gitdirector link <path>[/bold] to get started.",
@@ -310,7 +350,9 @@ class GitDirectorConsole(
                 )
             with TabPane("[2] Sessions", id="sessions"):
                 yield Static("", id="sessions-search-indicator", classes="search-indicator")
-                yield DataTable(id="sessions-table", cursor_type="row")
+                yield DataTable(
+                    id="sessions-table", cursor_type="row", cursor_foreground_priority="renderable"
+                )
                 yield Static(
                     "No active sessions.  Open a repository and start a tmux session"
                     " to see it here.",
@@ -318,7 +360,9 @@ class GitDirectorConsole(
                 )
             with TabPane("[3] Panels", id="panels"):
                 yield Static("", id="panels-search-indicator", classes="search-indicator")
-                yield DataTable(id="panels-table", cursor_type="row")
+                yield DataTable(
+                    id="panels-table", cursor_type="row", cursor_foreground_priority="renderable"
+                )
                 yield Static(
                     "No panels created.  Press [bold]n[/bold] to create a new panel.",
                     id="no-panels-message",
@@ -465,6 +509,20 @@ class GitDirectorConsole(
             config.save()
 
         self._sync_tmux_theme_config(theme_name)
+        if self.is_running:
+            self._rerender_tables()
+
+    def _rerender_tables(self) -> None:
+        """Repaint every table so cells pick up the new theme's palette."""
+        for repaint in (
+            self._rerender_repo_rows,
+            self._apply_sessions_filter_and_sort,
+            self._apply_panels_filter_and_sort,
+        ):
+            try:
+                repaint()
+            except (NoMatches, AttributeError):
+                logger.debug("table not ready for theme repaint", exc_info=True)
 
     def action_select_row(self) -> None:
         if self._active_tab == "sessions":
@@ -609,11 +667,6 @@ class GitDirectorConsole(
         attach_delay_seconds: float = 0.0,
     ) -> None:
         """Suspend the TUI and attach to the tmux session."""
-        import sys
-        import termios
-
-        from ...integrations.tmux import attach_tmux_session
-
         self._monitor.clear_bell(session_name)
         restore_tab = self._active_tab
         self._resume_target_tab = restore_tab
@@ -636,41 +689,93 @@ class GitDirectorConsole(
         )
 
         self._pause_session_status_tracking(wait=False)
+        attach_error: Exception | None = None
         try:
             try:
+                # Everything that can fail runs *inside* the suspend block
+                # and never lets an exception escape it. Textual's
+                # ``App.suspend`` does not use try/finally: an exception
+                # raised in the body skips ``resume_application_mode``, so
+                # the driver stays closed (no input thread, no writer) and
+                # the app is frozen for good. Writes to ``sys.stdout`` are
+                # also only meaningful in here, where Textual has pointed it
+                # at the real terminal; outside the block stdout is
+                # captured by the app and never reaches the screen.
                 with self.suspend():
-                    entered_manual_alt_screen = False
-                    try:
-                        if not os.environ.get("TMUX"):
-                            sys.stdout.write("\033[?1049h\033[H\033[2J\033[?25l")
-                            sys.stdout.flush()
-                            entered_manual_alt_screen = True
-                        attach_tmux_session(
-                            session_name,
-                            skip_config_sync=skip_config_sync,
-                            attach_delay_seconds=attach_delay_seconds,
-                        )
-                    finally:
-                        if entered_manual_alt_screen:
-                            sys.stdout.write("\033[?25h")
-                            sys.stdout.flush()
-                        try:
-                            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                        except (AttributeError, OSError):
-                            pass
+                    attach_error = self._attach_while_suspended(
+                        session_name,
+                        skip_config_sync=skip_config_sync,
+                        attach_delay_seconds=attach_delay_seconds,
+                    )
             except Exception as exc:
+                # Suspending or resuming the driver itself failed.
                 logger.warning("tmux attach failed: %s", exc)
-                try:
-                    sys.stdout.write("\033[?25h\033[?1049l")
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-                self._update_status(f"tmux attach failed: {exc}")
+                attach_error = exc
         finally:
             self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
 
+        if attach_error is not None:
+            self._update_status(f"tmux attach failed: {attach_error}")
+
         self._active_tab = restore_tab
+
+    @staticmethod
+    def _attach_while_suspended(
+        session_name: str,
+        *,
+        skip_config_sync: bool,
+        attach_delay_seconds: float,
+    ) -> Exception | None:
+        """Run the blocking tmux attach with the TUI suspended.
+
+        Returns the failure instead of raising so the caller's ``suspend``
+        context always completes and restarts the driver. Whatever happens,
+        the terminal is handed back with the cursor visible and outside any
+        alternate screen this method entered, and stale input is dropped.
+        """
+        import sys
+        import termios
+
+        from ...integrations.tmux import attach_tmux_session
+
+        def write_terminal(sequence: str) -> None:
+            try:
+                sys.stdout.write(sequence)
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        entered_manual_alt_screen = False
+        error: Exception | None = None
+        try:
+            if not os.environ.get("TMUX"):
+                # Enter the alt screen before tmux does so the primary
+                # screen never flashes between the TUI and the session.
+                write_terminal("\033[?1049h\033[H\033[2J\033[?25l")
+                entered_manual_alt_screen = True
+            attach_tmux_session(
+                session_name,
+                skip_config_sync=skip_config_sync,
+                attach_delay_seconds=attach_delay_seconds,
+            )
+        except Exception as exc:
+            logger.warning("tmux attach failed: %s", exc)
+            error = exc
+        finally:
+            if entered_manual_alt_screen:
+                if error is None:
+                    # tmux already left the alt screen on its way out.
+                    write_terminal("\033[?25h")
+                else:
+                    # tmux may never have drawn anything: leave the cleared
+                    # alt screen ourselves or the terminal stays black.
+                    write_terminal("\033[?25h\033[?1049l")
+            try:
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+            except (AttributeError, OSError, ValueError):
+                pass
+        return error
 
     def _refresh_after_session_launch(self, path: Path, launch_tab: str) -> None:
         if launch_tab == "repos":
@@ -922,14 +1027,6 @@ class GitDirectorConsole(
             return
         self.call_from_thread(screen.populate, aggregate)
 
-    def _push_info_screen(self, name: str, path: Path, result) -> None:
-        self.push_screen(RepoInfoScreen(name, path))
-        total = len(self._results)
-        shown = getattr(self, "_visible_repo_count", total)
-        if shown == 0 and total > 0:
-            shown = self.query_one("#repo-table", DataTable).row_count
-        self._update_status(self._build_loaded_status(shown, total))
-
     def _handle_git_menu_action(self, action: str | None, path: Path) -> None:
         if action is None:
             return
@@ -1139,7 +1236,7 @@ class GitDirectorConsole(
         target = f"{remote}/{branch}"
         self.push_screen(
             ConfirmScreen(
-                f"Pull '{escape(path.name)}' from [cyan]{escape(target)}[/cyan]?\n"
+                f"Pull '{escape(path.name)}' from [$text-primary]{escape(target)}[/]?\n"
                 f"[dim]{escape(command)}[/dim]"
             ),
             callback=lambda confirmed: self._do_pull_repo(confirmed, path, command),
@@ -1200,33 +1297,15 @@ class GitDirectorConsole(
         if ok:
             self._refresh_repo_for_path(path)
 
-    _AGENT_COMMANDS = {
-        "agent:opencode": "opencode",
-        "agent:claude": "claude",
-        "agent:claude-skip-permissions": "claude --dangerously-skip-permissions",
-        "agent:copilot": "copilot",
-        "agent:codex": "codex",
-        "agent:pi": "pi",
-    }
-
-    # Session-name purposes for agents whose command carries flags. Without an
-    # override the purpose is the launch command, which would be sanitized into
-    # an unreadable label.
-    _AGENT_SESSION_PURPOSES = {
-        "agent:claude-skip-permissions": AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS,
-    }
-
     def _handle_menu_action(self, action: str | None) -> None:
         if action is None:
             return
         if action == "new_session":
             self.action_open_tmux()
-        elif action in self._AGENT_COMMANDS:
-            kwargs = {}
-            purpose = self._AGENT_SESSION_PURPOSES.get(action)
-            if purpose:
-                kwargs["purpose"] = purpose
-            self.action_open_tmux(agent_cmd=self._AGENT_COMMANDS[action], **kwargs)
+        elif action.startswith("agent:"):
+            agent = AGENTS_BY_KEY.get(action[len("agent:") :])
+            if agent is not None:
+                self.action_open_tmux(agent_cmd=agent.launch_command, purpose=agent.purpose)
         elif action.startswith("attach:"):
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
@@ -1274,20 +1353,4 @@ def _run_console() -> None:
     try:
         app.run()
     finally:
-        shutdown_background_work = getattr(app, "_shutdown_background_work", None)
-        if (
-            callable(shutdown_background_work)
-            and getattr(shutdown_background_work, "__self__", None) is app
-        ):
-            shutdown_background_work()
-        else:
-            monitor = getattr(app, "_monitor", None)
-            if monitor is not None:
-                monitor.stop(wait=True)
-
-
-def register(cli: click.Group):
-    @cli.command(name="console")
-    def console_cmd():
-        """Interactive TUI for browsing and opening repositories."""
-        _run_console()
+        app._shutdown_background_work()

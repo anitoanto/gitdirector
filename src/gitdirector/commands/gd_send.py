@@ -3,36 +3,31 @@ from __future__ import annotations
 import click
 
 from ..integrations.tmux import send_key_to_session, send_text_to_session
-from ..integrations.tmux.core import _parse_gd_session_name
+from . import require_gd_session_name
+from .completion import complete_session_names
 
-SUPPORTED_KEYS = ("C-c",)
-
-
-def _resolve_session_name(name: str) -> str:
-    parsed = _parse_gd_session_name(name)
-    if parsed is None:
-        raise click.BadParameter(
-            f"expected a gd session name of the form gd/<repo>/<purpose>/<N>; got {name!r}"
-        )
-    return name
+# tmux key names accepted by --key. A fixed list keeps an arbitrary string
+# from being interpreted as a key by tmux.
+SUPPORTED_KEYS = ("C-c", "C-d", "C-z", "C-l", "Enter", "Escape", "Tab", "Up", "Down")
 
 
 def register(cli: click.Group):
     @cli.command("gd-send")
-    @click.argument("session_name", metavar="SESSION")
+    @click.argument("session_name", metavar="SESSION", shell_complete=complete_session_names)
     @click.argument("text", required=False)
-    @click.option("--enter", is_flag=True, help="Press Enter after sending text.")
+    @click.option("--enter", is_flag=True, help="Press Enter after the text")
     @click.option(
         "--key",
         type=click.Choice(SUPPORTED_KEYS),
-        help="Send a supported key instead of text. Accepted: C-c.",
+        help="Send a key instead of text",
     )
     def gd_send(session_name: str, text: str | None, enter: bool, key: str | None) -> None:
-        """Send text or a supported key to a live gd tmux session."""
-        try:
-            session_name = _resolve_session_name(session_name)
-        except click.BadParameter as exc:
-            raise click.ClickException(str(exc)) from exc
+        """Send text or a key to a live session
+
+        SESSION is the full session name shown in the dashboard's Sessions
+        tab. Text is pasted as-is; add --enter to submit it.
+        """
+        session_name = require_gd_session_name(session_name)
 
         if key is not None:
             if text is not None:

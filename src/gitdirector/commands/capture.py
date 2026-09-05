@@ -1,16 +1,13 @@
 """The ``gd-capture`` command: dump the current scrollback of a live gd session.
 
-gd-tmux sessions are ephemeral — they self-destruct when the command
-exits — so this only works for *running* sessions. For finished
-sessions, the only option is to redirect the command's own output to a
-file (``--description``-style metadata aside):
+gd-tmux sessions are ephemeral — they self-destruct when the command exits —
+so this only works for *running* sessions. For finished sessions, the only
+option is to redirect the command's own output to a file:
 
-    gitdirector gd-tmux myrepo "make test" 2>&1 | tee /tmp/run.log
+    gitdirector gd-tmux myrepo "make test 2>&1 | tee /tmp/run.log"
 
-This command targets a session by its full gd/ name (``gd/repo/purpose/N``)
-so it is unambiguous even when several sessions for the same repo are
-running. Pass the full name verbatim, or list candidates with
-``gitdirector console`` → Sessions tab.
+The session is addressed by its full ``gd/<repo>/<purpose>/<N>`` name so it is
+unambiguous even when several sessions for the same repo are running.
 """
 
 from __future__ import annotations
@@ -18,56 +15,31 @@ from __future__ import annotations
 import click
 
 from ..integrations.tmux import capture_pane
-from ..integrations.tmux.core import _parse_gd_session_name
-
-
-def _resolve_session_name(name: str) -> str:
-    """Validate that *name* looks like a gd session and return it unchanged.
-
-    gd-capture refuses anything that doesn't match the ``gd/{repo}/{purpose}/{N}``
-    shape — that way a typo can't be silently routed to the wrong session.
-    """
-    parsed = _parse_gd_session_name(name)
-    if parsed is None:
-        raise click.BadParameter(
-            f"expected a gd session name of the form gd/<repo>/<purpose>/<N>; got {name!r}"
-        )
-    return name
+from . import require_gd_session_name
+from .completion import complete_session_names
 
 
 def register(cli: click.Group):
     @cli.command()
-    @click.argument("session_name", metavar="SESSION")
+    @click.argument("session_name", metavar="SESSION", shell_complete=complete_session_names)
     @click.option(
-        "--lines",
         "-n",
+        "--lines",
         "lines",
         type=int,
         default=200,
         show_default=True,
-        help="Number of trailing lines to capture (ignored when --full is set).",
+        help="Number of trailing lines to print (ignored with --full)",
     )
-    @click.option(
-        "--full",
-        is_flag=True,
-        default=False,
-        help="Capture the entire scrollback history instead of the last --lines.",
-    )
+    @click.option("--full", is_flag=True, help="Print the entire scrollback history")
     def gd_capture(session_name: str, lines: int, full: bool) -> None:
-        """Print the current scrollback of a live gd tmux session.
+        """Print the scrollback of a live session
 
-        \b
-        SESSION is the full session name as shown in the TUI Sessions tab,
-        e.g. ``gd/myrepo/shell/1``. Only running sessions can be
-        captured — finished gd-tmux sessions self-destruct, so for those
-        you must have redirected the command's output to a file.
-
-        Output is plain text on stdout (pipeable). Errors go to stderr.
+        SESSION is the full session name shown in the dashboard's Sessions
+        tab, e.g. gd/myrepo/shell/1. Only running sessions can be captured;
+        a finished gd-tmux session has already destroyed itself.
         """
-        try:
-            session_name = _resolve_session_name(session_name)
-        except click.BadParameter as exc:
-            raise click.ClickException(str(exc)) from exc
+        session_name = require_gd_session_name(session_name)
 
         if lines <= 0 and not full:
             raise click.ClickException("--lines must be a positive integer")

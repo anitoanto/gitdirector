@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import shlex
@@ -8,11 +10,14 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
-_ORIGINAL_SUBPROCESS_RUN = subprocess.run
 _RUNNING_GIT_PROCESSES: set[subprocess.Popen] = set()
 _RUNNING_GIT_PROCESSES_LOCK = threading.Lock()
+
+# SHA-1 hash of the empty tree, used to diff an unborn branch. Only a fallback:
+# a SHA-256 repository reports a different hash, so it is asked for the real
+# value first.
+_EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 _NETWORK_ERROR_RE = re.compile(
     r"connection reset"
@@ -42,9 +47,18 @@ _AUTH_ERROR_RE = re.compile(
 )
 
 _NO_COMMITS_RE = re.compile(
-    r"does not have any commits yet" r"|bad default revision 'HEAD'" r"|ambiguous argument 'HEAD'",
+    r"does not have any commits yet|bad default revision 'HEAD'|ambiguous argument 'HEAD'",
     re.IGNORECASE,
 )
+
+
+def is_git_repository(path: Path) -> bool:
+    """Return True when *path* is the top level of a git checkout.
+
+    ``.git`` is a directory in an ordinary clone and a file in worktrees and
+    submodules; both are complete checkouts that every git command accepts.
+    """
+    return path.is_dir() and (path / ".git").exists()
 
 
 def _is_network_error(stderr: str) -> bool:
@@ -53,9 +67,9 @@ def _is_network_error(stderr: str) -> bool:
 
 def _classify_remote_error(stderr: str) -> str | None:
     if _is_network_error(stderr):
-        return "network error \u2014 could not reach remote"
+        return "network error — could not reach remote"
     if _AUTH_ERROR_RE.search(stderr):
-        return "authentication failed \u2014 configure git credentials for this remote"
+        return "authentication failed — configure git credentials for this remote"
     return None
 
 
@@ -119,6 +133,41 @@ def _kill_running_git_process(process: subprocess.Popen) -> None:
         pass
 
 
+def _run_git_process(
+    command: list[str], *, env: dict[str, str], timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """Run one git command, tracking it so a shutdown can kill it.
+
+    Each command runs in its own session so that killing it also kills any
+    helper it spawned (ssh, credential helpers). Raises
+    :class:`subprocess.TimeoutExpired` after killing a command that overran
+    *timeout*, and :class:`FileNotFoundError` when git is not installed.
+    """
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    _register_running_git_process(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_running_git_process(process)
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        _unregister_running_git_process(process)
+    returncode = process.returncode if process.returncode is not None else 1
+    return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+
 def _normalize_git_result(
     returncode: int,
     stdout: str,
@@ -140,6 +189,27 @@ def _normalize_git_result(
     return returncode, normalized_stdout, normalized_stderr
 
 
+def _parse_ahead_behind(text: str) -> tuple[int, int] | None:
+    """Parse porcelain v2's ``# branch.ab +A -B`` payload."""
+    parts = text.split()
+    if len(parts) != 2 or not parts[0].startswith("+") or not parts[1].startswith("-"):
+        return None
+    try:
+        return int(parts[0][1:]), int(parts[1][1:])
+    except ValueError:
+        return None
+
+
+def _sync_status_from_counts(ahead: int, behind: int) -> tuple[RepoStatus, str]:
+    if ahead > 0 and behind > 0:
+        return RepoStatus.DIVERGED, f"ahead {ahead}, behind {behind}"
+    if ahead > 0:
+        return RepoStatus.AHEAD, f"ahead {ahead}"
+    if behind > 0:
+        return RepoStatus.BEHIND, f"behind {behind}"
+    return RepoStatus.UP_TO_DATE, ""
+
+
 class RepoStatus(Enum):
     UP_TO_DATE = "up-to-date"
     AHEAD = "ahead"
@@ -153,15 +223,15 @@ class RepositoryInfo:
     path: Path
     name: str
     status: RepoStatus
-    branch: Optional[str] = None
+    branch: str | None = None
     message: str = ""
     staged: bool = False
     unstaged: bool = False
-    staged_files: Optional[list[str]] = None
-    unstaged_files: Optional[list[str]] = None
-    last_updated: Optional[str] = None
-    last_commit_timestamp: Optional[int] = None
-    size: Optional[int] = None
+    staged_files: list[str] | None = None
+    unstaged_files: list[str] | None = None
+    last_updated: str | None = None
+    last_commit_timestamp: int | None = None
+    size: int | None = None
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -169,14 +239,10 @@ class RepositoryInfo:
 
 class Repository:
     def __init__(self, path: Path):
-        if not self._is_git_repo(path):
+        if not is_git_repository(path):
             raise ValueError(f"Not a git repository: {path}")
         self.path = path
         self.name = path.name
-
-    @staticmethod
-    def _is_git_repo(path: Path) -> bool:
-        return (path / ".git").is_dir()
 
     @classmethod
     def kill_running_git_commands(cls) -> None:
@@ -203,59 +269,21 @@ class Repository:
         _github_auth: tuple[str, str] | None = None,
     ) -> tuple[int, str, str, str]:
         env = self._git_env(github_auth=_github_auth)
-        command = ["git", "-C", str(self.path)] + list(args)
+        command = ["git", "-C", str(self.path), *args]
         try:
-            if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    timeout=_timeout,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                )
-                code, out, err = _normalize_git_result(
-                    result.returncode,
-                    result.stdout,
-                    result.stderr,
-                    strip_stdout=_strip,
-                )
-                return code, out, err, result.stderr.strip()
-
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            result = _run_git_process(command, env=env, timeout=_timeout)
         except subprocess.TimeoutExpired:
             return 1, "", "git command timed out", "git command timed out"
         except FileNotFoundError:
             return 1, "", "git not found", "git not found"
 
-        _register_running_git_process(process)
-        try:
-            stdout, stderr = process.communicate(timeout=_timeout)
-        except subprocess.TimeoutExpired:
-            _kill_running_git_process(process)
-            try:
-                process.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
-            return 1, "", "git command timed out", "git command timed out"
-        finally:
-            _unregister_running_git_process(process)
-
         code, out, err = _normalize_git_result(
-            process.returncode if process.returncode is not None else 1,
-            stdout,
-            stderr,
+            result.returncode,
+            result.stdout,
+            result.stderr,
             strip_stdout=_strip,
         )
-        return code, out, err, stderr.strip()
+        return code, out, err, result.stderr.strip()
 
     def _run_git(self, *args: str, _strip: bool = True, _timeout: int = 30) -> tuple[int, str, str]:
         code, out, err, raw_err = self._run_git_once(*args, _strip=_strip, _timeout=_timeout)
@@ -274,11 +302,11 @@ class Repository:
         )
         return retry_code, retry_out, retry_err
 
-    def get_current_branch(self) -> Optional[str]:
+    def get_current_branch(self) -> str | None:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         return out if code == 0 and out not in {"", "HEAD"} else None
 
-    def get_pull_target(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    def get_pull_target(self) -> tuple[str | None, str | None, str | None]:
         code, branch, err = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         if code != 0:
             return None, None, err or "Could not determine current branch"
@@ -343,14 +371,14 @@ class Repository:
     def _origin_branch_ref(branch: str) -> str:
         return f"refs/remotes/origin/{branch}"
 
-    def _fetch_origin_branch(self, branch: Optional[str]) -> tuple[int, str]:
+    def _fetch_origin_branch(self, branch: str | None) -> tuple[int, str]:
         args = ["fetch", "origin"]
         if branch:
             args.append(branch)
         code, _, err = self._run_git(*args)
         return code, err
 
-    def _get_origin_sync_status(self, branch: Optional[str]) -> tuple[RepoStatus, str]:
+    def _get_origin_sync_status(self, branch: str | None) -> tuple[RepoStatus, str]:
         if branch is None:
             return RepoStatus.UNKNOWN, "Detached HEAD"
 
@@ -374,44 +402,36 @@ class Repository:
             behind = int(parts[1])
         except (IndexError, ValueError):
             return RepoStatus.UNKNOWN, "Could not determine sync status"
+        return _sync_status_from_counts(ahead, behind)
 
-        if ahead > 0 and behind > 0:
-            return RepoStatus.DIVERGED, f"ahead {ahead}, behind {behind}"
-        if ahead > 0:
-            return RepoStatus.AHEAD, f"ahead {ahead}"
-        if behind > 0:
-            return RepoStatus.BEHIND, f"behind {behind}"
-        return RepoStatus.UP_TO_DATE, ""
-
-    def get_last_commit_info(self) -> tuple[Optional[str], Optional[int]]:
+    def get_last_commit_info(self) -> tuple[str | None, int | None]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd%n%ct", "--date=relative")
         if code != 0 or not out:
             return None, None
         lines = out.split("\n", 1)
-        date = lines[0] if lines[0] else None
-        ts: Optional[int] = None
+        date = lines[0] or None
+        ts: int | None = None
         if len(lines) > 1 and lines[1]:
             try:
                 ts = int(lines[1])
             except ValueError:
-                pass
+                ts = None
         return date, ts
 
-    def get_tracked_size(self) -> Optional[int]:
+    def get_tracked_size(self) -> int | None:
         """Return total byte size of all tracked files (respects .gitignore)."""
         code, out, _ = self._run_git("ls-tree", "-r", "-l", "--full-tree", "HEAD", _strip=False)
         if code != 0 or not out:
             return None
         total = 0
         for line in out.split("\n"):
-            if not line:
-                continue
             parts = line.split(None, 4)
-            if len(parts) >= 4:
-                try:
-                    total += int(parts[3])
-                except ValueError:
-                    pass
+            if len(parts) < 4:
+                continue
+            try:
+                total += int(parts[3])
+            except ValueError:
+                continue
         return total
 
     def get_status(self, *, fetch: bool = False, include_size: bool = True) -> RepositoryInfo:
@@ -422,6 +442,8 @@ class Repository:
             )
 
         branch = None
+        upstream: str | None = None
+        ahead_behind: tuple[int, int] | None = None
         staged = False
         unstaged = False
         staged_files: list[str] = []
@@ -432,7 +454,11 @@ class Repository:
                 branch = line[14:]
                 if branch == "(detached)":
                     branch = None
-            elif line.startswith("1 ") or line.startswith("2 "):
+            elif line.startswith("# branch.upstream "):
+                upstream = line[18:]
+            elif line.startswith("# branch.ab "):
+                ahead_behind = _parse_ahead_behind(line[12:])
+            elif line.startswith(("1 ", "2 ")):
                 xy = line[2:4]
                 x, y = xy[0], xy[1]
                 if line.startswith("1 "):
@@ -465,7 +491,12 @@ class Repository:
                 status = RepoStatus.UNKNOWN
                 msg = err
             else:
+                # The counts parsed above predate the fetch.
                 status, msg = self._get_origin_sync_status(branch)
+        elif branch is not None and upstream == f"origin/{branch}" and ahead_behind is not None:
+            # git already compared HEAD with origin/<branch>: two fewer
+            # git processes per repository.
+            status, msg = _sync_status_from_counts(*ahead_behind)
         else:
             status, msg = self._get_origin_sync_status(branch)
 
@@ -546,6 +577,13 @@ class Repository:
             return False, err or out or "git push failed"
         return True, out
 
+    def _empty_tree_hash(self) -> str:
+        """Return the empty tree's hash in this repository's object format."""
+        code, out, _ = self._run_git("hash-object", "-t", "tree", "--stdin")
+        if code == 0 and re.fullmatch(r"[0-9a-f]{40,64}", out):
+            return out
+        return _EMPTY_TREE_SHA1
+
     def get_diff_against_head(
         self, *, max_bytes: int = 2 * 1024 * 1024
     ) -> tuple[bool, str, list[str]]:
@@ -563,10 +601,7 @@ class Repository:
         code, diff_text, err = self._run_git("diff", "HEAD", "--no-color", _strip=False)
         if code != 0 and _is_no_commits_error(err):
             code, diff_text, err = self._run_git(
-                "diff",
-                "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-                "--no-color",
-                _strip=False,
+                "diff", self._empty_tree_hash(), "--no-color", _strip=False
             )
         if code != 0:
             return False, err or "git diff failed", []
@@ -589,11 +624,7 @@ class Repository:
         )
         if code != 0 or not out:
             return []
-        paths: list[str] = []
-        for chunk in out.split("\x00"):
-            if chunk:
-                paths.append(chunk)
-        return paths
+        return [chunk for chunk in out.split("\x00") if chunk]
 
     def read_file_text(self, rel_path: str, *, max_bytes: int = 256 * 1024) -> str | None:
         """Read a tracked or untracked file's text content, capped to ``max_bytes``.

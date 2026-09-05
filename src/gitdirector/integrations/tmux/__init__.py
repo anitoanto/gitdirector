@@ -1,34 +1,11 @@
-"""tmux integration via subprocess."""
+"""tmux integration: sessions, panels, and the session status monitor.
 
-import shutil
-import subprocess
-import tempfile
-import threading
+Only the public API is re-exported here. Internals live in :mod:`.core`,
+:mod:`.monitor`, :mod:`.panels`, and :mod:`.session_env`.
+"""
 
 from .core import (
     TmuxError,
-    _current_window_target,
-    _ensure_panel_resize_tracking,
-    _get_session_description,
-    _is_persistent_panel_session,
-    _is_temp_panel_session,
-    _list_sessions,
-    _live_panel_sessions,
-    _live_repo_tmux_sessions,
-    _load_panel_tmux_config,
-    _make_session_name,
-    _panel_border_format,
-    _panel_pane_title,
-    _panel_tmux_config,
-    _panel_window_status_format,
-    _parse_gd_session_name,
-    _repo_session_name_segment,
-    _resolved_panel_theme_name,
-    _sanitize_repo_name,
-    _session_exists,
-    _session_tmux_config,
-    _set_session_description,
-    _tmux_theme_config,
     attach_tmux_session,
     capture_pane,
     create_tmux_session,
@@ -42,39 +19,14 @@ from .core import (
     sync_panel_tmux_config,
 )
 from .monitor import (
-    _AGENT_PURPOSES,
-    _BELL_GRACE_SECS,
-    _CONTROL_MODE_STOP_WAIT_SECS,
-    _SHELL_COMMANDS,
-    _SILENCE_THRESHOLD_SECS,
-    AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS,
+    STATUS_IDLE,
+    STATUS_RUNNING,
+    STATUS_WAITING,
     TmuxMonitor,
-    _capture_pane_text,
-    _ControlModeReader,
-    _get_process_snapshot,
-    _hash_content,
-    _make_agent_ready_marker,
-    _normalize_process_command,
-    _resolve_pane_command,
-    get_all_session_statuses,
     launch_command_in_tmux_session,
     resolve_pane_status,
 )
 from .panels import (
-    _build_layout_spec,
-    _build_panel_layout,
-    _configure_panel_window,
-    _distribute_equal,
-    _embedded_tmux_attach_command,
-    _ensure_panel_prefix_bindings,
-    _kill_tmux_session_by_name,
-    _layout_checksum,
-    _panel_attach_fragment,
-    _panel_pane_command,
-    _respawn_pane,
-    _span_size,
-    _tmux_output,
-    _tmux_session_actual_name,
     cleanup_panel_attached_session,
     cleanup_temp_panel_tmux_session,
     ensure_temp_panel_tmux_session,
@@ -82,16 +34,13 @@ from .panels import (
     panel_tmux_session_exists,
     rebuild_panel_tmux_session,
 )
-from .session_env import (
-    SCRUB_POLICY_ENV_VAR,
-    leaked_names,
-    sanitized_environ,
-    session_scrub_names,
-)
+from .session_env import SCRUB_POLICY_ENV_VAR, sanitized_environ, session_scrub_names
 
 __all__ = [
-    "AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS",
     "SCRUB_POLICY_ENV_VAR",
+    "STATUS_IDLE",
+    "STATUS_RUNNING",
+    "STATUS_WAITING",
     "TmuxError",
     "TmuxMonitor",
     "attach_tmux_session",
@@ -100,16 +49,14 @@ __all__ = [
     "cleanup_temp_panel_tmux_session",
     "create_tmux_session",
     "ensure_temp_panel_tmux_session",
-    "get_all_session_statuses",
     "kill_all_gd_sessions",
     "kill_panel_tmux_session",
-    "panel_tmux_session_exists",
     "kill_tmux_session",
     "launch_command_in_tmux_session",
-    "leaked_names",
     "list_all_gd_sessions",
     "list_repo_sessions",
     "open_in_tmux",
+    "panel_tmux_session_exists",
     "rebuild_panel_tmux_session",
     "resolve_pane_status",
     "sanitized_environ",

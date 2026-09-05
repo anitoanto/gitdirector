@@ -18,9 +18,7 @@ from .constants import (
     _DEFAULT_SORT_COLUMN,
     _REPO_CACHE_TTL_SECS,
     _SORT_COLUMN_NAMES,
-    _STATUS_LABEL,
     _STATUS_ORDER,
-    _changes_label,
     _changes_sort_key,
 )
 
@@ -236,7 +234,15 @@ class ConsoleReposMixin:
         return updated_at is None or monotonic() - updated_at >= _REPO_CACHE_TTL_SECS
 
     def _reload_config_if_changed(self) -> bool:
-        if not self.manager.config.reload_if_changed():
+        try:
+            changed = self.manager.config.reload_if_changed()
+        except ValueError as exc:
+            # The file was edited by hand into something unloadable. Keep the
+            # last good configuration and say so instead of crashing.
+            logger.warning("config reload failed: %s", exc)
+            self._update_status(f"config not reloaded: {exc}")
+            return False
+        if not changed:
             return False
         self._repos_cache_updated_at = None
         self._repos_cache_saved_at = None
@@ -283,9 +289,9 @@ class ConsoleReposMixin:
         try:
             table = self.query_one("#repo-table", DataTable)
             ck = self._col_keys
-            table.update_cell(row_key, ck[1], _STATUS_LABEL.get(info.status, "unknown"))
+            table.update_cell(row_key, ck[1], self._palette.sync_label(info.status))
             table.update_cell(row_key, ck[2], info.branch or "—")
-            table.update_cell(row_key, ck[3], _changes_label(info))
+            table.update_cell(row_key, ck[3], self._palette.changes_label(info))
             table.update_cell(row_key, ck[4], info.last_updated or "—")
         except Exception:
             logger.debug("Failed to update repo row %s", row_key, exc_info=True)
@@ -306,7 +312,7 @@ class ConsoleReposMixin:
         if col == 2:
             return lambda info: (info.branch or "").lower()
         if col == 3:
-            return lambda info: _changes_sort_key(info)
+            return _changes_sort_key
         if col == 4:
             return lambda info: info.last_commit_timestamp or 0
         if col == 5:
@@ -355,11 +361,11 @@ class ConsoleReposMixin:
 
     def _repo_group_label(self, group: RepoGroup) -> str:
         marker = "▸" if self._repo_group_is_collapsed(group) else "▾"
-        return f"[bold cyan]{marker} {escape(group.name)}[/bold cyan]"
+        return self._palette.group_label(f"{marker} {escape(group.name)}")
 
     def _repo_group_count_label(self, group: RepoGroup) -> str:
         repo_label = "repo" if group.repo_count == 1 else "repos"
-        return f"[bold cyan][{group.repo_count} {repo_label}][/bold cyan]"
+        return self._palette.group_label(f"\\[{group.repo_count} {repo_label}]")
 
     def _add_repo_group_row(self, table: DataTable, group: RepoGroup) -> None:
         table.add_row(
@@ -392,9 +398,9 @@ class ConsoleReposMixin:
     ) -> None:
         table.add_row(
             f"  {info.name}" if grouped else info.name,
-            _STATUS_LABEL.get(info.status, "unknown"),
+            self._palette.sync_label(info.status),
             info.branch or "—",
-            _changes_label(info),
+            self._palette.changes_label(info),
             info.last_updated or "—",
             str(info.path),
             key=str(info.path),
@@ -549,7 +555,7 @@ class ConsoleReposMixin:
 
         msg += "   ↑↓/jk navigate  [enter] actions"
         if group_count:
-            msg += "  [space] toggle"
+            msg += "  [space] toggle  [shift+space] toggle all"
         msg += "  g git  / search  s sort  r refresh  q quit"
         if self._search_query:
             msg += "  [esc] clear search"
@@ -570,6 +576,23 @@ class ConsoleReposMixin:
             self._collapsed_groups.remove(group_key)
         else:
             self._collapsed_groups.add(group_key)
+        self._rerender_repo_rows()
+
+    def action_toggle_all_groups(self) -> None:
+        """Collapse every group, or expand them all once none is left open."""
+        if self._active_tab != "repos":
+            return
+        group_keys = {str(group.path) for group in self._groups_entries}
+        if not group_keys:
+            return
+        if group_keys <= self._collapsed_groups:
+            self._collapsed_groups.difference_update(group_keys)
+        else:
+            self._collapsed_groups.update(group_keys)
+        self._rerender_repo_rows()
+
+    def _rerender_repo_rows(self) -> None:
+        """Repaint the repositories table from the current state."""
         if self._search_query or len(self._results) >= len(self._repo_paths):
             self._apply_filter_and_sort()
         else:

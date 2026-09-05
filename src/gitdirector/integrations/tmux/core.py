@@ -59,6 +59,29 @@ _TMUX_SERVER_ENVIRONMENT_PREPARED = False
 # as a failure rather than waiting on it.
 TMUX_COMMAND_TIMEOUT = 10
 
+# The tmux client prints one of these when there is no server to talk to:
+# it died mid-command (observed inside `respawn-pane`), or it exited on its
+# own because its last session closed. Every session on that server is gone
+# with it, so a failure carrying one of these is an authoritative "no
+# sessions", not an unknown error.
+_TMUX_SERVER_GONE_MARKERS = (
+    "server exited unexpectedly",
+    "no server running",
+    "lost server",
+    "error connecting to",
+)
+
+
+def _tmux_server_is_gone(stderr: object) -> bool:
+    """Whether *stderr* from a failed tmux command says the server is gone."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    if not isinstance(stderr, str):
+        return False
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _TMUX_SERVER_GONE_MARKERS)
+
+
 # Distinguishes concurrent send-text buffers within a process.
 # ``itertools.count`` increments atomically, so no lock is needed.
 _SEND_BUFFER_COUNTER = itertools.count()
@@ -93,14 +116,23 @@ def _run_tmux(
     check: bool = False,
     capture_output: bool = True,
     text: bool = False,
+    input: str | None = None,
     timeout: float | None = TMUX_COMMAND_TIMEOUT,
 ) -> subprocess.CompletedProcess:
+    """Run one tmux command. Every tmux invocation goes through here.
+
+    A hung server surfaces as a failed result (or :class:`TmuxError` with
+    *check*) instead of blocking forever, and the client always starts from a
+    sanitized environment.
+    """
     command = ["tmux", *args]
     kwargs: dict[str, object] = {}
     if capture_output:
         kwargs["capture_output"] = True
     if text:
         kwargs["text"] = True
+    if input is not None:
+        kwargs["input"] = input
     # A tmux client that ends up starting the server hands it its own
     # environment, and that snapshot becomes the baseline for every pane
     # created afterwards. Sanitizing here keeps a gitdirector-started
@@ -117,14 +149,7 @@ def _run_tmux(
             raise TmuxError("tmux command timed out", args_list=command, returncode=None) from exc
         empty: str | bytes = "" if text else b""
         return subprocess.CompletedProcess(command, 1, empty, empty)
-    except subprocess.CalledProcessError as exc:
-        raise TmuxError(
-            "tmux command failed",
-            args_list=command,
-            returncode=exc.returncode,
-            stderr=exc.stderr,
-        ) from exc
-    except OSError as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         raise TmuxError(str(exc), args_list=command) from exc
     if check and isinstance(result.returncode, int) and result.returncode != 0:
         raise TmuxError(
@@ -304,13 +329,8 @@ def _ensure_clean_tmux_server() -> None:
         return
     _TMUX_SERVER_ENVIRONMENT_PREPARED = True
     try:
-        subprocess.run(
-            ["tmux", "start-server"],
-            capture_output=True,
-            env=sanitized_environ(),
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
+        _run_tmux(["start-server"])
+    except TmuxError:
         logger.debug("tmux start-server failed while preparing the server", exc_info=True)
 
 
@@ -497,22 +517,28 @@ def list_all_gd_sessions() -> list[dict[str, str]]:
         ]
         rows.append((session_name, repo_label.strip(), description.strip()))
     for session_name, repo_label, description in sorted(rows, key=lambda row: row[0]):
-        parsed = _parse_gd_session_name(session_name)
-        if parsed is None:
-            continue
-        repo_slug, purpose, _ = parsed
-        if not repo_label or "\n" in repo_label or "/" in repo_label:
-            repo_label = _repo_label_from_segment(repo_slug)
-        entries.append(
-            {
-                "session_name": session_name,
-                "repo": repo_label,
-                "repo_slug": repo_slug,
-                "purpose": purpose,
-                "description": description or GD_DEFAULT_DESCRIPTION,
-            }
-        )
+        entry = session_entry(session_name, repo_label, description)
+        if entry is not None:
+            entries.append(entry)
     return entries
+
+
+def session_entry(session_name: str, repo_label: str, description: str) -> dict[str, str] | None:
+    """Build the Sessions-tab entry for one ``gd/*`` session, or None for others."""
+    parsed = _parse_gd_session_name(session_name)
+    if parsed is None:
+        return None
+    repo_slug, purpose, _ = parsed
+    repo_label = repo_label.strip()
+    if not repo_label or "\n" in repo_label or "/" in repo_label:
+        repo_label = _repo_label_from_segment(repo_slug)
+    return {
+        "session_name": session_name,
+        "repo": repo_label,
+        "repo_slug": repo_slug,
+        "purpose": purpose,
+        "description": description.strip() or GD_DEFAULT_DESCRIPTION,
+    }
 
 
 def create_tmux_session(
@@ -758,12 +784,24 @@ def attach_tmux_session(
         # must never inherit the default command timeout: a timeout here
         # SIGKILLs the tmux client mid-session, which the user experiences as
         # a random detach with the terminal left in tmux's alternate screen.
-        _run_tmux(
+        result = _run_tmux(
             ["attach-session", "-t", f"={target_session}"],
-            check=True,
             capture_output=False,
             timeout=None,
         )
+        # A non-zero exit is not necessarily a failed attach. The client also
+        # exits 1 after a perfectly normal interactive session when the server
+        # went away underneath it ("[server exited]", "[lost server]"), or when
+        # the session vanished in the moment between the loading screen and
+        # this call ("can't find session"). Every one of those means the
+        # session is over, which is exactly what the caller waits for. Only an
+        # attach that fails while its target is still alive is a real error.
+        if result.returncode != 0 and _session_exists(target_session):
+            raise TmuxError(
+                "tmux attach-session failed",
+                args_list=list(result.args),
+                returncode=result.returncode,
+            )
     finally:
         if temp_panel_session_name is not None:
             cleanup_temp_panel_tmux_session(temp_panel_session_name)
@@ -884,12 +922,12 @@ def capture_pane(
     """
     if not _session_exists(session_name):
         return None
-    cmd = ["tmux", "capture-pane", "-p", "-t", _active_pane_target(session_name)]
+    args = ["capture-pane", "-p", "-t", _active_pane_target(session_name)]
     if full:
-        cmd.extend(["-S", "-"])
+        args.extend(["-S", "-"])
     elif lines is not None and lines > 0:
-        cmd.extend(["-S", f"-{lines}"])
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=TMUX_COMMAND_TIMEOUT)
+        args.extend(["-S", f"-{lines}"])
+    result = _run_tmux(args, text=True)
     if result.returncode != 0:
         return None
     return result.stdout
@@ -898,12 +936,7 @@ def capture_pane(
 def send_key_to_session(session_name: str, key: str) -> bool:
     if not _session_exists(session_name):
         return False
-    result = subprocess.run(
-        ["tmux", "send-keys", "-t", _active_pane_target(session_name), key],
-        capture_output=True,
-        text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    result = _run_tmux(["send-keys", "-t", _active_pane_target(session_name), key], text=True)
     return result.returncode == 0
 
 
@@ -916,28 +949,15 @@ def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -
     # both panes get the same text while one paste fails on a deleted buffer.
     # The counter makes each send own its own buffer.
     buffer_name = f"gitdirector-send-{os.getpid()}-{next(_SEND_BUFFER_COUNTER)}"
-    load_result = subprocess.run(
-        ["tmux", "load-buffer", "-b", buffer_name, "-"],
-        input=text,
-        capture_output=True,
-        text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    load_result = _run_tmux(["load-buffer", "-b", buffer_name, "-"], input=text, text=True)
     if load_result.returncode != 0:
         return False
 
-    paste_result = subprocess.run(
-        ["tmux", "paste-buffer", "-b", buffer_name, "-t", _active_pane_target(session_name)],
-        capture_output=True,
+    paste_result = _run_tmux(
+        ["paste-buffer", "-b", buffer_name, "-t", _active_pane_target(session_name)],
         text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
     )
-    subprocess.run(
-        ["tmux", "delete-buffer", "-b", buffer_name],
-        capture_output=True,
-        text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    _run_tmux(["delete-buffer", "-b", buffer_name], text=True)
     if paste_result.returncode != 0:
         return False
     if enter:
@@ -950,45 +970,19 @@ GD_REPO_LABEL_OPTION = "@gitdirector_repo_label"
 GD_DEFAULT_DESCRIPTION = "-"
 
 
-def _get_session_repo_label(session_name: str) -> str | None:
-    result = subprocess.run(
-        [
-            "tmux",
-            "show-option",
-            "-t",
-            _session_option_target(session_name),
-            "-v",
-            "-q",
-            GD_REPO_LABEL_OPTION,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    if not value or "\n" in value or "/" in value:
-        return None
-    return value
+def _set_session_option(session_name: str, option: str, value: str | None) -> None:
+    """Set a session-scoped tmux option, or unset it when *value* is None."""
+    target = _session_option_target(session_name)
+    if value is None:
+        _run_tmux(["set-option", "-u", "-t", target, option])
+    else:
+        _run_tmux(["set-option", "-t", target, option, value])
 
 
 def _set_session_repo_label(session_name: str, repo_label: str) -> None:
     clean = (repo_label or "").strip()
-    if not clean:
-        return
-    subprocess.run(
-        [
-            "tmux",
-            "set-option",
-            "-t",
-            _session_option_target(session_name),
-            GD_REPO_LABEL_OPTION,
-            clean,
-        ],
-        capture_output=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    if clean:
+        _set_session_option(session_name, GD_REPO_LABEL_OPTION, clean)
 
 
 def _get_session_description(session_name: str) -> str:
@@ -998,9 +992,8 @@ def _get_session_description(session_name: str) -> str:
     default placeholder ("-") when the option is unset or the session is
     unavailable.
     """
-    result = subprocess.run(
+    result = _run_tmux(
         [
-            "tmux",
             "show-option",
             "-t",
             _session_option_target(session_name),
@@ -1008,14 +1001,11 @@ def _get_session_description(session_name: str) -> str:
             "-q",
             GD_DESCRIPTION_OPTION,
         ],
-        capture_output=True,
         text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode != 0:
         return GD_DEFAULT_DESCRIPTION
-    value = result.stdout.strip()
-    return value or GD_DEFAULT_DESCRIPTION
+    return result.stdout.strip() or GD_DEFAULT_DESCRIPTION
 
 
 def _set_session_description(session_name: str, description: str) -> None:
@@ -1027,32 +1017,7 @@ def _set_session_description(session_name: str, description: str) -> None:
     called.
     """
     clean = (description or "").strip()
-    if clean:
-        subprocess.run(
-            [
-                "tmux",
-                "set-option",
-                "-t",
-                _session_option_target(session_name),
-                GD_DESCRIPTION_OPTION,
-                clean,
-            ],
-            capture_output=True,
-            timeout=TMUX_COMMAND_TIMEOUT,
-        )
-    else:
-        subprocess.run(
-            [
-                "tmux",
-                "set-option",
-                "-u",
-                "-t",
-                _session_option_target(session_name),
-                GD_DESCRIPTION_OPTION,
-            ],
-            capture_output=True,
-            timeout=TMUX_COMMAND_TIMEOUT,
-        )
+    _set_session_option(session_name, GD_DESCRIPTION_OPTION, clean or None)
 
 
 def _panel_session_label(session_name: str | None) -> str | None:
@@ -1063,11 +1028,8 @@ def _panel_session_label(session_name: str | None) -> str | None:
     return _session_slug(session_name)
 
 
-def _panel_pane_title(pane_index: int, session_name: str | None) -> str:
-    label = _panel_session_label(session_name)
-    if label:
-        return label
-    return "empty"
+def _panel_pane_title(session_name: str | None) -> str:
+    return _panel_session_label(session_name) or "empty"
 
 
 def _resolved_panel_theme_name(theme_name: str | None = None) -> str:
@@ -1114,18 +1076,15 @@ def _session_badge_text(session_name: str) -> str:
 
 
 def _current_window_target(session_name: str) -> str:
-    result = subprocess.run(
+    result = _run_tmux(
         [
-            "tmux",
             "display-message",
             "-p",
             "-t",
             _session_option_target(session_name),
             "#{session_name}:#{window_index}",
         ],
-        capture_output=True,
         text=True,
-        timeout=TMUX_COMMAND_TIMEOUT,
     )
     if result.returncode == 0:
         target = result.stdout.strip()
@@ -1308,21 +1267,9 @@ def _ensure_panel_resize_tracking(session_name: str) -> None:
     session_target = _session_option_target(session_name)
     hook_command = f"run-shell -b {shlex.quote(_panel_resize_hook_shell(session_name))}"
 
-    subprocess.run(
-        ["tmux", "set-window-option", "-q", "-t", window_target, "aggressive-resize", "on"],
-        check=False,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        ["tmux", "set-hook", "-t", session_target, "client-resized", hook_command],
-        check=False,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
-    subprocess.run(
-        ["tmux", "set-hook", "-w", "-t", window_target, "window-resized", hook_command],
-        check=False,
-        timeout=TMUX_COMMAND_TIMEOUT,
-    )
+    _run_tmux(["set-window-option", "-q", "-t", window_target, "aggressive-resize", "on"])
+    _run_tmux(["set-hook", "-t", session_target, "client-resized", hook_command])
+    _run_tmux(["set-hook", "-w", "-t", window_target, "window-resized", hook_command])
 
 
 def reflow_panel_tmux_session(session_name: str) -> bool:
@@ -1342,7 +1289,7 @@ def reflow_panel_tmux_session(session_name: str) -> bool:
 
     try:
         _equalize_panel_layout(session_name, pane_ids[:total_panes], panel.layout)
-    except (OSError, subprocess.CalledProcessError, ValueError):
+    except (OSError, subprocess.CalledProcessError, TmuxError, ValueError):
         return False
     return True
 
@@ -1369,10 +1316,13 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
         f"# theme: {resolved_theme}",
         "",
     ]
-    for panel_name, session_name in live_panel_sessions:
-        lines.append(_panel_tmux_config(panel_name, session_name, resolved_theme))
-    for session_name in live_repo_sessions:
-        lines.append(_session_tmux_config(session_name, resolved_theme))
+    lines.extend(
+        _panel_tmux_config(panel_name, session_name, resolved_theme)
+        for panel_name, session_name in live_panel_sessions
+    )
+    lines.extend(
+        _session_tmux_config(session_name, resolved_theme) for session_name in live_repo_sessions
+    )
 
     content = "\n".join(lines)
     changed = _LAST_SYNC_CONTENT.get(config_path) != content

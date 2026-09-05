@@ -29,7 +29,6 @@ def test_doctor_reports_ok_when_tools_are_available(config, monkeypatch, tmp_pat
 
     tool_paths = {
         "tmux": "/usr/bin/tmux",
-        "pbcopy": "/usr/bin/pbcopy",
         "opencode": "/usr/local/bin/opencode",
         "codex": "/usr/local/bin/codex",
     }
@@ -44,7 +43,7 @@ def test_doctor_reports_ok_when_tools_are_available(config, monkeypatch, tmp_pat
     assert "Up to date" in result.output
     assert "Current version: 1.2.3" not in result.output
     assert "Tmux" in result.output
-    assert "Clipboard Integration" in result.output
+    assert "Clipboard" not in result.output
     assert "detected" in result.output
     assert "~/.gitdirector folder valid" in result.output
     assert "OpenCode: /usr/local/bin/opencode" in result.output
@@ -64,7 +63,6 @@ def test_doctor_warns_when_optional_tools_are_missing(config, monkeypatch):
 
     assert result.exit_code == 1, result.output
     assert "Needed for `gitdirector console`" in result.output
-    assert "Looked for: pbcopy, wl-copy, xclip, xsel, clip.exe." in result.output
     assert "Shell Completion" in result.output
     assert "OpenCode: not installed" in result.output
     assert "Fix:" in result.output
@@ -100,7 +98,6 @@ def test_doctor_reports_corrupted_gitdirector_file(config, monkeypatch):
 
     tool_paths = {
         "tmux": "/usr/bin/tmux",
-        "pbcopy": "/usr/bin/pbcopy",
         "opencode": "/usr/local/bin/opencode",
     }
     monkeypatch.setattr(doctor_module.shutil, "which", lambda name: tool_paths.get(name))

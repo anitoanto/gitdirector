@@ -3,84 +3,83 @@ import subprocess
 import click
 
 from .commands import (
-    _changes_text,
-    _format_size,
-    _path_text,
-    _status_text,
+    CONTEXT_SETTINGS,
     autoclean,
     capture,
     cd,
     completion,
-    console,
+    console_cmd,
     doctor,
+    error_console,
     gd_send,
     gd_tmux,
+    get_version,
     help,
     info,
     link,
     listt,
-    print_update_notice,
     pull,
     reset,
+    schedule_update_notice,
     status,
-    tui,
     unlink,
 )
 from .commands.help import show_help
 
-__all__ = [
-    "_changes_text",
-    "_format_size",
-    "_path_text",
-    "_status_text",
-    "cli",
-    "main",
-]
+__all__ = ["cli", "main"]
+
+# Commands whose output is consumed by scripts, that report versions
+# themselves, or that wipe ~/.gitdirector (the check's cache lives there, so
+# a concurrent check would race the wipe); the update notice stays out of
+# their way.
+_NO_UPDATE_NOTICE = frozenset({"completion", "doctor", "console", "reset"})
 
 
 class _HelpGroup(click.Group):
     def format_help(self, ctx, _formatter):
-        show_help()
+        show_help(self)
 
 
-@click.group(cls=_HelpGroup, invoke_without_command=True)
+@click.group(cls=_HelpGroup, context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
+@click.version_option(
+    get_version(), "-V", "--version", prog_name="gitdirector", message="%(prog)s %(version)s"
+)
 @click.pass_context
 def cli(ctx):
-    if not ctx.resilient_parsing and ctx.invoked_subcommand not in {"completion", "doctor"}:
-        print_update_notice()
+    """Manage many git repositories and agent sessions from one place."""
     if ctx.invoked_subcommand is None:
-        show_help()
+        show_help(cli)
+        return
+    if not ctx.resilient_parsing and ctx.invoked_subcommand not in _NO_UPDATE_NOTICE:
+        schedule_update_notice(ctx)
 
 
-link.register(cli)
-unlink.register(cli)
-listt.register(cli)
-status.register(cli)
-pull.register(cli)
-cd.register(cli)
-help.register(cli)
-tui.register(cli)
-autoclean.register(cli)
-reset.register(cli)
-info.register(cli)
-gd_tmux.register(cli)
-capture.register(cli)
-gd_send.register(cli)
-completion.register(cli)
-doctor.register(cli)
+for module in (
+    link,
+    unlink,
+    listt,
+    status,
+    pull,
+    cd,
+    console_cmd,
+    info,
+    doctor,
+    autoclean,
+    reset,
+    gd_tmux,
+    capture,
+    gd_send,
+    completion,
+    help,
+):
+    module.register(cli)
 
 
 def main():
     try:
         cli()
-    except (
-        click.ClickException,
-        OSError,
-        RuntimeError,
-        ValueError,
-        subprocess.SubprocessError,
-    ) as exc:
-        console.print(f"\n  [red]Error:[/red] {str(exc)}\n")
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        error_console.print(f"Error: {exc}")
         raise SystemExit(1) from exc
 
 

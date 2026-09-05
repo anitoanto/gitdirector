@@ -536,10 +536,6 @@ class FileTileList(ListView):
         if self.index > 0:
             self.index -= 1
 
-    def select_index(self, index: int) -> None:
-        if 0 <= index < len(self._specs):
-            self.index = index
-
     def selected_file(self) -> ChangedFile | None:
         if self.index is None or not self._specs:
             return None

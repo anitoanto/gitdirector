@@ -4,7 +4,6 @@ RemoveSessionScreen)."""
 
 from __future__ import annotations
 
-import termios
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -819,7 +818,7 @@ class TestCreatePanelScreen:
 
     def test_step_two_subtitle_markup_separates_name_and_layout(self):
         assert CreatePanelScreen._step2_subtitle_markup("Ops", "1×2") == (
-            '[bold white]"Ops"[/bold white]    [dim]1×2[/dim]'
+            '[bold $text]"Ops"[/]    [dim]1×2[/dim]'
         )
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
@@ -1634,75 +1633,34 @@ class TestAgentLoadingScreen:
         assert screen._dismissed is True
         screen._do_dismiss.assert_called_once_with()
 
-    @patch("gitdirector.integrations.tmux.attach_tmux_session")
-    @patch("subprocess.run")
-    @patch("termios.tcflush")
-    def test_do_dismiss_attaches_without_sending_control_keys(
-        self, mock_tcflush, mock_run, mock_attach
-    ):
+    def test_do_dismiss_removes_marker_and_delegates_attach_to_app(self):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         screen._ready_marker = MagicMock()
         screen.dismiss = MagicMock()
         app = GitDirectorConsole()
-        app._pause_session_status_tracking = MagicMock()
-        app._resume_session_status_tracking = MagicMock()
-        suspend_context = MagicMock()
-        suspend_context.__enter__.return_value = None
-        suspend_context.__exit__.return_value = False
-        app.suspend = MagicMock(return_value=suspend_context)
+        app._suspend_and_attach = MagicMock()
         screen._parent = app
-        mock_run.reset_mock()
-        stdout = MagicMock()
-        stdin = MagicMock()
-        stdin.fileno.return_value = 7
 
-        with patch.dict("os.environ", {}, clear=True):
-            with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
-                screen._do_dismiss()
+        screen._do_dismiss()
 
-        screen._ready_marker.unlink.assert_called_once_with()
-        app._pause_session_status_tracking.assert_called_once_with()
-        app.suspend.assert_called_once_with()
-        assert stdout.write.call_args_list[0].args[0] == "\033[?1049h\033[H\033[2J\033[?25l"
-        assert stdout.write.call_args_list[1].args[0] == "\033[?25h"
-        assert stdout.flush.call_count == 2
-        mock_run.assert_not_called()
-        mock_attach.assert_called_once_with("gd/my-repo/copilot/1", skip_config_sync=True)
-        mock_tcflush.assert_called_once_with(7, termios.TCIFLUSH)
-        app._resume_session_status_tracking.assert_called_once_with()
+        screen._ready_marker.unlink.assert_called_once_with(missing_ok=True)
+        app._suspend_and_attach.assert_called_once_with(
+            "gd/my-repo/copilot/1", skip_config_sync=True
+        )
         screen.dismiss.assert_called_once_with(None)
 
-    @patch("gitdirector.integrations.tmux.attach_tmux_session")
-    @patch("subprocess.run")
-    @patch("termios.tcflush", side_effect=OSError)
-    def test_do_dismiss_ignores_missing_marker_and_tcflush_errors(
-        self, _mock_tcflush, mock_run, mock_attach
-    ):
-        screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
-        screen._ready_marker = MagicMock()
-        screen._ready_marker.unlink.side_effect = FileNotFoundError
+    def test_do_dismiss_prefers_on_attach_callback(self):
+        on_attach = MagicMock()
+        screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1", on_attach=on_attach)
         screen.dismiss = MagicMock()
         app = GitDirectorConsole()
-        app._pause_session_status_tracking = MagicMock()
-        app._resume_session_status_tracking = MagicMock()
-        suspend_context = MagicMock()
-        suspend_context.__enter__.return_value = None
-        suspend_context.__exit__.return_value = False
-        app.suspend = MagicMock(return_value=suspend_context)
+        app._suspend_and_attach = MagicMock()
         screen._parent = app
-        mock_run.reset_mock()
-        stdout = MagicMock()
-        stdin = MagicMock()
-        stdin.fileno.return_value = 11
 
-        with patch.dict("os.environ", {}, clear=True):
-            with patch("sys.stdout", new=stdout), patch("sys.stdin", new=stdin):
-                screen._do_dismiss()
+        screen._do_dismiss()
 
-        mock_run.assert_not_called()
-        mock_attach.assert_called_once_with("gd/my-repo/copilot/1", skip_config_sync=True)
-        app._pause_session_status_tracking.assert_called_once_with()
-        app._resume_session_status_tracking.assert_called_once_with()
+        on_attach.assert_called_once_with()
+        app._suspend_and_attach.assert_not_called()
         screen.dismiss.assert_called_once_with(None)
 
 

@@ -9,7 +9,7 @@ class TestAutocleanLinks:
     def test_no_broken_links(self, runner, tmp_path):
         """When all links are valid, prints success message."""
         repo = tmp_path / "repo"
-        repo.mkdir()
+        (repo / ".git").mkdir(parents=True)
 
         config = MagicMock()
         config.repositories = [repo]
@@ -22,9 +22,10 @@ class TestAutocleanLinks:
     def test_broken_links_confirmed(self, runner, tmp_path):
         """When broken links exist and user confirms, they are removed."""
         existing = tmp_path / "existing"
-        existing.mkdir()
+        (existing / ".git").mkdir(parents=True)
         broken1 = tmp_path / "gone1"
-        broken2 = tmp_path / "gone2"
+        broken2 = tmp_path / "not-a-repo-anymore"
+        broken2.mkdir()
 
         config = MagicMock()
         config.repositories = [existing, broken1, broken2]

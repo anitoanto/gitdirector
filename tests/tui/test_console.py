@@ -6,9 +6,11 @@ from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock, patch
 
+import pytest
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
+from gitdirector.agents import AGENTS_BY_KEY
 from gitdirector.commands.tui import (
     AgentLoadingScreen,
     ConfirmScreen,
@@ -437,9 +439,9 @@ class TestGitDirectorConsole:
             table = app.query_one("#repo-table", DataTable)
             row_key = str(repos[0].path)
             ck = app._col_keys
-            assert table.get_cell(row_key, ck[1]) == "[bold yellow]behind[/bold yellow]"
+            assert table.get_cell(row_key, ck[1]) == app._palette.sync_label(RepoStatus.BEHIND)
             assert table.get_cell(row_key, ck[2]) == "develop"
-            assert table.get_cell(row_key, ck[3]) == "[bold yellow]staged[/bold yellow]"
+            assert table.get_cell(row_key, ck[3]) == f"[bold {app._palette.yellow}]staged[/]"
             assert table.get_cell(row_key, ck[4]) == "5 min ago"
             assert table.get_cell(row_key, ck[5]) == str(repos[0].path)
 
@@ -546,7 +548,7 @@ class TestGitDirectorConsoleActionRouting:
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             app._handle_menu_action("agent:copilot")
-            app.action_open_tmux.assert_called_once_with(agent_cmd="copilot")
+            app.action_open_tmux.assert_called_once_with(agent_cmd="copilot", purpose="copilot")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_handle_menu_action_claude_skip_permissions(self, _):
@@ -557,9 +559,11 @@ class TestGitDirectorConsoleActionRouting:
             await pilot.pause()
             app._handle_menu_action("agent:claude-skip-permissions")
             app.action_open_tmux.assert_called_once_with(
-                agent_cmd="claude --dangerously-skip-permissions",
+                agent_cmd=AGENTS_BY_KEY["claude-skip-permissions"].launch_command,
                 purpose="claude-dangerously-skip-permissions",
             )
+            launched = app.action_open_tmux.call_args.kwargs["agent_cmd"]
+            assert launched.startswith("claude --dangerously-skip-permissions --settings ")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch(
@@ -1129,27 +1133,6 @@ class TestGitDirectorConsoleDirectBranches:
         ]
         assert app.call_from_thread.call_args.args[0] is screen.populate
 
-    @patch("gitdirector.commands.tui.app.RepoInfoScreen")
-    def test_push_info_screen_updates_status(self, mock_screen_cls):
-        path = Path("/tmp/alpha")
-        screen = MagicMock()
-        table = MagicMock()
-        table.row_count = 2
-        mock_screen_cls.return_value = screen
-        app = GitDirectorConsole()
-        app._results = [object(), object(), object()]
-        app.push_screen = MagicMock()
-        app.query_one = MagicMock(return_value=table)
-        app._build_loaded_status = MagicMock(return_value="2/3 loaded")
-        app._update_status = MagicMock()
-
-        app._push_info_screen("alpha", path, object())
-
-        mock_screen_cls.assert_called_once_with("alpha", path)
-        app.push_screen.assert_called_once_with(screen)
-        app._build_loaded_status.assert_called_once_with(2, 3)
-        app._update_status.assert_called_once_with("2/3 loaded")
-
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     def test_load_repos_reapplies_filter_when_search_active(self, _mock_sessions):
         info = _make_info("alpha", Path("/tmp/alpha"))
@@ -1260,26 +1243,44 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.query_one.assert_not_called()
 
-    @patch(
-        "gitdirector.integrations.tmux.get_all_session_statuses",
-        return_value={"gd/alpha/shell/1": {"command": "python", "dead": False}},
-    )
-    @patch(
-        "gitdirector.integrations.tmux.list_all_gd_sessions",
-        return_value=[{"session_name": "gd/alpha/shell/1"}],
-    )
-    def test_poll_session_statuses_updates_state_and_notifies(self, _mock_sessions, _mock_statuses):
+    def test_poll_session_statuses_reads_monitor_state_and_notifies(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
         app._sessions_entries = [{"session_name": "gd/alpha/shell/1"}]
         app._sessions_snapshot_generation = 1
+        app._monitor = MagicMock()
+        app._monitor.entries.return_value = [{"session_name": "gd/alpha/shell/1"}]
+        app._monitor.statuses.return_value = {"gd/alpha/shell/1": "waiting"}
         app.call_from_thread = lambda callback, *args: callback(*args)
         app._on_statuses_updated = MagicMock()
 
         GitDirectorConsole._poll_session_statuses_worker.__wrapped__(app, 1)
 
-        assert app._session_statuses == {"gd/alpha/shell/1": {"command": "python", "dead": False}}
+        assert app._session_statuses == {"gd/alpha/shell/1": "waiting"}
+        app._monitor.statuses.assert_called_once_with()
         app._on_statuses_updated.assert_called_once_with()
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[{"session_name": "gd/alpha/shell/1"}],
+    )
+    def test_load_sessions_samples_monitor_synchronously(self, _mock_sessions):
+        app = GitDirectorConsole()
+        app._active_tab = "sessions"
+        app._sessions_snapshot_generation = 1
+        app._monitor = MagicMock()
+        app._monitor.refresh.return_value = {"gd/alpha/shell/1": "idle"}
+        app.call_from_thread = lambda callback, *args: callback(*args)
+        app._apply_sessions_snapshot = MagicMock()
+        app._show_refresh_indicator = MagicMock()
+        app._hide_refresh_indicator = MagicMock()
+
+        GitDirectorConsole._load_sessions_worker.__wrapped__(app, 1)
+
+        app._monitor.refresh.assert_called_once_with()
+        app._apply_sessions_snapshot.assert_called_once_with(
+            1, [{"session_name": "gd/alpha/shell/1"}], {"gd/alpha/shell/1": "idle"}, True
+        )
 
     def test_trigger_status_poll_delegates_to_worker(self):
         app = GitDirectorConsole()
@@ -1298,6 +1299,18 @@ class TestGitDirectorConsoleDirectBranches:
         app._trigger_status_poll()
 
         app._poll_session_statuses.assert_not_called()
+
+    def test_resolve_session_status_uses_monitor_verdict(self):
+        app = GitDirectorConsole()
+        app._monitor = MagicMock()
+        app._session_statuses = {"gd/alpha/shell/1": "idle"}
+
+        status = app._resolve_session_status(
+            {"session_name": "gd/alpha/shell/1", "purpose": "shell"}
+        )
+
+        assert status == "idle"
+        app._monitor.get_bell_state.assert_not_called()
 
     def test_resolve_session_status_waits_without_tmux_info(self):
         app = GitDirectorConsole()
@@ -1817,18 +1830,15 @@ class TestGitDirectorConsoleDirectBranches:
         app._refresh_repos.assert_called_once_with(show_loading=True)
 
     @patch("gitdirector.commands.tui.app.GitDirectorConsole")
-    def test_run_console_stops_monitor_when_run_raises(self, mock_console_cls):
+    def test_run_console_shuts_down_background_work_when_run_raises(self, mock_console_cls):
         app = MagicMock()
         app.run.side_effect = RuntimeError("boom")
         mock_console_cls.return_value = app
 
-        with patch.object(app._monitor, "stop") as mock_stop:
-            try:
-                _run_console()
-            except RuntimeError:
-                pass
+        with pytest.raises(RuntimeError, match="boom"):
+            _run_console()
 
-        mock_stop.assert_called_once_with(wait=True)
+        app._shutdown_background_work.assert_called_once_with()
 
 
 class TestBuildLoadedStatus:
@@ -1954,9 +1964,9 @@ class TestRefreshRepoForPath:
             table = app.query_one("#repo-table", DataTable)
             ck = app._col_keys
             row_key = str(Path("/tmp/alpha"))
-            assert table.get_cell(row_key, ck[1]) == "[bold yellow]behind[/bold yellow]"
+            assert table.get_cell(row_key, ck[1]) == app._palette.sync_label(RepoStatus.BEHIND)
             assert table.get_cell(row_key, ck[2]) == "develop"
-            assert table.get_cell(row_key, ck[3]) == "[bold yellow]staged[/bold yellow]"
+            assert table.get_cell(row_key, ck[3]) == f"[bold {app._palette.yellow}]staged[/]"
             assert table.get_cell(row_key, ck[5]) == row_key
             assert app._results[row_key].status == RepoStatus.BEHIND
             app.manager.get_repository_status.assert_any_call(Path("/tmp/alpha"), fetch=True)

@@ -33,10 +33,10 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{self.message}[/bold white]", id="menu-title")
+            yield Static(f"[bold $text]{self.message}[/]", id="menu-title")
             yield OptionList(
                 Option("[dim]✗ No[/dim]", id="no"),
-                Option("[white]✓[/white] [bold]Yes[/bold]", id="yes"),
+                Option("[$text]✓[/] [bold]Yes[/bold]", id="yes"),
                 id="action-menu",
             )
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
@@ -78,12 +78,12 @@ class SortMenuScreen(ModalScreen[tuple | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static("[bold white]Sort by[/bold white]", id="menu-title")
+            yield Static("[bold $text]Sort by[/]", id="menu-title")
             items: list[Option] = []
             for idx, name in self._column_names.items():
                 if idx == self._current_column:
                     arrow = "▼" if self._current_reverse else "▲"
-                    label = f"[cyan]● {name} {arrow}[/cyan]"
+                    label = f"[$text-primary]● {name} {arrow}[/]"
                 else:
                     label = f"  {name}"
                 items.append(Option(label, id=f"sort:{idx}"))

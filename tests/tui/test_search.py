@@ -294,7 +294,7 @@ class TestPanelsSearch:
             assert table.row_count == 1
             assert table.get_row_index("Main") == 0
 
-    @patch("gitdirector.integrations.tmux._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     async def test_search_filters_panels_by_visible_live_panes_label(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
@@ -324,7 +324,7 @@ class TestPanelsSearch:
             assert table.row_count == 1
             assert table.get_row_index("Main") == 0
 
-    @patch("gitdirector.integrations.tmux._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     async def test_search_filters_panels_by_empty_status_when_sessions_are_closed(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])

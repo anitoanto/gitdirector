@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Iterator
 
 from .storage import (
     advisory_file_lock,
@@ -13,6 +14,19 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MAIN_KEYS = frozenset({"repositories", "max_workers", "theme"})
+_SECRET_KEYS = frozenset({"github_username", "github_PAT"})
+
+
+@dataclass(frozen=True)
+class _Settings:
+    """Every configurable value except the repository list."""
+
+    max_workers: int
+    theme: str
+    github_username: str | None
+    github_PAT: str | None
 
 
 class Config:
@@ -32,11 +46,11 @@ class Config:
         self.theme = self.DEFAULT_THEME
         self.github_username: str | None = None
         self.github_PAT: str | None = None
+        # What was last read from or written to disk. A field that still
+        # matches its snapshot has not been edited in memory, so a save keeps
+        # whatever another process wrote to disk in the meantime.
         self._snapshot_repositories: tuple[Path, ...] = ()
-        self._snapshot_max_workers = self.DEFAULT_MAX_WORKERS
-        self._snapshot_theme = self.DEFAULT_THEME
-        self._snapshot_github_username: str | None = None
-        self._snapshot_github_PAT: str | None = None
+        self._snapshot_settings = self._current_settings()
         self._config_state_snapshot: dict[str, list[bool | int | None]] = self._cache_token()
         self._ensure_config_dir()
         self._load()
@@ -108,17 +122,29 @@ class Config:
         return value
 
     @classmethod
+    def _parse_settings(
+        cls, main_data: dict[str, object], secrets_data: dict[str, object]
+    ) -> _Settings:
+        return _Settings(
+            max_workers=cls._validate_max_workers(
+                main_data.get("max_workers", cls.DEFAULT_MAX_WORKERS)
+            ),
+            theme=cls._validate_theme(main_data.get("theme", cls.DEFAULT_THEME)),
+            github_username=cls._optional_str(
+                secrets_data.get("github_username"), "github_username"
+            ),
+            github_PAT=cls._optional_str(secrets_data.get("github_PAT"), "github_PAT"),
+        )
+
+    @classmethod
     def _validate_loaded_data(
         cls, main_data: dict[str, object], secrets_data: dict[str, object]
     ) -> None:
         cls._validate_repositories(main_data.get("repositories", []))
-        cls._validate_max_workers(main_data.get("max_workers", cls.DEFAULT_MAX_WORKERS))
-        cls._validate_theme(main_data.get("theme", cls.DEFAULT_THEME))
-        cls._optional_str(secrets_data.get("github_username"), "github_username")
-        cls._optional_str(secrets_data.get("github_PAT"), "github_PAT")
+        cls._parse_settings(main_data, secrets_data)
 
     @staticmethod
-    def _normalize_paths(paths: list[object]) -> list[Path]:
+    def _normalize_paths(paths: Iterable[object]) -> list[Path]:
         normalized: list[Path] = []
         seen: set[Path] = set()
         for raw_path in paths:
@@ -129,6 +155,24 @@ class Config:
             normalized.append(path)
         return normalized
 
+    def _current_settings(self) -> _Settings:
+        return _Settings(
+            max_workers=self.max_workers,
+            theme=self.theme,
+            github_username=self.github_username,
+            github_PAT=self.github_PAT,
+        )
+
+    def _apply(self, repositories: list[Path], settings: _Settings) -> None:
+        self.repositories = repositories
+        self._repo_set = set(repositories)
+        self.max_workers = settings.max_workers
+        self.theme = settings.theme
+        self.github_username = settings.github_username
+        self.github_PAT = settings.github_PAT
+        self._snapshot_repositories = tuple(repositories)
+        self._snapshot_settings = settings
+
     def _load_data(
         self,
         main_data: dict[str, object],
@@ -137,29 +181,13 @@ class Config:
         secrets = secrets_data if secrets_data is not None else {}
         self._validate_loaded_data(main_data, secrets)
         repositories = self._normalize_paths(main_data.get("repositories", []))
-        self.repositories = repositories
-        self._repo_set = set(repositories)
-        self.max_workers = self._validate_max_workers(
-            main_data.get("max_workers", self.DEFAULT_MAX_WORKERS)
-        )
-        self.theme = self._validate_theme(main_data.get("theme", self.DEFAULT_THEME))
-        self.github_username = self._optional_str(secrets.get("github_username"), "github_username")
-        self.github_PAT = self._optional_str(secrets.get("github_PAT"), "github_PAT")
-        self._snapshot_repositories = tuple(self.repositories)
-        self._snapshot_max_workers = self.max_workers
-        self._snapshot_theme = self.theme
-        self._snapshot_github_username = self.github_username
-        self._snapshot_github_PAT = self.github_PAT
-
-    @staticmethod
-    def _read_data_unlocked(path: Path, description: str) -> dict[str, object]:
-        return load_yaml_mapping(path, description=description)
+        self._apply(repositories, self._parse_settings(main_data, secrets))
 
     def _read_main_unlocked(self) -> dict[str, object]:
-        return self._read_data_unlocked(self.config_file, "GitDirector config")
+        return load_yaml_mapping(self.config_file, description="GitDirector config")
 
     def _read_secrets_unlocked(self) -> dict[str, object]:
-        return self._read_data_unlocked(self.secrets_file, "GitDirector secrets")
+        return load_yaml_mapping(self.secrets_file, description="GitDirector secrets")
 
     @contextmanager
     def _locked_latest(self) -> Iterator[tuple[dict[str, object], dict[str, object]]]:
@@ -169,67 +197,59 @@ class Config:
             self._validate_loaded_data(latest_main, latest_secrets)
             yield latest_main, latest_secrets
 
-    def _settings_from_latest(
+    def _merged_settings(
         self,
         latest_main: dict[str, object],
         latest_secrets: dict[str, object],
-    ) -> tuple[int, str, str | None, str | None]:
-        self._validate_loaded_data(latest_main, latest_secrets)
-        latest_max_workers = self._validate_max_workers(
-            latest_main.get("max_workers", self.DEFAULT_MAX_WORKERS)
-        )
-        latest_theme = self._validate_theme(latest_main.get("theme", self.DEFAULT_THEME))
-        latest_github_username = self._optional_str(
-            latest_secrets.get("github_username"), "github_username"
-        )
-        latest_github_PAT = self._optional_str(latest_secrets.get("github_PAT"), "github_PAT")
-        max_workers = (
-            latest_max_workers
-            if self.max_workers == self._snapshot_max_workers
-            else self.max_workers
-        )
-        theme = latest_theme if self.theme == self._snapshot_theme else self.theme
-        github_username = (
-            latest_github_username
-            if self.github_username == self._snapshot_github_username
-            else self.github_username
-        )
-        github_PAT = (
-            latest_github_PAT if self.github_PAT == self._snapshot_github_PAT else self.github_PAT
-        )
-        return max_workers, theme, github_username, github_PAT
+    ) -> _Settings:
+        """Combine in-memory edits with what is on disk right now.
+
+        A field edited since the last load wins; an untouched field takes the
+        on-disk value so a concurrent writer's change is not overwritten.
+        """
+        latest = self._parse_settings(latest_main, latest_secrets)
+        current = self._current_settings()
+        merged = {}
+        for field in fields(_Settings):
+            edited = getattr(current, field.name) != getattr(self._snapshot_settings, field.name)
+            merged[field.name] = getattr(current if edited else latest, field.name)
+        return _Settings(**merged)
 
     def _write_data_unlocked(
         self,
         repositories: list[Path],
+        settings: _Settings,
         *,
-        max_workers: int,
-        theme: str,
-        github_username: str | None,
-        github_PAT: str | None,
+        latest_main: dict[str, object],
+        latest_secrets: dict[str, object],
     ) -> None:
+        # Keys this version does not know about are carried over untouched,
+        # so a newer or hand-edited file is not silently trimmed.
         main_data: dict[str, object] = {"repositories": [str(path) for path in repositories]}
-        if max_workers != self.DEFAULT_MAX_WORKERS:
-            main_data["max_workers"] = max_workers
-        if theme != self.DEFAULT_THEME:
-            main_data["theme"] = theme
+        if settings.max_workers != self.DEFAULT_MAX_WORKERS:
+            main_data["max_workers"] = settings.max_workers
+        if settings.theme != self.DEFAULT_THEME:
+            main_data["theme"] = settings.theme
+        main_data.update({k: v for k, v in latest_main.items() if k not in _MAIN_KEYS})
         write_yaml_atomic(self.config_file, main_data)
+
         secrets_data: dict[str, object] = {}
-        if github_username is not None:
-            secrets_data["github_username"] = github_username
-        if github_PAT is not None:
-            secrets_data["github_PAT"] = github_PAT
+        if settings.github_username is not None:
+            secrets_data["github_username"] = settings.github_username
+        if settings.github_PAT is not None:
+            secrets_data["github_PAT"] = settings.github_PAT
+        secrets_data.update({k: v for k, v in latest_secrets.items() if k not in _SECRET_KEYS})
         if secrets_data:
             write_yaml_atomic(self.secrets_file, secrets_data)
-        elif self.secrets_file.exists():
-            self.secrets_file.unlink()
+        else:
+            self.secrets_file.unlink(missing_ok=True)
+
         self._load_data(main_data, secrets_data)
         self._refresh_config_state_snapshot()
         self._invalidate_repository_cache()
 
     def _load(self) -> None:
         self._load_data(self._read_main_unlocked(), self._read_secrets_unlocked())
-
         self._refresh_config_state_snapshot()
 
     def reload_if_changed(self) -> bool:
@@ -243,118 +263,79 @@ class Config:
         repositories = list(self.repositories)
         with self._locked_latest() as (latest_main, latest_secrets):
             if tuple(repositories) == self._snapshot_repositories:
-                repositories = self._normalize_paths(list(latest_main.get("repositories", [])))
-            max_workers, theme, github_username, github_PAT = self._settings_from_latest(
-                latest_main, latest_secrets
-            )
+                repositories = self._normalize_paths(latest_main.get("repositories", []))
             self._write_data_unlocked(
                 repositories,
-                max_workers=self._validate_max_workers(max_workers),
-                theme=theme,
-                github_username=github_username,
-                github_PAT=github_PAT,
+                self._merged_settings(latest_main, latest_secrets),
+                latest_main=latest_main,
+                latest_secrets=latest_secrets,
             )
 
-    def add_repository(self, path: Path) -> bool:
-        normalized_path = normalize_repository_path(path)
-        with self._locked_latest() as (latest_main, latest_secrets):
-            repositories = self._normalize_paths(list(latest_main.get("repositories", [])))
-            if normalized_path in set(repositories):
-                self._load_data(latest_main, latest_secrets)
-                return False
-            repositories.append(normalized_path)
-            max_workers, theme, github_username, github_PAT = self._settings_from_latest(
-                latest_main, latest_secrets
-            )
-            self._write_data_unlocked(
-                repositories,
-                max_workers=max_workers,
-                theme=theme,
-                github_username=github_username,
-                github_PAT=github_PAT,
-            )
-            return True
+    def _update_repositories(self, update: Callable[[list[Path]], int]) -> int:
+        """Apply *update* to the on-disk repository list under the lock.
 
-    def add_repositories(self, paths: list[Path]) -> int:
-        normalized_paths = self._normalize_paths(paths)
+        *update* mutates the list in place and returns how many entries it
+        changed. Nothing is written when it changed none, but the in-memory
+        state is still refreshed from disk.
+        """
         with self._locked_latest() as (latest_main, latest_secrets):
-            repositories = self._normalize_paths(list(latest_main.get("repositories", [])))
-            repo_set = set(repositories)
-            count = 0
-            for path in normalized_paths:
-                if path in repo_set:
-                    continue
-                repositories.append(path)
-                repo_set.add(path)
-                count += 1
-            if count:
-                max_workers, theme, github_username, github_PAT = self._settings_from_latest(
-                    latest_main, latest_secrets
-                )
+            repositories = self._normalize_paths(latest_main.get("repositories", []))
+            changed = update(repositories)
+            if changed:
                 self._write_data_unlocked(
                     repositories,
-                    max_workers=max_workers,
-                    theme=theme,
-                    github_username=github_username,
-                    github_PAT=github_PAT,
+                    self._merged_settings(latest_main, latest_secrets),
+                    latest_main=latest_main,
+                    latest_secrets=latest_secrets,
                 )
             else:
                 self._load_data(latest_main, latest_secrets)
-            return count
+            return changed
+
+    @staticmethod
+    def _append_missing(repositories: list[Path], candidates: list[Path]) -> int:
+        present = set(repositories)
+        added = 0
+        for path in candidates:
+            if path in present:
+                continue
+            repositories.append(path)
+            present.add(path)
+            added += 1
+        return added
+
+    @staticmethod
+    def _drop_present(repositories: list[Path], targets: set[Path]) -> int:
+        remaining = [path for path in repositories if path not in targets]
+        removed = len(repositories) - len(remaining)
+        repositories[:] = remaining
+        return removed
+
+    def add_repository(self, path: Path) -> bool:
+        target = normalize_repository_path(path)
+        return bool(self._update_repositories(lambda repos: self._append_missing(repos, [target])))
+
+    def add_repositories(self, paths: list[Path]) -> int:
+        targets = self._normalize_paths(paths)
+        return self._update_repositories(lambda repos: self._append_missing(repos, targets))
 
     def remove_repository(self, path: Path) -> bool:
-        normalized_path = normalize_repository_path(path)
-        with self._locked_latest() as (latest_main, latest_secrets):
-            repositories = self._normalize_paths(list(latest_main.get("repositories", [])))
-            if normalized_path not in set(repositories):
-                self._load_data(latest_main, latest_secrets)
-                return False
-            repositories = [repo_path for repo_path in repositories if repo_path != normalized_path]
-            max_workers, theme, github_username, github_PAT = self._settings_from_latest(
-                latest_main, latest_secrets
-            )
-            self._write_data_unlocked(
-                repositories,
-                max_workers=max_workers,
-                theme=theme,
-                github_username=github_username,
-                github_PAT=github_PAT,
-            )
-            return True
+        target = normalize_repository_path(path)
+        return bool(self._update_repositories(lambda repos: self._drop_present(repos, {target})))
 
     def remove_repositories(self, paths: list[Path]) -> int:
-        normalized_targets = set(self._normalize_paths(paths))
-        with self._locked_latest() as (latest_main, latest_secrets):
-            repositories = self._normalize_paths(list(latest_main.get("repositories", [])))
-            remaining = [path for path in repositories if path not in normalized_targets]
-            count = len(repositories) - len(remaining)
-            if count:
-                max_workers, theme, github_username, github_PAT = self._settings_from_latest(
-                    latest_main, latest_secrets
-                )
-                self._write_data_unlocked(
-                    remaining,
-                    max_workers=max_workers,
-                    theme=theme,
-                    github_username=github_username,
-                    github_PAT=github_PAT,
-                )
-            else:
-                self._load_data(latest_main, latest_secrets)
-            return count
+        targets = set(self._normalize_paths(paths))
+        return self._update_repositories(lambda repos: self._drop_present(repos, targets))
 
     def has_repository(self, path: Path) -> bool:
         return normalize_repository_path(path) in self._repo_set
 
     def clear(self) -> None:
+        """Drop every tracked repository and write the config file even if empty."""
         with self._locked_latest() as (latest_main, latest_secrets):
-            max_workers, theme, github_username, github_PAT = self._settings_from_latest(
-                latest_main, latest_secrets
-            )
             self._write_data_unlocked(
                 [],
-                max_workers=max_workers,
-                theme=theme,
-                github_username=github_username,
-                github_PAT=github_PAT,
+                self._merged_settings(latest_main, latest_secrets),
+                latest_main=latest_main,
+                latest_secrets=latest_secrets,
             )

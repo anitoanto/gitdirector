@@ -1,17 +1,14 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import click
-from rich.live import Live
-from rich.spinner import Spinner
 
 from ..manager import RepositoryManager
 from ..repo import RepositoryInfo, RepoStatus
-from . import _build_repo_table, console
+from . import _build_repo_table, console, count_noun, run_concurrently
 
 
 def register(cli: click.Group):
     @cli.command(name="list")
     def list_repos():
+        """List tracked repositories with their sync status"""
         manager = RepositoryManager()
         paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
 
@@ -20,47 +17,16 @@ def register(cli: click.Group):
             console.print("  [dim]No repositories linked[/dim]\n")
             return
 
-        results = []
-        with Live(
-            console=console, refresh_per_second=12, transient=True, vertical_overflow="visible"
-        ) as live:
-            with ThreadPoolExecutor(max_workers=manager.config.max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        manager.get_repository_status,
-                        path,
-                        fetch=True,
-                        include_size=True,
-                    ): path
-                    for path in paths
-                }
-                remaining = len(futures)
-                live.update(
-                    Spinner("dots", text=f"  [dim]checking {remaining} repositories...[/dim]")
-                )
-                for future in as_completed(futures):
-                    remaining -= 1
-                    path = futures[future]
-                    try:
-                        results.append(future.result())
-                    except Exception as exc:
-                        results.append(
-                            RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
-                        )
-                    done = len(results)
-                    if remaining > 0:
-                        live.update(
-                            Spinner(
-                                "dots",
-                                text=f"  [dim]{done} done, {remaining} remaining...[/dim]",
-                            )
-                        )
-                    else:
-                        live.update(Spinner("dots", text="  [dim]done[/dim]"))
+        results = run_concurrently(
+            paths,
+            lambda path: manager.get_repository_status(path, fetch=True, include_size=True),
+            max_workers=manager.config.max_workers,
+            verb="checking",
+            on_error=lambda path, exc: RepositoryInfo(
+                path, path.name, RepoStatus.UNKNOWN, None, str(exc)
+            ),
+        )
 
         console.print(_build_repo_table(results))
-
         console.print()
-        total = len(paths)
-        noun = "repository" if total == 1 else "repositories"
-        console.print(f" [green]{total} {noun}[/green]\n")
+        console.print(f" [green]{count_noun(len(paths), 'repository', 'repositories')}[/green]\n")

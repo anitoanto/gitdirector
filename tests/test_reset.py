@@ -158,6 +158,21 @@ class TestResetCommand:
         assert "Wiped and recreated" in result.output
         mock_recreate.assert_called_once_with()
 
+    def test_reset_does_not_run_the_update_check(self, runner, isolated_home):
+        """The update check caches under ~/.gitdirector, which reset wipes.
+
+        Running the two concurrently made the wipe fail when the check
+        recreated the directory mid-removal, so reset skips the check.
+        """
+        with patch("gitdirector.commands.reset._kill_all_sessions", return_value=[]):
+            with patch("gitdirector.commands.reset._recreate_config") as mock_recreate:
+                mock_recreate.return_value = MagicMock(config_file=isolated_home / "config.yaml")
+                with patch("gitdirector.version_check.get_update_notice") as mock_notice:
+                    result = runner.invoke(cli, ["reset", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        mock_notice.assert_not_called()
+
     def test_reset_missing_config_dir_still_succeeds(self, runner, isolated_home):
         """Reset succeeds and recreates config even when ~/.gitdirector is missing."""
         from gitdirector.commands.reset import _wipe_config_dir

@@ -409,19 +409,3 @@ class TestGdTmuxArgumentValidation:
 # ---------------------------------------------------------------------------
 # tmux integration availability
 # ---------------------------------------------------------------------------
-
-
-class TestGdTmuxIntegrationUnavailable:
-    def test_missing_tmux_module_fails(self, gd_tmux_cli, config, monkeypatch, tmp_path):
-        runner, _ = gd_tmux_cli
-        repo = tmp_path / "myapp"
-        _seed_repo(config, repo)
-
-        # Setting the module entry to None causes the import inside gd_tmux
-        # to raise ImportError, mirroring the unavailable-integration case.
-        monkeypatch.setitem(sys.modules, "gitdirector.integrations.tmux", None)
-
-        result = runner.invoke(cli, ["gd-tmux", "myapp", "pytest"])
-
-        assert result.exit_code != 0
-        assert "tmux integration" in result.output

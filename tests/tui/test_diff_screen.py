@@ -727,7 +727,7 @@ class TestReviewDiffActionMenuIntegration:
             assert "review_diff" in ids
             labels = [str(opt.prompt) for opt in menu.options]
             assert any("Review Diff" in label for label in labels)
-            assert any("Diff Viewer" in label for label in labels)
+            assert any("Review" in label and "Diff" not in label for label in labels)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_app_opens_review_diff_screen(self, _mock_sessions, mocker):

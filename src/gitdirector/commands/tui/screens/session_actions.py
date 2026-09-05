@@ -11,6 +11,7 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
+from ....agents import AGENTS
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
 from ..terminal_caps import strip_unsupported_css as _safe_css
 
@@ -37,7 +38,7 @@ class SessionActionMenuScreen(ModalScreen[str]):
         return ""
 
     def _primary_options(self) -> list[Option]:
-        return [Option("[white]+[/white] [bold]TMUX Session[/bold]", id="new_session")]
+        return [Option("[$text]+[/] [bold]TMUX Session[/bold]", id="new_session")]
 
     def _session_options(self, sessions: list[str]) -> list[Option]:
         if not sessions:
@@ -54,34 +55,30 @@ class SessionActionMenuScreen(ModalScreen[str]):
             session_label = f"{parts[2]}/{parts[3]}" if len(parts) >= 4 else session_name
             items.append(
                 Option(
-                    f"[white]●[/white] [bold]{session_label}[/bold] [dim]{session_name}[/dim]",
+                    f"[$text]●[/] [bold]{session_label}[/bold] [dim]{session_name}[/dim]",
                     id=f"attach:{session_name}",
                 )
             )
         return items
 
     def _agent_options(self) -> list[Option]:
-        return [
+        items = [
             Option("", disabled=True),
             Option("[dim]Launch AI Agent[/dim]", disabled=True),
-            Option("[white]◆[/white] [bold]Pi[/bold]", id="agent:pi"),
-            Option("[white]◆[/white] [bold]OpenCode[/bold]", id="agent:opencode"),
-            Option("[white]◆[/white] [bold]Claude Code[/bold]", id="agent:claude"),
-            Option(
-                "[white]◆[/white] [bold]Claude Code[/bold]"
-                " [dim]--dangerously-skip-permissions[/dim]",
-                id="agent:claude-skip-permissions",
-            ),
-            Option("[white]◆[/white] [bold]GitHub Copilot[/bold]", id="agent:copilot"),
-            Option("[white]◆[/white] [bold]Codex[/bold]", id="agent:codex"),
         ]
+        for agent in AGENTS:
+            label = f"[$text]◆[/] [bold]{escape(agent.label)}[/bold]"
+            if agent.menu_note:
+                label += f" [dim]{escape(agent.menu_note)}[/dim]"
+            items.append(Option(label, id=f"agent:{agent.key}"))
+        return items
 
     def _remove_options(self, sessions: list[str]) -> list[Option]:
         if not sessions:
             return []
         return [
             Option("", disabled=True),
-            Option("[white]✕[/white] [dim]Remove Session...[/dim]", id="remove_session"),
+            Option("[$text]✕[/] [dim]Remove Session...[/dim]", id="remove_session"),
         ]
 
     def compose(self) -> ComposeResult:
@@ -94,7 +91,7 @@ class SessionActionMenuScreen(ModalScreen[str]):
         items.extend(self._remove_options(sessions))
 
         with Vertical(id="menu-container"):
-            yield Static(f"[bold white]{escape(self.title)}[/bold white]", id="menu-title")
+            yield Static(f"[bold $text]{escape(self.title)}[/]", id="menu-title")
             yield Static(self._subtitle(), id="menu-branch")
             yield OptionList(*items, id="action-menu")
             yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")

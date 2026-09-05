@@ -21,7 +21,6 @@ hint bar) so they sit naturally on top of the ``DiffReviewScreen``.
 
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 from rich.markup import escape
@@ -70,24 +69,24 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
         noun = "file" if self.file_count == 1 else "files"
         with Vertical(id="menu-container"):
             yield Static(
-                f"[bold white]Stage all changes in[/bold white] "
-                f"[cyan]{escape(self.repo_name)}[/cyan]"
-                f"[bold white]?[/bold white]",
+                f"[bold $text]Stage all changes in[/] "
+                f"[$text-primary]{escape(self.repo_name)}[/]"
+                f"[bold $text]?[/]",
                 id="menu-title",
             )
             yield Static(
-                f"[green]+{self.additions}[/green]  "
-                f"[red]-{self.deletions}[/red]  "
+                f"[$text-success]+{self.additions}[/]  "
+                f"[$text-error]-{self.deletions}[/]  "
                 f"[dim]\u00b7  {self.file_count} {noun}[/dim]",
                 id="menu-stats",
             )
             yield OptionList(
                 Option("[dim]\u2717 No, keep working[/dim]", id="no"),
-                Option("[white]\u2713[/white] [bold]Yes, stage everything[/bold]", id="yes"),
+                Option("[$text]\u2713[/] [bold]Yes, stage everything[/bold]", id="yes"),
                 id="action-menu",
             )
             yield Static(
-                "[green]+N[/green] additions  [red]-N[/red] deletions  \u00b7  esc to cancel",
+                "[$text-success]+N[/] additions  [$text-error]-N[/] deletions  \u00b7  esc to cancel",
                 id="menu-hint",
             )
 
@@ -110,13 +109,6 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
 # ---------------------------------------------------------------------------
 # Commit message + action choice
 # ---------------------------------------------------------------------------
-
-
-# Validation mirrors what ``git commit`` accepts on the CLI: a single
-# non-empty line is the minimum. We allow embedded newlines (subject +
-# blank line + body) since git does, but we trim trailing whitespace
-# and refuse zero-length messages.
-_COMMIT_MESSAGE_RE = re.compile(r"[\s\S]+", re.MULTILINE)
 
 
 class _CommitActionOptionList(OptionList):
@@ -152,13 +144,14 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
     ``k`` (and ``up`` / ``down``) move the selection.
     """
 
+    # Up/down and j/k are handled by the focused widget: the TextArea moves
+    # its own cursor and the action picker (``_CommitActionOptionList``)
+    # binds j/k itself, so the screen only owns confirm, cancel, and focus.
     BINDINGS = [
         Binding("escape", "cancel", "Esc cancel", show=True),
         Binding("ctrl+enter", "confirm", "Confirm", show=False),
         Binding("tab", "focus_toggle", "Tab switch focus", show=False),
         Binding("shift+tab", "focus_toggle", "Shift+Tab switch focus", show=False),
-        Binding("down", "action_cursor_down", "\u2193 action", show=False),
-        Binding("up", "action_cursor_up", "\u2191 action", show=False),
     ]
 
     CSS = _safe_css(
@@ -227,12 +220,12 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         noun = "file" if self.file_count == 1 else "files"
         with Vertical(id="commit-message-container"):
             yield Static(
-                f"[bold white]Commit changes in[/bold white] [cyan]{escape(self.repo_name)}[/cyan]",
+                f"[bold $text]Commit changes in[/] [$text-primary]{escape(self.repo_name)}[/]",
                 id="commit-message-title",
             )
             yield Static(
-                f"[green]+{self.additions}[/green]  "
-                f"[red]-{self.deletions}[/red]  "
+                f"[$text-success]+{self.additions}[/]  "
+                f"[$text-error]-{self.deletions}[/]  "
                 f"[dim]\u00b7  {self.file_count} {noun}[/dim]",
                 id="commit-message-stats",
             )
@@ -242,8 +235,8 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
                 id="commit-message-input",
             )
             yield _CommitActionOptionList(
-                Option("[cyan]\u2191[/cyan] [bold]Commit and push[/bold]", id="commit_push"),
-                Option("[white]\u2713[/white] [bold]Commit[/bold]", id="commit"),
+                Option("[$text-primary]\u2191[/] [bold]Commit and push[/bold]", id="commit_push"),
+                Option("[$text]\u2713[/] [bold]Commit[/bold]", id="commit"),
                 id="commit-message-action-list",
             )
             yield Static(
@@ -305,18 +298,12 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
             return False
         return self.focused is action_list
 
-    def action_cursor_down(self) -> None:
-        self.query_one("#commit-message-action-list", OptionList).action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#commit-message-action-list", OptionList).action_cursor_up()
-
     def _message(self) -> str:
         return self.query_one("#commit-message-input", TextArea).text.strip()
 
     def _message_valid(self) -> bool:
-        msg = self._message()
-        return bool(msg) and bool(_COMMIT_MESSAGE_RE.match(msg))
+        # Mirrors git: any non-empty message (subject, optional body) is accepted.
+        return bool(self._message())
 
     def _selected_action_id(self) -> str:
         try:
@@ -369,13 +356,13 @@ class CommitLoadingScreen(ModalScreen[None]):
         super().__init__()
         self.repo_name = repo_name
         self.push_after = push_after
-        self._status: str = "Staging\u2026" if not push_after else "Staging\u2026"
+        self._status = "Staging\u2026"
 
     def compose(self) -> ComposeResult:
         with Container(id="commit-loading-container"):
             yield Static(
-                f"[bold white]{'Commit & push' if self.push_after else 'Commit'}"
-                f" \u2014 {escape(self.repo_name)}[/bold white]",
+                f"[bold $text]{'Commit & push' if self.push_after else 'Commit'}"
+                f" \u2014 {escape(self.repo_name)}[/]",
                 id="commit-loading-title",
             )
             yield LoadingIndicator(id="commit-loading-spinner")

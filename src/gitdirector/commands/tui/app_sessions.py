@@ -14,9 +14,9 @@ from textual.worker import Worker
 
 from .constants import (
     _DEFAULT_SESSIONS_SORT_COLUMN,
-    _SESSION_STATUS_DISPLAY,
     _SESSION_STATUS_ORDER,
     _SESSIONS_SORT_COLUMN_NAMES,
+    TablePalette,
 )
 from .table_text import wrap_table_cell_text
 
@@ -27,15 +27,15 @@ _PREFERRED_SESSIONS_DESCRIPTION_WIDTH = 30
 _SESSIONS_COL_GAP = 2
 _SESSIONS_STATUS_WIDTH = 9
 _SESSIONS_MAX_PURPOSE_WIDTH = 36
-_SESSIONS_MAX_REPO_WIDTH = 26
+# The repository column keeps this width regardless of the names shown, so
+# the layout does not shift as sessions come and go; longer names truncate.
+_SESSIONS_REPO_WIDTH = 26
 _SESSIONS_MIN_PURPOSE_WIDTH = 14
 _SESSIONS_MIN_REPO_WIDTH = 12
 _SESSIONS_FALLBACK_TOTAL_WIDTH = 80
 # The DataTable adds a cell padding of one cell on each side and the widget
 # itself has ``padding: 0 1``; reserve those plus a column for the scrollbar.
 _SESSIONS_TABLE_CHROME_WIDTH = 6
-# Repository names share the yellow accent used for repo state elsewhere.
-_SESSION_REPO_STYLE = "bright_yellow"
 
 
 @dataclass(frozen=True)
@@ -68,14 +68,16 @@ def _fit(values, header: str, max_width: int) -> int:
 
 
 def _resolve_sessions_layout(entries: list[dict[str, str]], screen_width: int) -> SessionsLayout:
-    """Size the row columns from the data, giving the rest to the description."""
+    """Size the row columns, giving the rest to the description.
+
+    The session column fits its data; the repository column has a fixed
+    width so it does not resize with the names it happens to contain.
+    """
     total = _resolve_sessions_total_width(screen_width)
     purpose = _fit(
         (entry.get("purpose", "") for entry in entries), "Session", _SESSIONS_MAX_PURPOSE_WIDTH
     )
-    repo = _fit(
-        (entry.get("repo", "") for entry in entries), "Repository", _SESSIONS_MAX_REPO_WIDTH
-    )
+    repo = _SESSIONS_REPO_WIDTH
     fixed = _SESSIONS_STATUS_WIDTH + _SESSIONS_COL_GAP * 3
 
     # On narrow terminals give the description room to breathe by trimming the
@@ -108,15 +110,6 @@ def _truncate(text: str, width: int) -> str:
     return text[: width - 1] + "…"
 
 
-def _wrap_session_description(text: str, max_width: int) -> str:
-    """Wrap *text* to *max_width* cells, preserving any existing newlines.
-
-    Empty/placeholder values pass through untouched so callers don't
-    have to special-case "-".
-    """
-    return wrap_table_cell_text(text, max_width)
-
-
 def _sessions_header(layout: SessionsLayout) -> Text:
     header = (
         "Status".ljust(layout.status)
@@ -130,20 +123,17 @@ def _sessions_header(layout: SessionsLayout) -> Text:
     return Text(header.ljust(layout.total), no_wrap=True, overflow="ignore")
 
 
-def _render_session_row(entry: dict[str, str], layout: SessionsLayout) -> tuple[Text, int]:
+def _render_session_row(
+    entry: dict[str, str], layout: SessionsLayout, palette: TablePalette
+) -> tuple[Text, int]:
     """Render one session as a two-line block plus a trailing blank line.
 
     The first line holds the aligned columns, the second holds the tmux
     session name spanning the full row width, and the third is left empty so
     consecutive sessions stay visually separated.
     """
-    status = entry.get("status", "running")
-    status_label, status_style = _SESSION_STATUS_DISPLAY.get(
-        status, _SESSION_STATUS_DISPLAY["running"]
-    )
-    description = _wrap_session_description(
-        entry.get("description", "-") or "-", layout.description
-    )
+    status_label, status_style = palette.session_status(entry.get("status", "running"))
+    description = wrap_table_cell_text(entry.get("description", "-") or "-", layout.description)
     description_lines = description.split("\n")
 
     text = Text(no_wrap=True, overflow="ignore")
@@ -153,7 +143,7 @@ def _render_session_row(entry: dict[str, str], layout: SessionsLayout) -> tuple[
     text.append(" " * _SESSIONS_COL_GAP)
     text.append(
         _truncate(entry.get("repo", ""), layout.repo).ljust(layout.repo),
-        style=_SESSION_REPO_STYLE,
+        style=palette.yellow,
     )
     text.append(" " * _SESSIONS_COL_GAP)
     text.append(description_lines[0].ljust(layout.description))
@@ -169,7 +159,7 @@ def _render_session_row(entry: dict[str, str], layout: SessionsLayout) -> tuple[
     text.append("  ")
     text.append(
         _truncate(entry.get("session_name", ""), layout.total - 2).ljust(layout.total - 2),
-        style="dim italic",
+        style=f"italic {palette.muted}",
     )
     text.append("\n")
     text.append(" " * layout.total)
@@ -187,12 +177,14 @@ class ConsoleSessionsMixin:
 
     @work(thread=True)
     def _load_sessions_worker(self, generation: int) -> None:
-        from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
+        from ...integrations.tmux import list_all_gd_sessions
 
         self.call_from_thread(self._show_refresh_indicator)
         try:
             entries = list_all_gd_sessions()
-            statuses = get_all_session_statuses()
+            # A synchronous sample so a freshly opened tab shows real
+            # statuses instead of waiting for the monitor's next tick.
+            statuses = self._monitor.refresh()
             self.call_from_thread(
                 self._apply_sessions_snapshot,
                 generation,
@@ -207,7 +199,7 @@ class ConsoleSessionsMixin:
         self,
         generation: int,
         entries: list[dict[str, str]],
-        statuses: dict[str, dict[str, object]],
+        statuses: dict[str, str],
         refresh_table: bool,
     ) -> None:
         if generation != self._sessions_snapshot_generation or self._shutdown_requested:
@@ -299,8 +291,9 @@ class ConsoleSessionsMixin:
         table.clear()
         if not is_empty:
             for entry in entries:
-                row, height = _render_session_row(entry, layout)
+                row, height = _render_session_row(entry, layout, self._palette)
                 table.add_row(row, height=height, key=entry["session_name"])
+                entry["_rendered_status"] = entry["status"]
 
         if self._resume_selection_tab == "sessions":
             self._restore_resume_selection("sessions")
@@ -393,13 +386,17 @@ class ConsoleSessionsMixin:
 
     @work(thread=True, exclusive=True, group="status_poll")
     def _poll_session_statuses_worker(self, generation: int) -> None:
-        from ...integrations.tmux import get_all_session_statuses, list_all_gd_sessions
+        from ...integrations.tmux import list_all_gd_sessions
 
         if not self._should_run_session_status_tracking():
             return
 
-        entries = list_all_gd_sessions()
-        statuses = get_all_session_statuses()
+        # The monitor samples tmux on its own cadence and already carries
+        # every session's metadata, so this poll normally costs no tmux call.
+        entries = self._monitor.entries()
+        if entries is None:
+            entries = list_all_gd_sessions()
+        statuses = self._monitor.statuses()
         self.call_from_thread(
             self._apply_sessions_snapshot,
             generation,
@@ -436,27 +433,17 @@ class ConsoleSessionsMixin:
             self._update_status(self._build_loaded_status(shown, total))
 
     def _resolve_session_status(self, entry: dict[str, str]) -> str:
-        from ...integrations.tmux import resolve_pane_status
+        """The monitor's verdict for a session, or a neutral default.
 
+        A session the monitor has not sampled yet (it was just created) is
+        shown as running until the next sample, unless a bell already
+        arrived for it.
+        """
         session_name = entry["session_name"]
-        tmux_info = self._session_statuses.get(session_name)
-        bell = (
-            bool(tmux_info.get("bell"))
-            if tmux_info is not None
-            else self._monitor.get_bell_state(session_name)
-        )
-        if tmux_info is None:
-            return "waiting" if bell else "running"
-        last_output = self._monitor.get_last_output_time(session_name)
-        last_content_change = self._monitor.get_last_content_change_time(session_name)
-        return resolve_pane_status(
-            entry["purpose"],
-            str(tmux_info["command"]),
-            bool(tmux_info["dead"]),
-            bell=bell,
-            last_output_time=last_output,
-            last_content_change_time=last_content_change,
-        )
+        status = self._session_statuses.get(session_name)
+        if status is not None:
+            return status
+        return "waiting" if self._monitor.get_bell_state(session_name) else "running"
 
     def _update_session_status_cells(self) -> None:
         try:
@@ -468,10 +455,13 @@ class ConsoleSessionsMixin:
         )
         for entry in self._sessions_entries:
             status = self._resolve_session_status(entry)
+            if entry.get("status") == status and entry.get("_rendered_status") == status:
+                continue
             entry["status"] = status
             try:
-                row, _height = _render_session_row(entry, layout)
+                row, _height = _render_session_row(entry, layout, self._palette)
                 table.update_cell(entry["session_name"], self._sess_col_keys[0], row)
+                entry["_rendered_status"] = status
             except Exception:
                 logger.debug(
                     "Failed to update session status cell %s",
