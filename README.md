@@ -132,19 +132,15 @@ scripts.
 
 ## Background sessions
 
-`gd-tmux` runs a command in a detached `gd/<repo>/shell/<N>` session and
-prints the session name, so scripts can capture it:
+Three commands: start, read, write.
 
 ```bash
-SESSION=$(gitdirector gd-tmux /path/to/repo "npm run dev" -d "Vite: dev server")
-gitdirector gd-capture "$SESSION" --lines 100
-gitdirector gd-send "$SESSION" --key C-c
+gitdirector gd-tmux my-repo "npm run dev"        # start; prints the session name
+gitdirector gd-capture gd/my-repo/shell/1        # read its screen
+gitdirector gd-send gd/my-repo/shell/1 --key C-c # send it input
 ```
 
-`--key` accepts `C-c`, `C-d`, `C-z`, `C-l`, `Enter`, `Escape`, `Tab`, `Up`,
-and `Down`. The session self-destructs when the command exits, taking its
-scrollback with it; to keep output, redirect inside the command:
-`"make test 2>&1 | tee /tmp/run.log"`.
+The session ends when the command exits.
 
 **AI coding agents:** the rules for driving GitDirector headlessly live in
 [`SKILL.md`](SKILL.md). Point your agent at it before it runs these commands.
@@ -168,12 +164,10 @@ Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`,
 
 ### GitHub credentials
 
-GitDirector runs plain `git` for pull, push, and fetch, so it uses whatever
-credentials git already has. The recommended setup is SSH remotes with a
-key loaded in your agent — nothing to store in GitDirector, and pull and
-push just work from the console and from background sessions.
+Nothing to set up. GitDirector runs plain `git`, so if pull and push already
+work in your terminal they work here too — just link your repos.
 
-`~/.ssh/config`:
+SSH is the preferred way. A `~/.ssh/config` like this is all it takes:
 
 ```ssh-config
 Host github.com
@@ -184,20 +178,13 @@ Host github.com
   IdentityFile ~/.ssh/github
 ```
 
-`Hostname ssh.github.com` with `Port 443` tunnels SSH over the HTTPS port,
-which gets through networks that block port 22; drop those two lines if you
-do not need that. `AddKeysToAgent yes` loads the key into `ssh-agent` on
-first use so the passphrase is asked once per login. Then clone (or switch
-remotes) with the SSH URL:
-
 ```bash
-git remote set-url origin git@github.com:owner/repo.git
 ssh -T git@github.com   # should greet you by username
 ```
 
-#### HTTPS token fallback
+#### Token option
 
-If SSH is not an option, GitDirector can retry with a personal access token
+If SSH is not possible, GitDirector can retry with a personal access token
 on HTTPS GitHub remotes. Credentials live separately in
 `~/.gitdirector/secrets.yaml`:
 
@@ -214,19 +201,14 @@ plaintext — scope it narrowly and protect the file.
 
 ## Shell completion
 
-Completion covers subcommands, options, and tracked repo names.
+Add the line for your shell to its rc file (`~/.bashrc`, `~/.zshrc`, or
+`~/.config/fish/config.fish`) and completions for subcommands, options, and
+tracked repo names load with every new shell:
 
 ```bash
 eval "$(gitdirector completion bash)"
 eval "$(gitdirector completion zsh)"
 gitdirector completion fish | source
-```
-
-For zsh, writing the script into your `$fpath` avoids a subprocess on every
-TAB:
-
-```bash
-gitdirector completion zsh > "${fpath[1]}/_gitdirector"
 ```
 
 ## Contributing
