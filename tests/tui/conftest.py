@@ -75,9 +75,9 @@ def _status_is_loading(app) -> bool:
 def _no_background_status_poll(monkeypatch):
     """Keep the Sessions tab's periodic status poll from firing mid-test.
 
-    The app re-reads the session list from tmux every second while the
-    Sessions tab is open and re-applies it to the table, restoring the
-    cursor from the saved selection. A test that edits ``_sessions_entries``
+    The app re-reads the session list from tmux every second on every tab
+    and, while the Sessions tab is open, re-applies it to the table,
+    restoring the cursor from the saved selection. A test that edits ``_sessions_entries``
     directly and then asserts on the table races that poll: on a slow CI
     runner the poll fires first and overwrites the edit, and the assertion
     sees the original list (observed as an off-by-one cursor row on the

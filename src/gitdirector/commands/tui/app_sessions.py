@@ -181,10 +181,17 @@ class ConsoleSessionsMixin:
 
         self.call_from_thread(self._show_refresh_indicator)
         try:
-            entries = list_all_gd_sessions()
-            # A synchronous sample so a freshly opened tab shows real
-            # statuses instead of waiting for the monitor's next tick.
-            statuses = self._monitor.refresh()
+            try:
+                entries = list_all_gd_sessions()
+                # A synchronous sample so a freshly opened tab shows real
+                # statuses instead of waiting for the monitor's next tick.
+                statuses = self._monitor.refresh()
+            except Exception:
+                # This load runs from startup and after every launch, so a
+                # missing tmux or a hung server must log, not take the
+                # console down with a worker error. The cache stays as is.
+                logger.warning("Loading tmux sessions failed", exc_info=True)
+                return
             self.call_from_thread(
                 self._apply_sessions_snapshot,
                 generation,
@@ -204,11 +211,15 @@ class ConsoleSessionsMixin:
     ) -> None:
         if generation != self._sessions_snapshot_generation or self._shutdown_requested:
             return
+        self._sessions_loaded = True
         self._session_statuses = statuses
         membership_changed = {entry["session_name"] for entry in entries} != {
             entry["session_name"] for entry in self._sessions_entries
         }
-        if refresh_table or (self._active_tab == "sessions" and membership_changed):
+        # Off the Sessions tab only the cache is updated: the table is
+        # repainted from it on activation, and touching it here would
+        # also overwrite the active tab's status bar.
+        if self._active_tab == "sessions" and (refresh_table or membership_changed):
             self._populate_sessions_table(entries)
         else:
             self._sessions_entries = entries
@@ -339,7 +350,25 @@ class ConsoleSessionsMixin:
         return msg
 
     def _should_run_session_status_tracking(self) -> bool:
-        return self._active_tab == "sessions" and not self._session_status_tracking_paused
+        # Tracking runs on every tab, not just Sessions, so the session
+        # list and statuses are already current when the user switches
+        # over; the tab then repaints from the cache instead of loading.
+        # It only stops while the TUI is suspended (attach) or quitting.
+        return not self._session_status_tracking_paused
+
+    def _show_sessions_tab(self) -> None:
+        """Bring the Sessions tab up to date on activation.
+
+        The background tracking keeps ``_sessions_entries`` fresh on every
+        tab, so a tab that has already been loaded once repaints
+        synchronously from the cache: no worker, no refresh indicator, no
+        stale rows. The first activation before any snapshot arrived (or
+        after a failed one) still loads from tmux.
+        """
+        if self._sessions_loaded:
+            self._apply_sessions_filter_and_sort()
+        else:
+            self._load_sessions()
 
     def _set_session_status_tracking_running(self, running: bool, *, wait: bool = True) -> None:
         poll_timer = getattr(self, "_poll_timer", None)
@@ -395,7 +424,11 @@ class ConsoleSessionsMixin:
         # every session's metadata, so this poll normally costs no tmux call.
         entries = self._monitor.entries()
         if entries is None:
-            entries = list_all_gd_sessions()
+            try:
+                entries = list_all_gd_sessions()
+            except Exception:
+                logger.warning("Polling tmux sessions failed", exc_info=True)
+                return
         statuses = self._monitor.statuses()
         self.call_from_thread(
             self._apply_sessions_snapshot,

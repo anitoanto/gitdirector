@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from textual.css.query import NoMatches
@@ -184,7 +184,9 @@ class TestGitDirectorConsole:
         app._monitor = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.press("q")
-        app._monitor.stop.assert_called_once_with(wait=True)
+        # Tracking runs from startup, so quitting first pauses it without
+        # blocking and then waits for the monitor in the final shutdown.
+        assert app._monitor.stop.call_args_list[-1] == call(wait=True)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_cursor_down_binding(self, _mock_sessions):
@@ -410,6 +412,9 @@ class TestGitDirectorConsole:
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
+        # The startup sessions load is the one legitimate caller; keep it
+        # out of the way so the assertion covers the repo load alone.
+        app._load_sessions = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
@@ -1291,14 +1296,74 @@ class TestGitDirectorConsoleDirectBranches:
 
         app._poll_session_statuses.assert_called_once_with()
 
-    def test_trigger_status_poll_skips_inactive_tabs(self):
+    def test_trigger_status_poll_runs_on_every_tab(self):
+        # The session list is kept current on every tab so the Sessions
+        # tab can repaint from the cache the moment it is opened.
         app = GitDirectorConsole()
         app._active_tab = "repos"
         app._poll_session_statuses = MagicMock()
 
         app._trigger_status_poll()
 
+        app._poll_session_statuses.assert_called_once_with()
+
+    def test_trigger_status_poll_skips_while_paused(self):
+        app = GitDirectorConsole()
+        app._active_tab = "sessions"
+        app._session_status_tracking_paused = True
+        app._poll_session_statuses = MagicMock()
+
+        app._trigger_status_poll()
+
         app._poll_session_statuses.assert_not_called()
+
+    def test_poll_worker_survives_session_listing_failure(self):
+        app = GitDirectorConsole()
+        app._active_tab = "repos"
+        app._monitor = MagicMock()
+        app._monitor.entries.return_value = None
+        app.call_from_thread = lambda callback, *args: callback(*args)
+        app._apply_sessions_snapshot = MagicMock()
+
+        with patch(
+            "gitdirector.integrations.tmux.list_all_gd_sessions",
+            side_effect=Exception("tmux error"),
+        ):
+            GitDirectorConsole._poll_session_statuses_worker.__wrapped__(app, 1)
+
+        app._apply_sessions_snapshot.assert_not_called()
+
+    def test_load_sessions_worker_survives_tmux_failure(self):
+        app = GitDirectorConsole()
+        app._monitor = MagicMock()
+        app.call_from_thread = lambda callback, *args: callback(*args)
+        app._apply_sessions_snapshot = MagicMock()
+        app._show_refresh_indicator = MagicMock()
+        app._hide_refresh_indicator = MagicMock()
+
+        with patch(
+            "gitdirector.integrations.tmux.list_all_gd_sessions",
+            side_effect=Exception("tmux error"),
+        ):
+            GitDirectorConsole._load_sessions_worker.__wrapped__(app, 1)
+
+        app._apply_sessions_snapshot.assert_not_called()
+        app._show_refresh_indicator.assert_called_once_with()
+        app._hide_refresh_indicator.assert_called_once_with()
+
+    def test_refresh_after_session_launch_reloads_sessions_from_repos_tab(self):
+        # A session launched from the Repos tab must show up in the
+        # Sessions tab straight away, without waiting for the next poll.
+        app = GitDirectorConsole()
+        app._results = {}
+        app._repo_paths = []
+        app._apply_filter_and_sort = MagicMock()
+        app._load_sessions = MagicMock()
+
+        app._refresh_after_session_launch(Path("/tmp/alpha"), "repos")
+
+        app._apply_filter_and_sort.assert_called_once_with()
+        app._load_sessions.assert_called_once_with()
 
     def test_resolve_session_status_uses_monitor_verdict(self):
         app = GitDirectorConsole()
@@ -1494,7 +1559,9 @@ class TestGitDirectorConsoleDirectBranches:
         app._monitor.start.assert_called_once_with()
         app._poll_timer.resume.assert_called_once_with()
 
-    def test_resume_session_status_tracking_stays_stopped_off_sessions_tab(self):
+    def test_resume_session_status_tracking_restarts_off_sessions_tab(self):
+        # Tracking is no longer tied to the Sessions tab: returning from a
+        # session on the Repos tab restarts it so the list stays current.
         app = GitDirectorConsole()
         app._active_tab = "repos"
         app._session_status_tracking_paused = True
@@ -1504,9 +1571,9 @@ class TestGitDirectorConsoleDirectBranches:
         app._resume_session_status_tracking()
 
         assert app._session_status_tracking_paused is False
-        app._monitor.start.assert_not_called()
-        app._poll_timer.resume.assert_not_called()
-        app._poll_timer.pause.assert_called_once_with()
+        app._monitor.start.assert_called_once_with()
+        app._poll_timer.resume.assert_called_once_with()
+        app._poll_timer.pause.assert_not_called()
 
     def test_action_quit_uses_non_blocking_session_monitor_shutdown(self):
         app = GitDirectorConsole()
@@ -1904,12 +1971,30 @@ class TestTUIEdgeCases:
         repos = [_make_info("alpha", Path("/tmp/alpha"))]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
+        app._load_sessions = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
             assert table.row_count == 1
             mock_sessions.assert_not_called()
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=Exception("tmux error")
+    )
+    async def test_startup_sessions_load_failure_does_not_crash(self, _mock_sessions):
+        """The sessions list now loads at startup; a tmux failure there must
+        log and leave the cache empty rather than kill the app."""
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.query_one("#repo-table", DataTable).row_count == 1
+            assert app._sessions_entries == []
+            assert app._sessions_loaded is False
+            assert app._refresh_operations == 0
 
     def test_sort_key_func_all_columns(self):
         app = GitDirectorConsole()

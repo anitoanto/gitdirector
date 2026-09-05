@@ -489,7 +489,17 @@ class FileTileList(ListView):
 
     def watch_index(self, old: int | None, new: int | None) -> None:
         if getattr(self, "_suppress_watch", False):
-            return
+            if new is None or self._pending_index is None:
+                return
+            # An explicit selection arrived (keyboard, click, or a
+            # caller assigning ``index``) while the deferred initial
+            # selection from ``set_files`` was still queued. Honour the
+            # explicit choice and drop the pending one; otherwise the
+            # late ``_apply_initial_selection`` would clobber it back
+            # to file 0 (this raced on slow CI runners).
+            self._pending_index = None
+            self._pending_retry_count = 0
+            self._suppress_watch = False
         # Delegate to ListView's watch_index first so it can
         # ``scroll_to_widget`` and keep the highlighted tile in view
         # when the list overflows the available height.
@@ -513,14 +523,21 @@ class FileTileList(ListView):
         if attempt < self._SCROLL_RETRY_LIMIT:
             self.call_after_refresh(self._ensure_index_visible, index, attempt + 1)
 
-    def _update_selection(self) -> None:
+    def _update_selection(self, attempt: int = 0) -> None:
+        deferred = False
         for i, child in enumerate(self.children):
             if isinstance(child, ListItem):
                 try:
                     tile = child.query_one(FileTile)
                 except Exception:
+                    # The ListItem hasn't mounted its FileTile yet
+                    # (index was assigned in the same tick as
+                    # ``set_files``). Re-apply once it has.
+                    deferred = True
                     continue
                 tile.set_selected(i == self.index)
+        if deferred and attempt < self._SCROLL_RETRY_LIMIT:
+            self.call_after_refresh(self._update_selection, attempt + 1)
 
     def action_cursor_down(self) -> None:
         if self.index is None:

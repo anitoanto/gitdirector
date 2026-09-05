@@ -308,6 +308,9 @@ class GitDirectorConsole(
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, str] = {}
         self._sessions_snapshot_generation = 0
+        # Set once the first sessions snapshot has been applied; until then
+        # the Sessions tab has nothing cached and must load on activation.
+        self._sessions_loaded = False
         self._waiting_count: int = 0
         self._resume_target_tab: str | None = None
         self._resume_refresh_path: Path | None = None
@@ -399,11 +402,14 @@ class GitDirectorConsole(
             _SESSION_STATUS_POLL_INTERVAL_SECS,
             self._trigger_status_poll,
         )
-        self._set_session_status_tracking_running(False)
+        self._sync_session_status_tracking()
         self.set_interval(0.25, self._advance_refresh_indicator)
         self._load_update_notice()
         self._load_repos_from_cache()
         self._refresh_repos()
+        # Load the session list up front so the Sessions tab is populated
+        # the first time it is opened; the tracking keeps it current after.
+        self._load_sessions()
 
     def _show_refresh_indicator(self) -> None:
         self._refresh_operations += 1
@@ -785,8 +791,10 @@ class GitDirectorConsole(
                 self._populate_initial_rows()
             else:
                 self._apply_filter_and_sort()
-        elif launch_tab == "sessions":
-            self._load_sessions()
+        # Whichever tab the session was launched from, pick it up in the
+        # session list right away so a switch to the Sessions tab does not
+        # have to wait for the next background poll.
+        self._load_sessions()
 
     def _resolve_repo_refresh_path(
         self, session_name: str, path: Path | None = None

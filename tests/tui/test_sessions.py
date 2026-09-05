@@ -1088,6 +1088,9 @@ class TestSessionsRefreshOnReturn:
         app.manager = _mock_manager()
         with patch("gitdirector.integrations.tmux.list_all_gd_sessions", side_effect=list_sessions):
             async with app.run_test(size=(120, 30)) as pilot:
+                # Only the active Sessions tab paints the table; off-tab
+                # loads just refresh the cache.
+                app._active_tab = "sessions"
                 stale_worker = app._load_sessions()
                 await asyncio.wait_for(asyncio.to_thread(first_started.wait), timeout=SYNC_TIMEOUT)
 
@@ -1104,6 +1107,85 @@ class TestSessionsRefreshOnReturn:
                 assert [entry["session_name"] for entry in app._sessions_entries] == [
                     entry["session_name"] for entry in SAMPLE_SESSIONS
                 ]
+
+    @patch_sessions()
+    async def test_sessions_tab_opens_from_cache_without_reloading(self, _mock):
+        """The list is loaded at startup and kept current on every tab, so
+        switching to the Sessions tab paints from the cache instantly
+        instead of showing a load."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Loaded in the background while the Repos tab was active...
+            assert app._active_tab == "repos"
+            assert app._sessions_loaded is True
+            assert [e["session_name"] for e in app._sessions_entries] == [
+                e["session_name"] for e in SAMPLE_SESSIONS
+            ]
+            # ...without touching the (hidden) table or the status bar.
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 0
+
+            app._load_sessions = MagicMock()
+            await pilot.press("2")
+            await pilot.pause()
+
+            assert app._active_tab == "sessions"
+            assert table.row_count == len(SAMPLE_SESSIONS)
+            app._load_sessions.assert_not_called()
+
+    @patch_sessions()
+    async def test_off_tab_poll_updates_cache_for_next_tab_visit(self, _mock):
+        """A session created while on the Repos tab is picked up by the
+        background poll and shows on the next switch, with no load."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._active_tab == "repos"
+
+            new_entry = {
+                "session_name": "gd/delta/shell/1",
+                "repo": "delta",
+                "repo_slug": "delta",
+                "purpose": "shell",
+                "description": "-",
+            }
+            app._monitor.entries = lambda: sample_sessions() + [dict(new_entry)]
+            app._monitor.statuses = lambda: {}
+            poll_worker = app._poll_session_statuses()
+            await poll_worker.wait()
+            await pilot.pause()
+
+            assert "gd/delta/shell/1" in {e["session_name"] for e in app._sessions_entries}
+            table = app.query_one("#sessions-table", DataTable)
+            assert table.row_count == 0
+
+            app._load_sessions = MagicMock()
+            await pilot.press("2")
+            await pilot.pause()
+
+            assert table.row_count == len(SAMPLE_SESSIONS) + 1
+            assert "gd/delta/shell/1" in {str(k.value) for k in table.rows}
+            app._load_sessions.assert_not_called()
+
+    async def test_sessions_tab_loads_when_nothing_cached_yet(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._load_sessions = MagicMock()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._load_sessions.reset_mock()
+            assert app._sessions_loaded is False
+
+            await pilot.press("2")
+            await pilot.pause()
+
+            app._load_sessions.assert_called_once_with()
 
     async def test_suspend_and_attach_refreshes_sessions_tab(self):
         app = GitDirectorConsole()

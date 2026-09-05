@@ -782,3 +782,42 @@ class TestSetFilesRegression:
                 fl._apply_initial_selection()
             assert fl._pending_index is None
             assert fl._suppress_watch is False
+
+    async def test_explicit_index_wins_over_pending_initial_selection(self):
+        """Regression: ``set_files`` defers ``index = 0`` via
+        ``call_after_refresh``. If a caller assigns ``index`` before
+        that fires (keyboard, click, or a test), the late callback used
+        to clobber the explicit choice back to 0. This raced on slow CI
+        runners; here we force the ordering deterministically.
+        """
+        from textual.app import App, ComposeResult
+
+        received: list[ChangedFile | None] = []
+
+        class _MiniApp(App):
+            def compose(self) -> ComposeResult:
+                yield FileTileList(id="fl")
+
+            def on_file_tile_list_file_selected(self, event: FileTileList.FileSelected) -> None:
+                received.append(event.file)
+
+        files = [
+            ChangedFile(path="new.py", status="A"),
+            ChangedFile(path="foo.py", status="M"),
+        ]
+        app = _MiniApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            fl = app.query_one("#fl", FileTileList)
+            fl.set_files(files)
+            # Same tick: the deferred initial selection is still queued.
+            assert fl._pending_index == 0
+            fl.index = 1
+            await pilot.pause()
+            await pilot.pause()
+            assert fl.index == 1
+            assert fl._pending_index is None
+            assert fl._suppress_watch is False
+            assert fl.selected_file() is files[1]
+            tiles = [c.query_one(FileTile) for c in fl.children]
+            assert [t.selected for t in tiles] == [False, True]
+            assert received and received[-1] is files[1]

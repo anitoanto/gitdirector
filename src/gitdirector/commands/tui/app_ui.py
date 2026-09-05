@@ -110,7 +110,7 @@ class ConsoleUIHelpersMixin:
         self.refresh_bindings()
         self._sync_session_status_tracking()
         if tab_id == "sessions":
-            self._load_sessions()
+            self._show_sessions_tab()
         elif tab_id == "panels":
             self._load_panels()
         elif tab_id == "repos":
