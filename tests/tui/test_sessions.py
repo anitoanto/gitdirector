@@ -949,8 +949,11 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             app._capture_resume_selection("sessions")
-            _entries = sample_sessions()
-            app._sessions_entries = [_entries[0], _entries[2]]
+            # The selected session (beta) is gone; keep the mocked tmux
+            # source consistent so any refresh sees the same two sessions.
+            remaining = [SAMPLE_SESSIONS[0], SAMPLE_SESSIONS[2]]
+            _mock_list.side_effect = lambda *_args, **_kwargs: sample_sessions(remaining)
+            app._sessions_entries = sample_sessions(remaining)
             app._apply_sessions_filter_and_sort()
             await pilot.pause()
 

@@ -6,7 +6,6 @@
 
 <p align="center">
   <a href="https://pypi.org/project/gitdirector/"><img alt="PyPI" src="https://img.shields.io/pypi/v/gitdirector?color=6e5bd6"></a>
-  <a href="https://pypi.org/project/gitdirector/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/gitdirector"></a>
   <a href="https://github.com/anitoanto/gitdirector/actions/workflows/main.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/anitoanto/gitdirector/main.yml?branch=main&label=CI"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/anitoanto/gitdirector"></a>
 </p>
@@ -42,7 +41,8 @@
 pip install gitdirector        # or: pipx install gitdirector / uv tool install gitdirector
 ```
 
-Requires Python 3.10+ and git. Anything session-related needs
+Requires Python 3.10 or newer (the test suite runs on every release from
+3.10 through 3.14) and git. Anything session-related needs
 [tmux](https://github.com/tmux/tmux) ≥ 3.2a. `gitdirector doctor` checks all
 of it.
 
@@ -166,20 +166,51 @@ Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`,
 `rose-pine-moon`, `rose-pine-dawn`, `catppuccin-latte`, `catppuccin-frappe`,
 `catppuccin-macchiato`, `catppuccin-mocha`.
 
-### GitHub PAT fallback
+### GitHub credentials
 
-Credentials live separately in `~/.gitdirector/secrets.yaml`:
+GitDirector runs plain `git` for pull, push, and fetch, so it uses whatever
+credentials git already has. The recommended setup is SSH remotes with a
+key loaded in your agent — nothing to store in GitDirector, and pull and
+push just work from the console and from background sessions.
+
+`~/.ssh/config`:
+
+```ssh-config
+Host github.com
+  Hostname ssh.github.com
+  Port 443
+  User git
+  AddKeysToAgent yes
+  IdentityFile ~/.ssh/github
+```
+
+`Hostname ssh.github.com` with `Port 443` tunnels SSH over the HTTPS port,
+which gets through networks that block port 22; drop those two lines if you
+do not need that. `AddKeysToAgent yes` loads the key into `ssh-agent` on
+first use so the passphrase is asked once per login. Then clone (or switch
+remotes) with the SSH URL:
+
+```bash
+git remote set-url origin git@github.com:owner/repo.git
+ssh -T git@github.com   # should greet you by username
+```
+
+#### HTTPS token fallback
+
+If SSH is not an option, GitDirector can retry with a personal access token
+on HTTPS GitHub remotes. Credentials live separately in
+`~/.gitdirector/secrets.yaml`:
 
 ```yaml
 github_username: your-username
 github_PAT: github_pat_...
 ```
 
-Git commands run with your normal credentials first. Only if one fails with
-an auth error, and both values are set, does GitDirector retry via a
-temporary credential helper for HTTPS GitHub remotes. SSH remotes are
-untouched. The PAT never appears on the command line or in TUI output, but
-it is stored in plaintext — scope it narrowly and protect the file.
+Git commands still run with your normal credentials first. Only if one
+fails with an auth error, and both values are set, does GitDirector retry
+via a temporary credential helper. SSH remotes are never touched. The PAT
+never appears on the command line or in TUI output, but it is stored in
+plaintext — scope it narrowly and protect the file.
 
 ## Shell completion
 

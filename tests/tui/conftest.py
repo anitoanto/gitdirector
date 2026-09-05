@@ -72,6 +72,22 @@ def _status_is_loading(app) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _no_background_status_poll(monkeypatch):
+    """Keep the Sessions tab's periodic status poll from firing mid-test.
+
+    The app re-reads the session list from tmux every second while the
+    Sessions tab is open and re-applies it to the table, restoring the
+    cursor from the saved selection. A test that edits ``_sessions_entries``
+    directly and then asserts on the table races that poll: on a slow CI
+    runner the poll fires first and overwrites the edit, and the assertion
+    sees the original list (observed as an off-by-one cursor row on the
+    Python 3.14 job). No test relies on the timer itself -- the ones that
+    cover polling call the worker directly -- so it is pushed out of reach.
+    """
+    monkeypatch.setattr("gitdirector.commands.tui.app._SESSION_STATUS_POLL_INTERVAL_SECS", 3600)
+
+
+@pytest.fixture(autouse=True)
 def _stabilize_tui_worker_wait(monkeypatch):
     original_wait = WorkerManager.wait_for_complete
 
