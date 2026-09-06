@@ -21,12 +21,14 @@ from importlib import resources
 from pathlib import Path
 
 #: tmux session option an agent's hooks stamp with its current status. The
-#: value is one of :data:`AGENT_STATES`; unset means "no report, use the
-#: heuristics".
+#: value is one of :data:`AGENT_STATES`, optionally followed by a space and
+#: the epoch second of the report (``"running 1788714352"``) so the monitor
+#: knows when the agent last spoke even when the state did not change; unset
+#: means "no report, use the heuristics".
 AGENT_STATE_OPTION = "@gitdirector_agent_state"
-#: Set to :data:`AGENT_INTERRUPTS_UNREPORTED` by agents whose hooks stay
-#: silent when the user interrupts a turn; the monitor then watches for a
-#: "running" report the screen no longer backs up.
+#: Set to :data:`AGENT_INTERRUPTS_UNREPORTED` by agents whose hooks leave
+#: gaps (no hook for an interrupt, none for a turn that resumes on its own);
+#: the monitor then checks every report against what the pane shows.
 AGENT_INTERRUPTS_OPTION = "@gitdirector_agent_interrupts"
 AGENT_INTERRUPTS_UNREPORTED = "unreported"
 
@@ -39,7 +41,7 @@ AGENT_STATES: frozenset[str] = frozenset(
 
 
 def agent_state_report_command(state: str | None, *, interrupts_unreported: bool = False) -> str:
-    """POSIX shell that stamps *state* on the tmux session the agent runs in.
+    """POSIX shell that stamps *state* and the time on the agent's tmux session.
 
     ``None`` clears the options. The command never fails (an agent must not
     be blocked by a reporting hiccup) and only acts inside a tmux pane.
@@ -52,7 +54,7 @@ def agent_state_report_command(state: str | None, *, interrupts_unreported: bool
     else:
         if state not in AGENT_STATES:
             raise ValueError(f"unknown agent state: {state!r}")
-        actions = [f'tmux set-option -t "$TMUX_PANE" {AGENT_STATE_OPTION} {state}']
+        actions = [f'tmux set-option -t "$TMUX_PANE" {AGENT_STATE_OPTION} "{state} $(date +%s)"']
         if interrupts_unreported:
             actions.append(
                 f'tmux set-option -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION} '
@@ -70,14 +72,22 @@ def _claude_hook_settings() -> dict:
       ``Notification`` (except the periodic ``idle_prompt`` reminder, which
       would turn a finished session back into "waiting"): waiting for the
       user.
-    * ``SessionStart``, ``Stop`` (turn finished, prompt is back), and
-      ``PermissionDenied`` (the user dismissed or refused a prompt; if Claude
-      carries on, the next event flips it back): idle.
+    * ``Elicitation`` (an MCP server asks the user something): waiting;
+      ``ElicitationResult``: working again.
+    * ``SessionStart``, ``Stop`` (turn finished, prompt is back),
+      ``StopFailure`` (turn ended by an API error, so ``Stop`` never fires),
+      and ``PermissionDenied`` (the user dismissed or refused a prompt; if
+      Claude carries on, the next event flips it back): idle.
     * ``SessionEnd``: report cleared.
 
-    ``Stop`` does not fire when the user interrupts a turn with Escape; the
-    monitor covers that case by noticing a "running" session that has gone
-    completely quiet (see ``_AGENT_REPORT_STALE_SECS`` in the monitor).
+    ``Stop`` does not fire when the user interrupts a turn with Escape, and
+    a turn that resumes on its own after a background task finished fires no
+    ``UserPromptSubmit``; the monitor settles both by checking the report
+    against the pane (see ``reconcile_agent_report`` in the monitor).
+    ``SubagentStop`` is deliberately not mapped: Claude Code's own helpers
+    (the prompt suggestion it generates after a turn) fire it while the
+    session is idle. Event names Claude Code does not know are ignored, so
+    older versions simply run the subset they support.
 
     Hooks read their JSON payload from stdin; the shell fragments below only
     look for the substrings they need so they stay independent of key order
@@ -114,7 +124,10 @@ def _claude_hook_settings() -> dict:
             "PermissionRequest": hook(waiting),
             "PermissionDenied": hook(idle),
             "Notification": hook(notification),
+            "Elicitation": hook(waiting),
+            "ElicitationResult": hook(running),
             "Stop": hook(idle),
+            "StopFailure": hook(idle),
             "SessionEnd": hook(cleared),
         }
     }

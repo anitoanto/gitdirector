@@ -113,7 +113,7 @@ class TestResolveTablePalette:
         app = App()
         app.theme = "ansi-dark"
         palette = resolve_table_palette(app.get_css_variables())
-        assert palette.success == "green"
+        assert palette.success == "bright_green"
         assert palette.yellow == "yellow"
         assert palette.muted == "bright_black"
 
@@ -126,6 +126,16 @@ class TestResolveTablePalette:
             colour = Color.parse(resolve_table_palette(app.get_css_variables()).yellow)
             hue = colour.hsl.h * 360
             assert 35 <= hue <= 65, (theme, colour.hex)
+
+    def test_live_colour_stays_green_in_every_theme(self):
+        app = App()
+        for theme in BUILTIN_THEMES:
+            if theme.startswith("ansi-"):
+                continue
+            app.theme = theme
+            colour = Color.parse(resolve_table_palette(app.get_css_variables()).success)
+            hue = colour.hsl.h * 360
+            assert 95 <= hue <= 130, (theme, colour.hex)
 
     def test_missing_variables_fall_back(self):
         palette = resolve_table_palette({})

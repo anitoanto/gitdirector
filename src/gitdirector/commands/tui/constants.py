@@ -21,6 +21,10 @@ _MUTED_CONTRAST = 3.5
 # waiting session, repo names). Fixed rather than taken from the theme so it
 # stays yellow in every theme; only its lightness adapts for contrast.
 _ATTENTION_YELLOW = "#ffd75f"
+# The green used for something live (a running session, an active panel).
+# Neon so it stands out at a glance, and fixed for the same reason as the
+# yellow: a theme's own success colour can be teal or olive.
+_LIVE_GREEN = "#39ff14"
 
 
 def _variable_color(variables: Mapping[str, str], name: str, fallback: str) -> Color:
@@ -99,9 +103,13 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
         return _markup_color(readable_on(color, surface, tint, minimum=_MIN_CONTRAST), source)
 
     if ansi_theme:
+        success = "bright_green"
         yellow = "yellow"
         muted = "bright_black"
     else:
+        success = _markup_color(
+            readable_on(Color.parse(_LIVE_GREEN), surface, tint, minimum=_MIN_CONTRAST), ""
+        )
         yellow = _markup_color(
             readable_on(Color.parse(_ATTENTION_YELLOW), surface, tint, minimum=_MIN_CONTRAST), ""
         )
@@ -111,7 +119,7 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
         )
 
     return TablePalette(
-        success=readable("success", "#4ebe63"),
+        success=success,
         yellow=yellow,
         muted=muted,
         primary=readable("primary", "#5fd7ff"),

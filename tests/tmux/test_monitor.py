@@ -16,9 +16,11 @@ from gitdirector.integrations.tmux import (
 )
 from gitdirector.integrations.tmux.core import TmuxError, _tmux_child_environment_command
 from gitdirector.integrations.tmux.monitor import (
+    _AGENT_OUTPUT_MIN_SECS,
     _AGENT_REPORT_STALE_SECS,
     _BELL_GRACE_SECS,
     _CONTROL_MODE_STOP_WAIT_SECS,
+    _OUTPUT_GAP_SECS,
     _SHELL_ACTIVITY_GRACE_SECS,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
@@ -31,10 +33,12 @@ from gitdirector.integrations.tmux.monitor import (
     _list_gd_panes,
     _make_agent_ready_marker,
     _normalize_process_command,
+    _parse_agent_report,
     _parse_cpu_seconds,
     _resolve_pane_command,
     _tree_cpu_seconds,
     _tty_is_raw,
+    reconcile_agent_report,
 )
 
 from ._shared import REAL_TMUX_MONITOR_START, REAL_TMUX_MONITOR_STOP
@@ -446,6 +450,7 @@ def _pane_line(
     interrupts="",
     label="",
     description="",
+    input_activity="0",
 ) -> str:
     return "\t".join(
         [
@@ -463,6 +468,7 @@ def _pane_line(
             interrupts,
             label,
             description,
+            input_activity,
         ]
     )
 
@@ -556,6 +562,23 @@ class TestListGdPanes:
         assert _list_gd_panes()["gd/alpha/claude/1"].agent_state == "waiting"
 
     @patch("subprocess.run")
+    def test_keeps_the_raw_stamped_report(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=_pane_line("gd/alpha/claude/1", agent="running 1700000005") + "\n"
+        )
+
+        assert _list_gd_panes()["gd/alpha/claude/1"].agent_state == "running 1700000005"
+
+    @patch("subprocess.run")
+    def test_parses_input_activity(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=_pane_line("gd/alpha/claude/1", input_activity="1700000042") + "\n",
+        )
+
+        assert _list_gd_panes()["gd/alpha/claude/1"].input_activity == 1700000042
+
+    @patch("subprocess.run")
     def test_parses_agent_interrupt_flag(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -579,6 +602,22 @@ class TestListGdPanes:
         assert pane.tty == ""
         assert pane.activity == 0
         assert pane.interactive_hint is False
+        assert pane.input_activity == 0
+
+
+class TestParseAgentReport:
+    def test_plain_state_has_no_stamp(self):
+        assert _parse_agent_report("running") == ("running", None)
+
+    def test_stamped_state(self):
+        assert _parse_agent_report("waiting 1700000005") == ("waiting", 1700000005.0)
+
+    def test_unknown_state_is_no_report(self):
+        assert _parse_agent_report("bogus 1700000005") == ("", None)
+        assert _parse_agent_report("") == ("", None)
+
+    def test_garbage_stamp_keeps_the_state(self):
+        assert _parse_agent_report("idle soon") == ("idle", None)
 
 
 class TestCursorBlinkFilter:
@@ -956,10 +995,15 @@ class _FakeTmux:
             "agent_interrupts_unreported": False,
             "repo_label": "",
             "description": "",
+            "input_activity": 0,
         }
         base.update(overrides)
         self.panes[session_name] = PaneSample(**base)
         return self.panes[session_name]
+
+    def type_keys(self, session_name):
+        """A client pressed a key (or attached) just now."""
+        self.panes[session_name] = replace(self.panes[session_name], input_activity=int(self.now))
 
     def run_program(self, session_name, command, *, cpu=0.0, raw=True):
         """Put *command* in the foreground under the pane's shell."""
@@ -1248,8 +1292,8 @@ class TestTmuxMonitorRefresh:
             world.pane("gd/repo/claude/1", agent_state="running")
             assert monitor.refresh()["gd/repo/claude/1"] == "running"
 
-    def test_reported_running_that_goes_silent_was_interrupted(self):
-        """Escape during a turn fires no hook; a working agent never goes static."""
+    def test_reported_running_interrupted_by_a_keypress_becomes_idle(self):
+        """Escape during a turn fires no hook; the keypress and the redraw give it away."""
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
@@ -1260,10 +1304,130 @@ class TestTmuxMonitorRefresh:
             for frame in ("working \u2819", "working \u2839", "working \u2838"):
                 world.advance(1.0, "gd/repo/claude/1", frame)
                 assert monitor.refresh()["gd/repo/claude/1"] == "running"
+            world.type_keys("gd/repo/claude/1")
             world.advance(1.0, "gd/repo/claude/1", "Interrupted. > ")
             assert monitor.refresh()["gd/repo/claude/1"] == "running"
             world.advance(_AGENT_REPORT_STALE_SECS)
             assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+    def test_reported_running_with_a_frozen_screen_stays_running(self):
+        """Claude Code stops redrawing for stretches of a turn; that is not an interrupt."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="running", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "Baking… (10m 15s)"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(_AGENT_REPORT_STALE_SECS * 20)
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
+
+    def test_attaching_to_a_running_turn_does_not_end_it(self):
+        """An attach stamps input like a key, but nothing is redrawn for it."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="running", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "Baking… (10m 15s)"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(3.0)
+            world.type_keys("gd/repo/claude/1")
+            world.advance(_AGENT_REPORT_STALE_SECS * 20)
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
+
+    def test_a_fresh_stamped_report_outranks_an_earlier_keypress(self):
+        """Typing a follow-up mid-turn, then a tool call, then a stall: still running."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane(
+                "gd/repo/claude/1",
+                agent_state=f"running {int(world.now)}",
+                agent_interrupts_unreported=True,
+            )
+            world.content["gd/repo/claude/1"] = "working \u280b"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(1.0, "gd/repo/claude/1", "working \u2819 > fix th")
+            world.type_keys("gd/repo/claude/1")
+            monitor.refresh()
+            world.advance(2.0, "gd/repo/claude/1", "Read(file.py) \u2839")
+            world.pane(
+                "gd/repo/claude/1",
+                agent_state=f"running {int(world.now)}",
+                agent_interrupts_unreported=True,
+            )
+            monitor.refresh()
+            world.advance(_AGENT_REPORT_STALE_SECS * 20)
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
+
+    def test_reported_idle_with_sustained_output_is_running(self):
+        """A turn resumed by a background task fires no hook until its first tool call."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="idle", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "> "
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(30.0)
+            assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+            statuses = []
+            for step in range(int(_AGENT_OUTPUT_MIN_SECS) + 2):
+                world.advance(1.0, "gd/repo/claude/1", f"thinking {step}")
+                statuses.append(monitor.refresh()["gd/repo/claude/1"])
+            # A short burst is idle-screen animation; a sustained one is a turn.
+            assert statuses[:3] == ["idle"] * 3
+            assert statuses[-1] == "running"
+
+            world.advance(1.0, "gd/repo/claude/1", "done. > ")
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
+            world.advance(_OUTPUT_GAP_SECS + 0.1)
+            assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+    def test_reported_idle_stays_idle_while_the_user_types(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="idle", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "> "
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            for text in ("> f", "> fi", "> fix", "> fix ", "> fix t", "> fix th"):
+                world.advance(1.0, "gd/repo/claude/1", text)
+                world.type_keys("gd/repo/claude/1")
+                assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+    def test_reported_idle_promotes_once_the_watcher_stops_typing(self):
+        """Attaching stamps input too; a spinner that outlives it is the agent's."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="idle", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "> "
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.type_keys("gd/repo/claude/1")
+            statuses = []
+            for step in range(int(_AGENT_OUTPUT_MIN_SECS) + 4):
+                world.advance(1.0, "gd/repo/claude/1", f"working {step}")
+                statuses.append(monitor.refresh()["gd/repo/claude/1"])
+            assert statuses[0] == "idle"
+            assert statuses[-1] == "running"
+
+    def test_reported_idle_without_the_gap_flag_is_trusted(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/opencode/1", agent_state="idle")
+            world.content["gd/repo/opencode/1"] = "> "
+            world.run_program("gd/repo/opencode/1", "opencode", raw=True)
+            monitor.refresh()
+            for step in range(int(_AGENT_OUTPUT_MIN_SECS) + 4):
+                world.advance(1.0, "gd/repo/opencode/1", f"redraw {step}")
+                assert monitor.refresh()["gd/repo/opencode/1"] == "idle"
 
     def test_reported_waiting_stays_while_the_prompt_is_on_screen(self):
         stack, world = self._world()
@@ -1279,7 +1443,7 @@ class TestTmuxMonitorRefresh:
             world.advance(_AGENT_REPORT_STALE_SECS * 20)
             assert monitor.refresh()["gd/repo/claude/1"] == "waiting"
 
-    def test_reported_waiting_whose_prompt_vanished_becomes_idle(self):
+    def test_reported_waiting_dismissed_with_a_keypress_becomes_idle(self):
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
@@ -1287,10 +1451,40 @@ class TestTmuxMonitorRefresh:
             world.content["gd/repo/claude/1"] = "Do you want to create probe.txt? 1. Yes 2. No"
             world.run_program("gd/repo/claude/1", "claude", raw=True)
             monitor.refresh()
-            world.advance(3.0, "gd/repo/claude/1", "User rejected write. > ")
-            assert monitor.refresh()["gd/repo/claude/1"] == "waiting"
+            world.advance(3.0)
+            world.type_keys("gd/repo/claude/1")
+            world.advance(1.0, "gd/repo/claude/1", "Interrupted. > ")
+            assert monitor.refresh()["gd/repo/claude/1"] == "running"
             world.advance(_AGENT_REPORT_STALE_SECS)
             assert monitor.refresh()["gd/repo/claude/1"] == "idle"
+
+    def test_reported_waiting_that_was_approved_is_running_while_the_tool_works(self):
+        """Nothing fires between approving a tool and its PostToolUse."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="waiting", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "Run pytest? 1. Yes 2. No"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(3.0)
+            world.type_keys("gd/repo/claude/1")
+            for step in range(8):
+                world.advance(1.0, "gd/repo/claude/1", f"Bash(pytest) running {step}s")
+                assert monitor.refresh()["gd/repo/claude/1"] == "running"
+
+    def test_reported_waiting_ignores_keys_that_change_nothing(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/claude/1", agent_state="waiting", agent_interrupts_unreported=True)
+            world.content["gd/repo/claude/1"] = "Run pytest? 1. Yes 2. No"
+            world.run_program("gd/repo/claude/1", "claude", raw=True)
+            monitor.refresh()
+            world.advance(3.0)
+            world.type_keys("gd/repo/claude/1")
+            world.advance(_AGENT_REPORT_STALE_SECS * 20)
+            assert monitor.refresh()["gd/repo/claude/1"] == "waiting"
 
     def test_unknown_agent_state_falls_back_to_heuristics(self):
         stack, world = self._world()
@@ -1320,6 +1514,51 @@ class TestTmuxMonitorRefresh:
             monitor = TmuxMonitor()
             world.pane("gd/repo/shell/1", dead=True, pane_pid=0, bell=True)
             assert monitor.refresh() == {"gd/repo/shell/1": "idle"}
+
+
+class TestReconcileAgentReport:
+    def _reconcile(self, reported, **overrides):
+        kwargs = {
+            "reported": reported,
+            "quiet": False,
+            "answered": False,
+            "input_age": 60.0,
+            "unattended_output_secs": 0.0,
+        }
+        kwargs.update(overrides)
+        return reconcile_agent_report(**kwargs)
+
+    def test_running_is_trusted_however_quiet_without_a_keypress(self):
+        assert self._reconcile("running", quiet=True) == "running"
+
+    def test_running_answered_and_quiet_was_interrupted(self):
+        assert self._reconcile("running", answered=True, quiet=True) == "idle"
+
+    def test_running_answered_but_still_drawing_stays_running(self):
+        assert self._reconcile("running", answered=True, quiet=False) == "running"
+
+    def test_a_keypress_is_debounced_for_the_stale_window(self):
+        assert (
+            self._reconcile(
+                "running", answered=True, quiet=True, input_age=_AGENT_REPORT_STALE_SECS - 1
+            )
+            == "running"
+        )
+
+    def test_waiting_prompt_still_on_screen_stays_waiting(self):
+        assert self._reconcile("waiting", quiet=True) == "waiting"
+
+    def test_waiting_answered_is_running_until_quiet(self):
+        assert self._reconcile("waiting", answered=True) == "running"
+        assert self._reconcile("waiting", answered=True, quiet=True) == "idle"
+
+    def test_idle_with_sustained_unattended_output_is_running(self):
+        assert self._reconcile("idle", unattended_output_secs=_AGENT_OUTPUT_MIN_SECS) == "running"
+
+    def test_idle_with_a_short_burst_stays_idle(self):
+        assert (
+            self._reconcile("idle", unattended_output_secs=_AGENT_OUTPUT_MIN_SECS - 0.5) == "idle"
+        )
 
 
 class TestSyncReaders:

@@ -51,12 +51,14 @@ serialized behind a file lock.
 
 An agent with lifecycle hooks can report its own status, which the monitor
 trusts over every heuristic below. The protocol is a tmux session option,
-`@gitdirector_agent_state`, holding `running`, `waiting`, or `idle`; the
-hook stamps it with `tmux set-option -t "$TMUX_PANE" ...`, which works
+`@gitdirector_agent_state`, holding `running`, `waiting`, or `idle`,
+optionally followed by the epoch second of the report (`running 1788714352`)
+so repeated reports of the same state still show when the agent last spoke;
+the hook stamps it with `tmux set-option -t "$TMUX_PANE" ...`, which works
 whether or not GitDirector is running, and `list-panes` reads it back for
-free every second. An agent whose hooks cannot see a user interrupt also
-sets `@gitdirector_agent_interrupts unreported`, which enables the
-staleness check described below.
+free every second. An agent whose hooks leave gaps also sets
+`@gitdirector_agent_interrupts unreported`, which enables the reconciliation
+described below.
 
 **Claude Code.** Both Claude launch entries pass `--settings '{"hooks": ...}'`
 on the command line (Claude merges it with the user's own settings, which
@@ -64,17 +66,29 @@ are never modified):
 
 | Hook | State |
 | --- | --- |
-| `SessionStart`, `Stop` (turn finished, prompt is back), `PermissionDenied` | `idle` |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `running` |
-| `PreToolUse` for `AskUserQuestion`, `PermissionRequest`, `Notification` (except `idle_prompt`) | `waiting` |
+| `SessionStart`, `Stop` (turn finished, prompt is back), `StopFailure` (turn ended by an API error), `PermissionDenied` | `idle` |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `ElicitationResult` | `running` |
+| `PreToolUse` for `AskUserQuestion`, `PermissionRequest`, `Elicitation`, `Notification` (except `idle_prompt`) | `waiting` |
 | `SessionEnd` | option cleared |
 
-Claude Code fires no hook when the user interrupts a turn with Escape, so a
-reported `running` whose screen has not changed and whose process tree has
-burned no CPU for 5 s is shown as `idle` (a working Claude redraws its
-spinner every second). A reported `waiting` is trusted for as long as the
-prompt stays on screen; once the screen changes after the report and then
-goes quiet, it is `idle` too.
+`SubagentStop` is deliberately unmapped: Claude Code's own helper that
+generates the prompt suggestion after a turn fires it while the session is
+idle. Event names an older Claude Code does not know are ignored.
+
+Three transitions have no hook, and the monitor settles them from the pane
+(`reconcile_agent_report` in `monitor.py`). A static screen alone proves
+nothing: Claude Code stops redrawing for stretches of a turn while it waits
+on the model, so a reported `running` is trusted however still the pane. An
+interrupt (Escape) and an answered prompt both show a keypress after the
+last report (tmux's `session_activity`, which only client input moves) with
+a redraw right behind it; when that is followed by 5 s without visible
+change or CPU, a `running` was interrupted and a `waiting` was dismissed,
+so both become `idle`. An answered `waiting` that keeps drawing is `running`
+(the approved tool is executing) until `PostToolUse` reports. Finally, a
+turn that resumes on its own after a background task finished fires no
+`UserPromptSubmit`, so a reported `idle` whose pane keeps producing output
+for 5 s with nobody typing into it is shown as `running`; an idle Claude
+animates for at most about 3 s at a time.
 
 The hook fragments live in `src/gitdirector/agents.py`.
 

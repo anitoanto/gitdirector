@@ -16,11 +16,16 @@ from gitdirector.agents import (
 )
 
 
+def _stamps(state: str) -> str:
+    """The shell fragment that records *state* together with the current time."""
+    return f'{AGENT_STATE_OPTION} "{state} $(date +%s)"'
+
+
 class TestAgentStateReportCommand:
     def test_sets_option_on_the_pane_session_and_never_fails(self):
         command = agent_state_report_command("waiting")
         assert command.startswith('[ -n "$TMUX_PANE" ] && ')
-        assert f'tmux set-option -t "$TMUX_PANE" {AGENT_STATE_OPTION} waiting' in command
+        assert f'tmux set-option -t "$TMUX_PANE" {_stamps("waiting")}' in command
         assert command.endswith("; exit 0")
 
     def test_none_clears_both_options(self):
@@ -30,7 +35,7 @@ class TestAgentStateReportCommand:
 
     def test_interrupt_flag_is_stamped_alongside_the_state(self):
         command = agent_state_report_command("idle", interrupts_unreported=True)
-        assert f"{AGENT_STATE_OPTION} idle" in command
+        assert _stamps("idle") in command
         assert f"{AGENT_INTERRUPTS_OPTION} unreported" in command
         assert AGENT_INTERRUPTS_OPTION not in agent_state_report_command("idle")
 
@@ -58,7 +63,10 @@ class TestClaudeLaunchCommand:
             "PermissionRequest",
             "PermissionDenied",
             "Notification",
+            "Elicitation",
+            "ElicitationResult",
             "Stop",
+            "StopFailure",
             "SessionEnd",
         }
         for entries in hooks.values():
@@ -73,26 +81,30 @@ class TestClaudeLaunchCommand:
         def command(event: str) -> str:
             return settings["hooks"][event][0]["hooks"][0]["command"]
 
-        assert f"{AGENT_STATE_OPTION} idle" in command("SessionStart")
+        assert _stamps("idle") in command("SessionStart")
         # Claude cannot report an Escape, so it asks the monitor to watch for one.
         assert f"{AGENT_INTERRUPTS_OPTION} unreported" in command("SessionStart")
         assert AGENT_INTERRUPTS_OPTION not in command("Stop")
-        assert f"{AGENT_STATE_OPTION} idle" in command("Stop")
-        assert f"{AGENT_STATE_OPTION} running" in command("UserPromptSubmit")
-        assert f"{AGENT_STATE_OPTION} running" in command("PostToolUse")
-        assert f"{AGENT_STATE_OPTION} waiting" in command("PermissionRequest")
-        assert f"{AGENT_STATE_OPTION} idle" in command("PermissionDenied")
-        assert f"{AGENT_STATE_OPTION} running" in command("PostToolUseFailure")
+        assert _stamps("idle") in command("Stop")
+        assert _stamps("running") in command("UserPromptSubmit")
+        assert _stamps("running") in command("PostToolUse")
+        assert _stamps("waiting") in command("PermissionRequest")
+        assert _stamps("idle") in command("PermissionDenied")
+        assert _stamps("running") in command("PostToolUseFailure")
+        # A turn ended by an API error never reaches Stop.
+        assert _stamps("idle") in command("StopFailure")
+        assert _stamps("waiting") in command("Elicitation")
+        assert _stamps("running") in command("ElicitationResult")
         assert "set-option -u" in command("SessionEnd")
         # Asking the user a question is waiting; any other tool is work.
         pre_tool = command("PreToolUse")
         assert "AskUserQuestion" in pre_tool
-        assert f"{AGENT_STATE_OPTION} waiting" in pre_tool
-        assert f"{AGENT_STATE_OPTION} running" in pre_tool
+        assert _stamps("waiting") in pre_tool
+        assert _stamps("running") in pre_tool
         # The periodic idle reminder must not flip a finished session back.
         notification = command("Notification")
         assert "idle_prompt" in notification
-        assert f"{AGENT_STATE_OPTION} waiting" in notification
+        assert _stamps("waiting") in notification
 
     def test_other_agents_launch_unchanged(self):
         for agent in AGENTS:
