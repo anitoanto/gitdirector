@@ -51,10 +51,16 @@ class TablePalette:
     muted: str
     primary: str
 
-    def sync_label(self, status: RepoStatus) -> str:
+    def sync_label(self, status: RepoStatus, *, stale: bool = False) -> str:
         if status is RepoStatus.UP_TO_DATE:
-            return "up to date"
-        return f"[bold {self.yellow}]{status.value}[/]"
+            label = "up to date"
+        else:
+            label = f"[bold {self.yellow}]{status.value}[/]"
+        if stale:
+            # The remote was unreachable, so this compares against the refs
+            # already on disk. Say so rather than passing it off as current.
+            return f"{label} [{self.muted}](offline)[/]"
+        return label
 
     def changes_label(self, info: RepositoryInfo) -> str:
         key = _changes_sort_key(info)

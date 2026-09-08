@@ -9,6 +9,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 
 _RUNNING_GIT_PROCESSES: set[subprocess.Popen] = set()
@@ -46,6 +47,17 @@ _AUTH_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A rejected or missing host key is neither a network nor a credential
+# problem: it prints the same "could not read from remote repository" tail as
+# an auth failure, so it has to be recognised first.
+_HOST_KEY_ERROR_RE = re.compile(
+    r"host key verification failed"
+    r"|remote host identification has changed"
+    r"|no matching host key type"
+    r"|host key for .+ has changed",
+    re.IGNORECASE,
+)
+
 _NO_COMMITS_RE = re.compile(
     r"does not have any commits yet|bad default revision 'HEAD'|ambiguous argument 'HEAD'",
     re.IGNORECASE,
@@ -65,9 +77,17 @@ def _is_network_error(stderr: str) -> bool:
     return _NETWORK_ERROR_RE.search(stderr) is not None
 
 
+def _is_host_key_error(stderr: str) -> bool:
+    return _HOST_KEY_ERROR_RE.search(stderr) is not None
+
+
 def _classify_remote_error(stderr: str) -> str | None:
     if _is_network_error(stderr):
         return "network error — could not reach remote"
+    if _is_host_key_error(stderr):
+        return (
+            "host key rejected — the remote's SSH host key changed or is not in ~/.ssh/known_hosts"
+        )
     if _AUTH_ERROR_RE.search(stderr):
         return "authentication failed — configure git credentials for this remote"
     return None
@@ -78,6 +98,10 @@ def _is_no_commits_error(stderr: str) -> bool:
 
 
 def _is_auth_error(stderr: str) -> bool:
+    # No credential fixes an untrusted host key, so retrying such a command
+    # with a token would only double the wait before the same failure.
+    if _is_host_key_error(stderr):
+        return False
     return _AUTH_ERROR_RE.search(stderr) is not None
 
 
@@ -131,6 +155,43 @@ def _kill_running_git_process(process: subprocess.Popen) -> None:
             process.kill()
     except (OSError, ProcessLookupError):
         pass
+
+
+_BASE_SSH_COMMAND = ["ssh", "-o", "ConnectTimeout=10"]
+_SSH_HOST_KEY_OPTIONS = ["-o", "StrictHostKeyChecking=accept-new"]
+
+
+@lru_cache(maxsize=1)
+def _default_ssh_command() -> str:
+    """The ``GIT_SSH_COMMAND`` used when the caller has not set one.
+
+    Git runs without a terminal here, so ssh can never ask "are you sure you
+    want to continue connecting?" — an unknown host key used to fail every
+    fetch until the user connected once by hand. With ``accept-new`` (OpenSSH
+    7.6+) a host is trusted on first contact and recorded in
+    ``~/.ssh/known_hosts`` just as answering "yes" would, while a key that
+    later changes is still refused. If the local ssh rejects the option it is
+    dropped, keeping the previous behaviour rather than breaking every remote
+    command.
+    """
+    if not _ssh_accepts(_SSH_HOST_KEY_OPTIONS):
+        return shlex.join(_BASE_SSH_COMMAND)
+    return shlex.join([*_BASE_SSH_COMMAND, *_SSH_HOST_KEY_OPTIONS])
+
+
+def _ssh_accepts(options: list[str]) -> bool:
+    """Whether the local ssh parses *options* (``ssh -G`` only reads config)."""
+    try:
+        probe = subprocess.run(
+            ["ssh", *options, "-G", "gitdirector.invalid"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
 
 
 def _run_git_process(
@@ -232,6 +293,9 @@ class RepositoryInfo:
     last_updated: str | None = None
     last_commit_timestamp: int | None = None
     size: int | None = None
+    #: True when the remote could not be fetched, so the sync status was
+    #: computed from the refs already on disk and may be out of date.
+    sync_stale: bool = False
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -255,7 +319,7 @@ class Repository:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
         if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
-            env["GIT_SSH_COMMAND"] = "ssh -o ConnectTimeout=10"
+            env["GIT_SSH_COMMAND"] = _default_ssh_command()
         if github_auth is not None:
             username, token = github_auth
             _apply_github_auth_env(env, username, token)
@@ -485,20 +549,28 @@ class Repository:
                 unstaged = True
                 unstaged_files.append(filename)
 
+        fetch_error = ""
         if fetch and branch is not None:
             code, err = self._fetch_origin_branch(branch)
             if code != 0:
-                status = RepoStatus.UNKNOWN
-                msg = err
-            else:
-                # The counts parsed above predate the fetch.
-                status, msg = self._get_origin_sync_status(branch)
+                fetch_error = err or "could not fetch from origin"
+
+        if fetch and branch is not None and not fetch_error:
+            # The counts parsed above predate the fetch.
+            status, msg = self._get_origin_sync_status(branch)
         elif branch is not None and upstream == f"origin/{branch}" and ahead_behind is not None:
             # git already compared HEAD with origin/<branch>: two fewer
             # git processes per repository.
             status, msg = _sync_status_from_counts(*ahead_behind)
         else:
             status, msg = self._get_origin_sync_status(branch)
+
+        if fetch_error:
+            # A remote that cannot be reached says nothing about how this
+            # branch compares with the origin ref already on disk: report that
+            # (possibly stale) comparison instead of blanking every repository
+            # to "unknown".
+            msg = f"{msg} ({fetch_error})" if msg else fetch_error
 
         last_updated, last_commit_ts = self.get_last_commit_info()
         size = self.get_tracked_size() if include_size else None
@@ -516,6 +588,7 @@ class Repository:
             last_updated,
             last_commit_ts,
             size,
+            bool(fetch_error),
         )
 
     def pull(self, *, retries: int = 1) -> tuple[bool, str]:

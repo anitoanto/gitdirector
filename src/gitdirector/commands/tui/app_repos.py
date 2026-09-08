@@ -52,6 +52,7 @@ class ConsoleReposMixin:
                     "last_updated": info.last_updated,
                     "last_commit_timestamp": info.last_commit_timestamp,
                     "size": info.size,
+                    "sync_stale": info.sync_stale,
                 }
                 for info in self._results.values()
             ],
@@ -89,6 +90,9 @@ class ConsoleReposMixin:
                 if not all(isinstance(value, str) for value in (path, name, status)):
                     return False
                 if not all(isinstance(entry.get(field), bool) for field in ("staged", "unstaged")):
+                    return False
+                # A cache written before this field existed simply has none.
+                if not isinstance(entry.get("sync_stale", False), bool):
                     return False
                 if not isinstance(entry.get("message"), str):
                     return False
@@ -133,6 +137,7 @@ class ConsoleReposMixin:
                     last_updated=entry.get("last_updated"),
                     last_commit_timestamp=entry.get("last_commit_timestamp"),
                     size=entry.get("size"),
+                    sync_stale=entry.get("sync_stale", False),
                 )
                 infos[str(info.path)] = info
         except (KeyError, TypeError, ValueError, OSError):
@@ -289,7 +294,9 @@ class ConsoleReposMixin:
         try:
             table = self.query_one("#repo-table", DataTable)
             ck = self._col_keys
-            table.update_cell(row_key, ck[1], self._palette.sync_label(info.status))
+            table.update_cell(
+                row_key, ck[1], self._palette.sync_label(info.status, stale=info.sync_stale)
+            )
             table.update_cell(row_key, ck[2], info.branch or "—")
             table.update_cell(row_key, ck[3], self._palette.changes_label(info))
             table.update_cell(row_key, ck[4], info.last_updated or "—")
@@ -398,7 +405,7 @@ class ConsoleReposMixin:
     ) -> None:
         table.add_row(
             f"  {info.name}" if grouped else info.name,
-            self._palette.sync_label(info.status),
+            self._palette.sync_label(info.status, stale=info.sync_stale),
             info.branch or "—",
             self._palette.changes_label(info),
             info.last_updated or "—",

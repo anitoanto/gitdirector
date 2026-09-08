@@ -178,9 +178,18 @@ Host github.com
   IdentityFile ~/.ssh/github
 ```
 
-```bash
-ssh -T git@github.com   # should greet you by username
-```
+No first connection by hand is needed. Git runs without a terminal inside
+GitDirector, so ssh can never ask "are you sure you want to continue
+connecting?"; instead GitDirector runs ssh with
+`StrictHostKeyChecking=accept-new`: a host you have never connected to is
+trusted on first contact and recorded in `~/.ssh/known_hosts`, exactly as
+answering `yes` would, while a key that later *changes* is still refused.
+
+When a host key is refused, the Sync column reads `(offline)` and the
+message names the host key problem — GitDirector can then only compare
+against the refs already on disk. To take over ssh handling entirely, set
+`GIT_SSH_COMMAND` in your environment; GitDirector leaves it alone when it
+is already set.
 
 #### Token option
 

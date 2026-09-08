@@ -40,6 +40,22 @@ def _isolate_version_check_cache(monkeypatch, tmp_path):
     monkeypatch.setattr("gitdirector.version_check._fetch_latest_version", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_ssh_probe(monkeypatch):
+    """Resolve the default ``GIT_SSH_COMMAND`` without spawning ssh.
+
+    The real probe runs ``ssh -G`` once per process; tests that patch
+    ``subprocess`` would otherwise see it as an unexpected command, and the
+    cached answer must not leak between tests that stub it differently.
+    """
+    from gitdirector import repo
+
+    repo._default_ssh_command.cache_clear()
+    monkeypatch.setattr(repo, "_ssh_accepts", lambda options: True)
+    yield
+    repo._default_ssh_command.cache_clear()
+
+
 @pytest.fixture
 def config_dir(tmp_path):
     """Return a temporary directory to use as ~/.gitdirector."""

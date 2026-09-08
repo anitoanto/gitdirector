@@ -1,4 +1,6 @@
 import os
+import shlex
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -13,6 +15,7 @@ from gitdirector.repo import (
     RepoStatus,
     _classify_remote_error,
     _github_credentials_from_config,
+    _is_auth_error,
 )
 
 from ._timeouts import SYNC_TIMEOUT
@@ -478,11 +481,24 @@ class TestGetStatusSync:
         assert info.status == RepoStatus.DIVERGED
         assert "ahead" in info.message and "behind" in info.message
 
-    def test_fetch_failure(self, fake_git_repo, mocker):
-        _setup_status_mocks(mocker, fetch_ok=False)
+    def test_fetch_failure_keeps_local_comparison(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, ahead_behind="0\t2", fetch_ok=False)
+        info = Repository(fake_git_repo).get_status(fetch=True)
+        assert info.status == RepoStatus.AHEAD
+        assert info.sync_stale is True
+        assert info.message == "ahead 2 (fetch error)"
+
+    def test_fetch_failure_reports_error_when_nothing_to_compare(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, ahead_behind=None, remote_exists=False, fetch_ok=False)
         info = Repository(fake_git_repo).get_status(fetch=True)
         assert info.status == RepoStatus.UNKNOWN
-        assert info.message == "fetch error"
+        assert info.sync_stale is True
+        assert "fetch error" in info.message
+
+    def test_successful_fetch_is_not_stale(self, fake_git_repo, mocker):
+        _setup_status_mocks(mocker, ahead_behind="0\t0")
+        info = Repository(fake_git_repo).get_status(fetch=True)
+        assert info.sync_stale is False
 
     def test_no_tracking_branch(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind=None, remote_exists=False)
@@ -1022,8 +1038,86 @@ class TestClassifyRemoteError:
     def test_auth_error(self):
         assert "authentication" in _classify_remote_error("authentication failed")
 
+    def test_host_key_error(self):
+        stderr = "Host key verification failed.\nfatal: Could not read from remote repository."
+        assert "host key" in _classify_remote_error(stderr)
+
+    def test_host_key_error_is_not_an_auth_error(self):
+        stderr = "Host key verification failed.\nfatal: Could not read from remote repository."
+        assert _is_auth_error(stderr) is False
+
     def test_no_match(self):
         assert _classify_remote_error("fatal: some other error") is None
+
+
+# ---------------------------------------------------------------------------
+# _default_ssh_command
+# ---------------------------------------------------------------------------
+
+
+# Captured at import time, before the autouse fixture in conftest stubs it.
+_REAL_SSH_ACCEPTS = repo_mod._ssh_accepts
+
+
+class TestDefaultSshCommand:
+    def test_trusts_hosts_on_first_contact(self, mocker):
+        accepts = mocker.patch("gitdirector.repo._ssh_accepts", return_value=True)
+        argv = shlex.split(repo_mod._default_ssh_command())
+
+        assert argv == [
+            "ssh",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ]
+        # Exactly the option handed to git was checked against the local ssh.
+        assert accepts.call_args.args[0] == argv[3:]
+
+    def test_probe_runs_once(self, mocker):
+        accepts = mocker.patch("gitdirector.repo._ssh_accepts", return_value=True)
+        assert repo_mod._default_ssh_command() == repo_mod._default_ssh_command()
+        assert accepts.call_count == 1
+
+    def test_falls_back_when_ssh_rejects_the_option(self, mocker):
+        mocker.patch("gitdirector.repo._ssh_accepts", return_value=False)
+        assert repo_mod._default_ssh_command() == "ssh -o ConnectTimeout=10"
+
+    def test_probe_is_false_when_ssh_is_missing(self, mocker):
+        mocker.patch("gitdirector.repo.subprocess.run", side_effect=FileNotFoundError)
+        assert _REAL_SSH_ACCEPTS(["-o", "StrictHostKeyChecking=accept-new"]) is False
+
+    def test_probe_is_false_when_ssh_rejects_the_options(self, mocker):
+        mocker.patch(
+            "gitdirector.repo.subprocess.run",
+            return_value=_make_run_result(255, "", "unsupported option"),
+        )
+        assert _REAL_SSH_ACCEPTS(["-o", "StrictHostKeyChecking=bogus"]) is False
+
+    def test_git_env_uses_it_unless_caller_set_ssh(self, fake_git_repo, monkeypatch):
+        monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+        monkeypatch.delenv("GIT_SSH", raising=False)
+        repo = Repository(fake_git_repo)
+        assert repo._git_env()["GIT_SSH_COMMAND"] == repo_mod._default_ssh_command()
+
+        monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -vvv")
+        assert repo._git_env()["GIT_SSH_COMMAND"] == "ssh -vvv"
+
+    @pytest.mark.skipif(shutil.which("ssh") is None, reason="requires ssh")
+    def test_real_ssh_parses_the_option(self, monkeypatch):
+        # No stub: the local ssh must accept the exact option handed to git.
+        monkeypatch.setattr(repo_mod, "_ssh_accepts", _REAL_SSH_ACCEPTS)
+        command = repo_mod._default_ssh_command()
+        assert "StrictHostKeyChecking=accept-new" in command
+        result = subprocess.run(
+            f"{command} -G gitdirector.invalid",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=SYNC_TIMEOUT,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "stricthostkeychecking accept-new" in result.stdout.splitlines()
 
 
 # ---------------------------------------------------------------------------

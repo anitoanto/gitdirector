@@ -46,6 +46,14 @@ class TestTablePaletteLabels:
         ):
             assert PALETTE.sync_label(status) == f"[bold #ffaa00]{status.value}[/]"
 
+    def test_sync_label_marks_a_stale_comparison(self):
+        assert PALETTE.sync_label(RepoStatus.UP_TO_DATE, stale=True) == (
+            "up to date [#888888](offline)[/]"
+        )
+        assert PALETTE.sync_label(RepoStatus.AHEAD, stale=True) == (
+            "[bold #ffaa00]ahead[/] [#888888](offline)[/]"
+        )
+
     def test_session_status_styles(self):
         assert PALETTE.session_status("waiting") == ("● waiting", "bold #ffaa00")
         assert PALETTE.session_status("running") == ("● running", "#00aa00")
