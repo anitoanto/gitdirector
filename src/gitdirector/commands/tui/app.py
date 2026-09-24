@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from rich.markup import escape
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -107,6 +107,14 @@ def _is_no_upstream_push_error(message: str) -> bool:
     return any(marker in message_lower for marker in _NO_UPSTREAM_PUSH_MARKERS)
 
 
+def _is_horizontal_mouse_scroll(event: events.Event) -> bool:
+    if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
+        return True
+    return isinstance(event, (events.MouseScrollUp, events.MouseScrollDown)) and (
+        event.shift or event.ctrl
+    )
+
+
 class GitDirectorConsole(
     ConsolePanelsMixin,
     ConsoleSessionsMixin,
@@ -171,6 +179,10 @@ class GitDirectorConsole(
        primary block forces a contrasting text colour over the cell, which
        erases status colours and turns dimmed text unreadable; a tint keeps
        the row's own colours legible in both dark and light themes. */
+    /* Its rows are laid out to fit, so there is never anything to scroll to. */
+    #sessions-table {
+        overflow-x: hidden;
+    }
     DataTable > .datatable--cursor,
     DataTable:focus > .datatable--cursor {
         background: $primary 30%;
@@ -366,8 +378,6 @@ class GitDirectorConsole(
                     id="sessions-table",
                     cursor_type="row",
                     cursor_foreground_priority="renderable",
-                    # The hover and cursor tints must cover a repo's band.
-                    cursor_background_priority="css",
                     cell_padding=0,
                 )
                 yield Static(
@@ -543,6 +553,14 @@ class GitDirectorConsole(
                 repaint()
             except (NoMatches, AttributeError):
                 logger.debug("table not ready for theme repaint", exc_info=True)
+
+    async def on_event(self, event: events.Event) -> None:
+        # The mouse only scrolls vertically: sideways wheel and trackpad
+        # gestures, and Shift/Ctrl with the wheel, are dropped before any
+        # scrollable area sees them. The keyboard still scrolls sideways.
+        if _is_horizontal_mouse_scroll(event):
+            return
+        await super().on_event(event)
 
     def action_select_row(self) -> None:
         if self._active_tab == "sessions":

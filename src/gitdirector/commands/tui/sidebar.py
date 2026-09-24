@@ -18,12 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.events import Click, Resize
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ...config import Config
@@ -34,6 +34,7 @@ from ...integrations.tmux.core import (
     list_all_gd_sessions,
 )
 from ...integrations.tmux.monitor import TmuxMonitor
+from .app_sessions import session_matches
 from .constants import TablePalette, resolve_table_palette
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,42 @@ class CollapseToggle(Static):
         self.app.action_toggle_collapse()
 
 
+class SessionList(OptionList):
+    """The session list; the cursor stops at either end instead of wrapping."""
+
+    def next_enabled(self, start: int, direction: int) -> int | None:
+        index = start
+        while 0 <= index < self.option_count:
+            if not self.get_option_at_index(index).disabled:
+                return index
+            index += direction
+        return None
+
+    def _step(self, direction: int) -> None:
+        start = 0 if self.highlighted is None else self.highlighted + direction
+        target = self.next_enabled(start, direction)
+        if target is not None:
+            self.highlighted = target
+
+    def action_cursor_down(self) -> None:
+        self._step(1)
+
+    def action_cursor_up(self) -> None:
+        self._step(-1)
+
+
+class SearchInput(Input):
+    """Filters the list as it is typed; Enter or Down goes to the list, Esc clears."""
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.app.action_close_search()
+        elif event.key in ("down", "enter"):
+            event.stop()
+            self.app.action_focus_list()
+
+
 class BackToConsole(Static):
     def on_click(self, event: Click) -> None:
         event.stop()
@@ -293,6 +330,23 @@ class SessionSidebar(App):
     Screen.-blurred #sessions > .option-list--option-highlighted {
         background: $primary 12%;
     }
+    #search {
+        display: none;
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: $panel;
+    }
+    #search:focus {
+        border: none;
+        background-tint: $foreground 0%;
+    }
+    Screen.-searching #search {
+        display: block;
+    }
+    Screen.-rail #search {
+        display: none;
+    }
     #empty {
         display: none;
         height: 1fr;
@@ -330,8 +384,10 @@ class SessionSidebar(App):
     BINDINGS = [
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
-        Binding("tab,right,l,escape", "focus_session", show=False, priority=True),
+        Binding("tab,right,l", "focus_session", show=False, priority=True),
+        Binding("escape", "escape", show=False, priority=True),
         Binding("b", "toggle_collapse", show=False),
+        Binding("slash", "search", show=False),
     ]
 
     def __init__(self, deck: str, pane_id: str | None) -> None:
@@ -358,6 +414,7 @@ class SessionSidebar(App):
         self._flash_timer = None
         self._reconcile_blocked = False
         self._revealed = False
+        self._query = ""
 
     # -- layout --------------------------------------------------------------
 
@@ -367,7 +424,8 @@ class SessionSidebar(App):
             yield BackToConsole(_BACK, id="back")
             yield Static("Sessions", id="title")
             yield CollapseToggle(_TOGGLE, id="toggle")
-        yield OptionList(id="sessions", classes="-pending")
+        yield SearchInput(placeholder="repo, agent or session", id="search")
+        yield SessionList(id="sessions", classes="-pending")
         yield Static("no sessions", id="empty", classes="-pending")
 
     def on_mount(self) -> None:
@@ -528,7 +586,6 @@ class SessionSidebar(App):
         changed = shown != self._shown or entries != self._entries
         self._shown = shown
         self._entries = entries
-        self.screen.set_class(not entries, "-empty")
         if changed:
             self._render_list()
         if not self._placed_cursor and entries:
@@ -542,17 +599,30 @@ class SessionSidebar(App):
             return
         title = self.query_one("#title", Static)
         title.remove_class("-error")
-        title.update(
-            Text.assemble(("Sessions", "bold"), (f"  {len(self._entries)}", self._palette.muted))
-        )
+        count = str(len(self._entries))
+        if self._query:
+            count = f"{len(self._visible_entries())}/{count}"
+        title.update(Text.assemble(("Sessions", "bold"), (f"  {count}", self._palette.muted)))
+
+    def _visible_entries(self) -> list[SidebarEntry]:
+        return [
+            entry
+            for entry in self._entries
+            if session_matches(
+                self._query, entry.session_name, entry.repo, entry.purpose, entry.description
+            )
+        ]
 
     def _render_list(self, *, force: bool = False) -> None:
         if self._palette is None:
             return
         option_list = self.query_one(OptionList)
         self._render_title()
+        visible = self._visible_entries()
+        self.screen.set_class(not visible, "-empty")
+        self.query_one("#empty", Static).update("no match" if self._query else "no sessions")
         options = build_options(
-            self._entries,
+            visible,
             self._palette,
             shown=self._shown,
             rail=self._rail,
@@ -608,6 +678,48 @@ class SessionSidebar(App):
 
     def action_cursor_up(self) -> None:
         self.query_one(OptionList).action_cursor_up()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Typing a search must not move focus to the session.
+        if action in ("focus_session", "escape") and isinstance(self.focused, SearchInput):
+            return False
+        return super().check_action(action, parameters)
+
+    def action_escape(self) -> None:
+        if self._query:
+            self.action_close_search()
+        else:
+            self.action_focus_session()
+
+    def action_search(self) -> None:
+        if self._rail:
+            return
+        self.screen.add_class("-searching")
+        self.query_one(SearchInput).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "search":
+            return
+        self._query = event.value
+        self._render_list()
+        option_list = self.query_one(SessionList)
+        if option_list.highlighted_option is None or option_list.highlighted_option.disabled:
+            option_list.highlighted = option_list.next_enabled(0, 1)
+
+    def action_focus_list(self) -> None:
+        self.query_one(OptionList).focus()
+
+    def action_close_search(self) -> None:
+        search = self.query_one(SearchInput)
+        highlighted = self.query_one(OptionList).highlighted_option
+        keep = highlighted.id if highlighted is not None else None
+        self._query = ""
+        search.value = ""
+        self.screen.remove_class("-searching")
+        self._render_list()
+        if keep:
+            self._move_cursor(keep)
+        self.action_focus_list()
 
     def action_focus_session(self) -> None:
         state = self._state

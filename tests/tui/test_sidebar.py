@@ -319,3 +319,58 @@ class TestFirstFrame:
             assert app.focused is app.query_one(OptionList)
             # Statuses came with the first frame: nothing says "checking".
             assert "checking" not in app.query_one(OptionList).get_option(CLAUDE).prompt.plain
+
+
+class TestListAndSearch:
+    async def test_the_cursor_stops_at_the_ends(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            for _ in range(5):
+                await pilot.press("down")
+            assert _highlighted(app) == SHELL
+            for _ in range(5):
+                await pilot.press("k")
+            assert _highlighted(app) == CLAUDE
+
+    async def test_slash_filters_by_repo_agent_or_session(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            await pilot.press("slash")
+            assert isinstance(app.focused, S.SearchInput)
+            await pilot.press(*"beta")
+            ids = [o.id for o in app.query_one(OptionList).options if not o.disabled]
+            assert ids == [SHELL]
+            assert "1/3" in str(app.query_one("#title", Static).render())
+            # Letters that are keys elsewhere (l, b) type into the search.
+            await pilot.press("backspace", "backspace", "backspace", "backspace", "c", "l")
+            ids = [o.id for o in app.query_one(OptionList).options if not o.disabled]
+            assert ids == [CLAUDE, CLAUDE_2]
+            deck_api.select_pane.assert_not_called()
+            deck_api.set_sidebar_collapsed.assert_not_called()
+
+    async def test_enter_goes_to_the_list_and_escape_clears(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            await pilot.press("slash", *"shell", "enter")
+            assert app.focused is app.query_one(OptionList)
+            assert _highlighted(app) == SHELL
+            # Esc in the list clears the filter before it would leave the sidebar.
+            await pilot.press("escape")
+            assert app._query == ""
+            assert not app.screen.has_class("-searching")
+            assert app.query_one(OptionList).option_count == 5
+            assert _highlighted(app) == SHELL
+            deck_api.select_pane.assert_not_called()
+
+    async def test_no_match_says_so(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            await pilot.press("slash", *"zzz")
+            assert app.screen.has_class("-empty")
+            assert str(app.query_one("#empty", Static).render()) == "no match"
+            await pilot.press("escape")
+            assert not app.screen.has_class("-empty")

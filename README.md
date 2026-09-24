@@ -88,10 +88,10 @@ timeline, branches, remotes, pull, push, and **Review Diff** — a two-pane view
 of uncommitted changes with real line numbers, where `g` stages everything and
 commits (optionally pushing).
 
-**Sessions** lists every gitdirector tmux session with its status, purpose,
-repo, and tmux session name, with its description on the line below (wrapped,
-never cut off). A repo's sessions are always kept together, and alternate repos
-sit on a subtle band. Statuses are `running` (the agent or program is working),
+**Sessions** lists every gitdirector tmux session by repo: the repo is named
+once, and a repo with several sessions holds them in one bracket, each with its status, purpose,
+and tmux session name, and its description on the line below (wrapped, never
+cut off). Statuses are `running` (the agent or program is working),
 `waiting` (it needs you: a permission prompt, a question, a bell), or `idle`
 (nothing is happening). Claude Code and OpenCode report their own status
 through hooks passed inline on the command GitDirector launches (your own
@@ -120,6 +120,7 @@ right; the session you leave keeps running.
 | `prefix d` | Detach and go back to the console |
 | `↑`/`↓`, `j`/`k`, Enter | In the sidebar: move, open the session |
 | Tab, `→`, `l`, Esc | In the sidebar: focus the session |
+| `/` | In the sidebar: search by repo, agent, or session name (Enter keeps the filter, Esc clears it) |
 
 The `«` next to the sidebar's title goes back to the console, like `prefix d`, and `◧`
 collapses or expands it. The keys are listed on the status line beside the clock

@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from textual.widgets import DataTable, Input, Static, TabbedContent, TextArea
 
 from gitdirector.commands.tui import GitDirectorConsole, SortMenuScreen
@@ -1570,7 +1571,7 @@ class TestSessionDescription:
             app.push_screen.assert_not_called()
 
 
-class TestRepoBands:
+class TestRepoGroups:
     def _entry(self, name: str, repo: str) -> dict[str, str]:
         _, slug, purpose, _ = name.split("/")
         return {
@@ -1581,17 +1582,25 @@ class TestRepoBands:
             "description": "-",
         }
 
-    def test_a_repo_keeps_one_band_and_bands_alternate_by_repo(self):
-        from gitdirector.commands.tui.app_sessions import _repo_bands
+    def test_each_session_knows_its_place_in_its_repo(self):
+        from gitdirector.commands.tui.app_sessions import _repo_positions
 
         entries = [
             self._entry("gd/alpha/shell/1", "alpha"),
             self._entry("gd/alpha/claude-auto/1", "alpha"),
+            self._entry("gd/alpha/codex/1", "alpha"),
             self._entry("gd/beta/shell/1", "beta"),
             self._entry("gd/gamma/shell/1", "gamma"),
             self._entry("gd/gamma/shell/2", "gamma"),
         ]
-        assert list(_repo_bands(entries).values()) == [False, False, True, False, False]
+        assert list(_repo_positions(entries).values()) == [
+            "first",
+            "middle",
+            "last",
+            "only",
+            "first",
+            "last",
+        ]
 
     def test_sessions_of_a_repo_sit_together_in_a_stable_order(self):
         from gitdirector.commands.tui.app_sessions import _session_order
@@ -1610,21 +1619,92 @@ class TestRepoBands:
             "gd/beta/shell/1",
         ]
 
-    def test_a_banded_row_is_tinted_edge_to_edge(self):
+    def _lines(self, guide=None, position: str = "only") -> list[str]:
         from gitdirector.commands.tui.app_sessions import (
             _render_session_row,
             _resolve_sessions_layout,
         )
         from gitdirector.commands.tui.constants import TablePalette
 
-        palette = TablePalette(
-            success="green", yellow="yellow", muted="grey50", primary="magenta", band="#303030"
-        )
+        palette = TablePalette(success="green", yellow="yellow", muted="grey50", primary="magenta")
         entry = self._entry("gd/alpha/shell/1", "alpha")
         layout = _resolve_sessions_layout([entry], 100)
-        plain, _ = _render_session_row(entry, layout, palette)
-        banded, _ = _render_session_row(entry, layout, palette, banded=True)
-        assert plain.plain == banded.plain
-        assert all(len(line) == layout.cell_width for line in banded.plain.split("\n"))
-        assert any("on #303030" in str(span.style) for span in banded.spans)
-        assert not any("on #303030" in str(span.style) for span in plain.spans)
+        row, height = _render_session_row(entry, layout, palette, position=position, guide=guide)
+        lines = row.plain.split("\n")
+        assert len(lines) == height
+        assert all(len(line) == layout.cell_width for line in lines)
+        return lines
+
+    def _guides(self, *names_and_repos):
+        from gitdirector.commands.tui.app_sessions import _repo_positions, _row_guides
+
+        entries = [self._entry(name, repo) for name, repo in names_and_repos]
+        return _row_guides(entries, _repo_positions(entries))
+
+    def test_a_group_is_held_in_one_bracket(self):
+        from gitdirector.commands.tui.app_sessions import RowGuide
+
+        guides = self._guides(
+            ("gd/alpha/shell/1", "alpha"),
+            ("gd/beta/shell/1", "beta"),
+            ("gd/beta/shell/2", "beta"),
+            ("gd/beta/shell/3", "beta"),
+            ("gd/gamma/shell/1", "gamma"),
+        )
+        assert list(guides.values()) == [
+            # The row above opens the bracket on its spacer line.
+            RowGuide(spacer="╭"),
+            RowGuide("│", "│"),
+            RowGuide("│", "│"),
+            RowGuide("│", "│", "╰"),
+            RowGuide(),
+        ]
+
+    def test_a_group_at_the_top_opens_on_its_own_first_line(self):
+        from gitdirector.commands.tui.app_sessions import RowGuide
+
+        guides = self._guides(("gd/beta/shell/1", "beta"), ("gd/beta/shell/2", "beta"))
+        assert list(guides.values()) == [RowGuide("╭", "│"), RowGuide("│", "│", "╰")]
+
+    def test_rows_draw_their_bracket_marks(self):
+        from gitdirector.commands.tui.app_sessions import RowGuide
+
+        first = self._lines(RowGuide("│", "│"), position="first")
+        assert first[0].startswith(" │ alpha")
+        assert all(line.startswith(" │") for line in first[1:])
+        last = self._lines(RowGuide("│", "│", "╰"), position="last")
+        assert "alpha" not in last[0][:30]
+        assert last[-1].startswith(" ╰") and last[-2].startswith(" │")
+        above = self._lines(RowGuide(spacer="╭"))
+        assert above[-1].startswith(" ╭") and above[-2].strip() == ""
+
+    def test_a_lone_session_has_no_bracket(self):
+        only = self._lines()
+        assert only[0].startswith("   alpha")
+        assert not any(mark in "".join(only) for mark in "╭│╰")
+
+
+class TestSessionsFitTheWidth:
+    @pytest.mark.parametrize("width", [80, 120, 160])
+    async def test_there_is_nothing_to_scroll_sideways(self, width):
+        from gitdirector.integrations.tmux.core import session_entry
+
+        many = [
+            session_entry(f"gd/repo{i % 4}_aaaaa/shell/{i}", f"repo{i % 4}", "")
+            for i in range(1, 14)
+        ]
+        with patch(
+            "gitdirector.integrations.tmux.list_all_gd_sessions",
+            side_effect=lambda *_a, **_k: [dict(entry) for entry in many],
+        ):
+            app = GitDirectorConsole()
+            app.manager = _mock_manager()
+            async with app.run_test(size=(width, 30)) as pilot:
+                app.action_tab_sessions()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                table = app.query_one("#sessions-table", DataTable)
+                # Enough rows for a vertical scrollbar, which takes a column.
+                assert table.show_vertical_scrollbar
+                assert table.virtual_size.width <= table.scrollable_content_region.width
+                assert table.max_scroll_x == 0
