@@ -1662,7 +1662,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_action_select_row_reattaches_selected_session_with_inner_delay(self):
+    def test_action_select_row_reattaches_selected_session(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
         row_key = MagicMock()
@@ -1676,12 +1676,9 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_select_row()
 
-        app._suspend_and_attach.assert_called_once_with(
-            "gd/alpha/shell/1",
-            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
-        )
+        app._suspend_and_attach.assert_called_once_with("gd/alpha/shell/1")
 
-    def test_on_data_table_row_selected_reattaches_agent_session_with_inner_delay(self):
+    def test_on_data_table_row_selected_reattaches_agent_session(self):
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
         event = MagicMock()
@@ -1690,10 +1687,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.on_data_table_row_selected(event)
 
-        app._suspend_and_attach.assert_called_once_with(
-            "gd/alpha/copilot/1",
-            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
-        )
+        app._suspend_and_attach.assert_called_once_with("gd/alpha/copilot/1")
 
     def test_action_select_row_on_repos_opens_menu(self):
         app = GitDirectorConsole()
@@ -1759,17 +1753,13 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.push_screen.assert_not_called()
 
-    def test_attach_to_session_reuses_temp_attach_with_inner_delay(self):
+    def test_attach_to_session_attaches_directly(self):
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
 
         app._attach_to_session("gd/alpha/copilot/1", Path("/tmp/alpha"))
 
-        app._suspend_and_attach.assert_called_once_with(
-            "gd/alpha/copilot/1",
-            Path("/tmp/alpha"),
-            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
-        )
+        app._suspend_and_attach.assert_called_once_with("gd/alpha/copilot/1", Path("/tmp/alpha"))
 
     @patch("gitdirector.commands.tui.app.ActionMenuScreen")
     def test_action_show_menu_uses_selected_repo_metadata(self, mock_screen_cls):

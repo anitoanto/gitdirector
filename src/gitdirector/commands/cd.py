@@ -21,5 +21,9 @@ def register(cli: click.Group):
             raise SystemExit(1)
 
         from ..integrations.tmux import open_in_tmux
+        from ..launch_context import leave_launch_directory
+
+        # The path is resolved already, so the restart may drop the cwd.
+        leave_launch_directory(["cd", str(repo_path)])
 
         open_in_tmux(repo_path.name, repo_path)

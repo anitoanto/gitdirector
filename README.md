@@ -41,10 +41,9 @@
 pip install gitdirector        # or: pipx install gitdirector / uv tool install gitdirector
 ```
 
-Requires Python 3.10 or newer (the test suite runs on every release from
-3.10 through 3.14) and git. Anything session-related needs
-[tmux](https://github.com/tmux/tmux) ≥ 3.2a. `gitdirector doctor` checks all
-of it.
+Runs on macOS and Linux with Python 3.10–3.14 and git; sessions and panels
+need [tmux](https://github.com/tmux/tmux) ≥ 3.2a. `gitdirector doctor` checks
+all of it.
 
 ## Quick start
 
@@ -77,28 +76,27 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 | `q` | Quit |
 
 **Repositories** shows sync state (`up to date`, `ahead`, `behind`,
-`diverged`), branch, staged and unstaged changes, and the last commit. Repos
-that share a parent directory collapse into a group row. `enter` opens the
-action menu: start a shell session, attach to an existing one, launch an AI
-agent, or remove a session. `g` opens the git menu — status, timeline,
-branches, remotes, pull, push, and **Review Diff**: a two-pane viewer of
-uncommitted changes with syntax-highlighted per-file diffs, where `g` stages
-everything and commits (optionally pushing) after you write a message.
+`diverged`), branch, changes, and the last commit; repos sharing a parent
+directory collapse into a group. `enter` opens the action menu (start a shell,
+attach, launch an AI agent, remove a session). `g` opens the git menu: status,
+timeline, branches, remotes, pull, push, and **Review Diff** — a two-pane view
+of uncommitted changes with real line numbers, where `g` stages everything and
+commits (optionally pushing).
 
-**Sessions** lists every `gd/*` tmux session with its status, purpose, repo,
-and a free-form description. `running` means the session is working,
-`waiting` means it is blocked on you (a permission question, a prompt for
-input), and `idle` means nothing is happening (a shell prompt, or a finished
-agent turn). Claude Code and OpenCode sessions launched from the console
-report their status through the agents' own lifecycle hooks; every other
-session is classified from what its pane is doing (see [DEV.md](DEV.md)).
+**Sessions** lists every gitdirector tmux session with its status, purpose,
+repo, and description: `running` (working), `waiting` (blocked on you — a
+permission question or prompt), or `idle` (a shell prompt, a finished turn).
+Claude Code and OpenCode report their own status through lifecycle hooks;
+everything else is classified from its pane (see [DEV.md](DEV.md)).
 
-**Panels** manages reusable tmux layouts. Opening a panel attaches to a tmux
-session that shows every assigned session side by side; `prefix 1`–`9` jumps
-to a pane and `prefix b` shows the pane numbers.
+**Panels** are reusable tmux layouts showing several sessions side by side,
+each under its own header with its slot number. `prefix 1`–`9` jumps to a
+slot, and proportions hold as the window resizes.
 
-Leaving a session (detach with `prefix d`, or exit its program) returns you
-to the console where you left it.
+Every session carries its own themed header and status line, so it looks the
+same attached directly, in a panel, or from a plain `tmux attach`. Detaching
+(`prefix d`) or the program exiting returns you to the console. Sessions never
+learn which directory gitdirector was started from.
 
 ## Commands
 
@@ -116,28 +114,22 @@ to the console where you left it.
 | `autoclean [--yes]` | Drop links whose paths no longer exist |
 | `reset [--yes]` | Kill every session and panel, wipe `~/.gitdirector` |
 | `gd-tmux PATH\|NAME "cmd" [-d TEXT]` | Run a command in a new background session |
-| `gd-capture SESSION [--lines N\|--full]` | Print a live session's scrollback |
+| `gd-capture SESSION [--lines N\|--full]` | Print a live session's last lines |
 | `gd-send SESSION [TEXT] [--enter\|--key KEY]` | Send input to a live session |
 | `completion {bash\|zsh\|fish}` | Print the shell completion script |
 | `help` | Overview of all commands |
 
-Repo arguments accept an absolute path or the directory basename. If two
-tracked repos share a basename, GitDirector refuses and lists both so you can
-pass the full path. Worktrees and submodules (where `.git` is a file rather
-than a directory) are accepted like any other checkout.
-
-Run `gitdirector COMMAND --help` (or `-h`) for a command's options. Errors
-and the update notice go to stderr, so command output is safe to capture in
-scripts.
+Repo arguments take a path or the directory name; when two tracked repos
+share a name, pass the path. Worktrees and submodules work like any checkout.
+`gitdirector COMMAND -h` shows a command's options. Errors and notices go to
+stderr, so command output is safe to capture.
 
 ## Background sessions
 
-Three commands: start, read, write.
-
 ```bash
-gitdirector gd-tmux my-repo "npm run dev"        # start; prints the session name
-gitdirector gd-capture gd/my-repo/shell/1        # read its screen
-gitdirector gd-send gd/my-repo/shell/1 --key C-c # send it input
+SESSION=$(gitdirector gd-tmux my-repo "npm run dev")   # start; prints the session name
+gitdirector gd-capture "$SESSION" --lines 50            # read its last lines
+gitdirector gd-send "$SESSION" --key C-c                # send it input
 ```
 
 The session ends when the command exits.
@@ -164,10 +156,8 @@ Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`,
 
 ### GitHub credentials
 
-Nothing to set up. GitDirector runs plain `git`, so if pull and push already
-work in your terminal they work here too — just link your repos.
-
-SSH is the preferred way. A `~/.ssh/config` like this is all it takes:
+GitDirector runs plain `git`, so if pull and push work in your terminal they
+work here. SSH is preferred:
 
 ```ssh-config
 Host github.com
@@ -178,41 +168,28 @@ Host github.com
   IdentityFile ~/.ssh/github
 ```
 
-No first connection by hand is needed. Git runs without a terminal inside
-GitDirector, so ssh can never ask "are you sure you want to continue
-connecting?"; instead GitDirector runs ssh with
-`StrictHostKeyChecking=accept-new`: a host you have never connected to is
-trusted on first contact and recorded in `~/.ssh/known_hosts`, exactly as
-answering `yes` would, while a key that later *changes* is still refused.
+Git runs without a terminal, so ssh can't ask to confirm an unknown host;
+GitDirector uses `StrictHostKeyChecking=accept-new`, which records a new host
+in `~/.ssh/known_hosts` as answering `yes` would and still refuses a key that
+changes. A refused key shows as `(offline)` in the Sync column. Set
+`GIT_SSH_COMMAND` to take over ssh entirely.
 
-When a host key is refused, the Sync column reads `(offline)` and the
-message names the host key problem — GitDirector can then only compare
-against the refs already on disk. To take over ssh handling entirely, set
-`GIT_SSH_COMMAND` in your environment; GitDirector leaves it alone when it
-is already set.
-
-#### Token option
-
-If SSH is not possible, GitDirector can retry with a personal access token
-on HTTPS GitHub remotes. Credentials live separately in
-`~/.gitdirector/secrets.yaml`:
+If SSH isn't possible, HTTPS GitHub remotes can fall back to a personal access
+token in `~/.gitdirector/secrets.yaml`:
 
 ```yaml
 github_username: your-username
 github_PAT: github_pat_...
 ```
 
-Git commands still run with your normal credentials first. Only if one
-fails with an auth error, and both values are set, does GitDirector retry
-via a temporary credential helper. SSH remotes are never touched. The PAT
-never appears on the command line or in TUI output, but it is stored in
-plaintext — scope it narrowly and protect the file.
+It is only used to retry a command that failed authentication, through a
+temporary credential helper — never on the command line or in the TUI. The
+file is plaintext, so scope the token narrowly.
 
 ## Shell completion
 
-Add the line for your shell to its rc file (`~/.bashrc`, `~/.zshrc`, or
-`~/.config/fish/config.fish`) and completions for subcommands, options, and
-tracked repo names load with every new shell:
+Add the line for your shell to its rc file to complete subcommands, options,
+repo names, and session names:
 
 ```bash
 eval "$(gitdirector completion bash)"
@@ -222,9 +199,8 @@ gitdirector completion fish | source
 
 ## Contributing
 
-See [DEV.md](DEV.md) for the development workflow, test suite conventions,
-and the release process, and [AGENTS.md](AGENTS.md) if you are pointing a
-coding agent at this repo.
+See [DEV.md](DEV.md) for development, tests, internals, and releases, and
+[AGENTS.md](AGENTS.md) when pointing a coding agent at this repo.
 
 ## License
 

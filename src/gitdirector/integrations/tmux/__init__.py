@@ -27,9 +27,6 @@ from .monitor import (
     resolve_pane_status,
 )
 from .panels import (
-    cleanup_panel_attached_session,
-    cleanup_temp_panel_tmux_session,
-    ensure_temp_panel_tmux_session,
     kill_panel_tmux_session,
     panel_tmux_session_exists,
     rebuild_panel_tmux_session,
@@ -45,10 +42,7 @@ __all__ = [
     "TmuxMonitor",
     "attach_tmux_session",
     "capture_pane",
-    "cleanup_panel_attached_session",
-    "cleanup_temp_panel_tmux_session",
     "create_tmux_session",
-    "ensure_temp_panel_tmux_session",
     "kill_all_gd_sessions",
     "kill_panel_tmux_session",
     "kill_tmux_session",

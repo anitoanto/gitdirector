@@ -91,8 +91,7 @@ class ConsoleReposMixin:
                     return False
                 if not all(isinstance(entry.get(field), bool) for field in ("staged", "unstaged")):
                     return False
-                # A cache written before this field existed simply has none.
-                if not isinstance(entry.get("sync_stale", False), bool):
+                if not isinstance(entry.get("sync_stale"), bool):
                     return False
                 if not isinstance(entry.get("message"), str):
                     return False
@@ -137,7 +136,7 @@ class ConsoleReposMixin:
                     last_updated=entry.get("last_updated"),
                     last_commit_timestamp=entry.get("last_commit_timestamp"),
                     size=entry.get("size"),
-                    sync_stale=entry.get("sync_stale", False),
+                    sync_stale=entry["sync_stale"],
                 )
                 infos[str(info.path)] = info
         except (KeyError, TypeError, ValueError, OSError):

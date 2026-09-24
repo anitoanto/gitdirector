@@ -53,11 +53,6 @@ def host_color_system() -> str | None:
     if no_color_requested():
         return None
 
-    if sys.platform == "win32":
-        if "WT_SESSION" in os.environ or "TERMINUS_SUBTITLE" in os.environ:
-            return "truecolor"
-        return "256"
-
     colorterm = (os.environ.get("COLORTERM") or "").lower()
     if "truecolor" in colorterm or "24bit" in colorterm:
         return "truecolor"
@@ -83,18 +78,13 @@ def host_supports_hatch() -> bool:
     """Return ``True`` if the host can render Textual ``hatch:`` patterns.
 
     Hatch requires a Unicode-aware terminal with decent box-drawing
-    support. On ``TERM=dumb`` or Windows legacy console the hatch
+    support. On ``TERM=dumb`` or an ASCII-only terminal the hatch
     characters render as ``?`` and should be suppressed.
     """
     if is_dumb_terminal():
         return False
     encoding = (sys.stdout.encoding or "").lower()
-    if encoding in {"ascii", "us-ascii"}:
-        return False
-    if sys.platform == "win32" and "WT_SESSION" not in os.environ:
-        # Legacy conhost.exe doesn't draw hatch reliably.
-        return False
-    return True
+    return encoding not in {"ascii", "us-ascii"}
 
 
 def host_supports_alpha() -> bool:

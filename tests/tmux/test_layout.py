@@ -473,9 +473,12 @@ class TestRebuildPanelTmuxSession:
     @patch("shutil.get_terminal_size", return_value=(80, 24))
     @patch("gitdirector.integrations.tmux.panels._ensure_panel_prefix_bindings")
     @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
-    @patch("gitdirector.integrations.tmux.panels._load_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.panels._install_panel_resize_hook")
     @patch("gitdirector.integrations.tmux.panels._configure_panel_window")
-    @patch("gitdirector.integrations.tmux.panels._equalize_panel_layout")
+    @patch(
+        "gitdirector.integrations.tmux.panels._equalize_panel_layout",
+        return_value=["%0", "%1", "%2", "%3"],
+    )
     @patch(
         "gitdirector.integrations.tmux.panels._build_panel_layout",
         return_value=["%0", "%1", "%2", "%3"],
@@ -484,7 +487,7 @@ class TestRebuildPanelTmuxSession:
     @patch("gitdirector.integrations.tmux.panels.kill_panel_tmux_session")
     @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=False)
     @patch("subprocess.run")
-    def test_enables_pane_headers_before_building_layout(
+    def test_isolates_the_build_session_before_building_layout(
         self,
         mock_run,
         _mock_session_exists,
@@ -493,7 +496,7 @@ class TestRebuildPanelTmuxSession:
         mock_build_layout,
         mock_equalize,
         mock_configure,
-        mock_load,
+        mock_resize_hook,
         mock_sync,
         mock_bindings,
         _mock_term_size,
@@ -506,7 +509,7 @@ class TestRebuildPanelTmuxSession:
                 command for command in commands if command[1] == "new-session"
             )
             build_session_name = new_session_command[new_session_command.index("-s") + 1]
-            assert build_session_name.startswith("gd/temp/panel/build-")
+            assert build_session_name.startswith("gd/build/")
             assert new_session_command == [
                 "tmux",
                 "new-session",
@@ -549,16 +552,6 @@ class TestRebuildPanelTmuxSession:
             scrub_command = next(command for command in commands if "set-environment" in command)
             assert "CLAUDE_CODE_SESSION_ID" in scrub_command
             assert commands.index(scrub_command) > commands.index(protect_command)
-
-            # The point of the test: headers are on before the layout is built.
-            assert commands[-1] == [
-                "tmux",
-                "set-window-option",
-                "-t",
-                f"={build_session_name}:^",
-                "pane-border-status",
-                "top",
-            ]
             return ["%0", "%1", "%2", "%3"]
 
         mock_build_layout.side_effect = assert_border_enabled_first
@@ -576,14 +569,14 @@ class TestRebuildPanelTmuxSession:
         mock_kill_panel.assert_not_called()
         mock_equalize.assert_called_once()
         mock_configure.assert_called_once()
-        mock_load.assert_not_called()
+        mock_resize_hook.assert_called_once()
         mock_sync.assert_called_once_with("rose-pine")
         mock_bindings.assert_called_once_with()
 
 
 class TestPanelPrefixBindings:
     @patch("subprocess.run")
-    def test_panel_prefix_bindings_include_overlay_alias_and_numeric_focus(self, mock_run):
+    def test_panel_prefix_bindings_include_overlay_alias_and_slot_focus(self, mock_run):
         _ensure_panel_prefix_bindings()
 
         mock_run.assert_called_once()
@@ -600,30 +593,19 @@ class TestPanelPrefixBindings:
             "#{m:gd/panel/*,#{session_name}}",
             "display-panes",
         ]
-        assert [
+        assert commands[3] == [
             "tmux",
             "bind-key",
             "-T",
             "prefix",
-            "1",
+            "3",
             "if-shell",
             "-F",
             "#{m:gd/panel/*,#{session_name}}",
-            "select-pane -t:.1",
-            "select-window -t :=1",
-        ] in commands
-        assert [
-            "tmux",
-            "bind-key",
-            "-T",
-            "prefix",
-            "9",
-            "if-shell",
-            "-F",
-            "#{m:gd/panel/*,#{session_name}}",
-            "select-pane -t:.9",
-            "select-window -t :=9",
-        ] in commands
+            "run-shell -C \"select-pane -t '#{P:#{?#{==:#{@gd_slot},3},#{pane_id},}}'\"",
+            "select-window -t :=3",
+        ]
+        assert len(commands) == 10
 
 
 class TestDistributeEqual:

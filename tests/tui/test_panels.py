@@ -172,12 +172,10 @@ class TestPanelStore:
         assert deleted is False
         mock_kill_panel_tmux_session.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux.cleanup_panel_attached_session")
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
-    def test_rename_cleans_old_normalized_panel_session_and_inner_sessions(
+    def test_rename_kills_old_normalized_panel_session(
         self,
         mock_kill_panel_tmux_session,
-        mock_cleanup_panel_attached_session,
         tmp_path,
     ):
         with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
@@ -189,14 +187,11 @@ class TestPanelStore:
         assert renamed is True
         assert store.get("Operations") is not None
         mock_kill_panel_tmux_session.assert_called_once_with("Main")
-        mock_cleanup_panel_attached_session.assert_called_once_with("gd/repo/shell/1")
 
-    @patch("gitdirector.integrations.tmux.cleanup_panel_attached_session")
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_rename_preserves_shared_normalized_panel_session(
         self,
         mock_kill_panel_tmux_session,
-        mock_cleanup_panel_attached_session,
         tmp_path,
     ):
         with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
@@ -207,7 +202,6 @@ class TestPanelStore:
 
         assert renamed is True
         mock_kill_panel_tmux_session.assert_not_called()
-        mock_cleanup_panel_attached_session.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_reconfigure_updates_layout_assignments_and_kills_panel_tmux_session(
@@ -248,34 +242,6 @@ class TestPanelStore:
         assert reloaded_panel.layout_key == "wide_bottom"
         assert reloaded_panel.panes == panel.panes
         mock_kill_panel_tmux_session.assert_called_once_with("Main")
-
-    @patch("gitdirector.integrations.tmux.cleanup_panel_attached_session")
-    @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
-    def test_reconfigure_cleans_sessions_removed_from_new_layout(
-        self,
-        mock_kill_panel_tmux_session,
-        mock_cleanup_panel_attached_session,
-        tmp_path,
-    ):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
-            store = PanelStore()
-            store.create(
-                "Main",
-                layout_key="grid_1x2",
-                panes={1: "gd/repo/shell/1", 2: "gd/repo/copilot/1"},
-            )
-
-            reconfigured = store.reconfigure(
-                "Main",
-                layout_key="grid_1x1",
-                panes={1: "gd/repo/shell/1"},
-            )
-
-        assert reconfigured is True
-        assert mock_cleanup_panel_attached_session.call_args_list == [
-            (("gd/repo/shell/1",),),
-            (("gd/repo/copilot/1",),),
-        ]
 
 
 class TestPanelStoreCreateCaseCollision:
@@ -373,25 +339,14 @@ class TestPanelStoreKillFailurePath:
             original_panes = panel.panes.copy()
             original_config = store.panels_file.read_text()
 
-            cleanup_calls: list[list[str]] = []
-
-            def tracker(self, session_names):
-                cleanup_calls.append(list(session_names))
-
-            with (
-                patch.object(PanelStore, "_cleanup_inner_panel_sessions", tracker),
-                patch.object(
-                    PanelStore,
-                    "_kill_panel_sessions",
-                    lambda self, _names: False,
-                ),
+            with patch.object(
+                PanelStore,
+                "_kill_panel_sessions",
+                lambda self, _names: False,
             ):
                 ok = store.reconfigure("Main", layout_key="grid_1x1", panes={1: "gd/repo/other/1"})
 
         assert ok is False
-        assert cleanup_calls == [], (
-            "cleanup_inner_panel_sessions must not be called when kill failed"
-        )
         panel = store.get("Main")
         assert panel is not None
         assert panel.panes == original_panes
@@ -414,31 +369,6 @@ class TestPanelStoreKillFailurePath:
         # YAML must not have been rewritten — the panel still owns the old name.
         assert store.get("Main") is not None
         assert store.get("Renamed") is None
-
-    @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
-    def test_rename_aborts_cleanup_when_kill_fails(self, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
-            store = PanelStore()
-            store.create("Main", layout_key="grid_1x1", panes={1: "gd/repo/shell/1"})
-
-            cleanup_calls: list[list[str]] = []
-
-            def tracker(self, session_names):
-                cleanup_calls.append(list(session_names))
-
-            with (
-                patch.object(PanelStore, "_cleanup_inner_panel_sessions", tracker),
-                patch.object(
-                    PanelStore,
-                    "_kill_panel_sessions",
-                    lambda self, _names: False,
-                ),
-            ):
-                store.rename("Main", "Renamed")
-
-        assert cleanup_calls == [], (
-            "cleanup must not run when the outer panel session can't be killed"
-        )
 
 
 class TestTabStyling:

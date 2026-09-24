@@ -8,13 +8,13 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 from base64 import b32encode
 from collections.abc import Collection
 from functools import lru_cache
 from pathlib import Path
 
 from ...config import Config
+from ...launch_context import neutral_directory
 from ...storage import atomic_write_text, normalize_repository_path
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .session_env import child_unset_names, sanitized_environ, session_scrub_names
@@ -137,6 +137,9 @@ def _run_tmux(
     # created afterwards. Sanitizing here keeps a gitdirector-started
     # server clean from birth.
     kwargs["env"] = sanitized_environ()
+    # A server this client forks keeps the client's working directory for
+    # its whole life, and it is readable from inside every session.
+    kwargs["cwd"] = neutral_directory()
     if timeout is not None:
         kwargs["timeout"] = timeout
     try:
@@ -476,7 +479,7 @@ def list_repo_sessions(repo_name: str | Path) -> list[str]:
             session_name
             for session_name in sessions
             if any(session_name.startswith(prefix) for prefix in prefixes)
-            and not _is_temp_panel_session(session_name)
+            and _parse_gd_session_name(session_name) is not None
         ]
     )
 
@@ -682,7 +685,7 @@ def kill_all_gd_sessions() -> list[str]:
         session_names.update(
             session_name
             for session_name in _list_sessions()
-            if _is_persistent_panel_session(session_name) or _is_temp_panel_session(session_name)
+            if _is_persistent_panel_session(session_name) or _is_helper_session(session_name)
         )
     except (TmuxError, OSError, ValueError):
         logger.debug("Failed to enumerate GitDirector tmux sessions", exc_info=True)
@@ -730,87 +733,49 @@ def _validate_session_name_for_kill(session_name: str) -> None:
             )
 
 
-def attach_tmux_session(
-    session_name: str,
-    *,
-    skip_config_sync: bool = False,
-    attach_delay_seconds: float = 0.0,
-) -> bool:
-    """Attach to an existing tmux session, blocking until detach/exit.
+def attach_tmux_session(session_name: str, *, skip_config_sync: bool = False) -> bool:
+    """Attach to *session_name*, blocking until the client detaches or the session ends.
 
-    When *skip_config_sync* is true the leading ``sync_panel_tmux_config`` call
-    is omitted. Callers that just created the session (and therefore triggered
-    a sync moments ago) should set this to avoid a visible flicker: the sync
-    re-lists every tmux session, rewrites the tmux_design.conf file, and runs
-    ``tmux source-file``, which together take long enough to expose a brief
-    empty alt-screen between the manual screen clear and tmux's first redraw.
+    Returns ``False`` when running inside tmux, where the current client is
+    switched to the session instead and the call returns at once.
+
+    When *skip_config_sync* is true the theme sync is left out; callers that
+    just created the session (and therefore synced moments ago) set it.
     """
-    from .panels import (
-        _ensure_panel_prefix_bindings,
-        cleanup_temp_panel_tmux_session,
-        ensure_temp_panel_tmux_session,
-    )
-
-    target_session = session_name
-    temp_panel_session_name: str | None = None
-    if (
-        not skip_config_sync
-        and session_name.startswith("gd/")
-        and not _is_temp_panel_session(session_name)
-    ):
+    if not _session_exists(session_name):
+        raise TmuxError(f"tmux session no longer exists: {session_name}")
+    if not skip_config_sync and session_name.startswith("gd/"):
         sync_panel_tmux_config()
-    if _should_open_in_temp_panel(session_name):
-        if not _session_exists(session_name):
-            raise TmuxError(f"tmux session no longer exists: {session_name}")
-        temp_panel_session_name = ensure_temp_panel_tmux_session(
-            session_name,
-            attach_delay_seconds=attach_delay_seconds,
-        )
-        target_session = temp_panel_session_name
-    elif _is_persistent_panel_session(target_session):
-        if not _session_exists(target_session):
-            raise TmuxError(f"tmux session no longer exists: {target_session}")
+    if _is_persistent_panel_session(session_name):
+        from .panels import _ensure_panel_prefix_bindings
+
         _ensure_panel_prefix_bindings()
-        _ensure_panel_resize_tracking(target_session)
-        reflow_panel_tmux_session(target_session)
+        reflow_panel_tmux_session(session_name)
     if os.environ.get("TMUX"):
-        # A successful switch leaves the wrapper to close itself when its
-        # inner attach ends; only a failed one must not leak it.
-        try:
-            _run_tmux(
-                ["switch-client", "-t", f"={target_session}"], check=True, capture_output=False
-            )
-        except BaseException:
-            if temp_panel_session_name is not None:
-                cleanup_temp_panel_tmux_session(temp_panel_session_name)
-            raise
+        _run_tmux(["switch-client", "-t", f"={session_name}"], check=True, capture_output=False)
         return False
-    try:
-        # The attach client blocks for the entire interactive session, so it
-        # must never inherit the default command timeout: a timeout here
-        # SIGKILLs the tmux client mid-session, which the user experiences as
-        # a random detach with the terminal left in tmux's alternate screen.
-        result = _run_tmux(
-            ["attach-session", "-t", f"={target_session}"],
-            capture_output=False,
-            timeout=None,
+    # The attach client blocks for the entire interactive session, so it
+    # must never inherit the default command timeout: a timeout here
+    # SIGKILLs the tmux client mid-session, which the user experiences as a
+    # random detach with the terminal left in tmux's alternate screen.
+    result = _run_tmux(
+        ["attach-session", "-t", f"={session_name}"],
+        capture_output=False,
+        timeout=None,
+    )
+    # A non-zero exit is not necessarily a failed attach. The client also
+    # exits 1 after a perfectly normal interactive session when the server
+    # went away underneath it ("[server exited]", "[lost server]"), or when
+    # the session vanished in the moment before this call ("can't find
+    # session"). Every one of those means the session is over, which is
+    # exactly what the caller waits for. Only an attach that fails while its
+    # target is still alive is a real error.
+    if result.returncode != 0 and _session_exists(session_name):
+        raise TmuxError(
+            "tmux attach-session failed",
+            args_list=list(result.args),
+            returncode=result.returncode,
         )
-        # A non-zero exit is not necessarily a failed attach. The client also
-        # exits 1 after a perfectly normal interactive session when the server
-        # went away underneath it ("[server exited]", "[lost server]"), or when
-        # the session vanished in the moment between the loading screen and
-        # this call ("can't find session"). Every one of those means the
-        # session is over, which is exactly what the caller waits for. Only an
-        # attach that fails while its target is still alive is a real error.
-        if result.returncode != 0 and _session_exists(target_session):
-            raise TmuxError(
-                "tmux attach-session failed",
-                args_list=list(result.args),
-                returncode=result.returncode,
-            )
-    finally:
-        if temp_panel_session_name is not None:
-            cleanup_temp_panel_tmux_session(temp_panel_session_name)
     return True
 
 
@@ -832,55 +797,18 @@ def _sanitize_panel_name(name: str) -> str:
     return f"panel-{digest}"
 
 
-def _is_temp_panel_session(session_name: str) -> bool:
-    parts = session_name.split("/")
-    if parts[:3] != ["gd", "temp", "panel"]:
-        return False
-    return len(parts) > 4 or (len(parts) == 4 and parts[3].startswith("build-"))
-
-
 def _is_persistent_panel_session(session_name: str) -> bool:
     parts = session_name.split("/")
     return len(parts) == 3 and parts[:2] == ["gd", "panel"] and bool(parts[2])
 
 
-def _should_open_in_temp_panel(session_name: str) -> bool:
-    return (
-        session_name.startswith("gd/")
-        and not _is_persistent_panel_session(session_name)
-        and not _is_temp_panel_session(session_name)
-    )
-
-
-def make_temp_panel_session_name(session_name: str) -> str:
-    """Return the deterministic temp panel session name for *session_name*.
-
-    The temp session is a 1:1 wrapper around an existing inner session,
-    so its name is derived directly from the inner session. Inner
-    session names are already unique (repo + purpose + incrementing
-    sequence), which makes the temp name unique by construction.
-
-    The name is deterministic so a stale wrapper can be found and removed
-    before recreating the temp panel for a later attach.
-    """
-    suffix = session_name[3:] if session_name.startswith("gd/") else session_name
-    return f"gd/temp/panel/{suffix}"
-
-
-def _temp_panel_display_name(session_name: str) -> str:
-    return _panel_session_label(session_name) or _session_slug(session_name) or session_name
+def _is_helper_session(session_name: str) -> bool:
+    """A panel's view of a session, or a panel still being built."""
+    return session_name.startswith(("gd/view/", "gd/build/"))
 
 
 def make_panel_session_name(panel_name: str) -> str:
     return f"gd/panel/{_sanitize_panel_name(panel_name)}"
-
-
-_PANEL_CLIENT_COUNT_OPTION = "@gitdirector_panel_clients"
-_PANEL_STATUS_RESTORE_OPTION = "@gitdirector_panel_prev_status"
-_PANEL_BORDER_RESTORE_OPTION = "@gitdirector_panel_prev_pane_border_status"
-_PANEL_WINDOW_RESTORE_OPTION = "@gitdirector_panel_prev_window_target"
-_PANEL_RESIZE_BUSY_OPTION = "@gitdirector_panel_resize_busy"
-_PANEL_RESIZE_PENDING_OPTION = "@gitdirector_panel_resize_pending"
 
 
 def _session_slug(session_name: str | None) -> str | None:
@@ -991,7 +919,7 @@ def _set_session_option(session_name: str, option: str, value: str | None) -> No
 
 
 def _set_session_repo_label(session_name: str, repo_label: str) -> None:
-    clean = (repo_label or "").strip()
+    clean = " ".join((repo_label or "").split())
     if clean:
         _set_session_option(session_name, GD_REPO_LABEL_OPTION, clean)
 
@@ -1053,23 +981,25 @@ def _resolved_panel_theme_name(theme_name: str | None = None) -> str:
     return DEFAULT_THEME_NAME
 
 
-def _panel_border_format(theme_name: str | None = None, *, show_pane_number: bool = True) -> str:
+#: Session option a panel's view of a session carries: the slot it fills.
+PANEL_SLOT_OPTION = "@gd_slot"
+
+
+def _session_header_format(session_name: str, theme_name: str | None = None) -> str:
+    """The top border of a gitdirector session: its label, and a slot badge in panels.
+
+    tmux draws a border for each client viewing the window, with that
+    client's session, so the badge appears only where the session is seen
+    through a panel's view session.
+    """
     theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
-    badge = ""
-    if show_pane_number:
-        badge = (
-            "#{?pane_active,"
-            f"#[bold fg={theme.badge_active_fg} bg={theme.badge_active_bg}],"
-            f"#[bold fg={theme.badge_inactive_fg} bg={theme.badge_inactive_bg}]"
-            "} #{pane_index} #[default]"
-        )
-    title = (
-        "#{?pane_active,"
-        f"#[fg={theme.label_active_fg} bg={theme.label_active_bg}],"
-        f"#[fg={theme.label_inactive_fg} bg={theme.label_inactive_bg}]"
-        "} #{pane_title} #[default]"
+    slot = f"#{{{PANEL_SLOT_OPTION}}}"
+    label = _panel_pane_title(session_name).replace("#", "##")
+    badge = (
+        f"#{{?{slot},#[bold fg={theme.badge_active_fg} bg={theme.badge_active_bg}] {slot} "
+        "#[default],}"
     )
-    return f"{badge}{title}"
+    return f"{badge}#[fg={theme.label_active_fg} bg={theme.label_active_bg}] {label} #[default]"
 
 
 def _panel_window_status_format() -> str:
@@ -1105,6 +1035,13 @@ def _current_window_target(session_name: str) -> str:
     return f"{session_name}:{_FIRST_WINDOW}"
 
 
+_STATUS_BADGE_OPTION = "@gd_badge"
+_STATUS_LABEL_OPTION = "@gd_label"
+_STATUS_BADGE_MAX = 24
+# The label gets what the badge, window list and clock leave of the width.
+_STATUS_LABEL_WIDTH = "#{?#{e|>:#{window_width},70},#{e|-:#{window_width},58},12}"
+
+
 def _tmux_theme_config(
     badge_text: str,
     label_text: str,
@@ -1124,8 +1061,10 @@ def _tmux_theme_config(
     quoted_session = shlex.quote(_session_option_target(session_name))
     quoted_window = shlex.quote(f"={window_target}")
     status_left = (
-        f"#[bold fg={theme.badge_active_fg},bg={theme.badge_active_bg}] {badge_text} #[default]"
-        f"#[fg={theme.label_active_fg},bg={theme.label_active_bg}] {label_text} #[default]"
+        f"#[bold fg={theme.badge_active_fg},bg={theme.badge_active_bg}]"
+        f" #{{=/{_STATUS_BADGE_MAX}/…:{_STATUS_BADGE_OPTION}}} #[default]"
+        f"#[fg={theme.label_active_fg},bg={theme.label_active_bg}]"
+        f" #{{=/{_STATUS_LABEL_WIDTH}/…:{_STATUS_LABEL_OPTION}}} #[default]"
     )
     status_right = (
         f"#[fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}] %H:%M %d %b #[default]"
@@ -1136,7 +1075,10 @@ def _tmux_theme_config(
             [
                 f"set-option -t {quoted_session} status-position bottom",
                 f'set-option -t {quoted_session} status-style "fg={theme.foreground},bg={theme.panel}"',
-                f"set-option -t {quoted_session} status-left-length 40",
+                f"set-option -t {quoted_session} {_STATUS_BADGE_OPTION} {shlex.quote(badge_text)}",
+                f"set-option -t {quoted_session} {_STATUS_LABEL_OPTION} {shlex.quote(label_text)}",
+                # Each part truncates itself with an ellipsis instead.
+                f"set-option -t {quoted_session} status-left-length 1000",
                 f"set-option -t {quoted_session} status-right-length 24",
                 f"set-option -t {quoted_session} status-left {shlex.quote(status_left)}",
                 f"set-option -t {quoted_session} status-right {shlex.quote(status_right)}",
@@ -1188,9 +1130,9 @@ def _panel_tmux_config(
         session_name,
         theme_name,
         window_target=f"{session_name}:{_FIRST_WINDOW}",
-        pane_border_status="top",
-        pane_border_lines="heavy",
-        pane_border_format=_panel_border_format(theme_name),
+        # Every pane shows its session's own header; a panel title row
+        # above it would say the same thing twice.
+        pane_border_status="off",
         window_status_format=_panel_window_status_format(),
         window_status_current_format=_panel_window_status_format(),
         show_status=True,
@@ -1200,25 +1142,31 @@ def _panel_tmux_config(
 def _session_tmux_config(
     session_name: str, theme_name: str | None = None, *, window_target: str | None = None
 ) -> str:
-    return _tmux_theme_config(
+    header = _session_header_format(session_name, theme_name)
+    quoted_session = shlex.quote(_session_option_target(session_name))
+    new_window_header = (
+        "set-window-option pane-border-status top ; "
+        "set-window-option pane-border-lines heavy ; "
+        f'set-window-option pane-border-format "{header}"'
+    )
+    config = _tmux_theme_config(
         _session_badge_text(session_name),
         _session_slug(session_name) or session_name,
         session_name,
         theme_name,
         window_target=window_target or _current_window_target(session_name),
+        pane_border_status="top",
+        pane_border_lines="heavy",
+        pane_border_format=header,
     )
-
-
-def _load_panel_tmux_config(
-    panel_name: str,
-    session_name: str,
-    theme_name: str | None = None,
-) -> Path:
-    config_path = _tmux_design_config_path()
-    config_path.parent.mkdir(exist_ok=True)
-    atomic_write_text(config_path, _panel_tmux_config(panel_name, session_name, theme_name))
-    _run_tmux(["source-file", str(config_path)], check=True)
-    return config_path
+    extra = [
+        f"set-option -t {quoted_session} status on",
+        # Ending the session (an agent exiting) returns the attached client
+        # to the console, whatever the user's tmux.conf prefers.
+        f"set-option -t {quoted_session} detach-on-destroy on",
+        f"set-hook -t {quoted_session} after-new-window {shlex.quote(new_window_header)}",
+    ]
+    return config + "\n".join(extra) + "\n"
 
 
 def _live_session_windows() -> dict[str, str]:
@@ -1256,53 +1204,13 @@ def _panel_for_session(session_name: str):
     return None
 
 
-def _panel_resize_hook_shell(session_name: str) -> str:
-    session_target = shlex.quote(_session_option_target(session_name))
-    python_code = (
-        "from gitdirector.integrations.tmux import reflow_panel_tmux_session; "
-        f"reflow_panel_tmux_session({session_name!r})"
-    )
-    python_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)}"
-    return (
-        f"panel_target={session_target}; "
-        f'tmux set-option -q -t "$panel_target" {_PANEL_RESIZE_PENDING_OPTION} 1'
-        " >/dev/null 2>&1 || true; "
-        f'panel_busy=$(tmux show-options -q -v -t "$panel_target"'
-        f" {_PANEL_RESIZE_BUSY_OPTION} 2>/dev/null || printf '0'); "
-        'if [ "$panel_busy" = "1" ]; then exit 0; fi; '
-        f'tmux set-option -q -t "$panel_target" {_PANEL_RESIZE_BUSY_OPTION} 1'
-        " >/dev/null 2>&1 || true; "
-        "while :; do "
-        f'tmux set-option -q -t "$panel_target" {_PANEL_RESIZE_PENDING_OPTION} 0'
-        " >/dev/null 2>&1 || true; "
-        "sleep 0.15; "
-        f"{python_command} >/dev/null 2>&1 || true; "
-        f'panel_pending=$(tmux show-options -q -v -t "$panel_target"'
-        f" {_PANEL_RESIZE_PENDING_OPTION} 2>/dev/null || printf '0'); "
-        'if [ "$panel_pending" != "1" ]; then break; fi; '
-        "done; "
-        f'tmux set-option -q -u -t "$panel_target" {_PANEL_RESIZE_BUSY_OPTION}'
-        " >/dev/null 2>&1 || true; "
-        f'tmux set-option -q -u -t "$panel_target" {_PANEL_RESIZE_PENDING_OPTION}'
-        " >/dev/null 2>&1 || true"
-    )
-
-
-def _ensure_panel_resize_tracking(session_name: str) -> None:
-    if not _is_persistent_panel_session(session_name) or not _session_exists(session_name):
-        return
-
-    window_target = f"={session_name}:{_FIRST_WINDOW}"
-    session_target = _session_option_target(session_name)
-    hook_command = f"run-shell -b {shlex.quote(_panel_resize_hook_shell(session_name))}"
-
-    _run_tmux(["set-window-option", "-q", "-t", window_target, "aggressive-resize", "on"])
-    _run_tmux(["set-hook", "-t", session_target, "client-resized", hook_command])
-    _run_tmux(["set-hook", "-w", "-t", window_target, "window-resized", hook_command])
-
-
 def reflow_panel_tmux_session(session_name: str) -> bool:
-    from .panels import _equalize_panel_layout, _list_window_panes_row_major
+    """Lay the panel out exactly at its current size and (re)install its resize hook."""
+    from .panels import (
+        _equalize_panel_layout,
+        _install_panel_resize_hook,
+        _list_window_panes_row_major,
+    )
 
     if not _is_persistent_panel_session(session_name) or not _session_exists(session_name):
         return False
@@ -1317,7 +1225,8 @@ def reflow_panel_tmux_session(session_name: str) -> bool:
         return False
 
     try:
-        _equalize_panel_layout(session_name, pane_ids[:total_panes], panel.layout)
+        by_slot = _equalize_panel_layout(session_name, pane_ids[:total_panes], panel.layout)
+        _install_panel_resize_hook(session_name, by_slot, panel.layout)
     except (OSError, subprocess.CalledProcessError, TmuxError, ValueError):
         return False
     return True

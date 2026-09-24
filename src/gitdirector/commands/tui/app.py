@@ -40,9 +40,10 @@ from .constants import (
     resolve_table_palette,
 )
 from .panels import Panel, PanelStore
+from .screens._shared import ConfirmScreen
 from .screens.diff import DiffReviewScreen
 from .screens.groups import GroupActionMenuScreen
-from .screens.panels import AgentLoadingScreen, ConfirmScreen
+from .screens.panels import AgentLoadingScreen
 from .screens.repos import (
     ActionMenuScreen,
     GitCommandResultScreen,
@@ -266,7 +267,7 @@ class GitDirectorConsole(
         Binding("3", "tab_panels", "Panels", show=False),
         Binding("space", "toggle_group", "Toggle", show=True),
         # Reaches us only from terminals that speak the kitty keyboard
-        # protocol; legacy terminals send a plain space for shift+space.
+        # protocol; others send a plain space for shift+space.
         Binding("shift+space", "toggle_all_groups", "Toggle all", show=False),
         Binding("n", "new_panel", "New Panel", show=True),
     ]
@@ -547,10 +548,7 @@ class GitDirectorConsole(
             session_name = self._get_selected_row_key(table)
             if session_name is None:
                 return
-            self._suspend_and_attach(
-                session_name,
-                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
-            )
+            self._suspend_and_attach(session_name)
         elif self._active_tab == "panels":
             self._open_selected_panel_menu()
         else:
@@ -559,10 +557,7 @@ class GitDirectorConsole(
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "sessions-table":
             session_name = str(event.row_key.value)
-            self._suspend_and_attach(
-                session_name,
-                attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
-            )
+            self._suspend_and_attach(session_name)
         elif event.data_table.id == "panels-table":
             self._open_selected_panel_menu()
         else:
@@ -679,7 +674,6 @@ class GitDirectorConsole(
         row_key: str | None = None,
         *,
         skip_config_sync: bool = False,
-        attach_delay_seconds: float = 0.0,
     ) -> None:
         """Suspend the TUI and attach to the tmux session."""
         self._monitor.clear_bell(session_name)
@@ -720,7 +714,6 @@ class GitDirectorConsole(
                     attach_error = self._attach_while_suspended(
                         session_name,
                         skip_config_sync=skip_config_sync,
-                        attach_delay_seconds=attach_delay_seconds,
                     )
             except Exception as exc:
                 # Suspending or resuming the driver itself failed, so no
@@ -745,7 +738,6 @@ class GitDirectorConsole(
         session_name: str,
         *,
         skip_config_sync: bool,
-        attach_delay_seconds: float,
     ) -> Exception | None:
         """Run the blocking tmux attach with the TUI suspended.
 
@@ -774,11 +766,7 @@ class GitDirectorConsole(
                 # screen never flashes between the TUI and the session.
                 write_terminal("\033[?1049h\033[H\033[2J\033[?25l")
                 entered_manual_alt_screen = True
-            attach_tmux_session(
-                session_name,
-                skip_config_sync=skip_config_sync,
-                attach_delay_seconds=attach_delay_seconds,
-            )
+            attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
         except Exception as exc:
             logger.warning("tmux attach failed: %s", exc)
             error = exc
@@ -866,11 +854,7 @@ class GitDirectorConsole(
 
     def _attach_to_session(self, session_name: str, path: Path | None = None) -> None:
         """Attach to an existing tmux session."""
-        self._suspend_and_attach(
-            session_name,
-            path,
-            attach_delay_seconds=AgentLoadingScreen._MIN_WAIT,
-        )
+        self._suspend_and_attach(session_name, path)
 
     def action_show_menu(self) -> None:
         path = self._get_selected_path()

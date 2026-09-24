@@ -156,25 +156,29 @@ _OUTPUT_GAP_SECS = 2.5
 _INPUT_QUIET_SECS = 2.0
 
 _PANE_LIST_SEPARATOR = "\t"
+# The user-editable description is last and the line is split at most this
+# many times, so a separator inside it can never shift another field.
 _PANE_LIST_FIELDS = (
-    "#{session_name}",
-    "#{pane_current_command}",
-    "#{pane_dead}",
-    "#{pane_pid}",
-    "#{window_bell_flag}",
-    "#{pane_active}",
-    "#{pane_tty}",
-    "#{window_activity}",
-    "#{mouse_any_flag}",
-    "#{alternate_on}",
-    f"#{{{AGENT_STATE_OPTION}}}",
-    f"#{{{AGENT_INTERRUPTS_OPTION}}}",
-    f"#{{{GD_REPO_LABEL_OPTION}}}",
-    f"#{{{GD_DESCRIPTION_OPTION}}}",
-    "#{session_activity}",
-    "#{window_active}",
+    ("session", "#{session_name}"),
+    ("command", "#{pane_current_command}"),
+    ("dead", "#{pane_dead}"),
+    ("pid", "#{pane_pid}"),
+    ("bell", "#{window_bell_flag}"),
+    ("pane_active", "#{pane_active}"),
+    ("window_active", "#{window_active}"),
+    ("pane_id", "#{pane_id}"),
+    ("tty", "#{pane_tty}"),
+    ("activity", "#{window_activity}"),
+    ("mouse", "#{mouse_any_flag}"),
+    ("alternate", "#{alternate_on}"),
+    ("agent_state", f"#{{{AGENT_STATE_OPTION}}}"),
+    ("interrupts", f"#{{{AGENT_INTERRUPTS_OPTION}}}"),
+    ("input_activity", "#{session_activity}"),
+    ("repo_label", f"#{{{GD_REPO_LABEL_OPTION}}}"),
+    ("description", f"#{{{GD_DESCRIPTION_OPTION}}}"),
 )
-_PANE_LIST_FORMAT = _PANE_LIST_SEPARATOR.join(_PANE_LIST_FIELDS)
+_PANE_LIST_NAMES = tuple(name for name, _ in _PANE_LIST_FIELDS)
+_PANE_LIST_FORMAT = _PANE_LIST_SEPARATOR.join(fmt for _, fmt in _PANE_LIST_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -383,34 +387,43 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
     if result.returncode != 0:
         return {} if _tmux_server_is_gone(result.stderr) else None
 
-    panes: dict[str, PaneSample] = {}
+    rows = []
     for line in result.stdout.splitlines():
-        parts = line.split(_PANE_LIST_SEPARATOR)
-        if len(parts) < 6:
-            continue
-        parts += [""] * (len(_PANE_LIST_FIELDS) - len(parts))
-        session_name = parts[0]
+        values = line.split(_PANE_LIST_SEPARATOR, len(_PANE_LIST_NAMES) - 1)
+        if len(values) == len(_PANE_LIST_NAMES):
+            rows.append(dict(zip(_PANE_LIST_NAMES, values)))
+    # A session shown in a panel is typed into through the panel's view of
+    # it, a second session over the same pane, and tmux stamps the keypress
+    # on that one: the latest input across every session showing the pane.
+    input_by_pane: dict[str, int] = {}
+    for row in rows:
+        stamp = _int_or_zero(row["input_activity"])
+        input_by_pane[row["pane_id"]] = max(input_by_pane.get(row["pane_id"], 0), stamp)
+
+    panes: dict[str, PaneSample] = {}
+    for row in rows:
+        session_name = row["session"]
         if _parse_gd_session_name(session_name) is None:
             continue
         # pane_active is per window; the pane that counts (and that
         # capture-pane reads) is the active one of the current window.
-        current = parts[5] == "1" and parts[15] != "0"
+        current = row["pane_active"] == "1" and row["window_active"] == "1"
         if session_name in panes and not current:
             continue
         panes[session_name] = PaneSample(
             session_name=session_name,
-            command=parts[1],
-            dead=parts[2] == "1",
-            pane_pid=_int_or_zero(parts[3]),
-            bell=parts[4] == "1",
-            tty=parts[6],
-            activity=_int_or_zero(parts[7]),
-            interactive_hint=parts[8] == "1" or parts[9] == "1",
-            agent_state=parts[10].strip(),
-            agent_interrupts_unreported=parts[11].strip() == AGENT_INTERRUPTS_UNREPORTED,
-            repo_label=parts[12],
-            description=parts[13],
-            input_activity=_int_or_zero(parts[14]),
+            command=row["command"],
+            dead=row["dead"] == "1",
+            pane_pid=_int_or_zero(row["pid"]),
+            bell=row["bell"] == "1",
+            tty=row["tty"],
+            activity=_int_or_zero(row["activity"]),
+            interactive_hint=row["mouse"] == "1" or row["alternate"] == "1",
+            agent_state=row["agent_state"].strip(),
+            agent_interrupts_unreported=row["interrupts"].strip() == AGENT_INTERRUPTS_UNREPORTED,
+            repo_label=row["repo_label"],
+            description=row["description"],
+            input_activity=input_by_pane[row["pane_id"]],
         )
     return panes
 

@@ -19,7 +19,8 @@ keywords = ["git", "repository", "manager", "cli", "synchronization", "batch"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

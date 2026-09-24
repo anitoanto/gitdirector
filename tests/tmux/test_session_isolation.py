@@ -255,3 +255,46 @@ class TestSessionWorkingDirectory:
             finally:
                 _tmux("kill-server")
                 _cleanup_tmux_tmpdir(tmux_dir)
+
+
+def _process_cwd(pid: str) -> str | None:
+    proc = Path(f"/proc/{pid}/cwd")
+    if proc.exists():
+        return os.readlink(proc)
+    if shutil.which("lsof"):
+        out = _tmux_free_run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"])
+        names = [line[1:] for line in out.splitlines() if line.startswith("n")]
+        return names[0] if names else None
+    return None
+
+
+def _tmux_free_run(args: list[str]) -> str:
+    return subprocess.run(args, capture_output=True, text=True, timeout=TMUX_CMD_TIMEOUT).stdout
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+def test_server_started_by_gitdirector_does_not_keep_the_launch_directory(tmp_path, monkeypatch):
+    """A tmux server keeps the cwd of the client that forked it for good,
+    and any session can read it (``lsof -p $(tmux display -p '#{pid}')``)."""
+    with _tmux_integration_lock():
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        launch_dir = tmp_path / "where-gd-was-launched"
+        launch_dir.mkdir()
+        repo = home_dir / "repo"
+        repo.mkdir()
+        tmux_dir = _make_short_tmux_tmpdir()
+        monkeypatch.setenv("HOME", str(home_dir))
+        monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+        monkeypatch.delenv("TMUX", raising=False)
+        monkeypatch.chdir(launch_dir)
+        try:
+            create_tmux_session("repo", repo, purpose="shell")
+            server_pid = _tmux("display-message", "-p", "#{pid}").stdout.strip()
+            cwd = _process_cwd(server_pid)
+            if cwd is None:
+                pytest.skip("no way to read a process's cwd here")
+            assert os.path.realpath(cwd) == os.path.realpath(home_dir)
+        finally:
+            _tmux("kill-server")
+            _cleanup_tmux_tmpdir(tmux_dir)

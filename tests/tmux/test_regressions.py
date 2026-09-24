@@ -11,19 +11,16 @@ import pytest
 import gitdirector.integrations.tmux.panels as tmux_panels
 from gitdirector.integrations.tmux import (
     attach_tmux_session,
-    cleanup_panel_attached_session,
     kill_tmux_session,
     launch_command_in_tmux_session,
 )
 from gitdirector.integrations.tmux.core import (
     _current_window_target,
-    _ensure_panel_resize_tracking,
     _session_exists,
     _tmux_theme_config,
 )
 from gitdirector.integrations.tmux.monitor import _capture_pane_text
 from gitdirector.integrations.tmux.panels import (
-    _panel_attach_fragment,
     _panel_pane_command,
     _respawn_pane,
     _tmux_output,
@@ -136,31 +133,23 @@ class TestKillTmuxSessionInputValidation:
 class TestExactMatchAttachTmuxSession:
     """attach_tmux_session must use ``=`` for both switch-client and attach-session."""
 
-    @patch(
-        "gitdirector.integrations.tmux.panels.ensure_temp_panel_tmux_session",
-        return_value="gd/temp/panel/repo/shell/1",
-    )
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("subprocess.run")
-    def test_regular_session_switch_client_exact_temp_panel_target(
-        self, mock_run, _mock_sync, _mock_ensure
-    ):
+    def test_regular_session_switch_client_exact_target(self, mock_run, _mock_sync):
         mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")
         target = mock_run.call_args[0][0][3]
-        assert target == "=gd/temp/panel/repo/shell/1"
+        assert target == "=gd/repo/shell/1"
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core.reflow_panel_tmux_session")
-    @patch("gitdirector.integrations.tmux.core._ensure_panel_resize_tracking")
     @patch("gitdirector.integrations.tmux.panels._ensure_panel_prefix_bindings")
     @patch("subprocess.run")
     def test_switch_client_exact(
         self,
         mock_run,
         mock_prefix_bindings,
-        mock_track_resize,
         mock_reflow,
         _mock_sync,
     ):
@@ -170,19 +159,16 @@ class TestExactMatchAttachTmuxSession:
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
         mock_prefix_bindings.assert_called_once_with()
-        mock_track_resize.assert_called_once_with("gd/panel/dev")
         mock_reflow.assert_called_once_with("gd/panel/dev")
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core.reflow_panel_tmux_session")
-    @patch("gitdirector.integrations.tmux.core._ensure_panel_resize_tracking")
     @patch("gitdirector.integrations.tmux.panels._ensure_panel_prefix_bindings")
     @patch("subprocess.run")
     def test_attach_session_exact(
         self,
         mock_run,
         mock_prefix_bindings,
-        mock_track_resize,
         mock_reflow,
         _mock_sync,
     ):
@@ -192,126 +178,7 @@ class TestExactMatchAttachTmuxSession:
         target = mock_run.call_args[0][0][3]
         assert target == "=gd/panel/dev"
         mock_prefix_bindings.assert_called_once_with()
-        mock_track_resize.assert_called_once_with("gd/panel/dev")
         mock_reflow.assert_called_once_with("gd/panel/dev")
-
-
-class TestPanelResizeTracking:
-    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
-    @patch("subprocess.run")
-    def test_sets_resize_hooks_on_panel_session_and_window(self, mock_run, _mock_exists):
-        _ensure_panel_resize_tracking("gd/panel/dev")
-
-        assert mock_run.call_args_list[0].args[0] == [
-            "tmux",
-            "set-window-option",
-            "-q",
-            "-t",
-            "=gd/panel/dev:^",
-            "aggressive-resize",
-            "on",
-        ]
-        assert mock_run.call_args_list[1].args[0][:5] == [
-            "tmux",
-            "set-hook",
-            "-t",
-            "=gd/panel/dev:",
-            "client-resized",
-        ]
-        assert mock_run.call_args_list[2].args[0][:6] == [
-            "tmux",
-            "set-hook",
-            "-w",
-            "-t",
-            "=gd/panel/dev:^",
-            "window-resized",
-        ]
-
-    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
-    @patch("subprocess.run")
-    def test_skips_missing_panel_session(self, mock_run, _mock_exists):
-        _ensure_panel_resize_tracking("gd/panel/dev")
-
-        mock_run.assert_not_called()
-
-
-class TestExactMatchPanelAttachFragment:
-    """_panel_attach_fragment shell script must use ``=`` for all -t args."""
-
-    def test_all_tmux_targets_use_equals(self):
-        fragment = _panel_attach_fragment("gd/panel/dev")
-        for part in fragment.split("tmux ")[1:]:
-            if " -t " in part:
-                target = part.split(" -t ")[1].split()[0]
-                unquoted = target.strip("'\"")
-                assert unquoted.startswith("=") or unquoted.startswith("$"), (
-                    f"tmux -t target missing '=' prefix in fragment: ...tmux {part[:60]}..."
-                )
-
-
-class TestCleanupPanelAttachedSession:
-    @staticmethod
-    def _completed(stdout: str = "", returncode: int = 0):
-        result = MagicMock()
-        result.stdout = stdout
-        result.returncode = returncode
-        return result
-
-    @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
-    @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
-    @patch("subprocess.run")
-    def test_restores_session_chrome_once_nothing_is_attached(
-        self, mock_run, _mock_exists, mock_sync
-    ):
-        done = self._completed
-        mock_run.side_effect = [
-            done("0\n"),  # session_attached
-            done("=gd/repo/shell/1:2\n"),  # saved window
-            done("on\n"),  # saved status
-            done(""),  # saved border status: inherited
-            *[done() for _ in range(6)],
-        ]
-
-        cleanup_panel_attached_session("gd/repo/shell/1", theme_name="rose-pine")
-
-        commands = [c.args[0] for c in mock_run.call_args_list]
-        assert ["tmux", "set-option", "-q", "-t", "=gd/repo/shell/1:", "status", "on"] in commands
-        assert [
-            "tmux",
-            "set-window-option",
-            "-q",
-            "-u",
-            "-t",
-            "=gd/repo/shell/1:2",
-            "pane-border-status",
-        ] in commands
-        mock_sync.assert_called_once_with("rose-pine")
-
-    @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
-    @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
-    @patch("subprocess.run")
-    def test_leaves_restore_to_the_trap_while_a_client_is_attached(
-        self, mock_run, _mock_exists, mock_sync
-    ):
-        mock_run.return_value = self._completed("1\n")
-
-        cleanup_panel_attached_session("gd/repo/shell/1")
-
-        mock_run.assert_called_once()
-        mock_sync.assert_not_called()
-
-    @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
-    @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
-    @patch("subprocess.run")
-    def test_does_nothing_for_a_session_never_shown_in_a_panel(
-        self, mock_run, _mock_exists, mock_sync
-    ):
-        mock_run.side_effect = [self._completed("0\n"), self._completed("")]
-
-        cleanup_panel_attached_session("gd/repo/shell/1")
-
-        assert mock_run.call_count == 2
-        mock_sync.assert_not_called()
 
 
 class TestExactMatchPanelPaneCommand:
@@ -324,25 +191,12 @@ class TestExactMatchPanelPaneCommand:
         unquoted = has_session_part.strip("'\"")
         assert unquoted.startswith("=")
 
-    def test_temp_panel_kill_session_uses_equals(self):
-        """Shell-embedded kill-session in temp panel script must use ``=``.
-
-        Without ``=``, tmux's prefix matching would kill every session
-        whose name starts with the wrapper name — including all gd/
-        sessions. Belt-and-braces assertion.
-        """
-        from gitdirector.integrations.tmux.panels import _temp_panel_pane_command
-
-        cmd = _temp_panel_pane_command("gd/temp/panel/repo/shell/1", "gd/repo/shell/1")
-        assert f"kill-session -t {shlex.quote('=gd/temp/panel/repo/shell/1')}" in cmd
-        # All kill-session invocations in the embedded script must be exact.
-        for line in cmd.splitlines() + [cmd]:
-            if "kill-session -t" in line:
-                after_t = line.split("kill-session -t ", 1)[1].split()[0]
-                unquoted = after_t.strip("'\"")
-                assert unquoted.startswith("="), (
-                    f"shell kill-session target not exact-match: {after_t!r}"
-                )
+    def test_assigned_pane_views_the_session_through_an_exact_target(self):
+        script = shlex.split(_panel_pane_command("Dev", 2, "gd/repo/shell/1"))[2]
+        assert "new-session -t =gd/repo/shell/1 -s gd/view/dev-2-$$" in script
+        assert "set-option status off" in script
+        assert "set-option @gd_slot 2" in script
+        assert "set-option destroy-unattached on" in script
 
     def test_unassigned_pane_has_no_tmux_target(self):
         cmd = _panel_pane_command("Dev", 1, None)
@@ -351,7 +205,7 @@ class TestExactMatchPanelPaneCommand:
         assert "UNASSIGNED" not in cmd
         assert script.endswith("exit 0")
         assert "Panel: Dev" not in cmd
-        assert "Pane 1: unassigned" not in cmd
+        assert "1: empty" in script
 
     def test_unassigned_pane_exits_without_placeholder_process(self):
         cmd = _panel_pane_command("Dev", 1, None)
@@ -364,15 +218,6 @@ class TestExactMatchPanelPaneCommand:
 
     def test_assigned_pane_exits_without_placeholder_process(self):
         cmd = _panel_pane_command("Dev", 1, "gd/repo/shell/1")
-        script = shlex.split(cmd)[2]
-
-        assert "tail -f /dev/null" not in script
-        assert "read -r" not in script
-        assert "while :" not in script
-        assert script.endswith("exit 0")
-
-    def test_temp_panel_exits_without_placeholder_process(self):
-        cmd = tmux_panels._temp_panel_pane_command("gd/temp/panel/repo/shell/1", "gd/repo/shell/1")
         script = shlex.split(cmd)[2]
 
         assert "tail -f /dev/null" not in script
@@ -586,9 +431,10 @@ class TestExactMatchSourceCodeAudit:
                             )
                     elif isinstance(next_elt, ast.JoinedStr):
                         first_val = next_elt.values[0] if next_elt.values else None
+                        # Pane ids ("%3") are exact by construction.
                         if isinstance(first_val, ast.Constant) and not str(
                             first_val.value
-                        ).startswith("="):
+                        ).startswith(("=", "%")):
                             violations.append(
                                 f"{module.__name__}:{node.lineno}: f-string '-t' target doesn't start with '='"
                             )

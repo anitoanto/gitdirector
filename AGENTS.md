@@ -36,6 +36,9 @@ The test suite runs in randomized order. If a test fails, replay it with the
 seed pytest printed (`--randomly-seed=<seed>`) before assuming it is unrelated
 noise — see [DEV.md](DEV.md).
 
+Never run tmux experiments against the user's own tmux server: use
+`tmux -L <name>` or a private `TMUX_TMPDIR`, and kill that server afterwards.
+
 ## Git requires explicit permission
 
 Ask before any state-changing git operation: `add`, `commit`, `push`, `rebase`,
@@ -48,5 +51,5 @@ Read-only inspection (`status`, `diff`, `log`) needs no permission.
 ## Docs
 
 - [README.md](README.md) — overview, commands, configuration
-- [DEV.md](DEV.md) — dev workflow, test suite conventions, release
+- [DEV.md](DEV.md) — dev workflow, tests, how sessions and panels work, release
 - [SKILL.md](SKILL.md) — driving GitDirector headlessly from a shell

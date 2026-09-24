@@ -8,8 +8,7 @@
 - ``screens._shared`` — generic confirm and sort dialogs, plus the shared ANSI
   renderer
 
-This package re-exports the same public surface that the previous monolithic
-``screens`` module exposed, so existing imports keep working unchanged.
+The package re-exports every screen so callers can import them from one place.
 """
 
 from __future__ import annotations

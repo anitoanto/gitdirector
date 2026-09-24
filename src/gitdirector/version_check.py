@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -12,32 +11,12 @@ from urllib.request import urlopen
 
 from .storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
 
-try:
-    from packaging.version import InvalidVersion, Version
-except ImportError:  # pragma: no cover - optional dependency
-    InvalidVersion = ValueError
-    Version = None
-
 _PACKAGE_NAME = "gitdirector"
 # Shown when package metadata is absent, e.g. an uninstalled source checkout.
 UNKNOWN_VERSION = "unknown"
 _PYPI_JSON_URL = f"https://pypi.org/pypi/{_PACKAGE_NAME}/json"
 _VERSION_CACHE_TTL = timedelta(hours=6)
 _VERSION_CHECK_TIMEOUT_SECS = 1.0
-_VERSION_RE = re.compile(r"^v?(?P<release>\d+(?:\.\d+)*)(?P<suffix>.*)$", re.IGNORECASE)
-_SUFFIX_RANK = {
-    "dev": 0,
-    "a": 1,
-    "alpha": 1,
-    "b": 2,
-    "beta": 2,
-    "rc": 3,
-    "c": 3,
-    "": 4,
-    "post": 5,
-    "rev": 5,
-    "r": 5,
-}
 
 
 @dataclass(frozen=True)
@@ -102,30 +81,18 @@ def _fetch_latest_version() -> str | None:
     return latest_version.strip()
 
 
-def _fallback_version_key(version: str) -> tuple[tuple[int, ...], int, tuple[int, ...]]:
-    normalized = version.strip().lower()
-    match = _VERSION_RE.match(normalized)
-    if match is None:
-        return (0,), 0, ()
-
-    release = tuple(int(part) for part in match.group("release").split("."))
-    suffix = match.group("suffix").strip(".-+_").lower()
-    if not suffix:
-        return release, _SUFFIX_RANK[""], ()
-
-    tokens = re.findall(r"[a-z]+|\d+", suffix)
-    label = next((token for token in tokens if token.isalpha()), "")
-    numbers = tuple(int(token) for token in tokens if token.isdigit())
-    return release, _SUFFIX_RANK.get(label, 0), numbers
+def _release(version: str) -> tuple[int, ...] | None:
+    """``1.8.8`` as ``(1, 8, 8)``; ``None`` for anything that is not a plain release."""
+    parts = version.strip().split(".")
+    if not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
 
 
 def _is_version_newer(latest_version: str, current_version: str) -> bool:
-    if Version is not None:
-        try:
-            return Version(latest_version) > Version(current_version)
-        except InvalidVersion:
-            pass
-    return _fallback_version_key(latest_version) > _fallback_version_key(current_version)
+    # PyPI reports the latest plain release; anything else is never "newer".
+    latest, current = _release(latest_version), _release(current_version)
+    return latest is not None and current is not None and latest > current
 
 
 @lru_cache(maxsize=1)

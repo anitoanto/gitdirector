@@ -75,9 +75,9 @@ for module in (
     module.register(cli)
 
 
-def main():
+def main(prog_name: str | None = None):
     try:
-        cli()
+        cli(prog_name=prog_name)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         error_console.print(f"Error: {exc}")
         raise SystemExit(1) from exc

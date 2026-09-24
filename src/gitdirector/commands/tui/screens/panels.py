@@ -23,15 +23,12 @@ from ..panels import (
     resolve_panel_layout,
 )
 from ..terminal_caps import strip_unsupported_css as _safe_css
-from ._shared import ConfirmScreen, SortMenuScreen  # re-export for backward compat
 
 __all__ = [
     "AgentLoadingScreen",
-    "ConfirmScreen",  # re-exported for backward compat
     "CreatePanelScreen",
     "PanelActionMenuScreen",
     "RenamePanelScreen",
-    "SortMenuScreen",  # re-exported for backward compat
     "_render_grid_preview",
 ]
 

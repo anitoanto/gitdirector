@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-#: tmux session option an agent's hooks stamp with its current status. The
+#: tmux pane option an agent's hooks stamp with its current status. Pane
+#: scoped because a session shown in a panel is also reachable through a
+#: second, grouped session, and a session option set through ``$TMUX_PANE``
+#: lands on whichever of the two tmux picks. The
 #: value is one of :data:`AGENT_STATES`, optionally followed by a space and
 #: the epoch second of the report (``"running 1788714352"``) so the monitor
 #: knows when the agent last spoke even when the state did not change; unset
@@ -41,23 +44,23 @@ AGENT_STATES: frozenset[str] = frozenset(
 
 
 def agent_state_report_command(state: str | None, *, interrupts_unreported: bool = False) -> str:
-    """POSIX shell that stamps *state* and the time on the agent's tmux session.
+    """POSIX shell that stamps *state* and the time on the agent's tmux pane.
 
     ``None`` clears the options. The command never fails (an agent must not
     be blocked by a reporting hiccup) and only acts inside a tmux pane.
     """
     if state is None:
         actions = [
-            f'tmux set-option -u -t "$TMUX_PANE" {AGENT_STATE_OPTION}',
-            f'tmux set-option -u -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION}',
+            f'tmux set-option -p -u -t "$TMUX_PANE" {AGENT_STATE_OPTION}',
+            f'tmux set-option -p -u -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION}',
         ]
     else:
         if state not in AGENT_STATES:
             raise ValueError(f"unknown agent state: {state!r}")
-        actions = [f'tmux set-option -t "$TMUX_PANE" {AGENT_STATE_OPTION} "{state} $(date +%s)"']
+        actions = [f'tmux set-option -p -t "$TMUX_PANE" {AGENT_STATE_OPTION} "{state} $(date +%s)"']
         if interrupts_unreported:
             actions.append(
-                f'tmux set-option -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION} '
+                f'tmux set-option -p -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION} '
                 f"{AGENT_INTERRUPTS_UNREPORTED}"
             )
     body = "; ".join(f"{action} >/dev/null 2>&1" for action in actions)
@@ -86,8 +89,7 @@ def _claude_hook_settings() -> dict:
     against the pane (see ``reconcile_agent_report`` in the monitor).
     ``SubagentStop`` is deliberately not mapped: Claude Code's own helpers
     (the prompt suggestion it generates after a turn) fire it while the
-    session is idle. Event names Claude Code does not know are ignored, so
-    older versions simply run the subset they support.
+    session is idle.
 
     Hooks read their JSON payload from stdin; the shell fragments below only
     look for the substrings they need so they stay independent of key order

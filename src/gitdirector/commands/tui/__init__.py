@@ -13,12 +13,11 @@ from .constants import (
     resolve_table_palette,
 )
 from .panels import Panel, PanelStore
-from .screens import SortMenuScreen
+from .screens import ConfirmScreen, SortMenuScreen
 from .screens.diff import DiffReviewScreen
 from .screens.groups import GroupActionMenuScreen
 from .screens.panels import (
     AgentLoadingScreen,
-    ConfirmScreen,
     CreatePanelScreen,
     PanelActionMenuScreen,
     RenamePanelScreen,

@@ -124,6 +124,7 @@ class TestSendKeyToSession:
             capture_output=True,
             text=True,
             env=ANY,
+            cwd=ANY,
             timeout=ANY,
         )
 

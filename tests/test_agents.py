@@ -25,13 +25,13 @@ class TestAgentStateReportCommand:
     def test_sets_option_on_the_pane_session_and_never_fails(self):
         command = agent_state_report_command("waiting")
         assert command.startswith('[ -n "$TMUX_PANE" ] && ')
-        assert f'tmux set-option -t "$TMUX_PANE" {_stamps("waiting")}' in command
+        assert f'tmux set-option -p -t "$TMUX_PANE" {_stamps("waiting")}' in command
         assert command.endswith("; exit 0")
 
     def test_none_clears_both_options(self):
         command = agent_state_report_command(None)
-        assert f'tmux set-option -u -t "$TMUX_PANE" {AGENT_STATE_OPTION}' in command
-        assert f'tmux set-option -u -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION}' in command
+        assert f'tmux set-option -p -u -t "$TMUX_PANE" {AGENT_STATE_OPTION}' in command
+        assert f'tmux set-option -p -u -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION}' in command
 
     def test_interrupt_flag_is_stamped_alongside_the_state(self):
         command = agent_state_report_command("idle", interrupts_unreported=True)
@@ -95,7 +95,7 @@ class TestClaudeLaunchCommand:
         assert _stamps("idle") in command("StopFailure")
         assert _stamps("waiting") in command("Elicitation")
         assert _stamps("running") in command("ElicitationResult")
-        assert "set-option -u" in command("SessionEnd")
+        assert "set-option -p -u" in command("SessionEnd")
         # Asking the user a question is waiting; any other tool is work.
         pre_tool = command("PreToolUse")
         assert "AskUserQuestion" in pre_tool

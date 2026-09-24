@@ -5,10 +5,9 @@ description: Drive GitDirector headlessly from a shell — run long-lived comman
 
 # GitDirector for coding agents
 
-GitDirector runs commands in named, detached tmux sessions you can read from and
-write to later. That is the whole value: a normal shell call blocks until the
-command exits, so it cannot host a dev server or a watcher. A GitDirector
-session keeps running after your call returns.
+GitDirector runs commands in named, detached tmux sessions that keep running
+after your call returns, and that you can read from and write to later — which
+a normal shell call, blocking until the command exits, cannot do.
 
 ## When to use it
 
@@ -16,11 +15,10 @@ Use it **only** when the user has asked for GitDirector / `gd`, **and** the
 command is long-lived — dev server, build/file watcher, REPL, or an interactive
 AI agent.
 
-Do not use it for one-off commands. The session self-destructs the moment the
-command exits, taking its scrollback with it, so `make test` run this way is
-output you can never read. Run one-off commands in your normal shell.
+Not for one-off commands: the session closes the moment its command exits,
+taking the output with it. Run those in your normal shell.
 
-## The four commands
+## Commands
 
 ```bash
 # Start. Prints the session name to stdout and returns immediately.
@@ -47,9 +45,9 @@ Read-only inspection is also safe headlessly: `gitdirector list`, `status`,
   and is ambiguous when two tracked repos share one.
 - **Quote the command as one string.** It is passed to `sh -lc`, so
   `'echo "hi"'` is the safe pattern for embedded double quotes.
-- **Capture the session name** from stdout rather than guessing it. Names are
-  `gd/<repo>/shell/<N>`, where `N` is one above the highest running shell
-  session for that repo — it is not stable or predictable.
+- **Capture the session name** from stdout rather than guessing it. Names look
+  like `gd/my-repo_bavte/shell/3`: the repo, a short id of its path, the
+  purpose, and a sequence number that is not predictable.
 - **Stop processes with `--key C-c`.** Only kill the session if Ctrl-C fails or
   the user asks.
 
@@ -82,6 +80,5 @@ gitdirector gd-send "$SESSION" "continue and run the tests" --enter
 ```
 
 Sessions started from the console's agent menu are named after the agent
-instead (`gd/<repo>/claude/1`, `gd/<repo>/opencode/2`, ...). The console's
-Sessions tab (or `tmux list-sessions`) shows every live session name, and
-`gd-capture`/`gd-send` accept any of them.
+(`.../claude/1`, `.../opencode/2`). The Sessions tab shows every live session
+name, and `gd-capture`/`gd-send` accept any of them.

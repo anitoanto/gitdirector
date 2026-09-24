@@ -10,8 +10,8 @@ from textual.widgets import DataTable, Static
 
 from .constants import _DEFAULT_PANELS_SORT_COLUMN, _PANELS_SORT_COLUMN_NAMES
 from .panels import Panel, render_panel_layout_preview
+from .screens._shared import ConfirmScreen
 from .screens.panels import (
-    ConfirmScreen,
     CreatePanelScreen,
     PanelActionMenuScreen,
     RenamePanelScreen,

@@ -20,6 +20,7 @@ from gitdirector.integrations.tmux.monitor import (
     _AGENT_REPORT_STALE_SECS,
     _BELL_GRACE_SECS,
     _OUTPUT_GAP_SECS,
+    _PANE_LIST_NAMES,
     _SHELL_ACTIVITY_GRACE_SECS,
     _SHELL_COMMANDS,
     _SILENCE_THRESHOLD_SECS,
@@ -73,6 +74,7 @@ class TestLaunchCommandInTmuxSession:
             ],
             capture_output=True,
             env=ANY,
+            cwd=ANY,
             timeout=ANY,
         )
         # The agent command carries its own last-resort scrub, so a leak
@@ -450,26 +452,30 @@ def _pane_line(
     label="",
     description="",
     input_activity="0",
+    window_active="1",
+    pane_id=None,
 ) -> str:
-    return "\t".join(
-        [
-            session,
-            command,
-            dead,
-            pid,
-            bell,
-            active,
-            tty,
-            activity,
-            mouse,
-            alt,
-            agent,
-            interrupts,
-            label,
-            description,
-            input_activity,
-        ]
-    )
+    """One ``list-panes`` row, in the monitor's field order."""
+    values = {
+        "session": session,
+        "command": command,
+        "dead": dead,
+        "pid": pid,
+        "bell": bell,
+        "pane_active": active,
+        "window_active": window_active,
+        "pane_id": pane_id or f"%{pid}",
+        "tty": tty,
+        "activity": activity,
+        "mouse": mouse,
+        "alternate": alt,
+        "agent_state": agent,
+        "interrupts": interrupts,
+        "input_activity": input_activity,
+        "repo_label": label,
+        "description": description,
+    }
+    return "\t".join(values[name] for name in _PANE_LIST_NAMES)
 
 
 class TestListGdPanes:
@@ -591,17 +597,55 @@ class TestListGdPanes:
         assert panes["gd/b/opencode/1"].agent_interrupts_unreported is False
 
     @patch("subprocess.run")
-    def test_tolerates_older_tmux_without_trailing_fields(self, mock_run):
+    def test_tab_in_description_does_not_shift_fields(self, mock_run):
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="gd/alpha/shell/1\tzsh\t0\t101\t0\t1\n"
+            returncode=0,
+            stdout=_pane_line("gd/alpha/shell/1", description="left\tright", input_activity="7")
+            + "\n",
         )
 
         pane = _list_gd_panes()["gd/alpha/shell/1"]
 
-        assert pane.tty == ""
-        assert pane.activity == 0
-        assert pane.interactive_hint is False
-        assert pane.input_activity == 0
+        assert pane.description == "left\tright"
+        assert pane.input_activity == 7
+
+    @patch("subprocess.run")
+    def test_incomplete_rows_are_skipped(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="gd/alpha/shell/1\tzsh\t0\t101\t0\t1\n"
+        )
+
+        assert _list_gd_panes() == {}
+
+    @patch("subprocess.run")
+    def test_input_through_a_panel_view_counts_for_the_session(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    _pane_line("gd/alpha/shell/1", pane_id="%5", input_activity="100"),
+                    _pane_line("gd/view/main-1-42", pane_id="%5", input_activity="250"),
+                ]
+            )
+            + "\n",
+        )
+
+        assert _list_gd_panes()["gd/alpha/shell/1"].input_activity == 250
+
+    @patch("subprocess.run")
+    def test_active_pane_of_the_current_window_wins(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="\n".join(
+                [
+                    _pane_line("gd/alpha/shell/1", command="claude", pid="101"),
+                    _pane_line("gd/alpha/shell/1", command="zsh", pid="202", window_active="0"),
+                ]
+            )
+            + "\n",
+        )
+
+        assert _list_gd_panes()["gd/alpha/shell/1"].command == "claude"
 
 
 class TestParseAgentReport:

@@ -160,11 +160,8 @@ def _kill_running_git_process(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except (OSError, ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
         pass
 
 

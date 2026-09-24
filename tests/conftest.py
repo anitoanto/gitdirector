@@ -15,6 +15,16 @@ def _no_tmux_monitor():
 
 
 @pytest.fixture(autouse=True)
+def _no_launch_directory_reexec(monkeypatch):
+    """A re-exec would replace the test process itself."""
+    monkeypatch.setattr("gitdirector.launch_context.os.execve", _refuse_execve)
+
+
+def _refuse_execve(*_args, **_kwargs):
+    raise AssertionError("leave_launch_directory tried to re-exec during a test")
+
+
+@pytest.fixture(autouse=True)
 def _fixed_default_terminal(monkeypatch):
     """Keep the cached ``infocmp`` probe out of tests that count subprocess calls."""
     monkeypatch.setattr(

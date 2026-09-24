@@ -613,19 +613,6 @@ class PanelStore:
 
         sync_panel_tmux_config()
 
-    def _cleanup_inner_panel_sessions(self, session_names: list[str]) -> None:
-        if not session_names:
-            return
-        from ...integrations.tmux import cleanup_panel_attached_session
-
-        for session_name in session_names:
-            try:
-                cleanup_panel_attached_session(session_name)
-            except Exception:
-                logger.debug(
-                    "inner panel session cleanup failed for %s", session_name, exc_info=True
-                )
-
     @property
     def panels(self) -> list[Panel]:
         return list(self._panels)
@@ -667,12 +654,10 @@ class PanelStore:
     def delete(self, name: str) -> bool:
         for i, p in enumerate(self._panels):
             if p.name == name:
-                inner_sessions = [s for s in p.panes.values() if s]
                 if not self._kill_panel_sessions([name]):
                     return False
                 self._panels.pop(i)
                 self._save()
-                self._cleanup_inner_panel_sessions(inner_sessions)
                 self._sync_panel_tmux_config()
                 return True
         return False
@@ -697,15 +682,12 @@ class PanelStore:
                     return False
                 if old_session_name != new_session_name and _session_exists(new_session_name):
                     return False
-                inner_sessions = [session_name for session_name in p.panes.values() if session_name]
                 if old_session_name != new_session_name and not self._kill_panel_sessions(
                     [old_name]
                 ):
                     return False
                 p.name = new_name
                 self._save()
-                if old_session_name != new_session_name:
-                    self._cleanup_inner_panel_sessions(inner_sessions)
                 return True
         return False
 
@@ -722,14 +704,8 @@ class PanelStore:
             return False
 
         layout = resolve_panel_layout(layout_key, rows, cols)
-        old_inner_sessions = [session_name for session_name in panel.panes.values() if session_name]
         source_panes = panel.panes if panes is None else panes
         normalized_panes = self._normalize_panes(layout, source_panes)
-        inner_sessions = old_inner_sessions + [
-            session_name
-            for session_name in normalized_panes.values()
-            if session_name and session_name not in old_inner_sessions
-        ]
         if not self._kill_panel_sessions([name]):
             return False
         panel.rows = layout.rows
@@ -738,7 +714,6 @@ class PanelStore:
         panel.panes = normalized_panes
         panel.closed_panes = set()
         self._save()
-        self._cleanup_inner_panel_sessions(inner_sessions)
         return True
 
     def reload(self) -> None:

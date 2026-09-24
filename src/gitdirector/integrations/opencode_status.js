@@ -3,7 +3,7 @@
 // Loaded by OpenCode as a plugin (GitDirector passes its path through
 // OPENCODE_CONFIG_CONTENT when it launches OpenCode inside a tmux session).
 // It listens to OpenCode's event bus and stamps the session's status on the
-// tmux session it runs in, using the same option Claude Code's hooks use:
+// tmux pane it runs in, using the same option Claude Code's hooks use:
 //
 //   @gitdirector_agent_state = running | waiting | idle
 //
@@ -33,7 +33,7 @@ export const GitDirectorStatus = async ({ $ }) => {
         return;
       }
       try {
-        const result = await $`tmux set-option -t ${pane} ${OPTION} ${state}`.quiet().nothrow();
+        const result = await $`tmux set-option -p -t ${pane} ${OPTION} ${state}`.quiet().nothrow();
         if (result.exitCode === 0) {
           reported = state;
         }
