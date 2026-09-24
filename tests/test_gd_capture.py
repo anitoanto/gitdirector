@@ -178,6 +178,17 @@ class TestCapturePane:
         assert "-S" in args
         assert args[args.index("-S") + 1] == "-50"
 
+    def test_lines_returns_only_the_last_lines_above_blank_screen_rows(self, monkeypatch):
+        # -S -N also returns the whole visible screen, blank rows included.
+        monkeypatch.setattr(
+            "gitdirector.integrations.tmux.core._session_exists", MagicMock(return_value=True)
+        )
+        screen = "one\ntwo\nthree\n$ \n" + "\n" * 20
+        fake_run = MagicMock(return_value=MagicMock(returncode=0, stdout=screen))
+        monkeypatch.setattr("gitdirector.integrations.tmux.core.subprocess.run", fake_run)
+
+        assert capture_pane("gd/repo/c/1", lines=2) == "three\n$ \n"
+
     def test_full_passes_dash_for_full_history(self, monkeypatch):
         fake_exists = MagicMock(return_value=True)
         monkeypatch.setattr("gitdirector.integrations.tmux.core._session_exists", fake_exists)

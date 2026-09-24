@@ -114,8 +114,24 @@ class ConsolePanelsMixin:
             )
         return lambda panel: panel.name.lower()
 
+    def _live_session_names(self) -> set[str]:
+        """Live ``gd/*`` sessions, from the tracked list once it has loaded.
+
+        The status poll compares against the same set, so a panels table
+        built from it is not rebuilt again on the next tick.
+        """
+        if self._sessions_loaded:
+            return {entry["session_name"] for entry in self._sessions_entries}
+        from ...integrations.tmux import list_all_gd_sessions
+
+        try:
+            return {entry["session_name"] for entry in list_all_gd_sessions()}
+        except Exception:
+            logger.debug("Listing tmux sessions failed", exc_info=True)
+            return set()
+
     def _apply_panels_filter_and_sort(self, live_sessions: set[str] | None = None) -> None:
-        from ...integrations.tmux.core import _list_sessions, make_panel_session_name
+        from ...integrations.tmux.core import make_panel_session_name
 
         try:
             table = self.query_one("#panels-table", DataTable)
@@ -133,10 +149,7 @@ class ConsolePanelsMixin:
         panels = list(self._panels_entries)
         total = len(panels)
 
-        if live_sessions is None:
-            live_sessions = set(_list_sessions())
-        else:
-            live_sessions = set(live_sessions)
+        live_sessions = self._live_session_names() if live_sessions is None else set(live_sessions)
         self._panels_live_sessions = live_sessions
 
         if self._search_query:
@@ -162,7 +175,7 @@ class ConsolePanelsMixin:
                     _panel_row_cell(preview),
                     _panel_row_cell(panel.name),
                     _panel_row_cell(make_panel_session_name(panel.name)),
-                    _panel_row_cell(panel.layout_display_label),
+                    _panel_row_cell(panel.layout_label),
                     _panel_row_cell(panes_label),
                     _panel_row_cell(status_label),
                     height=_panel_row_height(panel, live_sessions, preview=preview),
@@ -178,7 +191,10 @@ class ConsolePanelsMixin:
                 preserved_row_index,
                 restore_focus=restore_focus,
             )
-        self._update_status(self._build_panels_loaded_status(len(panels), total))
+        # Repainting a hidden tab's table (a theme change, a removed
+        # session) must not take over the visible tab's status bar.
+        if self._active_tab == "panels":
+            self._update_status(self._build_panels_loaded_status(len(panels), total))
 
     def _build_panels_loaded_status(self, shown: int, total: int) -> str:
         if total == 0 and not self._search_query:
@@ -213,7 +229,14 @@ class ConsolePanelsMixin:
     def _load_panels(self) -> None:
         self._show_refresh_indicator()
         try:
-            self._panel_store.reload()
+            try:
+                self._panel_store.reload()
+            except ValueError as exc:
+                # Hand-edited into something unloadable: keep the last good
+                # panels, as a bad config.yaml does.
+                logger.warning("panels reload failed: %s", exc)
+                self._update_status(f"panels not reloaded: {exc}")
+                return
             try:
                 self.query_one("#panels-table", DataTable)
             except NoMatches:
@@ -264,7 +287,7 @@ class ConsolePanelsMixin:
             )
         elif action == "delete":
             self.push_screen(
-                ConfirmScreen(f"Delete panel '{panel_name}'?"),
+                ConfirmScreen(f"Delete panel '{escape(panel_name)}'?"),
                 callback=lambda confirmed: self._do_delete_panel(confirmed, panel_name),
             )
 

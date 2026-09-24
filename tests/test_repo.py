@@ -20,6 +20,9 @@ from gitdirector.repo import (
 
 from ._timeouts import SYNC_TIMEOUT
 
+DIFF_CONFIG = repo_mod._DIFF_CONFIG
+DIFF_OPTIONS = repo_mod._DIFF_OPTIONS
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1049,6 +1052,27 @@ class TestClassifyRemoteError:
     def test_no_match(self):
         assert _classify_remote_error("fatal: some other error") is None
 
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "git@github.com: Permission denied (publickey).",
+            "fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403",
+        ],
+    )
+    def test_remote_auth_failures_are_auth_errors(self, stderr):
+        assert _is_auth_error(stderr) is True
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "fatal: Unable to create '/r/.git/index.lock': Permission denied",
+            "warning: unable to access '/home/u/.config/git/ignore': Permission denied",
+        ],
+    )
+    def test_local_permission_errors_are_not_auth_errors(self, stderr):
+        assert _is_auth_error(stderr) is False
+        assert _classify_remote_error(stderr) is None
+
 
 # ---------------------------------------------------------------------------
 # _default_ssh_command
@@ -1225,7 +1249,7 @@ class TestGetStatusFetchErrorClassification:
             elif "show-ref" in cmd:
                 rc, out, err = 1, "", "unknown ref"
             elif "rev-list" in cmd:
-                rc, out, err = 0, "0\t0", ""
+                rc, out, err = 128, "", "fatal: ambiguous argument"
             elif "log" in cmd:
                 rc, out, err = 0, "2 hours ago\n1234", ""
             elif "ls-tree" in cmd:
@@ -1258,7 +1282,7 @@ class TestGetDiffAgainstHead:
     def test_success_returns_diff_and_untracked(self, fake_git_repo, mocker):
         diff_text = "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
         responses = {
-            ("diff", "HEAD", "--no-color"): (0, diff_text, ""),
+            (*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS): (0, diff_text, ""),
             ("ls-files", "--others", "--exclude-standard", "-z"): (
                 0,
                 "untracked.py\x00",
@@ -1293,18 +1317,22 @@ class TestGetDiffAgainstHead:
         assert ok is False
         assert "bad revision" in text
         assert untracked == []
-        assert calls == [("diff", "HEAD", "--no-color")]
+        assert calls == [(*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS)]
 
     def test_no_commits_retries_against_empty_tree(self, fake_git_repo, mocker):
         empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         calls = []
         responses = {
-            ("diff", "HEAD", "--no-color"): (
+            (*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS): (
                 128,
                 "",
                 "fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.",
             ),
-            ("diff", empty_tree, "--no-color"): (0, "diff --git a/a.py b/a.py\n+new\n", ""),
+            (*DIFF_CONFIG, "diff", empty_tree, *DIFF_OPTIONS): (
+                0,
+                "diff --git a/a.py b/a.py\n+new\n",
+                "",
+            ),
             ("ls-files", "--others", "--exclude-standard", "-z"): (0, "untracked.py\x00", ""),
         }
 
@@ -1319,9 +1347,9 @@ class TestGetDiffAgainstHead:
         assert "+new" in text
         assert untracked == ["untracked.py"]
         assert calls == [
-            ("diff", "HEAD", "--no-color"),
+            (*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS),
             ("hash-object", "-t", "tree", "--stdin"),
-            ("diff", empty_tree, "--no-color"),
+            (*DIFF_CONFIG, "diff", empty_tree, *DIFF_OPTIONS),
             ("ls-files", "--others", "--exclude-standard", "-z"),
         ]
 
@@ -1354,7 +1382,7 @@ class TestGetDiffAgainstHead:
     def test_truncates_diff_above_max_bytes(self, fake_git_repo, mocker):
         huge = "x" * (3 * 1024 * 1024)
         responses = {
-            ("diff", "HEAD", "--no-color"): (0, huge, ""),
+            (*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS): (0, huge, ""),
             ("ls-files", "--others", "--exclude-standard", "-z"): (0, "", ""),
         }
 
@@ -1370,7 +1398,7 @@ class TestGetDiffAgainstHead:
 
     def test_empty_diff_returns_empty_string(self, fake_git_repo, mocker):
         responses = {
-            ("diff", "HEAD", "--no-color"): (0, "", ""),
+            (*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS): (0, "", ""),
             ("ls-files", "--others", "--exclude-standard", "-z"): (0, "", ""),
         }
 

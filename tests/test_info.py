@@ -69,16 +69,6 @@ class TestCountTokens:
         with patch("gitdirector.info._get_encoder", return_value=_TestEncoder()):
             assert _count_tokens("before <|endoftext|> after") > 0
 
-    def test_falls_back_when_encode_ordinary_is_unavailable(self):
-        class LegacyEncoder:
-            def encode(self, text: str, disallowed_special=()):
-                assert text == "legacy text"
-                assert disallowed_special == ()
-                return [1, 2, 3]
-
-        with patch("gitdirector.info._get_encoder", return_value=LegacyEncoder()):
-            assert _count_tokens("legacy text") == 3
-
 
 # ---------------------------------------------------------------------------
 # _get_non_ignored_files — gitignore tests

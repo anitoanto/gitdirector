@@ -171,14 +171,6 @@ _SESSIONS_SORT_COLUMN_NAMES = {
 
 _DEFAULT_SESSIONS_SORT_COLUMN = 3
 
-# Column indexes for the Sessions tab. Kept here so the TUI mixins and
-# the action handlers can refer to the same source of truth.
-_SESSIONS_COL_STATUS = 0
-_SESSIONS_COL_PURPOSE = 1
-_SESSIONS_COL_REPO = 2
-_SESSIONS_COL_SESSION_NAME = 3
-_SESSIONS_COL_DESCRIPTION = 4
-
 _SESSION_STATUS_POLL_INTERVAL_SECS = 1
 _REPO_CACHE_TTL_SECS = 30 * 60
 

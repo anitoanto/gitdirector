@@ -18,11 +18,12 @@ fully unit-testable without booting Textual.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import PurePosixPath
 
 from pygments.lexer import Lexer
-from pygments.lexers import DiffLexer, get_lexer_by_name, guess_lexer_for_filename
+from pygments.lexers import get_lexer_by_name, guess_lexer_for_filename
 from pygments.style import Style
 from pygments.token import (
     Comment,
@@ -39,56 +40,12 @@ from pygments.token import (
 from pygments.util import ClassNotFound
 from rich.console import Group, RenderableType
 from rich.padding import Padding
-from rich.syntax import Syntax
+from rich.style import Style as RichStyle
+from rich.syntax import PygmentsSyntaxTheme
+from rich.text import Span
 from rich.text import Text as RichText
 
-
-class _DiffDelegatingLexer(Lexer):
-    """Lexer that keeps the diff lexer's line-type tags and runs the
-    file-specific lexer over context lines so we get both the coloured
-    +/- backgrounds from the diff tags *and* accurate code highlighting.
-
-    Pygments' built-in ``DelegatingLexer`` doesn't quite fit because the
-    diff lexer doesn't produce a ``delegate`` token; instead the entire
-    line is one token (``Generic.Inserted``/``Generic.Deleted``/``Text``).
-    Walking the diff tokens first and only re-lexing the plain ``Text``
-    parts with the file lexer is exactly what we need.
-    """
-
-    def __init__(self, file_lexer_name: str | None = None, **options) -> None:
-        super().__init__(**options)
-        self._diff = DiffLexer(**options)
-        self._file_lexer = None
-        if file_lexer_name:
-            try:
-                self._file_lexer = get_lexer_by_name(file_lexer_name, **options)
-            except ClassNotFound:
-                self._file_lexer = None
-
-    def get_tokens(self, code):
-        if self._file_lexer is None:
-            yield from self._diff.get_tokens(code)
-            return
-        for tok, val in self._diff.get_tokens(code):
-            if tok in (Generic.Heading, Generic.Subheading, Generic.Inserted, Generic.Deleted):
-                yield tok, val
-            elif tok is Whitespace:
-                # Pass plain whitespace through untouched so we don't add
-                # line breaks that the file lexer would otherwise inject.
-                if val:
-                    yield tok, val
-            else:
-                # The file-specific lexer tends to append a trailing
-                # newline to its output, which would create phantom blank
-                # lines in the rendered diff. Strip it before yielding.
-                for sub_tok, sub_val in self._file_lexer.get_tokens(val):
-                    if sub_val.endswith("\n"):
-                        stripped = sub_val.rstrip("\n")
-                        if stripped:
-                            yield sub_tok, stripped
-                    elif sub_val:
-                        yield sub_tok, sub_val
-
+from ...repo import DIFF_TRUNCATED_MARKER
 
 _STATUS_LABEL: dict[str, str] = {
     "M": "modified",
@@ -222,9 +179,6 @@ class ChangedFile:
     is_rename: bool = False
     old_path: str | None = None
     diff_text: str = ""
-    raw_untracked_text: str | None = None
-    old_line_count: int = 0
-    new_line_count: int = 0
     first_new_line: int | None = None
     last_new_line: int | None = None
 
@@ -254,17 +208,12 @@ class DiffBundle:
 
     files: list[ChangedFile] = field(default_factory=list)
     raw: str = ""
+    #: The diff hit the size cap, so later files are missing.
+    truncated: bool = False
 
 
-_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
-_NEW_FILE_RE = re.compile(r"^new file")
-_DELETED_FILE_RE = re.compile(r"^deleted file")
-_RENAME_FROM_RE = re.compile(r"^rename from (.+)$")
-_RENAME_TO_RE = re.compile(r"^rename to (.+)$")
-_COPY_FROM_RE = re.compile(r"^copy from (.+)$")
-_COPY_TO_RE = re.compile(r"^copy to (.+)$")
 _BINARY_RE = re.compile(r"^Binary files .* differ$")
-_HUNK_HEADER_RE = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@")
+_HUNK_HEADER_RE = re.compile(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
 _NO_NEWLINE_MARKER = r"\ No newline at end of file"
 
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
@@ -282,34 +231,79 @@ _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
 )
 
 
+def _closing_quote(text: str, start: int) -> int | None:
+    """Index of the quote closing the quoted token that opens at *start*."""
+    i = start + 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return i
+        i += 1
+    return None
+
+
+def _unquote_git_path(token: str) -> str:
+    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
+        return _unescape_git_path(token[1:-1])
+    return token
+
+
+def _strip_side_prefix(path: str, prefix: str) -> str:
+    return path[len(prefix) :] if path.startswith(prefix) else path
+
+
+def _split_header_tokens(rest: str) -> tuple[str, str] | None:
+    """Split a ``diff --git`` payload into its old and new path tokens.
+
+    git quotes each side on its own, so either, both, or neither may be
+    quoted. Two unquoted sides are split in the middle when they name the
+    same path, which is right even for a path containing `` b/``.
+    """
+    if rest.startswith('"'):
+        end = _closing_quote(rest, 0)
+        if end is None or rest[end + 1 : end + 2] != " ":
+            return None
+        return rest[: end + 1], rest[end + 2 :]
+    if rest.endswith('"'):
+        start = rest.find(' "')
+        if start == -1:
+            return None
+        return rest[:start], rest[start + 1 :]
+    middle = len(rest) // 2
+    if len(rest) % 2 and rest[middle] == " " and rest[2:middle] == rest[middle + 3 :]:
+        return rest[:middle], rest[middle + 1 :]
+    sep = rest.find(" b/")
+    if sep == -1:
+        return None
+    return rest[:sep], rest[sep + 1 :]
+
+
 def _parse_diff_git_paths(line: str) -> tuple[str | None, str | None]:
     """Extract the old and new paths from a ``diff --git`` header line.
 
-    Handles both the unquoted form (``a/foo b/bar``) and the quoted
-    form that git emits when paths contain characters outside its
-    safe set (``"a/f with\\ttab.txt" "b/f with\\ttab.txt"``). Returns
-    ``(None, None)`` when the line doesn't look like a header so the
-    caller can skip it.
+    Returns ``(None, None)`` when the line is not a well-formed header.
     """
-
     if not line.startswith("diff --git "):
         return None, None
-    rest = line[len("diff --git ") :]
-    if rest.startswith('"a/'):
-        # Quoted form: "<old>" "<new>" with both segments fully quoted.
-        # Find the boundary between the two quoted segments.
-        boundary = rest.find('" "b/')
-        if boundary == -1 or not rest.endswith('"'):
-            return None, None
-        old_raw = rest[3:boundary]
-        new_raw = rest[boundary + 5 : -1]  # skip 5 chars ("_""_b_/)
-    else:
-        if " b/" not in rest:
-            return None, None
-        sep = rest.index(" b/")
-        old_raw = rest[2:sep]
-        new_raw = rest[sep + 3 :]
-    return _unescape_git_path(old_raw), _unescape_git_path(new_raw)
+    tokens = _split_header_tokens(line[len("diff --git ") :])
+    if tokens is None:
+        return None, None
+    old_token, new_token = tokens
+    return (
+        _strip_side_prefix(_unquote_git_path(old_token), "a/"),
+        _strip_side_prefix(_unquote_git_path(new_token), "b/"),
+    )
+
+
+def _patch_line_path(value: str, prefix: str) -> str | None:
+    """Path from a ``---``/``+++`` value, or None for ``/dev/null``."""
+    # git appends a tab to a name containing a space.
+    value = value.rstrip("\t")
+    if value == "/dev/null":
+        return None
+    return _strip_side_prefix(_unquote_git_path(value), prefix)
 
 
 def _unescape_git_path(raw: str) -> str:
@@ -366,14 +360,6 @@ def is_image_file(path: str) -> bool:
     if "." not in name:
         return False
     return "." + name.rsplit(".", 1)[1] in _IMAGE_EXTENSIONS
-
-
-def _parse_hunk_start(header: str) -> tuple[int, int]:
-    """Return ``(old_start, new_start)`` from an ``@@`` hunk header."""
-    match = re.match(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@", header)
-    if not match:
-        return 0, 0
-    return int(match.group(1)), int(match.group(2))
 
 
 _PYGMENTS_LANG_OVERRIDES: dict[str, str] = {
@@ -445,105 +431,108 @@ def detect_language(path: str) -> str | None:
     if name in {"dockerfile", "makefile", "rakefile", "gemfile"}:
         return _PYGMENTS_LANG_OVERRIDES.get(name, name)
     try:
-        return guess_lexer_for_filename(name, "").name
-    except ClassNotFound:
+        return guess_lexer_for_filename(name, "").aliases[0]
+    except (ClassNotFound, IndexError):
         return None
 
 
 def parse_diff_files(diff_text: str) -> list[ChangedFile]:
     """Walk a unified ``git diff`` payload and return one ``ChangedFile`` per file."""
-    if not diff_text:
-        return []
-
     files: list[ChangedFile] = []
-    current: ChangedFile | None = None
-    current_lines: list[str] = []
-    # Mutable per-file tracking that doesn't fit on a frozen dataclass.
-    state: dict[str, int | None] = {
-        "old_running": 0,
-        "new_running": 0,
-        "first_new": None,
-        "last_new": None,
-    }
+    current: dict | None = None
+    lines: list[str] = []
 
-    def _flush() -> None:
-        nonlocal current, current_lines
+    def flush() -> None:
         if current is None:
             return
+        old_path = current["old_path"]
+        is_rename = old_path is not None and old_path != current["path"]
         files.append(
             ChangedFile(
-                path=current.path,
-                status=current.status,
-                additions=current.additions,
-                deletions=current.deletions,
-                is_binary=current.is_binary,
-                is_image=current.is_image,
-                is_rename=current.is_rename,
-                old_path=current.old_path,
-                diff_text="\n".join(current_lines).rstrip("\n"),
-                old_line_count=current.old_line_count,
-                new_line_count=current.new_line_count,
-                first_new_line=state["first_new"],
-                last_new_line=state["last_new"],
+                path=current["path"],
+                status=current["status"],
+                additions=current["additions"],
+                deletions=current["deletions"],
+                is_binary=current["is_binary"],
+                is_image=is_image_file(current["path"]),
+                is_rename=is_rename,
+                old_path=old_path if is_rename else None,
+                diff_text="\n".join(lines).rstrip("\n"),
+                first_new_line=current["first_new"],
+                last_new_line=current["last_new"],
             )
         )
-        current = None
-        current_lines = []
-        state.update({"old_running": 0, "new_running": 0, "first_new": None, "last_new": None})
 
     for raw_line in diff_text.splitlines():
         if raw_line.startswith("diff --git "):
-            _flush()
+            flush()
             old_name, new_name = _parse_diff_git_paths(raw_line)
             if old_name is None or new_name is None:
+                current = None
                 continue
-            is_rename = old_name != new_name
-            current = ChangedFile(
-                path=new_name,
-                status="M",
-                is_rename=is_rename,
-                is_image=is_image_file(new_name),
-                old_path=old_name if is_rename else None,
-            )
-            current_lines = [raw_line]
+            current = {
+                "path": new_name,
+                "old_path": old_name,
+                "status": "M",
+                "additions": 0,
+                "deletions": 0,
+                "is_binary": False,
+                "in_hunk": False,
+                "old_running": 0,
+                "new_running": 0,
+                "first_new": None,
+                "last_new": None,
+            }
+            lines = [raw_line]
             continue
         if current is None:
             continue
-        current_lines.append(raw_line)
-        if _NEW_FILE_RE.match(raw_line):
-            current = replace(current, status="A")
-        elif _DELETED_FILE_RE.match(raw_line):
-            current = replace(current, status="D")
-        elif (m := _RENAME_FROM_RE.match(raw_line)) and current.is_rename:
-            current = replace(current, status="R", old_path=m.group(1))
-        elif (m := _RENAME_TO_RE.match(raw_line)) and current.is_rename:
-            current = replace(current, status="R", old_path=current.old_path or m.group(1))
-        elif (m := _COPY_FROM_RE.match(raw_line)) and current.is_rename:
-            current = replace(current, status="C", old_path=m.group(1))
-        elif (m := _COPY_TO_RE.match(raw_line)) and current.is_rename:
-            current = replace(current, status="C", old_path=current.old_path or m.group(1))
+        lines.append(raw_line)
+
+        if current["in_hunk"] or raw_line.startswith("@@"):
+            match = _HUNK_HEADER_RE.match(raw_line)
+            if match:
+                current["in_hunk"] = True
+                current["old_running"] = int(match.group(1))
+                current["new_running"] = int(match.group(2))
+                if current["first_new"] is None:
+                    current["first_new"] = current["new_running"]
+                continue
+            marker = raw_line[:1]
+            if marker == "+":
+                current["additions"] += 1
+                current["last_new"] = current["new_running"]
+                current["new_running"] += 1
+            elif marker == "-":
+                current["deletions"] += 1
+                current["old_running"] += 1
+            elif marker == " ":
+                current["last_new"] = current["new_running"]
+                current["new_running"] += 1
+                current["old_running"] += 1
+            continue
+
+        if raw_line.startswith("new file"):
+            current["status"] = "A"
+        elif raw_line.startswith("deleted file"):
+            current["status"] = "D"
+        elif raw_line.startswith(("rename from ", "copy from ")):
+            verb, _, value = raw_line.partition(" from ")
+            current["status"] = "R" if verb == "rename" else "C"
+            current["old_path"] = _unquote_git_path(value)
+        elif raw_line.startswith(("rename to ", "copy to ")):
+            current["path"] = _unquote_git_path(raw_line.partition(" to ")[2])
+        elif raw_line.startswith("--- "):
+            old_path = _patch_line_path(raw_line[4:], "a/")
+            if old_path is not None:
+                current["old_path"] = old_path
+        elif raw_line.startswith("+++ "):
+            new_path = _patch_line_path(raw_line[4:], "b/")
+            if new_path is not None:
+                current["path"] = new_path
         elif _BINARY_RE.match(raw_line):
-            current = replace(current, is_binary=True)
-        elif _HUNK_HEADER_RE.match(raw_line):
-            old_start, new_start = _parse_hunk_start(raw_line)
-            state["old_running"] = old_start
-            state["new_running"] = new_start
-            if state["first_new"] is None:
-                state["first_new"] = new_start
-        elif raw_line.startswith("+") and not raw_line.startswith("+++"):
-            additions = current.additions + 1
-            current = replace(current, additions=additions)
-            running = state["new_running"]
-            if running:
-                state["new_running"] = running + 1
-                state["last_new"] = running
-        elif raw_line.startswith("-") and not raw_line.startswith("---"):
-            deletions = current.deletions + 1
-            current = replace(current, deletions=deletions)
-            old_running = state["old_running"]
-            if old_running:
-                state["old_running"] = old_running + 1
-    _flush()
+            current["is_binary"] = True
+    flush()
     return files
 
 
@@ -554,6 +543,10 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
     returns the text content of an untracked file, or ``None`` if the file
     cannot be read (binary, missing, too large).
     """
+    truncated = False
+    body, marker, _ = diff_text.rpartition(f"\n{DIFF_TRUNCATED_MARKER}\n")
+    if marker:
+        diff_text, truncated = body + "\n", True
     files = parse_diff_files(diff_text)
     for rel_path in untracked_paths:
         text = untracked_lookup(rel_path)
@@ -579,10 +572,9 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
                 additions=line_count,
                 is_image=is_image_file(rel_path),
                 diff_text=synthetic.rstrip("\n"),
-                raw_untracked_text=text,
             )
         )
-    return DiffBundle(files=files, raw=diff_text)
+    return DiffBundle(files=files, raw=diff_text, truncated=truncated)
 
 
 def _status_pill_text(status: str) -> RichText:
@@ -632,16 +624,12 @@ def render_file_diff(
     file: ChangedFile,
     *,
     width: int | None = None,
-    theme=GithubDarkStyle,
 ) -> RenderableType:
     """Build a richly-styled renderable for the right-hand panel.
 
-    The layout matches GitHub's diff view:
-
-    1. Coloured header bar with status pill, file path, line range, stats.
-    2. The hunk header (the ``@@`` lines) collapsed into a single chip.
-    3. The actual file lines (context, +, -) rendered with syntax
-       highlighting and a gutter showing the *real* file line number.
+    The layout matches GitHub's diff view: a header bar with status, path,
+    line range and stats, then each hunk's ``@@`` line followed by its
+    syntax-highlighted lines, with the old and new line numbers in the gutter.
     """
     pieces: list[RenderableType] = []
 
@@ -658,58 +646,124 @@ def render_file_diff(
         pieces.append(Padding(body, (1, 2)))
         return Group(*pieces)
 
-    body_text = file.diff_text
-
-    # Split the diff text into:
-    #   - header_lines: the diff --git / index / --- / +++ / new file mode /
-    #     rename from / rename to / binary preamble
-    #   - hunk_chips:   the @@ lines (rendered as small blue chips)
-    #   - body_lines:   the actual file content (context, +, -)
-    header_lines, hunk_chips, body_lines = _split_diff_for_render(body_text)
-
-    if header_lines:
-        pieces.append(_render_diff_meta_lines(header_lines))
-    if hunk_chips:
-        pieces.append(_render_hunk_chips(hunk_chips))
-    if body_lines:
-        pieces.append(
-            _render_file_body(
-                body_lines,
-                file=file,
-                width=width,
-                theme=theme,
-            )
-        )
-
+    meta_lines, hunks = _split_diff_hunks(file.diff_text)
+    if meta_lines:
+        pieces.append(_render_diff_meta_lines(meta_lines))
+    if hunks:
+        pieces.append(_render_hunks(hunks, lexer=_file_lexer(file.path), width=width))
     return Group(*pieces)
 
 
-def _split_diff_for_render(diff_text: str) -> tuple[list[str], list[str], list[str]]:
-    """Split a diff payload into metadata, hunk headers, and file-body lines.
-
-    The metadata section is everything before the first hunk header that is
-    not a hunk header itself (the ``diff --git`` line, the ``index`` line,
-    ``---``/``+++``, ``new file mode``/``rename from``/etc.). The body
-    section is just the ``+``/``-``/context lines, which the Syntax
-    renderer will then number with the *real* file line numbers via
-    ``start_line``.
-    """
-    header_lines: list[str] = []
-    hunk_chips: list[str] = []
-    body_lines: list[str] = []
-    in_hunk = False
+def _split_diff_hunks(diff_text: str) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """Split a file's diff into its pre-hunk metadata and ``(header, lines)`` hunks."""
+    meta_lines: list[str] = []
+    hunks: list[tuple[str, list[str]]] = []
     for raw_line in diff_text.splitlines():
-        if raw_line == _NO_NEWLINE_MARKER:
-            continue
         if _HUNK_HEADER_RE.match(raw_line):
-            hunk_chips.append(raw_line)
-            in_hunk = True
-            continue
-        if in_hunk:
-            body_lines.append(raw_line)
-        else:
-            header_lines.append(raw_line)
-    return header_lines, hunk_chips, body_lines
+            hunks.append((raw_line, []))
+        elif not hunks:
+            meta_lines.append(raw_line)
+        elif not raw_line.startswith("\\"):
+            hunks[-1][1].append(raw_line)
+    return meta_lines, hunks
+
+
+def _hunk_number_width(hunks: list[tuple[str, list[str]]]) -> int:
+    highest = 1
+    for header, lines in hunks:
+        match = _HUNK_HEADER_RE.match(header)
+        if match:
+            span = len(lines)
+            highest = max(highest, int(match.group(1)) + span, int(match.group(2)) + span)
+    return len(str(highest))
+
+
+def diff_gutter_width(file: ChangedFile) -> int:
+    """Cells the line-number gutter and change marker take before the code."""
+    _, hunks = _split_diff_hunks(file.diff_text)
+    return 2 * _hunk_number_width(hunks) + 4
+
+
+def _file_lexer(path: str) -> Lexer | None:
+    name = detect_language(path)
+    if not name:
+        return None
+    try:
+        # stripnl would drop leading blank lines and misalign every row.
+        return get_lexer_by_name(name, stripnl=False, ensurenl=True)
+    except ClassNotFound:
+        return None
+
+
+_SYNTAX_THEME = PygmentsSyntaxTheme(GithubDarkStyle)
+
+
+@lru_cache(maxsize=None)
+def _token_style(token_type) -> RichStyle:
+    # Foreground only: the row decides the background.
+    style = _SYNTAX_THEME.get_style_for_token(token_type)
+    return RichStyle(color=style.color, bold=style.bold, italic=style.italic)
+
+
+def _line_spans(lines: list[str], lexer: Lexer | None) -> list[list[Span]]:
+    """Syntax spans per line, lexing *lines* as one block so multi-line
+    constructs (docstrings, block comments) highlight correctly."""
+    spans: list[list[Span]] = [[] for _ in lines]
+    if lexer is None:
+        return spans
+    line_no = col = 0
+    for token_type, value in lexer.get_tokens("\n".join(lines)):
+        style = _token_style(token_type)
+        for index, part in enumerate(value.split("\n")):
+            if index:
+                line_no += 1
+                col = 0
+            if part and line_no < len(spans):
+                spans[line_no].append(Span(col, col + len(part), style))
+            col += len(part)
+    return spans
+
+
+_LINE_BACKGROUND = {"+": GITHUB_DARK_ADDED_BG, "-": GITHUB_DARK_REMOVED_BG}
+_MARKER_STYLE = {"+": "bold #3fb950", "-": "bold #f85149"}
+
+
+def _render_hunks(
+    hunks: list[tuple[str, list[str]]], *, lexer: Lexer | None, width: int | None
+) -> RichText:
+    """Render hunks with a gutter of real old/new line numbers."""
+    number_width = _hunk_number_width(hunks)
+    gutter_width = 2 * number_width + 4
+    blank = " " * number_width
+    gutter_style = RichStyle(color=GITHUB_DARK_GUTTER)
+    rows: list[RichText] = []
+    for header, lines in hunks:
+        match = _HUNK_HEADER_RE.match(header)
+        old_no, new_no = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+        rows.append(RichText(f" {header} ", style=f"bold {GITHUB_DARK_HEADING} on #1f2d44"))
+        code = [line[1:].expandtabs(4) for line in lines]
+        for line, content, spans in zip(lines, code, _line_spans(code, lexer)):
+            marker = line[:1] if line[:1] in "+-" else " "
+            old_label = new_label = blank
+            if marker != "+":
+                old_label = f"{old_no:>{number_width}}"
+                old_no += 1
+            if marker != "-":
+                new_label = f"{new_no:>{number_width}}"
+                new_no += 1
+            prefix = f"{old_label} {new_label} {marker} "
+            background = _LINE_BACKGROUND.get(marker)
+            plain = prefix + content
+            if background and width:
+                plain = plain.ljust(width + gutter_width)
+            row_spans = [Span(0, gutter_width - 2, gutter_style)]
+            if marker in _MARKER_STYLE:
+                row_spans.append(Span(gutter_width - 2, gutter_width - 1, _MARKER_STYLE[marker]))
+            row_spans += [span.move(gutter_width) for span in spans]
+            rows.append(
+                RichText(plain, style=f"on {background}" if background else "", spans=row_spans)
+            )
+    return RichText("\n", no_wrap=True, overflow="crop").join(rows)
 
 
 def _render_diff_meta_lines(lines: list[str]) -> RenderableType:
@@ -726,74 +780,6 @@ def _render_diff_meta_lines(lines: list[str]) -> RenderableType:
     return Padding(text, (0, 2), style="on #161b22")
 
 
-def _render_hunk_chips(hunk_lines: list[str]) -> RenderableType:
-    """Render the ``@@ ... @@`` lines as small blue chips (one per hunk)."""
-    text = RichText()
-    for i, line in enumerate(hunk_lines):
-        if i:
-            text.append("\n")
-        text.append("  ", style="dim")
-        text.append(line, style=f"bold {GITHUB_DARK_HEADING} on #1f2d44")
-    return Padding(text, (0, 2), style="on #161b22")
-
-
-def _render_file_body(
-    body_lines: list[str],
-    *,
-    file: ChangedFile,
-    width: int | None,
-    theme: Style,
-) -> RenderableType:
-    """Render the file-content portion of the diff with proper line numbers."""
-    body_text = "\n".join(body_lines)
-    lexer_name = detect_language(file.path)
-    try:
-        if lexer_name:
-            lexer: str | Lexer = _DiffDelegatingLexer(file_lexer_name=lexer_name)
-        else:
-            lexer = DiffLexer()
-    except Exception:
-        lexer = "diff"
-    start_line = file.first_new_line or 1
-    # Tint the whole content area the same family as the file's
-    # status so new/deleted files read as one cohesive block instead
-    # of a dark strip with floating coloured chips. Rich's Syntax
-    # applies ``background_color`` *after* the per-token bgs, which
-    # means the per-line ``+``/``-`` bgs from the Pygments style are
-    # clobbered when we do this; we accept that trade-off because the
-    # whole-panel tint is the more important signal. The line-number
-    # gutter, trailing whitespace, and the empty space below the
-    # content all pick up the panel bg.
-    if file.status in ("A", "?"):
-        syntax_bg = GITHUB_DARK_ADDED_PANEL_BG
-    elif file.status == "D":
-        syntax_bg = GITHUB_DARK_REMOVED_PANEL_BG
-    else:
-        syntax_bg = None
-    try:
-        syntax: Syntax = Syntax(
-            body_text or " ",
-            lexer,
-            theme=theme,
-            line_numbers=True,
-            word_wrap=False,
-            indent_guides=False,
-            code_width=width,
-            start_line=start_line,
-            background_color=syntax_bg,
-        )
-    except Exception:
-        syntax = Syntax(
-            body_text or " ",
-            DiffLexer(),
-            theme=theme,
-            line_numbers=True,
-            start_line=start_line,
-            background_color=syntax_bg,
-        )
-    return syntax
-
-
 def _render_file_header(file: ChangedFile) -> RenderableType:
     """Coloured header bar for a file diff (GitHub's file header style)."""
     bg = STATUS_PILL_BG.get(file.status, "#21262d")
@@ -801,17 +787,8 @@ def _render_file_header(file: ChangedFile) -> RenderableType:
     text.append_text(_status_pill_text(file.status))
     text.append("  ")
     text.append(file.display_path, style="bold white")
-    if file.first_new_line is not None and file.last_new_line is not None:
-        if file.status == "A":
-            text.append(
-                f"  L{file.first_new_line}-{file.last_new_line}",
-                style="dim",
-            )
-        elif file.status != "D":
-            text.append(
-                f"  L{file.first_new_line}-{file.last_new_line}",
-                style="dim",
-            )
+    if file.status != "D" and file.first_new_line is not None and file.last_new_line is not None:
+        text.append(f"  L{file.first_new_line}-{file.last_new_line}", style="dim")
     if file.additions or file.deletions:
         text.append("   ")
         text.append(f"+{file.additions}", style="bold #3fb950")
@@ -881,6 +858,7 @@ __all__ = [
     "STATUS_PILL_FG",
     "build_diff_bundle",
     "detect_language",
+    "diff_gutter_width",
     "format_status_badge",
     "parse_diff_files",
     "render_change_summary",

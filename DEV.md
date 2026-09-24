@@ -139,7 +139,8 @@ cpu          the process tree burned >= 0.5 s of CPU within the last 3 s
              (a lone housekeeping burst from an idle agent does not count)
 interactive  the pane's tty is in raw mode (the program reads keystrokes);
              tmux's mouse/alternate-screen flags are the fallback
-bell         tmux bell flag rose, or a control-mode %bell event arrived;
+bell         tmux's window bell flag rose (tmux only raises it while no
+             client is attached, so the monitor never attaches one);
              cleared by a real content change >= 1 s later or on attach
 
 if pane is dead:                                        idle

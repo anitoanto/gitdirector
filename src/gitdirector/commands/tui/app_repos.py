@@ -233,6 +233,9 @@ class ConsoleReposMixin:
         finally:
             self._repos_refreshing = False
             safe_call(self._hide_refresh_indicator)
+            if self._repos_refresh_pending and not shutdown_requested():
+                self._repos_refresh_pending = False
+                safe_call(self._refresh_repos, show_loading=True)
 
     def _repo_cache_expired(self) -> bool:
         updated_at = self._repos_cache_updated_at
@@ -254,10 +257,14 @@ class ConsoleReposMixin:
         return True
 
     def _refresh_repos(self, *, show_loading: bool = False) -> None:
-        if self._reload_config_if_changed():
-            show_loading = True
+        config_changed = self._reload_config_if_changed()
         if self._repos_refreshing:
+            # The running load read the repository list before this change;
+            # run again once it finishes rather than dropping the change.
+            self._repos_refresh_pending = self._repos_refresh_pending or config_changed
             return
+        if config_changed:
+            show_loading = True
         self._repos_refreshing = True
         if show_loading:
             self._results = {}
@@ -265,29 +272,8 @@ class ConsoleReposMixin:
         self._load_repos()
 
     def _populate_initial_rows(self) -> None:
-        table = self.query_one("#repo-table", DataTable)
-        no_msg = self.query_one("#no-repos-message", Static)
-        self._apply_repo_table_loading_widths(table)
-        self._set_table_empty_state(table, no_msg, is_empty=False)
-        preserved_row_key = None
-        preserved_row_index = None
-        restore_focus = False
-        if self._resume_selection_tab != "repos":
-            preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
-                table
-            )
-        table.clear()
-        self._render_repo_path_rows(table, self._repo_paths)
-
-        if self._resume_selection_tab == "repos":
-            self._restore_resume_selection("repos")
-        else:
-            self._restore_table_selection(
-                table,
-                preserved_row_key,
-                preserved_row_index,
-                restore_focus=restore_focus,
-            )
+        """Paint every configured repository, loaded or still loading."""
+        self._apply_filter_and_sort(update_status=False)
 
     def _update_row(self, info: RepositoryInfo) -> None:
         row_key = str(info.path)
@@ -413,50 +399,36 @@ class ConsoleReposMixin:
             key=str(info.path),
         )
 
-    def _add_repo_path_row(self, table: DataTable, path: Path, *, grouped: bool) -> None:
-        info = self._results.get(str(path))
-        if info is None:
-            self._add_placeholder_repo_row(table, path, grouped=grouped)
-            return
-        self._add_repo_info_row(table, info, grouped=grouped)
+    def _sorted_repo_infos(
+        self, infos: list[RepositoryInfo], loading: set[Path]
+    ) -> list[RepositoryInfo]:
+        """Sort loaded repositories; ones still loading follow, by name."""
+        loaded = [info for info in infos if info.path not in loading]
+        loaded.sort(key=self._sort_key_func(), reverse=self._sort_reverse)
+        pending = sorted(
+            (info for info in infos if info.path in loading), key=lambda info: info.name.lower()
+        )
+        return loaded + pending
 
-    def _render_repo_path_rows(self, table: DataTable, paths: list[Path]) -> None:
-        path_set = set(paths)
-        grouped_paths: set[Path] = set()
-        shown_repo_count = 0
-        shown_group_count = 0
-
-        for group in self._groups_entries:
-            group_paths = [path for path in group.repositories if path in path_set]
-            if not group_paths:
-                continue
-            shown_group_count += 1
-            shown_repo_count += len(group_paths)
-            grouped_paths.update(group_paths)
-            self._add_repo_group_row(table, group)
-            if self._repo_group_is_collapsed(group):
-                continue
-            for path in sorted(group_paths, key=lambda item: item.name.lower()):
-                self._add_repo_path_row(table, path, grouped=True)
-
-        ungrouped_paths = [path for path in paths if path not in grouped_paths]
-        shown_repo_count += len(ungrouped_paths)
-        for path in sorted(ungrouped_paths, key=lambda item: item.name.lower()):
-            self._add_repo_path_row(table, path, grouped=False)
-
-        self._visible_repo_count = shown_repo_count
-        self._visible_group_count = shown_group_count
+    def _add_repo_row(
+        self, table: DataTable, info: RepositoryInfo, loading: set[Path], *, grouped: bool
+    ) -> None:
+        if info.path in loading:
+            self._add_placeholder_repo_row(table, info.path, grouped=grouped)
+        else:
+            self._add_repo_info_row(table, info, grouped=grouped)
 
     def _render_repo_info_rows(
         self,
         table: DataTable,
         infos: list[RepositoryInfo],
+        loading: set[Path] | None = None,
     ) -> None:
+        loading = loading or set()
         infos_by_path = {info.path: info for info in infos}
         grouped_paths: set[Path] = set()
         shown_repo_count = 0
         shown_group_count = 0
-        key_func = self._sort_key_func()
 
         for group in self._groups_entries:
             group_infos = [
@@ -470,20 +442,33 @@ class ConsoleReposMixin:
             self._add_repo_group_row(table, group)
             if self._repo_group_is_collapsed(group):
                 continue
-            group_infos.sort(key=key_func, reverse=self._sort_reverse)
-            for info in group_infos:
-                self._add_repo_info_row(table, info, grouped=True)
+            for info in self._sorted_repo_infos(group_infos, loading):
+                self._add_repo_row(table, info, loading, grouped=True)
 
         ungrouped_infos = [info for info in infos if info.path not in grouped_paths]
         shown_repo_count += len(ungrouped_infos)
-        ungrouped_infos.sort(key=key_func, reverse=self._sort_reverse)
-        for info in ungrouped_infos:
-            self._add_repo_info_row(table, info, grouped=False)
+        for info in self._sorted_repo_infos(ungrouped_infos, loading):
+            self._add_repo_row(table, info, loading, grouped=False)
 
         self._visible_repo_count = shown_repo_count
         self._visible_group_count = shown_group_count
 
-    def _apply_filter_and_sort(self) -> None:
+    def _repo_row_infos(self) -> tuple[list[RepositoryInfo], set[Path]]:
+        """Every configured repository's info, with a placeholder for each one
+        still loading, and the set of those placeholders' paths."""
+        if not self._repo_paths:
+            return list(self._results.values()), set()
+        infos: list[RepositoryInfo] = []
+        loading: set[Path] = set()
+        for path in self._repo_paths:
+            info = self._results.get(str(path))
+            if info is None:
+                info = RepositoryInfo(path, path.name, RepoStatus.UNKNOWN)
+                loading.add(path)
+            infos.append(info)
+        return infos, loading
+
+    def _apply_filter_and_sort(self, *, update_status: bool = True) -> None:
         table = self.query_one("#repo-table", DataTable)
         no_msg = self.query_one("#no-repos-message", Static)
         self._apply_repo_table_loading_widths(table)
@@ -494,19 +479,18 @@ class ConsoleReposMixin:
             preserved_row_key, preserved_row_index, restore_focus = self._capture_table_selection(
                 table
             )
-        table.clear()
 
-        infos = list(self._results.values())
+        infos, loading = self._repo_row_infos()
         total = len(infos)
         infos = self._filter_repo_infos_for_search(infos)
-        is_empty = total == 0 and not self._repo_paths and not self._search_query
+        is_empty = total == 0 and not self._search_query
         self._set_table_empty_state(table, no_msg, is_empty=is_empty)
         table.clear()
         if is_empty:
             self._visible_repo_count = 0
             self._visible_group_count = 0
         else:
-            self._render_repo_info_rows(table, infos)
+            self._render_repo_info_rows(table, infos, loading)
 
         if self._resume_selection_tab == "repos":
             self._restore_resume_selection("repos")
@@ -517,7 +501,8 @@ class ConsoleReposMixin:
                 preserved_row_index,
                 restore_focus=restore_focus,
             )
-        self._update_status(self._build_loaded_status(len(infos), total))
+        if update_status and self._active_tab == "repos":
+            self._update_status(self._build_loaded_status(len(infos), total))
 
     def _apply_repo_table_loading_widths(self, table: DataTable) -> None:
         col_keys = getattr(self, "_col_keys", None)
@@ -600,10 +585,7 @@ class ConsoleReposMixin:
 
     def _rerender_repo_rows(self) -> None:
         """Repaint the repositories table from the current state."""
-        if self._search_query or len(self._results) >= len(self._repo_paths):
-            self._apply_filter_and_sort()
-        else:
-            self._populate_initial_rows()
+        self._apply_filter_and_sort()
 
     def action_refresh(self) -> None:
         if self._active_tab == "sessions":

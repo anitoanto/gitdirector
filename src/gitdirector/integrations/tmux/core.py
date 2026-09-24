@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import sys
 from base64 import b32encode
+from collections.abc import Collection
+from functools import lru_cache
 from pathlib import Path
 
 from ...config import Config
@@ -21,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 _REPO_ID_LENGTH = 5
 _SESSION_LIST_SEPARATOR = "\t"
-_LAST_SYNC_CONTENT: dict[Path, str] = {}
 _TMUX_TERMINAL_NAME = "tmux-256color"
 _TMUX_TERMINAL_FALLBACK = "screen-256color"
 _TMUX_TRUECOLOR_FEATURES = "*:RGB"
@@ -47,8 +48,6 @@ _TMUX_AGENT_TRUECOLOR_OPT_OUTS = {
 }
 _TMUX_COLOR_ENV = {**_TMUX_STANDARD_COLOR_ENV, **_TMUX_AGENT_TRUECOLOR_OPT_OUTS}
 _TMUX_CHILD_ENV = {"TERM": _TMUX_TERMINAL_NAME, **_TMUX_COLOR_ENV}
-# Set once per process by :func:`_ensure_clean_tmux_server`.
-_TMUX_SERVER_ENVIRONMENT_PREPARED = False
 
 # Wall-clock cap for a single tmux/ps invocation.
 #
@@ -161,6 +160,19 @@ def _run_tmux(
     return result
 
 
+def _chain_tmux_commands(commands: list[list[str]]) -> list[str]:
+    """Join several tmux commands into one invocation's arguments.
+
+    No argument may end in ``;``: tmux would read it as a separator.
+    """
+    args: list[str] = []
+    for command in commands:
+        if args:
+            args.append(";")
+        args.extend(command)
+    return args
+
+
 def _sanitize_repo_name(name: str) -> str:
     """Sanitize a repository name for use in tmux session names.
 
@@ -269,6 +281,12 @@ def _protect_session(session_name: str) -> None:
     _run_tmux(["set-option", "-t", f"={session_name}:", "destroy-unattached", "off"], check=True)
 
 
+# gitdirector creates its own sessions with one window, which is window 0
+# only under the default base-index; "^" names the lowest window whatever
+# the user's tmux.conf sets.
+_FIRST_WINDOW = "^"
+
+
 def _active_pane_target(session_name: str) -> str:
     """Return the exact-match tmux target for the session's active pane."""
     return f"={session_name}:"
@@ -311,29 +329,6 @@ def _tmux_new_session_environment_args() -> list[str]:
     return args
 
 
-def _ensure_clean_tmux_server() -> None:
-    """Start the tmux server from a sanitized environment, once per process.
-
-    Only has an effect when no server is running: tmux snapshots its
-    global environment from whichever client starts it, and that snapshot
-    is inherited by every pane created for the rest of the server's life.
-    Starting it ourselves means the snapshot is clean from birth.
-
-    An already-running server is deliberately left alone -- it may be the
-    user's own, and rewriting its global environment would reach into
-    sessions gitdirector does not manage. :func:`_scrub_session_environment`
-    covers that case at session scope instead.
-    """
-    global _TMUX_SERVER_ENVIRONMENT_PREPARED
-    if _TMUX_SERVER_ENVIRONMENT_PREPARED:
-        return
-    _TMUX_SERVER_ENVIRONMENT_PREPARED = True
-    try:
-        _run_tmux(["start-server"])
-    except TmuxError:
-        logger.debug("tmux start-server failed while preparing the server", exc_info=True)
-
-
 def _tmux_global_environment_names() -> tuple[str, ...]:
     """Variable names currently in the tmux server's global environment."""
     result = _run_tmux(["show-environment", "-g"], text=True)
@@ -371,11 +366,7 @@ def _scrub_session_environment(session_name: str) -> tuple[str, ...]:
     if not names:
         return ()
     target = _session_option_target(session_name)
-    args: list[str] = []
-    for name in names:
-        if args:
-            args.append(";")
-        args.extend(["set-environment", "-r", "-t", target, name])
+    args = _chain_tmux_commands([["set-environment", "-r", "-t", target, name] for name in names])
     result = _run_tmux(args)
     if isinstance(result.returncode, int) and result.returncode != 0:
         raise TmuxError(
@@ -444,20 +435,27 @@ def _tmux_color_environment_config(quoted_session: str) -> list[str]:
     return lines
 
 
+@lru_cache(maxsize=1)
+def _default_terminal() -> str:
+    """``tmux-256color`` where this machine has its terminfo entry, else the
+    universally available ``screen-256color``."""
+    try:
+        probe = subprocess.run(
+            ["infocmp", _TMUX_TERMINAL_NAME],
+            capture_output=True,
+            timeout=TMUX_COMMAND_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _TMUX_TERMINAL_FALLBACK
+    return _TMUX_TERMINAL_NAME if probe.returncode == 0 else _TMUX_TERMINAL_FALLBACK
+
+
 def _tmux_terminal_capability_config(quoted_session: str) -> list[str]:
-    tmux_term = shlex.quote(_TMUX_TERMINAL_NAME)
-    fallback_term = shlex.quote(_TMUX_TERMINAL_FALLBACK)
-    terminfo_check = shlex.quote(f"infocmp {_TMUX_TERMINAL_NAME} >/dev/null 2>&1")
-    default_truecolor = shlex.quote(
-        f"set-option -t {quoted_session} default-terminal {tmux_term}; "
-        f"set-environment -t {quoted_session} TERM {tmux_term}"
-    )
-    default_fallback = shlex.quote(
-        f"set-option -t {quoted_session} default-terminal {fallback_term}; "
-        f"set-environment -t {quoted_session} TERM {fallback_term}"
-    )
+    term = shlex.quote(_default_terminal())
     return [
-        f"if-shell {terminfo_check} {default_truecolor} {default_fallback}",
+        f"set-option -t {quoted_session} default-terminal {term}",
+        f"set-environment -t {quoted_session} TERM {term}",
         f"set-option -gq {shlex.quote(f'terminal-features[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_FEATURES)}",
         f"set-option -gq {shlex.quote(f'terminal-overrides[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_OVERRIDES)}",
         *_tmux_color_environment_config(quoted_session),
@@ -570,7 +568,6 @@ def create_tmux_session(
     if not path.is_dir():
         raise TmuxError(f"repository path is not a directory: {path}")
 
-    _ensure_clean_tmux_server()
     sessions = _list_sessions()
     environment_args = _tmux_new_session_environment_args()
     max_attempts = 5
@@ -777,7 +774,16 @@ def attach_tmux_session(
         _ensure_panel_resize_tracking(target_session)
         reflow_panel_tmux_session(target_session)
     if os.environ.get("TMUX"):
-        _run_tmux(["switch-client", "-t", f"={target_session}"], check=True, capture_output=False)
+        # A successful switch leaves the wrapper to close itself when its
+        # inner attach ends; only a failed one must not leak it.
+        try:
+            _run_tmux(
+                ["switch-client", "-t", f"={target_session}"], check=True, capture_output=False
+            )
+        except BaseException:
+            if temp_panel_session_name is not None:
+                cleanup_temp_panel_tmux_session(temp_panel_session_name)
+            raise
         return False
     try:
         # The attach client blocks for the entire interactive session, so it
@@ -930,7 +936,12 @@ def capture_pane(
     result = _run_tmux(args, text=True)
     if result.returncode != 0:
         return None
-    return result.stdout
+    if full or lines is None or lines <= 0:
+        return result.stdout
+    # ``-S -N`` is N history lines *plus* the whole visible screen, whose
+    # bottom is usually blank rows below the prompt.
+    tail = result.stdout.rstrip("\n").splitlines()[-lines:]
+    return "\n".join(tail) + "\n" if tail else ""
 
 
 def send_key_to_session(session_name: str, key: str) -> bool:
@@ -1016,7 +1027,8 @@ def _set_session_description(session_name: str, description: str) -> None:
     to the live session; ``sync_panel_tmux_config`` does not need to be
     called.
     """
-    clean = (description or "").strip()
+    # The monitor reads it back in a tab-separated, line-per-pane listing.
+    clean = " ".join((description or "").split())
     _set_session_option(session_name, GD_DESCRIPTION_OPTION, clean or None)
 
 
@@ -1090,7 +1102,7 @@ def _current_window_target(session_name: str) -> str:
         target = result.stdout.strip()
         if target:
             return target
-    return f"{session_name}:0"
+    return f"{session_name}:{_FIRST_WINDOW}"
 
 
 def _tmux_theme_config(
@@ -1108,7 +1120,7 @@ def _tmux_theme_config(
     show_status: bool = True,
 ) -> str:
     theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
-    window_target = window_target or f"{session_name}:0"
+    window_target = window_target or f"{session_name}:{_FIRST_WINDOW}"
     quoted_session = shlex.quote(_session_option_target(session_name))
     quoted_window = shlex.quote(f"={window_target}")
     status_left = (
@@ -1175,7 +1187,7 @@ def _panel_tmux_config(
         panel_name,
         session_name,
         theme_name,
-        window_target=f"{session_name}:0",
+        window_target=f"{session_name}:{_FIRST_WINDOW}",
         pane_border_status="top",
         pane_border_lines="heavy",
         pane_border_format=_panel_border_format(theme_name),
@@ -1185,13 +1197,15 @@ def _panel_tmux_config(
     )
 
 
-def _session_tmux_config(session_name: str, theme_name: str | None = None) -> str:
+def _session_tmux_config(
+    session_name: str, theme_name: str | None = None, *, window_target: str | None = None
+) -> str:
     return _tmux_theme_config(
         _session_badge_text(session_name),
         _session_slug(session_name) or session_name,
         session_name,
         theme_name,
-        window_target=_current_window_target(session_name),
+        window_target=window_target or _current_window_target(session_name),
     )
 
 
@@ -1207,15 +1221,30 @@ def _load_panel_tmux_config(
     return config_path
 
 
-def _live_panel_sessions() -> list[tuple[str, str]]:
+def _live_session_windows() -> dict[str, str]:
+    """Every live session mapped to its current window as ``session:index``."""
+    result = _run_tmux(
+        ["list-sessions", "-F", f"#{{session_name}}{_SESSION_LIST_SEPARATOR}#{{window_index}}"],
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}
+    windows: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        session_name, separator, window_index = line.rpartition(_SESSION_LIST_SEPARATOR)
+        if separator and session_name:
+            windows[session_name] = f"{session_name}:{window_index}"
+    return windows
+
+
+def _live_panel_sessions(live_sessions: Collection[str]) -> list[tuple[str, str]]:
     from ...commands.tui.panels import PanelStore
 
-    sessions: list[tuple[str, str]] = []
-    for panel in PanelStore().panels:
-        session_name = make_panel_session_name(panel.name)
-        if _session_exists(session_name):
-            sessions.append((panel.name, session_name))
-    return sessions
+    return [
+        (panel.name, session_name)
+        for panel in PanelStore().panels
+        if (session_name := make_panel_session_name(panel.name)) in live_sessions
+    ]
 
 
 def _panel_for_session(session_name: str):
@@ -1263,7 +1292,7 @@ def _ensure_panel_resize_tracking(session_name: str) -> None:
     if not _is_persistent_panel_session(session_name) or not _session_exists(session_name):
         return
 
-    window_target = f"={session_name}:0"
+    window_target = f"={session_name}:{_FIRST_WINDOW}"
     session_target = _session_option_target(session_name)
     hook_command = f"run-shell -b {shlex.quote(_panel_resize_hook_shell(session_name))}"
 
@@ -1294,22 +1323,13 @@ def reflow_panel_tmux_session(session_name: str) -> bool:
     return True
 
 
-def _live_repo_tmux_sessions() -> list[str]:
-    try:
-        entries = list_all_gd_sessions()
-    except Exception:
-        logger.debug("Failed to list GitDirector tmux sessions", exc_info=True)
-        return []
-
-    return [entry["session_name"] for entry in entries]
-
-
 def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     resolved_theme = _resolved_panel_theme_name(theme_name)
     config_path = _tmux_design_config_path()
     config_path.parent.mkdir(exist_ok=True)
-    live_panel_sessions = _live_panel_sessions()
-    live_repo_sessions = _live_repo_tmux_sessions()
+    windows = _live_session_windows()
+    live_panel_sessions = _live_panel_sessions(windows)
+    live_repo_sessions = sorted(name for name in windows if _parse_gd_session_name(name))
 
     lines = [
         "# Generated by GitDirector",
@@ -1321,16 +1341,14 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
         for panel_name, session_name in live_panel_sessions
     )
     lines.extend(
-        _session_tmux_config(session_name, resolved_theme) for session_name in live_repo_sessions
+        _session_tmux_config(session_name, resolved_theme, window_target=windows[session_name])
+        for session_name in live_repo_sessions
     )
 
-    content = "\n".join(lines)
-    changed = _LAST_SYNC_CONTENT.get(config_path) != content
-    if changed:
-        atomic_write_text(config_path, content)
-        _LAST_SYNC_CONTENT[config_path] = content
-
-    if changed and (live_panel_sessions or live_repo_sessions):
+    atomic_write_text(config_path, "\n".join(lines))
+    # Always sourced: identical text can still mean a new session that
+    # reuses a closed one's name and has never been themed.
+    if live_panel_sessions or live_repo_sessions:
         try:
             _run_tmux(["source-file", str(config_path)], check=True)
         except TmuxError:

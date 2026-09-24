@@ -369,7 +369,7 @@ class TestPullCommand:
 
         with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             with patch(
-                "gitdirector.commands.pull._pull_one",
+                "gitdirector.commands.pull.pull_repository",
                 return_value=(fake_git_repo.name, True, "Already up to date."),
             ):
                 result = runner.invoke(cli, ["pull", "-y"])
@@ -383,7 +383,7 @@ class TestPullCommand:
 
         with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             with patch(
-                "gitdirector.commands.pull._pull_one",
+                "gitdirector.commands.pull.pull_repository",
                 return_value=(fake_git_repo.name, False, "Cannot fast-forward"),
             ):
                 result = runner.invoke(cli, ["pull", "-y"])
@@ -411,7 +411,7 @@ class TestPullCommand:
 
         with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             with patch(
-                "gitdirector.commands.pull._pull_one",
+                "gitdirector.commands.pull.pull_repository",
                 side_effect=lambda path: (path.name, True, "Already up to date."),
             ):
                 result = runner.invoke(cli, ["pull"], input="y\n")

@@ -32,6 +32,14 @@ from .._timeouts import SYNC_TIMEOUT
 from .conftest import _make_info, _mock_manager
 
 
+def _run_git_output_inline(app: GitDirectorConsole) -> None:
+    """Run the git-output worker body in the calling thread."""
+    app.call_from_thread = lambda callback, *args, **kwargs: callback(*args, **kwargs)
+    app._run_repo_git_output = lambda *args: GitDirectorConsole._run_repo_git_output.__wrapped__(
+        app, *args
+    )
+
+
 class TestGitDirectorConsole:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_startup_uses_fresh_repository_cache(self, _mock_sessions):
@@ -695,6 +703,7 @@ class TestGitDirectorConsoleActionRouting:
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
         app._update_status = MagicMock()
+        _run_git_output_inline(app)
 
         app._show_repo_git_status(path)
 
@@ -718,6 +727,7 @@ class TestGitDirectorConsoleActionRouting:
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
         app._update_status = MagicMock()
+        _run_git_output_inline(app)
 
         app._show_repo_git_timeline(path)
 
@@ -740,6 +750,7 @@ class TestGitDirectorConsoleActionRouting:
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
         app._update_status = MagicMock()
+        _run_git_output_inline(app)
 
         app._show_repo_git_branches(path)
 
@@ -762,6 +773,7 @@ class TestGitDirectorConsoleActionRouting:
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
         app._update_status = MagicMock()
+        _run_git_output_inline(app)
 
         app._show_repo_git_remotes(path)
 
@@ -1256,10 +1268,9 @@ class TestGitDirectorConsoleDirectBranches:
         app._monitor = MagicMock()
         app._monitor.entries.return_value = [{"session_name": "gd/alpha/shell/1"}]
         app._monitor.statuses.return_value = {"gd/alpha/shell/1": "waiting"}
-        app.call_from_thread = lambda callback, *args: callback(*args)
         app._on_statuses_updated = MagicMock()
 
-        GitDirectorConsole._poll_session_statuses_worker.__wrapped__(app, 1)
+        app._poll_session_statuses()
 
         assert app._session_statuses == {"gd/alpha/shell/1": "waiting"}
         app._monitor.statuses.assert_called_once_with()
@@ -1317,19 +1328,14 @@ class TestGitDirectorConsoleDirectBranches:
 
         app._poll_session_statuses.assert_not_called()
 
-    def test_poll_worker_survives_session_listing_failure(self):
+    def test_poll_waits_for_the_monitors_first_sample(self):
         app = GitDirectorConsole()
         app._active_tab = "repos"
         app._monitor = MagicMock()
         app._monitor.entries.return_value = None
-        app.call_from_thread = lambda callback, *args: callback(*args)
         app._apply_sessions_snapshot = MagicMock()
 
-        with patch(
-            "gitdirector.integrations.tmux.list_all_gd_sessions",
-            side_effect=Exception("tmux error"),
-        ):
-            GitDirectorConsole._poll_session_statuses_worker.__wrapped__(app, 1)
+        app._poll_session_statuses()
 
         app._apply_sessions_snapshot.assert_not_called()
 
@@ -1350,20 +1356,6 @@ class TestGitDirectorConsoleDirectBranches:
         app._apply_sessions_snapshot.assert_not_called()
         app._show_refresh_indicator.assert_called_once_with()
         app._hide_refresh_indicator.assert_called_once_with()
-
-    def test_refresh_after_session_launch_reloads_sessions_from_repos_tab(self):
-        # A session launched from the Repos tab must show up in the
-        # Sessions tab straight away, without waiting for the next poll.
-        app = GitDirectorConsole()
-        app._results = {}
-        app._repo_paths = []
-        app._apply_filter_and_sort = MagicMock()
-        app._load_sessions = MagicMock()
-
-        app._refresh_after_session_launch(Path("/tmp/alpha"), "repos")
-
-        app._apply_filter_and_sort.assert_called_once_with()
-        app._load_sessions.assert_called_once_with()
 
     def test_resolve_session_status_uses_monitor_verdict(self):
         app = GitDirectorConsole()
@@ -2073,3 +2065,70 @@ class TestReposStatusBarEscHint:
         async with app.run_test(size=(80, 24)):
             msg = app._build_loaded_status(3, 3)
             assert "[esc] clear search" not in msg
+
+
+class TestRepoTableWhileLoading:
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_search_keeps_repositories_that_are_still_loading(self, _mock_sessions):
+        alpha = _make_info("alpha", Path("/tmp/alpha"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            app._repo_paths = [alpha.path, Path("/tmp/beta")]
+            app._groups_entries = []
+            app._results = {str(alpha.path): alpha}
+            app._search_query = "beta"
+            app._apply_filter_and_sort()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            assert [str(key.value) for key in table.rows] == ["/tmp/beta"]
+            assert table.get_cell("/tmp/beta", app._col_keys[1]) == _REPO_LOADING_CELL_VALUE
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_sorting_puts_loading_repositories_last(self, _mock_sessions):
+        zed = _make_info("zed", Path("/tmp/zed"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            app._repo_paths = [Path("/tmp/alpha"), zed.path]
+            app._groups_entries = []
+            app._results = {str(zed.path): zed}
+            app._apply_filter_and_sort()
+            await pilot.pause()
+
+            table = app.query_one("#repo-table", DataTable)
+            assert [str(key.value) for key in table.rows] == ["/tmp/zed", "/tmp/alpha"]
+
+
+class TestSessionStatusCells:
+    def test_unchanged_statuses_redraw_nothing(self):
+        app = GitDirectorConsole()
+        app._active_tab = "sessions"
+        app._sess_col_keys = ("sessions",)
+        table = MagicMock()
+        app.query_one = MagicMock(return_value=table)
+        app._monitor = MagicMock()
+        app._monitor.statuses.return_value = {"gd/alpha/shell/1": "idle"}
+        entry = {
+            "session_name": "gd/alpha/shell/1",
+            "repo": "alpha",
+            "repo_slug": "alpha",
+            "purpose": "shell",
+            "description": "-",
+        }
+        app._sessions_entries = [dict(entry)]
+        app._session_statuses = {"gd/alpha/shell/1": "idle"}
+        app._rendered_session_status = {"gd/alpha/shell/1": "idle"}
+
+        for _ in range(3):
+            app._monitor.entries.return_value = [dict(entry)]
+            app._poll_session_statuses()
+
+        table.update_cell.assert_not_called()
+
+        app._monitor.statuses.return_value = {"gd/alpha/shell/1": "running"}
+        app._poll_session_statuses()
+        table.update_cell.assert_called_once()

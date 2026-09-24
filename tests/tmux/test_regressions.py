@@ -21,14 +21,12 @@ from gitdirector.integrations.tmux.core import (
     _session_exists,
     _tmux_theme_config,
 )
-from gitdirector.integrations.tmux.monitor import _capture_pane_text, _ControlModeReader
+from gitdirector.integrations.tmux.monitor import _capture_pane_text
 from gitdirector.integrations.tmux.panels import (
-    _kill_tmux_session_by_name,
     _panel_attach_fragment,
     _panel_pane_command,
     _respawn_pane,
     _tmux_output,
-    _tmux_session_actual_name,
 )
 
 
@@ -209,7 +207,7 @@ class TestPanelResizeTracking:
             "set-window-option",
             "-q",
             "-t",
-            "=gd/panel/dev:0",
+            "=gd/panel/dev:^",
             "aggressive-resize",
             "on",
         ]
@@ -225,7 +223,7 @@ class TestPanelResizeTracking:
             "set-hook",
             "-w",
             "-t",
-            "=gd/panel/dev:0",
+            "=gd/panel/dev:^",
             "window-resized",
         ]
 
@@ -252,90 +250,67 @@ class TestExactMatchPanelAttachFragment:
 
 
 class TestCleanupPanelAttachedSession:
+    @staticmethod
+    def _completed(stdout: str = "", returncode: int = 0):
+        result = MagicMock()
+        result.stdout = stdout
+        result.returncode = returncode
+        return result
+
     @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
-    @patch(
-        "gitdirector.integrations.tmux.panels._current_window_target",
-        return_value="gd/repo/shell/1:0",
-    )
     @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
     @patch("subprocess.run")
-    def test_restores_session_chrome_when_last_panel_client_stops(
-        self,
-        mock_run,
-        _mock_exists,
-        _mock_window_target,
-        mock_sync,
+    def test_restores_session_chrome_once_nothing_is_attached(
+        self, mock_run, _mock_exists, mock_sync
     ):
-        def completed(stdout: str = "", returncode: int = 0):
-            result = MagicMock()
-            result.stdout = stdout
-            result.returncode = returncode
-            return result
-
+        done = self._completed
         mock_run.side_effect = [
-            completed("1\n"),
-            completed("on\n"),
-            completed("off\n"),
-            completed("gd/repo/shell/1:2\n"),
-            completed(),
-            completed(),
-            completed(),
-            completed(),
-            completed(),
-            completed(),
-            completed(),
+            done("0\n"),  # session_attached
+            done("=gd/repo/shell/1:2\n"),  # saved window
+            done("on\n"),  # saved status
+            done(""),  # saved border status: inherited
+            *[done() for _ in range(6)],
         ]
 
         cleanup_panel_attached_session("gd/repo/shell/1", theme_name="rose-pine")
 
-        assert mock_run.call_args_list[4].args[0] == [
-            "tmux",
-            "set-option",
-            "-q",
-            "-t",
-            "=gd/repo/shell/1:",
-            "status",
-            "on",
-        ]
-        assert mock_run.call_args_list[5].args[0] == [
+        commands = [c.args[0] for c in mock_run.call_args_list]
+        assert ["tmux", "set-option", "-q", "-t", "=gd/repo/shell/1:", "status", "on"] in commands
+        assert [
             "tmux",
             "set-window-option",
             "-q",
+            "-u",
             "-t",
             "=gd/repo/shell/1:2",
             "pane-border-status",
-            "off",
-        ]
+        ] in commands
         mock_sync.assert_called_once_with("rose-pine")
 
     @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
     @patch("subprocess.run")
-    def test_decrements_client_count_when_other_panel_clients_remain(
-        self,
-        mock_run,
-        _mock_exists,
-        mock_sync,
+    def test_leaves_restore_to_the_trap_while_a_client_is_attached(
+        self, mock_run, _mock_exists, mock_sync
     ):
-        result = MagicMock()
-        result.stdout = "3\n"
-        result.returncode = 0
-        mock_run.side_effect = [
-            result,
-            MagicMock(),
-        ]
+        mock_run.return_value = self._completed("1\n")
 
         cleanup_panel_attached_session("gd/repo/shell/1")
 
-        assert mock_run.call_args_list[1].args[0] == [
-            "tmux",
-            "set-option",
-            "-q",
-            "-t",
-            "=gd/repo/shell/1:",
-            "@gitdirector_panel_clients",
-            "2",
-        ]
+        mock_run.assert_called_once()
+        mock_sync.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.panels.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.panels._session_exists", return_value=True)
+    @patch("subprocess.run")
+    def test_does_nothing_for_a_session_never_shown_in_a_panel(
+        self, mock_run, _mock_exists, mock_sync
+    ):
+        mock_run.side_effect = [self._completed("0\n"), self._completed("")]
+
+        cleanup_panel_attached_session("gd/repo/shell/1")
+
+        assert mock_run.call_count == 2
         mock_sync.assert_not_called()
 
 
@@ -479,17 +454,6 @@ class TestOrphanSessionNameTmuxSafe:
     the Python kill call couldn't find it.
     """
 
-    def test_actual_name_replaces_dots_with_underscores(self):
-        assert _tmux_session_actual_name("gd/panel/main.orphaned-1-2") == (
-            "gd/panel/main_orphaned-1-2"
-        )
-
-    def test_actual_name_passthrough_when_no_dots(self):
-        assert _tmux_session_actual_name("gd/panel/main") == "gd/panel/main"
-
-    def test_actual_name_handles_multiple_dots(self):
-        assert _tmux_session_actual_name("a.b.c.d") == "a_b_c_d"
-
     def test_rebuild_panel_uses_underscore_in_orphan_name(self):
         """Source-level guarantee that we don't regress to ``.orphaned-``."""
         source_path = (
@@ -500,29 +464,6 @@ class TestOrphanSessionNameTmuxSafe:
         assert ".orphaned-" not in source, (
             "rebuild_panel_tmux_session must use '_orphaned-' so tmux does not munge it"
         )
-
-    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
-    def test_kill_by_name_falls_back_to_munged_form(self, mock_kill):
-        """When the intended name has a dot, try the munged form too."""
-        mock_kill.side_effect = [False, True]
-        assert _kill_tmux_session_by_name("gd/panel/main.orphaned-1-2") is True
-        assert mock_kill.call_count == 2
-        first_call_args = mock_kill.call_args_list[0][0]
-        second_call_args = mock_kill.call_args_list[1][0]
-        assert first_call_args[0] == "gd/panel/main.orphaned-1-2"
-        assert second_call_args[0] == "gd/panel/main_orphaned-1-2"
-
-    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
-    def test_kill_by_name_returns_true_on_first_success(self, mock_kill):
-        """If the intended name works directly, don't try the munged form."""
-        mock_kill.return_value = True
-        assert _kill_tmux_session_by_name("gd/panel/main") is True
-        assert mock_kill.call_count == 1
-
-    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
-    def test_kill_by_name_returns_false_when_both_forms_fail(self, mock_kill):
-        mock_kill.return_value = False
-        assert _kill_tmux_session_by_name("gd/panel/main.orphaned-1-2") is False
 
 
 class TestExactMatchLaunchCommand:
@@ -564,20 +505,6 @@ class TestExactMatchCapturePaneText:
         _capture_pane_text("gd/repo/shell/1")
         args = mock_run.call_args[0][0]
         assert args == ["tmux", "capture-pane", "-p", "-t", "=gd/repo/shell/1:"]
-
-
-class TestExactMatchControlModeReader:
-    """_ControlModeReader must use ``=`` prefix in attach-session."""
-
-    def test_attach_command_uses_equals(self):
-        reader = _ControlModeReader("gd/repo/shell/1", callback=lambda *a: None)
-        with patch("subprocess.Popen") as mock_popen:
-            mock_proc = MagicMock()
-            mock_proc.stdout = iter([])
-            mock_popen.return_value = mock_proc
-            reader._run()
-            popen_args = mock_popen.call_args[0][0]
-            assert popen_args == ["tmux", "-C", "attach-session", "-t", "=gd/repo/shell/1", "-r"]
 
 
 class TestExactMatchTmuxThemeConfig:

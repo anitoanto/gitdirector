@@ -102,8 +102,8 @@ class PanelActionMenuScreen(ModalScreen[str]):
         session_name = make_panel_session_name(self.panel.name)
 
         with Vertical(id="menu-container"):
-            yield Static(f"[bold $text]{self.panel.name}[/]", id="menu-title")
-            yield Static(f"[dim]{session_name}[/dim]", id="menu-branch")
+            yield Static(f"[bold $text]{escape(self.panel.name)}[/]", id="menu-title")
+            yield Static(f"[dim]{escape(session_name)}[/dim]", id="menu-branch")
             with Horizontal(id="panel-action-layout"):
                 with Vertical(id="panel-action-main"):
                     yield OptionList(
@@ -162,7 +162,7 @@ class RenamePanelScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
             yield Static("[bold $text]Rename Panel[/]", id="menu-title")
-            yield Static(f"[dim]Current: {self.current_name}[/dim]", id="menu-branch")
+            yield Static(f"[dim]Current: {escape(self.current_name)}[/dim]", id="menu-branch")
             yield Input(value=self.current_name, id="rename-input")
             yield Static("\\[enter] confirm    \\[esc] cancel", id="menu-hint")
 
@@ -244,7 +244,7 @@ class AgentLoadingScreen(ModalScreen[None]):
         with Vertical(id="loading-container"):
             yield LoadingIndicator()
             yield Static(
-                f"Launching [bold]{self._agent_cmd}[/bold]",
+                f"Launching [bold]{escape(self._agent_cmd)}[/bold]",
                 id="loading-text",
             )
             yield Static(self._loading_hint, id="loading-hint")
@@ -464,7 +464,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             with Vertical(id="step-1"):
                 if self._editing:
                     yield Static("[dim]Panel[/dim]", id="panel-name-label")
-                    yield Static(f"[bold $text]{self._panel_name}[/]", id="panel-name-value")
+                    yield Static(
+                        f"[bold $text]{escape(self._panel_name)}[/]", id="panel-name-value"
+                    )
                 else:
                     yield Static("[dim]Name[/dim]", id="panel-name-label")
                     yield Input(placeholder="panel name...", id="panel-name-input")
@@ -693,7 +695,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     @staticmethod
     def _step2_subtitle_markup(name: str, layout_label: str) -> str:
-        return f'[bold $text]"{name}"[/]    [dim]{layout_label}[/dim]'
+        return f'[bold $text]"{escape(name)}"[/]    [dim]{escape(layout_label)}[/dim]'
 
     @classmethod
     def _layout_preview_markup(cls, layout_key: str | None) -> str:
@@ -790,7 +792,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             marker = "[$text-primary]● [/]" if sn == current else "  "
             options.append(
                 Option(
-                    f"{marker}[bold]{entry['purpose']}[/bold] [dim]{entry['repo']}[/dim]  {sn}",
+                    f"{marker}[bold]{escape(entry['purpose'])}[/bold] [dim]{escape(entry['repo'])}[/dim]  {escape(sn)}",
                     id=sn,
                 )
             )
@@ -907,7 +909,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             marker = "[$text-primary]● [/]" if sn == current else "  "
             menu.replace_option_prompt(
                 sn,
-                f"{marker}[bold]{entry['purpose']}[/bold] [dim]{entry['repo']}[/dim]  {sn}",
+                f"{marker}[bold]{escape(entry['purpose'])}[/bold] [dim]{escape(entry['repo'])}[/dim]  {escape(sn)}",
             )
 
     def _update_session_visibility(self) -> None:

@@ -157,6 +157,9 @@ class ConsoleUIHelpersMixin:
         self._sync_session_status_tracking()
 
         if restore_tab == "sessions":
+            # Repaint from the cache so the selection is restored now; the
+            # load that follows may be superseded by a status poll.
+            self._apply_sessions_filter_and_sort()
             self._load_sessions()
             self.query_one("#sessions-table", DataTable).focus()
         elif restore_tab == "panels":

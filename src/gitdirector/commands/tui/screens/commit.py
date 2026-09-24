@@ -469,7 +469,7 @@ class CommitResultScreen(ModalScreen[None]):
             )
             yield Static(escape(self.output) if self.output else "", id="commit-result-output")
             yield Static(
-                "[enter]/[esc] close",
+                "\\[enter]/\\[esc] close",
                 id="commit-result-hint",
             )
 

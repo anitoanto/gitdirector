@@ -11,6 +11,17 @@ REAL_TMUX_MONITOR_START = TmuxMonitor.start
 REAL_TMUX_MONITOR_STOP = TmuxMonitor.stop
 
 
+def split_chained_tmux(args: list[str]) -> list[list[str]]:
+    """Split one ``tmux a ; b`` invocation into ``[["tmux", a], ["tmux", b]]``."""
+    commands: list[list[str]] = [["tmux"]]
+    for token in args[1:]:
+        if token == ";":
+            commands.append(["tmux"])
+        else:
+            commands[-1].append(token)
+    return commands
+
+
 @contextmanager
 def _tmux_integration_lock():
     lock_path = Path(tempfile.gettempdir()) / "gitdirector-tmux-integration.lock"

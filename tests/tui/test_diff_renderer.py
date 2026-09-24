@@ -7,7 +7,6 @@ without booting Textual so failures point straight at the logic.
 from __future__ import annotations
 
 from rich.console import Group
-from rich.syntax import Syntax
 from rich.text import Text
 
 from gitdirector.commands.tui.diff_renderer import (
@@ -37,6 +36,13 @@ def _luminance(color: str) -> float:
         return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
 
     return 0.2126 * linearise(r) + 0.7152 * linearise(g) + 0.0722 * linearise(b)
+
+
+def _body_text(rendered: Group) -> Text:
+    """The hunk body: the last piece of a rendered file diff."""
+    body = rendered.renderables[-1]
+    assert isinstance(body, Text)
+    return body
 
 
 def _rgb(color: str) -> tuple[int, int, int]:
@@ -276,6 +282,58 @@ class TestParseCopyStatus:
         assert f.path == "clone.txt"
         assert f.additions == 1, f"expected 1 addition, got {f.additions}"
         assert f.deletions == 0, f"expected 0 deletions, got {f.deletions}"
+
+
+class TestParseDiffEdgeCases:
+    def test_lines_starting_with_doubled_markers_are_counted(self):
+        files = parse_diff_files(
+            "diff --git a/q.sql b/q.sql\n"
+            "--- a/q.sql\n"
+            "+++ b/q.sql\n"
+            "@@ -1,2 +1,2 @@\n"
+            "--- removed comment\n"
+            "+++j;\n"
+            " keep\n"
+        )
+        assert (files[0].additions, files[0].deletions) == (1, 1)
+
+    def test_last_new_line_counts_context_lines(self):
+        files = parse_diff_files("diff --git a/f b/f\n@@ -10,4 +10,4 @@\n a\n b\n c\n-d\n+e\n")
+        assert (files[0].first_new_line, files[0].last_new_line) == (10, 13)
+
+    def test_rename_between_plain_and_quoted_name(self):
+        files = parse_diff_files(
+            'diff --git a/old.txt "b/\\303\\274.txt"\n'
+            "similarity index 100%\n"
+            "rename from old.txt\n"
+            'rename to "\\303\\274.txt"\n'
+        )
+        assert len(files) == 1
+        assert (files[0].old_path, files[0].path, files[0].status) == ("old.txt", "ü.txt", "R")
+
+    def test_path_containing_b_slash(self):
+        files = parse_diff_files(
+            "diff --git a/p b/q.txt b/p b/q.txt\n"
+            "--- a/p b/q.txt\n"
+            "+++ b/p b/q.txt\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+b\n"
+        )
+        assert files[0].path == "p b/q.txt"
+        assert files[0].is_rename is False
+
+    def test_patch_line_trailing_tab_is_ignored(self):
+        files = parse_diff_files(
+            "diff --git a/my file b/my file\n"
+            "--- a/my file\t\n"
+            "+++ b/my file\t\n"
+            "@@ -1 +1 @@\n"
+            "-a\n"
+            "+b\n"
+        )
+        assert files[0].path == "my file"
+        assert files[0].is_rename is False
 
 
 class TestParseQuotedFilenames:
@@ -673,16 +731,6 @@ class TestPerLineTint:
 
         return GithubDarkStyle.style_for_token(token)
 
-    def _syntax_for(self, file: ChangedFile):
-        from gitdirector.commands.tui.diff_renderer import _render_file_body
-
-        return _render_file_body(
-            ["+first line", "-second line"],
-            file=file,
-            width=80,
-            theme="monokai",
-        )
-
     def test_inserted_line_has_green_tinted_bgcolor(self):
         from pygments.token import Generic
 
@@ -706,50 +754,25 @@ class TestPerLineTint:
         assert r > g and r > b, f"expected red-tinted bg, got {bg}"
         assert r > 30, f"expected a visible red tint, got {bg}"
 
-    def test_new_file_paints_whole_panel_green(self):
-        # The line-number gutter, trailing whitespace, and empty
-        # space below the content must all read as green.
+    def test_changed_lines_carry_their_background(self):
         from gitdirector.commands.tui.diff_renderer import (
-            GITHUB_DARK_ADDED_PANEL_BG,
+            GITHUB_DARK_ADDED_BG,
+            GITHUB_DARK_REMOVED_BG,
         )
 
-        syntax = self._syntax_for(ChangedFile(path="new.py", status="A", additions=2))
-        bg = getattr(syntax, "background_color", None)
-        assert bg == GITHUB_DARK_ADDED_PANEL_BG
-        r, g, b = _rgb(bg)
-        assert g > r and g > b, f"expected green-tinted panel bg, got {bg}"
-
-    def test_untracked_file_paints_whole_panel_green(self):
-        from gitdirector.commands.tui.diff_renderer import (
-            GITHUB_DARK_ADDED_PANEL_BG,
+        f = ChangedFile(
+            path="foo.py",
+            status="M",
+            diff_text="diff --git a/foo.py b/foo.py\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n",
         )
-
-        syntax = self._syntax_for(ChangedFile(path="new.py", status="?", additions=2))
-        assert getattr(syntax, "background_color", None) == GITHUB_DARK_ADDED_PANEL_BG
-
-    def test_deleted_file_paints_whole_panel_red(self):
-        from gitdirector.commands.tui.diff_renderer import (
-            GITHUB_DARK_REMOVED_PANEL_BG,
-        )
-
-        syntax = self._syntax_for(ChangedFile(path="old.py", status="D", deletions=2))
-        bg = getattr(syntax, "background_color", None)
-        assert bg == GITHUB_DARK_REMOVED_PANEL_BG
-        r, g, b = _rgb(bg)
-        assert r > g and r > b, f"expected red-tinted panel bg, got {bg}"
-
-    def test_modified_file_keeps_base_dark_panel(self):
-        # Modified files: no whole-panel tint; the per-line
-        # ``+`` / ``-`` bgs from the Pygments style are the
-        # only colour signal.
-        from gitdirector.commands.tui.diff_renderer import GITHUB_DARK_BG
-
-        syntax = self._syntax_for(ChangedFile(path="foo.py", status="M", additions=1, deletions=1))
-        # Rich defaults the Syntax bg to the theme's bg when no
-        # ``background_color`` is passed; either way it must be the
-        # base dark colour, not a green/red panel tint.
-        bg = getattr(syntax, "background_color", None) or GITHUB_DARK_BG
-        assert bg == GITHUB_DARK_BG
+        body = _body_text(render_file_diff(f, width=40))
+        lines = body.split("\n")
+        backgrounds = [
+            {str(span.style) for span in line.spans if "on #" in str(span.style)} for line in lines
+        ]
+        assert backgrounds[1] == set()
+        assert f"on {GITHUB_DARK_REMOVED_BG}" in backgrounds[2]
+        assert f"on {GITHUB_DARK_ADDED_BG}" in backgrounds[3]
 
     def test_added_palette_constants(self):
         from gitdirector.commands.tui.diff_renderer import (
@@ -772,51 +795,58 @@ class TestPerLineTint:
                 assert r > g and r > b, f"{color} should lean red"
 
 
-class TestDiffDelegatingLexer:
-    def test_preserves_inserted_token(self):
-        from pygments.token import Generic
+class TestHunkGutter:
+    def _gutter(self, diff_text: str, path: str = "foo.txt") -> list[str]:
+        f = ChangedFile(path=path, status="M", diff_text=diff_text)
+        return _body_text(render_file_diff(f)).plain.splitlines()
 
-        from gitdirector.commands.tui.diff_renderer import _DiffDelegatingLexer
+    def test_gutter_shows_real_old_and_new_line_numbers(self):
+        lines = self._gutter(
+            "diff --git a/foo.txt b/foo.txt\n"
+            "@@ -10,3 +10,3 @@\n"
+            " a\n"
+            "-b\n"
+            "+c\n"
+            " d\n"
+            "@@ -100,2 +100,3 @@\n"
+            " x\n"
+            "+y\n"
+            " z\n"
+        )
+        assert lines[0].startswith(" @@ -10,3 +10,3 @@")
+        assert lines[1].split() == ["10", "10", "a"]
+        assert lines[2].split() == ["11", "-", "b"]
+        assert lines[3].split() == ["11", "+", "c"]
+        assert lines[4].split() == ["12", "12", "d"]
+        assert lines[5].startswith(" @@ -100,2 +100,3 @@")
+        assert lines[6].split() == ["100", "100", "x"]
+        assert lines[7].split() == ["101", "+", "y"]
+        assert lines[8].split() == ["101", "102", "z"]
 
-        lexer = _DiffDelegatingLexer(file_lexer_name="python")
-        sample = "+    return 42\n"
-        tokens = list(lexer.get_tokens(sample))
-        types = [t for t, _ in tokens]
-        assert Generic.Inserted in types
-        # The full line is one Generic.Inserted token, including the leading '+'
-        inserted_text = next(v for t, v in tokens if t is Generic.Inserted)
-        assert inserted_text.startswith("+")
+    def test_highlighting_keeps_one_row_per_line(self):
+        lines = self._gutter(
+            "diff --git a/foo.py b/foo.py\n"
+            "@@ -1,4 +1,4 @@\n"
+            " \n"
+            '-x = """doc\n'
+            '+y = """doc\n'
+            ' more"""\n',
+            path="foo.py",
+        )
+        assert len(lines) == 5
+        assert lines[2].endswith('x = """doc')
+        assert lines[4].endswith('more"""')
 
-    def test_preserves_deleted_token(self):
-        from pygments.token import Generic
+    def test_gutter_width_matches_rendered_rows(self):
+        from gitdirector.commands.tui.diff_renderer import diff_gutter_width
 
-        from gitdirector.commands.tui.diff_renderer import _DiffDelegatingLexer
-
-        lexer = _DiffDelegatingLexer(file_lexer_name="python")
-        sample = "-    return 42\n"
-        tokens = list(lexer.get_tokens(sample))
-        types = [t for t, _ in tokens]
-        assert Generic.Deleted in types
-        deleted_text = next(v for t, v in tokens if t is Generic.Deleted)
-        assert deleted_text.startswith("-")
-
-    def test_falls_back_to_diff_when_no_file_lexer(self):
-        from pygments.token import Generic
-
-        from gitdirector.commands.tui.diff_renderer import _DiffDelegatingLexer
-
-        lexer = _DiffDelegatingLexer()
-        sample = "+    x = 1\n"
-        tokens = list(lexer.get_tokens(sample))
-        assert any(t is Generic.Inserted for t, _ in tokens)
-
-    def test_ignores_unknown_file_lexer(self):
-        from gitdirector.commands.tui.diff_renderer import _DiffDelegatingLexer
-
-        # Should not raise even if lexer name is unknown
-        lexer = _DiffDelegatingLexer(file_lexer_name="this-is-not-a-real-lexer")
-        sample = "+    x = 1\n"
-        list(lexer.get_tokens(sample))
+        f = ChangedFile(
+            path="foo.txt",
+            status="M",
+            diff_text="diff --git a/foo.txt b/foo.txt\n@@ -998,1 +998,2 @@\n x\n+y\n",
+        )
+        row = _body_text(render_file_diff(f)).plain.splitlines()[2]
+        assert row[diff_gutter_width(f) :] == "y"
 
     def test_long_path_truncated(self):
         f = ChangedFile(path="a/very/very/long/path/to/some/file.py", status="M", additions=1)
@@ -826,7 +856,7 @@ class TestDiffDelegatingLexer:
 
 
 class TestRenderFileDiff:
-    def test_returns_group_with_syntax(self):
+    def test_returns_group_with_body(self):
         f = ChangedFile(
             path="foo.py",
             status="M",
@@ -834,11 +864,9 @@ class TestRenderFileDiff:
             deletions=1,
             diff_text=("diff --git a/foo.py b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"),
         )
-        r = render_file_diff(f, theme="monokai")
+        r = render_file_diff(f)
         assert isinstance(r, Group)
-        # First piece is the header text, second is the Syntax
-        syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
-        assert len(syntax_pieces) == 1
+        assert "new" in _body_text(r).plain
 
     def test_no_newline_marker_is_not_rendered(self):
         f = ChangedFile(
@@ -857,23 +885,20 @@ class TestRenderFileDiff:
             ),
         )
 
-        rendered = render_file_diff(f)
-        syntax = next(piece for piece in rendered.renderables if isinstance(piece, Syntax))
+        body = _body_text(render_file_diff(f)).plain
 
-        assert "No newline at end of file" not in syntax.code
-        assert syntax.code.splitlines() == ["+{", '+  "port": 5501', "+}"]
+        assert "No newline at end of file" not in body
+        assert len(body.splitlines()) == 4
 
     def test_binary_file_shows_message_no_syntax(self):
         f = ChangedFile(path="app.exe", status="M", is_binary=True, diff_text="")
         r = render_file_diff(f)
-        syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
-        assert syntax_pieces == []
+        assert "Binary file differs" in str(r.renderables[-1].renderable)
 
     def test_image_file_renders_header_only_no_diff(self):
         f = ChangedFile(path="logo.png", status="A", is_image=True, additions=0, deletions=0)
         r = render_file_diff(f)
-        syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
-        assert syntax_pieces == []
+        assert len(r.renderables) == 1
         # Header is still rendered so the user sees which file is selected.
         assert len(r.renderables) == 1
 
@@ -911,15 +936,9 @@ class TestRenderFileDiff:
             additions=line_count,
             diff_text=huge_diff,
         )
-        r = render_file_diff(f)
-        syntax_pieces = [p for p in r.renderables if isinstance(p, Syntax)]
-        assert len(syntax_pieces) == 1
-        # No truncation marker should be injected and the full body
-        # should be passed through to the Syntax renderer.
-        syntax = syntax_pieces[0]
-        assert "[gd-truncated]" not in syntax.code
-        rendered_lines = len(syntax.code.splitlines())
-        assert rendered_lines == line_count
+        body = _body_text(render_file_diff(f)).plain
+        assert "[gd-truncated]" not in body
+        assert len(body.splitlines()) == line_count + 1
 
 
 class TestBuildDiffBundle:
@@ -984,6 +1003,15 @@ class TestBuildDiffBundle:
         f = bundle.files[0]
         assert f.status == "?"
         assert "binary" in f.diff_text.lower() or "unreadable" in f.diff_text.lower()
+
+    def test_truncation_marker_is_stripped_and_flagged(self):
+        from gitdirector.repo import DIFF_TRUNCATED_MARKER
+
+        diff = f"diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-x\n+y\n{DIFF_TRUNCATED_MARKER}\n"
+        bundle = build_diff_bundle(diff, [], lambda p: None)
+        assert bundle.truncated is True
+        assert DIFF_TRUNCATED_MARKER not in bundle.files[0].diff_text
+        assert bundle.files[0].additions == 1
 
     def test_raw_diff_preserved(self):
         diff = "diff --git a/a.py b/a.py\n"

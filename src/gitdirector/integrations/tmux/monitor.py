@@ -25,7 +25,6 @@ import termios
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import zip_longest
 from pathlib import Path
@@ -99,7 +98,9 @@ def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
             "-k",
             "-t",
             pane_target,
-            _tmux_child_environment_command(f"sh -lc {shlex.quote(cleanup_script)}"),
+            # Only the command's own shell is a login shell; a second one
+            # would run the user's profile twice before every launch.
+            _tmux_child_environment_command(f"sh -c {shlex.quote(cleanup_script)}"),
         ],
     )
     if isinstance(result.returncode, int) and result.returncode != 0:
@@ -154,10 +155,6 @@ _OUTPUT_GAP_SECS = 2.5
 # A change this soon after a keypress may be the user's own typing echoed.
 _INPUT_QUIET_SECS = 2.0
 
-_CONTROL_MODE_STOP_WAIT_SECS = 5.0
-_CONTROL_MODE_KILL_WAIT_SECS = 2.0
-_CONTROL_MODE_FAILURE_BACKOFF_SECS = 30.0
-
 _PANE_LIST_SEPARATOR = "\t"
 _PANE_LIST_FIELDS = (
     "#{session_name}",
@@ -175,6 +172,7 @@ _PANE_LIST_FIELDS = (
     f"#{{{GD_REPO_LABEL_OPTION}}}",
     f"#{{{GD_DESCRIPTION_OPTION}}}",
     "#{session_activity}",
+    "#{window_active}",
 )
 _PANE_LIST_FORMAT = _PANE_LIST_SEPARATOR.join(_PANE_LIST_FIELDS)
 
@@ -394,8 +392,10 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
         session_name = parts[0]
         if _parse_gd_session_name(session_name) is None:
             continue
-        active = parts[5] == "1"
-        if session_name in panes and not active:
+        # pane_active is per window; the pane that counts (and that
+        # capture-pane reads) is the active one of the current window.
+        current = parts[5] == "1" and parts[15] != "0"
+        if session_name in panes and not current:
             continue
         panes[session_name] = PaneSample(
             session_name=session_name,
@@ -562,130 +562,6 @@ class _SessionActivity:
     report_raw: str = ""
     report_time: float = 0.0
     status: str = STATUS_RUNNING
-    details: dict[str, object] = field(default_factory=dict)
-
-
-class _ControlModeReader:
-    """Streams ``%bell`` events for one session over ``tmux -C``."""
-
-    def __init__(self, session_name: str, callback):
-        self._session_name = session_name
-        self._callback = callback
-        self._process: subprocess.Popen | None = None
-        self._thread: threading.Thread | None = None
-        self._running = False
-
-    def start(self):
-        self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def request_stop(self):
-        self._running = False
-        proc = self._process
-        if proc:
-            try:
-                if proc.stdin is not None:
-                    proc.stdin.close()
-            except Exception:
-                pass
-            try:
-                proc.terminate()
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-    def wait_for_stop(self, *, timeout: float = _CONTROL_MODE_STOP_WAIT_SECS):
-        proc = self._process
-        if proc is None:
-            return
-        try:
-            proc.wait(timeout=timeout)
-            return
-        except Exception:
-            pass
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=_CONTROL_MODE_KILL_WAIT_SECS)
-        except Exception:
-            logger.debug(
-                "control mode reader subprocess %s did not exit after SIGKILL",
-                proc.pid,
-                exc_info=True,
-            )
-
-    def stop(self, *, wait: bool = True, timeout: float = _CONTROL_MODE_STOP_WAIT_SECS):
-        self.request_stop()
-        if wait:
-            self.wait_for_stop(timeout=timeout)
-
-    def is_alive(self) -> bool:
-        return self._running and self._thread is not None and self._thread.is_alive()
-
-    def _run(self):
-        try:
-            self._process = subprocess.Popen(
-                ["tmux", "-C", "attach-session", "-t", f"={self._session_name}", "-r"],
-                stdout=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            for line in self._process.stdout:
-                if not self._running:
-                    break
-                self._parse_line(line.rstrip("\n"))
-        except Exception:
-            logger.debug("control mode reader for %s died", self._session_name, exc_info=True)
-        finally:
-            self._running = False
-            proc = self._process
-            self._process = None
-            if proc is not None:
-                # Readers are started and torn down for the lifetime of the
-                # TUI, so leaving the pipes to the garbage collector leaks a
-                # pair of file descriptors per session churn.
-                for stream in (proc.stdout, proc.stdin):
-                    if stream is not None:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
-                try:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-                    except Exception:
-                        try:
-                            proc.kill()
-                            proc.wait(timeout=_CONTROL_MODE_KILL_WAIT_SECS)
-                        except Exception:
-                            logger.debug(
-                                "control mode reader subprocess %s did not exit",
-                                proc.pid,
-                                exc_info=True,
-                            )
-                except Exception:
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=_CONTROL_MODE_KILL_WAIT_SECS)
-                    except Exception:
-                        logger.debug(
-                            "control mode reader subprocess %s failed terminate path",
-                            proc.pid,
-                            exc_info=True,
-                        )
-
-    def _parse_line(self, line: str):
-        if line.startswith("%bell"):
-            self._callback(self._session_name, "bell")
-        elif line.startswith("%exit"):
-            self._running = False
 
 
 class TmuxMonitor:
@@ -693,42 +569,40 @@ class TmuxMonitor:
 
     :meth:`refresh` performs one sampling round and can be called from any
     thread; :meth:`start` runs it periodically in the background. Statuses
-    are read with :meth:`statuses`. Bells arrive both from the ``list-panes``
-    flag and, with lower latency, from a control-mode reader per session.
+    are read with :meth:`statuses`.
+
+    Bells come from ``list-panes``' bell flag, which tmux only raises while
+    no client is attached to the session -- so nothing here may attach one
+    (a read-only client would also make tmux refuse ``send-keys``).
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._poll_lock = threading.Lock()
-        self._readers: dict[str, _ControlModeReader] = {}
         self._sessions: dict[str, _SessionActivity] = {}
-        self._running = False
         self._sync_thread: threading.Thread | None = None
-        self._reader_failure_backoff: dict[str, float] = {}
+        # One event per start: a thread from an earlier start that has not
+        # noticed its stop yet can never be revived by a later start.
+        self._stop_event: threading.Event | None = None
         self._entries: list[dict[str, str]] | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
     def start(self):
-        if self._running:
+        if self._stop_event is not None:
             return
-        self._running = True
-        self._sync_thread = threading.Thread(target=self._sync_sessions, daemon=True)
+        stop_event = threading.Event()
+        self._stop_event = stop_event
+        self._sync_thread = threading.Thread(
+            target=self._sync_sessions, args=(stop_event,), daemon=True
+        )
         self._sync_thread.start()
 
     def stop(self, *, wait: bool = True):
-        self._running = False
-        readers = list(self._readers.values())
-        self._readers.clear()
-        for reader in readers:
-            reader.request_stop()
-
-        if wait:
-            for reader in readers:
-                reader.wait_for_stop(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-
-        sync_thread = self._sync_thread
-        self._sync_thread = None
+        stop_event, self._stop_event = self._stop_event, None
+        sync_thread, self._sync_thread = self._sync_thread, None
+        if stop_event is not None:
+            stop_event.set()
         if (
             wait
             and sync_thread is not None
@@ -736,11 +610,6 @@ class TmuxMonitor:
             and sync_thread.is_alive()
         ):
             sync_thread.join(timeout=3)
-            # The sync loop may have attached a reader between the snapshot
-            # above and noticing it was asked to stop.
-            for reader in list(self._readers.values()):
-                reader.stop(wait=False)
-            self._readers.clear()
 
     # -- queries -----------------------------------------------------------
 
@@ -774,15 +643,6 @@ class TmuxMonitor:
                 activity.bell_active = False
 
     # -- sampling ----------------------------------------------------------
-
-    def _on_event(self, session_name: str, event_type: str):
-        if event_type != "bell":
-            return
-        with self._lock:
-            activity = self._sessions.setdefault(session_name, _SessionActivity())
-            activity.bell_active = True
-            activity.bell_time = time.time()
-            activity.status = STATUS_WAITING
 
     def refresh(self) -> dict[str, str]:
         """Sample tmux once and return the resulting statuses."""
@@ -873,7 +733,6 @@ class TmuxMonitor:
                     if pane.agent_interrupts_unreported
                     else reported
                 )
-                activity.details = {"command": command, "source": "agent"}
             return
 
         interactive = False
@@ -899,11 +758,6 @@ class TmuxMonitor:
                 change_age=now - activity.last_change_time,
                 cpu_age=now - activity.last_cpu_time,
             )
-            activity.details = {
-                "command": command,
-                "interactive": interactive,
-                "source": "heuristics",
-            }
 
     @staticmethod
     def _cpu_active(activity: _SessionActivity, cpu_seconds: float, now: float) -> bool:
@@ -950,70 +804,14 @@ class TmuxMonitor:
 
     # -- background loop ---------------------------------------------------
 
-    def _sync_sessions(self):
-        while self._running:
+    def _sync_sessions(self, stop_event: threading.Event):
+        while not stop_event.is_set():
             started = time.monotonic()
             try:
                 self.refresh()
-                self._sync_readers(self.statuses().keys())
             except Exception:
                 logger.warning("tmux session monitor poll failed", exc_info=True)
-
-            deadline = started + _POLL_SECS
-            while self._running and time.monotonic() < deadline:
-                time.sleep(0.1)
-
-    def _sync_readers(self, session_names: Iterable[str]) -> None:
-        """Keep one control-mode reader per live ``gd/*`` session."""
-        gd_sessions = {s for s in session_names if _parse_gd_session_name(s) is not None}
-        current = set(self._readers.keys())
-
-        for s in current - gd_sessions:
-            self._remove_reader(s)
-            self._reader_failure_backoff.pop(s, None)
-
-        for s in gd_sessions & current:
-            reader = self._readers.get(s)
-            if reader and not reader.is_alive():
-                self._remove_reader(s)
-                self._record_reader_failure(s)
-            elif reader:
-                self._reader_failure_backoff.pop(s, None)
-
-        now = time.time()
-        for s in gd_sessions - set(self._readers.keys()):
-            if not self._running:
-                return
-            if now < self._reader_failure_backoff.get(s, 0.0):
-                continue
-            self._add_reader(s)
-            if s in self._readers and not self._readers[s].is_alive():
-                self._record_reader_failure(s)
-            else:
-                self._reader_failure_backoff.pop(s, None)
-
-    def _add_reader(self, session_name: str):
-        reader = _ControlModeReader(session_name, self._on_event)
-        self._readers[session_name] = reader
-        reader.start()
-
-    def _record_reader_failure(self, session_name: str) -> None:
-        """Back off ``tmux -C`` attach retries for *session_name*.
-
-        When ``tmux -C attach-session`` fails (most commonly because the
-        PTY allocator is exhausted) we don't want to hammer tmux again
-        on the next sync iteration. Each failure pushes the next attempt
-        out by ``_CONTROL_MODE_FAILURE_BACKOFF_SECS``. Successful
-        observation in a subsequent sync clears the entry.
-        """
-        self._reader_failure_backoff[session_name] = (
-            time.time() + _CONTROL_MODE_FAILURE_BACKOFF_SECS
-        )
-
-    def _remove_reader(self, session_name: str):
-        reader = self._readers.pop(session_name, None)
-        if reader:
-            reader.stop()
+            stop_event.wait(max(0.0, started + _POLL_SECS - time.monotonic()))
 
 
 __all__ = [

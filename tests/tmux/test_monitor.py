@@ -2,7 +2,7 @@
 
 import shlex
 import subprocess
-import time
+import threading
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -19,7 +19,6 @@ from gitdirector.integrations.tmux.monitor import (
     _AGENT_OUTPUT_MIN_SECS,
     _AGENT_REPORT_STALE_SECS,
     _BELL_GRACE_SECS,
-    _CONTROL_MODE_STOP_WAIT_SECS,
     _OUTPUT_GAP_SECS,
     _SHELL_ACTIVITY_GRACE_SECS,
     _SHELL_COMMANDS,
@@ -27,7 +26,6 @@ from gitdirector.integrations.tmux.monitor import (
     PaneSample,
     ProcessSnapshot,
     _capture_pane_text,
-    _ControlModeReader,
     _get_process_snapshot,
     _is_cursor_blink,
     _list_gd_panes,
@@ -36,6 +34,7 @@ from gitdirector.integrations.tmux.monitor import (
     _parse_agent_report,
     _parse_cpu_seconds,
     _resolve_pane_command,
+    _SessionActivity,
     _tree_cpu_seconds,
     _tty_is_raw,
     reconcile_agent_report,
@@ -61,7 +60,7 @@ class TestLaunchCommandInTmuxSession:
             "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "exit $status"
         )
-        expected_command = _tmux_child_environment_command(f"sh -lc {shlex.quote(cleanup_script)}")
+        expected_command = _tmux_child_environment_command(f"sh -c {shlex.quote(cleanup_script)}")
         assert ready_marker == Path("/tmp/gitdirector-agent.ready")
         mock_run.assert_called_once_with(
             [
@@ -100,20 +99,20 @@ class TestLaunchCommandInTmuxSession:
         assert 'echo "hello world"' in wrapped_script
         # The outer wrapping still uses shlex.quote so single-quote–bearing
         # commands survive the tmux command boundary intact.
-        assert wrapped_script.startswith(_tmux_child_environment_command("sh -lc "))
+        assert wrapped_script.startswith(_tmux_child_environment_command("sh -c "))
 
 
 def _inner_shell_script(mock_run) -> str:
-    """Return the script that ``sh -lc`` actually executes.
+    """Return the script the outer ``sh -c`` actually executes.
 
     The wrapper passed to ``tmux respawn-pane`` is
-    ``env ... sh -lc <shlex.quote(script)>``; parsing the wrapper as a
+    ``env ... sh -c <shlex.quote(script)>``; parsing the wrapper as a
     shell line recovers the original script.
     """
     wrapped = mock_run.call_args[0][0][-1]
     parts = shlex.split(wrapped)
     shell_index = parts.index("sh")
-    assert parts[shell_index + 1] == "-lc"
+    assert parts[shell_index + 1] == "-c"
     return parts[shell_index + 2]
 
 
@@ -689,150 +688,6 @@ class TestResolvePaneStatus:
             assert self._status(command=command, interactive=False) == "idle"
 
 
-class TestControlModeReader:
-    @patch("threading.Thread")
-    def test_start_spawns_thread(self, mock_thread_cls):
-        thread = MagicMock()
-        mock_thread_cls.return_value = thread
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-
-        reader.start()
-
-        assert reader._running is True
-        mock_thread_cls.assert_called_once_with(target=reader._run, daemon=True)
-        thread.start.assert_called_once_with()
-
-    def test_stop_kills_process_if_terminate_fails(self):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._process = MagicMock()
-        reader._process.terminate.side_effect = RuntimeError("boom")
-
-        reader.stop()
-
-        reader._process.kill.assert_called_once_with()
-
-    def test_stop_waits_for_process_when_terminate_succeeds(self):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._process = MagicMock()
-
-        reader.stop()
-
-        reader._process.terminate.assert_called_once_with()
-        reader._process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-
-    def test_stop_without_wait_skips_waiting_for_process(self):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._process = MagicMock()
-
-        reader.stop(wait=False)
-
-        reader._process.terminate.assert_called_once_with()
-        reader._process.wait.assert_not_called()
-
-    def test_stop_ignores_kill_failure(self):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._process = MagicMock()
-        reader._process.terminate.side_effect = RuntimeError("boom")
-        reader._process.kill.side_effect = RuntimeError("still broken")
-
-        reader.stop()
-
-        reader._process.kill.assert_called_once_with()
-
-    def test_is_alive_reflects_thread_state(self):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._running = True
-        reader._thread = MagicMock()
-        reader._thread.is_alive.return_value = True
-
-        assert reader.is_alive() is True
-
-    def test_parse_bell(self):
-        events = []
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
-        reader._parse_line("%bell @0 0")
-        assert events == [("gd/repo/shell/1", "bell")]
-
-    def test_parse_output_is_ignored(self):
-        events = []
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
-        reader._parse_line("%output %0 some data here")
-        assert events == []
-
-    def test_parse_exit(self):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._running = True
-        reader._parse_line("%exit")
-        assert reader._running is False
-
-    def test_ignores_other_lines(self):
-        events = []
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
-        reader._parse_line("%begin 1234")
-        reader._parse_line("%end 1234")
-        reader._parse_line("%session-changed $0 mysession")
-        reader._parse_line("some random text")
-        assert events == []
-
-    @patch("subprocess.Popen")
-    def test_run_parses_output_and_cleans_up(self, mock_popen):
-        events = []
-        process = MagicMock()
-        process.stdout = iter(["%bell @0 0\n", "%output %0 hello\n"])
-        mock_popen.return_value = process
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
-        reader._running = True
-
-        reader._run()
-
-        assert events == [("gd/repo/shell/1", "bell")]
-        process.terminate.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-        assert reader._running is False
-        assert reader._process is None
-
-    @patch("subprocess.Popen")
-    def test_run_stops_before_parsing_when_not_running(self, mock_popen):
-        events = []
-        process = MagicMock()
-        process.stdout = iter(["%bell @0 0\n"])
-        mock_popen.return_value = process
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: events.append((s, e)))
-        reader._running = False
-
-        reader._run()
-
-        assert events == []
-        process.terminate.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-
-    @patch("subprocess.Popen")
-    def test_run_ignores_kill_failure_during_cleanup(self, mock_popen):
-        process = MagicMock()
-        process.stdout = iter(())
-        process.terminate.side_effect = RuntimeError("boom")
-        process.kill.side_effect = RuntimeError("still broken")
-        mock_popen.return_value = process
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._running = True
-
-        reader._run()
-
-        process.kill.assert_called_once_with()
-        assert reader._running is False
-        assert reader._process is None
-
-    @patch("subprocess.Popen", side_effect=RuntimeError("boom"))
-    def test_run_ignores_popen_errors(self, _mock_popen):
-        reader = _ControlModeReader("gd/repo/shell/1", lambda s, e: None)
-        reader._running = True
-
-        reader._run()
-
-        assert reader._running is False
-        assert reader._process is None
-
-
 class TestTmuxMonitor:
     @patch("threading.Thread")
     def test_start_spawns_sync_thread_once(self, mock_thread_cls):
@@ -843,45 +698,23 @@ class TestTmuxMonitor:
         REAL_TMUX_MONITOR_START(monitor)
         REAL_TMUX_MONITOR_START(monitor)
 
-        assert monitor._running is True
-        mock_thread_cls.assert_called_once_with(target=monitor._sync_sessions, daemon=True)
+        mock_thread_cls.assert_called_once_with(
+            target=monitor._sync_sessions, args=(monitor._stop_event,), daemon=True
+        )
         thread.start.assert_called_once_with()
 
-    def test_stop_stops_all_readers_and_clears_registry(self):
+    def test_stop_without_wait_signals_without_blocking(self):
         monitor = TmuxMonitor()
-        reader_one = MagicMock()
-        reader_two = MagicMock()
-        monitor._readers = {
-            "gd/alpha/shell/1": reader_one,
-            "gd/beta/claude/1": reader_two,
-        }
-        monitor._running = True
-
-        REAL_TMUX_MONITOR_STOP(monitor)
-
-        assert monitor._running is False
-        assert monitor._readers == {}
-        reader_one.request_stop.assert_called_once_with()
-        reader_two.request_stop.assert_called_once_with()
-        reader_one.wait_for_stop.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-        reader_two.wait_for_stop.assert_called_once_with(timeout=_CONTROL_MODE_STOP_WAIT_SECS)
-
-    def test_stop_without_wait_requests_reader_shutdown_without_blocking(self):
-        monitor = TmuxMonitor()
-        reader = MagicMock()
         sync_thread = MagicMock()
         sync_thread.is_alive.return_value = True
-        monitor._readers = {"gd/alpha/shell/1": reader}
+        stop_event = threading.Event()
         monitor._sync_thread = sync_thread
-        monitor._running = True
+        monitor._stop_event = stop_event
 
         REAL_TMUX_MONITOR_STOP(monitor, wait=False)
 
-        assert monitor._running is False
-        assert monitor._readers == {}
+        assert stop_event.is_set()
         assert monitor._sync_thread is None
-        reader.request_stop.assert_called_once_with()
-        reader.wait_for_stop.assert_not_called()
         sync_thread.join.assert_not_called()
 
     def test_stop_waits_for_sync_thread_to_exit(self):
@@ -889,52 +722,29 @@ class TestTmuxMonitor:
         sync_thread = MagicMock()
         sync_thread.is_alive.return_value = True
         monitor._sync_thread = sync_thread
+        monitor._stop_event = threading.Event()
 
         REAL_TMUX_MONITOR_STOP(monitor)
 
         assert monitor._sync_thread is None
         sync_thread.join.assert_called_once_with(timeout=3)
 
-    def test_stop_stops_readers_attached_while_stopping(self):
+    def test_restart_does_not_revive_the_previous_loop(self):
         monitor = TmuxMonitor()
-        late_reader = MagicMock()
-        sync_thread = MagicMock()
-        sync_thread.is_alive.return_value = True
-        sync_thread.join.side_effect = lambda timeout: monitor._readers.__setitem__(
-            "gd/late/shell/1", late_reader
-        )
-        monitor._sync_thread = sync_thread
+        with patch.object(monitor, "refresh"), patch("threading.Thread"):
+            REAL_TMUX_MONITOR_START(monitor)
+            first_event = monitor._stop_event
+            REAL_TMUX_MONITOR_STOP(monitor, wait=False)
+            REAL_TMUX_MONITOR_START(monitor)
 
-        REAL_TMUX_MONITOR_STOP(monitor)
-
-        late_reader.stop.assert_called_once_with(wait=False)
-        assert monitor._readers == {}
-
-    @patch("gitdirector.integrations.tmux.monitor._ControlModeReader")
-    def test_add_reader_starts_control_reader(self, mock_reader_cls):
-        monitor = TmuxMonitor()
-        reader = MagicMock()
-        mock_reader_cls.return_value = reader
-
-        monitor._add_reader("gd/repo/shell/1")
-
-        assert monitor._readers["gd/repo/shell/1"] is reader
-        reader.start.assert_called_once_with()
-
-    def test_bell_event_sets_state_and_status(self):
-        monitor = TmuxMonitor()
-        monitor._on_event("gd/repo/shell/1", "bell")
-        assert monitor.get_bell_state("gd/repo/shell/1") is True
-        assert monitor.status_for("gd/repo/shell/1") == "waiting"
-
-    def test_other_events_are_ignored(self):
-        monitor = TmuxMonitor()
-        monitor._on_event("gd/repo/shell/1", "output")
-        assert monitor.statuses() == {}
+        assert first_event.is_set()
+        assert monitor._stop_event is not first_event
+        assert not monitor._stop_event.is_set()
 
     def test_clear_bell(self):
         monitor = TmuxMonitor()
-        monitor._on_event("gd/repo/shell/1", "bell")
+        monitor._sessions["gd/repo/shell/1"] = _SessionActivity(bell_active=True)
+        assert monitor.get_bell_state("gd/repo/shell/1") is True
         monitor.clear_bell("gd/repo/shell/1")
         assert monitor.get_bell_state("gd/repo/shell/1") is False
 
@@ -1260,19 +1070,6 @@ class TestTmuxMonitorRefresh:
             world.advance(_BELL_GRACE_SECS, "gd/repo/agent/1", "working again \u2819")
             assert monitor.refresh()["gd/repo/agent/1"] == "running"
 
-    def test_control_mode_bell_is_cleared_by_later_output(self):
-        stack, world = self._world()
-        with stack:
-            monitor = TmuxMonitor()
-            world.pane("gd/repo/agent/1")
-            world.content["gd/repo/agent/1"] = "frame 1"
-            world.run_program("gd/repo/agent/1", "some-agent")
-            monitor.refresh()
-            monitor._on_event("gd/repo/agent/1", "bell")
-            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
-            world.advance(_BELL_GRACE_SECS + 1, "gd/repo/agent/1", "frame 2 with more text")
-            assert monitor.refresh()["gd/repo/agent/1"] == "running"
-
     def test_agent_reported_state_wins_over_heuristics(self):
         stack, world = self._world()
         with stack:
@@ -1280,8 +1077,8 @@ class TestTmuxMonitorRefresh:
             world.pane("gd/repo/claude/1", agent_state="idle")
             world.content["gd/repo/claude/1"] = "spinning \u280b"
             world.run_program("gd/repo/claude/1", "claude", cpu=50.0, raw=True)
+            world.pane("gd/repo/claude/1", agent_state="idle", bell=True)
             monitor.refresh()
-            monitor._on_event("gd/repo/claude/1", "bell")
             # Fresh output, CPU, raw tty, even a bell: the hook report is the truth.
             world.advance(1.0, "gd/repo/claude/1", "spinning \u2819")
             assert monitor.refresh()["gd/repo/claude/1"] == "idle"
@@ -1561,94 +1358,23 @@ class TestReconcileAgentReport:
         )
 
 
-class TestSyncReaders:
-    def test_removes_dead_readers_and_adds_new_ones(self):
+class TestSyncLoop:
+    def test_sync_loop_survives_errors(self):
         monitor = TmuxMonitor()
-        monitor._running = True
-        stale_reader = MagicMock()
-        existing_reader = MagicMock()
-        existing_reader.is_alive.return_value = False
-        monitor._readers = {
-            "gd/stale/shell/1": stale_reader,
-            "gd/existing/shell/1": existing_reader,
-        }
-        live = [
-            "gd/new/shell/1",
-            "gd/existing/shell/1",
-            "other-session",
-            "gd/panel/main",
-            "gd/temp/panel/repo/shell/1",
-        ]
-        added: list[str] = []
-        removed: list[str] = []
+        stop_event = threading.Event()
+        calls = []
 
-        def add_reader(session_name: str):
-            added.append(session_name)
-            replacement = MagicMock()
-            replacement.is_alive.return_value = True
-            monitor._readers[session_name] = replacement
+        def refresh():
+            calls.append(1)
+            if len(calls) == 2:
+                stop_event.set()
+            raise RuntimeError("boom")
 
-        def remove_reader(session_name: str):
-            removed.append(session_name)
-            monitor._readers.pop(session_name, None)
+        monitor.refresh = refresh
+        with patch("gitdirector.integrations.tmux.monitor._POLL_SECS", 0):
+            monitor._sync_sessions(stop_event)
 
-        monitor._add_reader = MagicMock(side_effect=add_reader)
-        monitor._remove_reader = MagicMock(side_effect=remove_reader)
-
-        monitor._sync_readers(live)
-
-        assert set(added) == {"gd/new/shell/1"}
-        assert set(removed) == {"gd/stale/shell/1", "gd/existing/shell/1"}
-        assert monitor._reader_failure_backoff["gd/existing/shell/1"] > time.time()
-
-    def test_skips_reader_retry_during_backoff(self):
-        monitor = TmuxMonitor()
-        monitor._running = True
-        monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() + 60
-        monitor._add_reader = MagicMock()
-
-        monitor._sync_readers(["gd/repo/shell/1"])
-
-        monitor._add_reader.assert_not_called()
-
-    def test_clears_backoff_after_successful_reader_start(self):
-        monitor = TmuxMonitor()
-        monitor._running = True
-        monitor._reader_failure_backoff["gd/repo/shell/1"] = time.time() - 1
-
-        def add_reader(session_name: str):
-            monitor._readers[session_name] = MagicMock(is_alive=MagicMock(return_value=True))
-
-        monitor._add_reader = MagicMock(side_effect=add_reader)
-
-        monitor._sync_readers(["gd/repo/shell/1"])
-
-        monitor._add_reader.assert_called_once_with("gd/repo/shell/1")
-        assert "gd/repo/shell/1" not in monitor._reader_failure_backoff
-
-    def test_does_not_add_readers_once_stopped(self):
-        monitor = TmuxMonitor()
-        monitor._running = False
-        monitor._add_reader = MagicMock()
-
-        monitor._sync_readers(["gd/repo/shell/1"])
-
-        monitor._add_reader.assert_not_called()
-
-    @patch("gitdirector.integrations.tmux.monitor.time.sleep")
-    def test_sync_loop_survives_errors(self, mock_sleep):
-        monitor = TmuxMonitor()
-        monitor._running = True
-        monitor.refresh = MagicMock(side_effect=RuntimeError("boom"))
-
-        def stop_after_first_sleep(_seconds: float):
-            monitor._running = False
-
-        mock_sleep.side_effect = stop_after_first_sleep
-
-        monitor._sync_sessions()
-
-        mock_sleep.assert_called()
+        assert len(calls) == 2
 
 
 class TestCapturePaneText:

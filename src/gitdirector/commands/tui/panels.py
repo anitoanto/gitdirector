@@ -442,19 +442,7 @@ class Panel:
         return self.layout.total_panes
 
     @property
-    def filled_panes(self) -> int:
-        return sum(1 for pane_index in range(1, self.total_panes + 1) if self.panes.get(pane_index))
-
-    @property
-    def is_empty(self) -> bool:
-        return self.filled_panes == 0 and not self.closed_panes
-
-    @property
     def layout_label(self) -> str:
-        return self.layout.layout_label
-
-    @property
-    def layout_display_label(self) -> str:
         return self.layout.layout_label
 
     @property

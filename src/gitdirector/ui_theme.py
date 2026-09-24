@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -106,6 +107,7 @@ def readable_on(color: Color, *backgrounds: Color, minimum: float = 4.5) -> Colo
     return best
 
 
+@lru_cache(maxsize=8)
 def resolve_panel_theme(theme_name: str | None) -> PanelTheme:
     theme = _resolve_theme(theme_name)
     fallback_foreground = "#F5F5F5" if theme.dark else "#1A1A1A"

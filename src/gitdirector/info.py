@@ -5,16 +5,14 @@ from __future__ import annotations
 import os
 import subprocess
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import lru_cache
-from itertools import islice
+from functools import lru_cache, partial
 from pathlib import Path
 
 import tiktoken
 
 _GIT_LS_FILES_TIMEOUT = 30
-_INFO_PENDING_MULTIPLIER = 2
 _MAX_INFO_WORKERS = 8
 # Well above any real source file, so ordinary repositories are unaffected.
 _MAX_TEXT_BYTES = 10 * 1024 * 1024
@@ -143,15 +141,12 @@ def _read_text(file_path: Path, *, max_bytes: int | None = None) -> str | None:
             # Oversized files are reported like binaries: counted, not measured.
             if os.fstat(f.fileno()).st_size > limit:
                 return None
-            chunk = f.read(8192)
-            if b"\x00" in chunk:
-                return None
-            remaining = f.read()
-            if b"\x00" in remaining:
-                return None
-            return (chunk + remaining).decode("utf-8", errors="replace")
-    except (OSError, PermissionError):
+            data = f.read()
+    except OSError:
         return None
+    if b"\x00" in data:
+        return None
+    return data.decode("utf-8", errors="replace")
 
 
 def _count_lines_from_text(text: str) -> int:
@@ -166,11 +161,7 @@ def _get_encoder():
 
 
 def _count_tokens(text: str) -> int:
-    encoder = _get_encoder()
-    try:
-        return len(encoder.encode_ordinary(text))
-    except AttributeError:
-        return len(encoder.encode(text, disallowed_special=()))
+    return len(_get_encoder().encode_ordinary(text))
 
 
 def _info_worker_count(total_files: int) -> int:
@@ -182,7 +173,7 @@ def _process_file(repo_path: Path, rel_path: str) -> tuple[str, str, int | None,
     _, ext = os.path.splitext(rel_path)
     ext = ext.lower() if ext else "(no ext)"
 
-    if ext != "(no ext)" and ext in _BINARY_EXTENSIONS:
+    if ext in _BINARY_EXTENSIONS:
         return rel_path, ext, None, None
 
     text = _read_text(repo_path / rel_path)
@@ -195,28 +186,9 @@ def _process_file(repo_path: Path, rel_path: str) -> tuple[str, str, int | None,
 
 
 def _iter_processed_files(repo_path: Path, files: list[str]):
-    worker_count = _info_worker_count(len(files))
-    pending_limit = worker_count * _INFO_PENDING_MULTIPLIER
-    file_iter = iter(files)
-
-    with ThreadPoolExecutor(max_workers=worker_count) as pool:
-        pending = {
-            pool.submit(_process_file, repo_path, rel_path): rel_path
-            for rel_path in islice(file_iter, pending_limit)
-        }
-
-        while pending:
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                pending.pop(future, None)
-                yield future.result()
-
-            while len(pending) < pending_limit:
-                try:
-                    rel_path = next(file_iter)
-                except StopIteration:
-                    break
-                pending[pool.submit(_process_file, repo_path, rel_path)] = rel_path
+    # tiktoken releases the GIL while encoding, so threads do run in parallel.
+    with ThreadPoolExecutor(max_workers=_info_worker_count(len(files))) as pool:
+        yield from pool.map(partial(_process_file, repo_path), files)
 
 
 def gather_repo_info(repo_path: Path, *, full: bool = False) -> RepoInfoResult:

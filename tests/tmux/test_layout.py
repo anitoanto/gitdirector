@@ -14,6 +14,8 @@ from gitdirector.integrations.tmux.panels import (
     _span_size,
 )
 
+from ._shared import split_chained_tmux
+
 
 class TestSanitizeRepoName:
     def test_lowercases(self):
@@ -62,7 +64,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "=gd/panel/focus:0.0",
+            "=gd/panel/focus:^",
             "cat",
         )
         assert mock_tmux_output.call_args_list[1].args == (
@@ -100,7 +102,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/grid:0.0",
+                "=gd/panel/grid:^",
                 "cat",
             ),
             (
@@ -112,7 +114,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/grid:0.0",
+                "=gd/panel/grid:^",
                 "cat",
             ),
             (
@@ -150,7 +152,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "=gd/panel/focus:0.0",
+            "=gd/panel/focus:^",
             "cat",
         )
         assert mock_tmux_output.call_args_list[1].args == (
@@ -162,7 +164,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "=gd/panel/focus:0.0",
+            "=gd/panel/focus:^",
             "cat",
         )
         mock_list_panes.assert_called_once_with("gd/panel/focus")
@@ -188,7 +190,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/wall:0.0",
+                "=gd/panel/wall:^",
                 "cat",
             ),
             (
@@ -200,7 +202,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/wall:0.0",
+                "=gd/panel/wall:^",
                 "cat",
             ),
             (
@@ -251,7 +253,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "=gd/panel/grid:0.0",
+            "=gd/panel/grid:^",
             "cat",
         )
         assert mock_tmux_output.call_args_list[1].args == (
@@ -263,7 +265,7 @@ class TestBuildPanelLayout:
             "-F",
             "#{pane_id}",
             "-t",
-            "=gd/panel/grid:0.0",
+            "=gd/panel/grid:^",
             "cat",
         )
         assert mock_tmux_output.call_args_list[2].args == (
@@ -301,7 +303,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/grid:0.0",
+                "=gd/panel/grid:^",
                 "cat",
             ),
             (
@@ -313,7 +315,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/grid:0.0",
+                "=gd/panel/grid:^",
                 "cat",
             ),
             (
@@ -412,7 +414,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/studio:0.0",
+                "=gd/panel/studio:^",
                 "cat",
             ),
             (
@@ -424,7 +426,7 @@ class TestBuildPanelLayout:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=gd/panel/studio:0.0",
+                "=gd/panel/studio:^",
                 "cat",
             ),
             (
@@ -553,7 +555,7 @@ class TestRebuildPanelTmuxSession:
                 "tmux",
                 "set-window-option",
                 "-t",
-                f"={build_session_name}:0",
+                f"={build_session_name}:^",
                 "pane-border-status",
                 "top",
             ]
@@ -584,7 +586,8 @@ class TestPanelPrefixBindings:
     def test_panel_prefix_bindings_include_overlay_alias_and_numeric_focus(self, mock_run):
         _ensure_panel_prefix_bindings()
 
-        commands = [call.args[0] for call in mock_run.call_args_list]
+        mock_run.assert_called_once()
+        commands = split_chained_tmux(mock_run.call_args.args[0])
 
         assert commands[0] == [
             "tmux",

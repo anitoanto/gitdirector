@@ -32,13 +32,16 @@ _NETWORK_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "permission denied" and "unable to access" also appear in purely local
+# errors (a locked index, an unreadable config), so only their remote forms
+# count: ssh's "Permission denied (publickey)" and an http(s) URL.
 _AUTH_ERROR_RE = re.compile(
     r"could not read username"
     r"|authentication failed"
-    r"|permission denied"
+    r"|permission denied(?: \(|, please try again)"
     r"|terminal prompts disabled"
     r"|could not read from remote repository"
-    r"|unable to access"
+    r"|unable to access '[a-z][a-z0-9+.-]*://"
     r"|returned error: 40[13]"
     r"|invalid credentials"
     r"|logon failed"
@@ -57,6 +60,14 @@ _HOST_KEY_ERROR_RE = re.compile(
     r"|host key for .+ has changed",
     re.IGNORECASE,
 )
+
+#: Appended on its own line to a diff cut short by ``get_diff_against_head``.
+DIFF_TRUNCATED_MARKER = "[gd-truncated] diff exceeded size cap"
+
+# Pin the output format against user config (diff.noprefix,
+# diff.mnemonicPrefix, diff.external, core.quotepath) the parser relies on.
+_DIFF_CONFIG = ("-c", "core.quotepath=false")
+_DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/")
 
 _NO_COMMITS_RE = re.compile(
     r"does not have any commits yet|bad default revision 'HEAD'|ambiguous argument 'HEAD'",
@@ -157,6 +168,10 @@ def _kill_running_git_process(process: subprocess.Popen) -> None:
         pass
 
 
+# Commit hooks (tests, linters) and large transfers routinely outlast the
+# default 30 s; killing them midway leaves a half-finished commit or push.
+_LONG_GIT_TIMEOUT = 600
+
 _BASE_SSH_COMMAND = ["ssh", "-o", "ConnectTimeout=10"]
 _SSH_HOST_KEY_OPTIONS = ["-o", "StrictHostKeyChecking=accept-new"]
 
@@ -208,7 +223,10 @@ def _run_git_process(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        # Diffs and paths are not guaranteed UTF-8; a strict decode would
+        # fail the whole command over one Latin-1 line.
+        encoding="utf-8",
+        errors="replace",
         env=env,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
@@ -447,10 +465,6 @@ class Repository:
             return RepoStatus.UNKNOWN, "Detached HEAD"
 
         remote_ref = self._origin_branch_ref(branch)
-        code, _, _ = self._run_git("show-ref", "--verify", "--quiet", remote_ref)
-        if code != 0:
-            return RepoStatus.UNKNOWN, f"No origin/{branch} branch"
-
         code, out, err = self._run_git(
             "rev-list",
             "--left-right",
@@ -458,6 +472,9 @@ class Repository:
             f"HEAD...{remote_ref}",
         )
         if code != 0:
+            ref_code, _, _ = self._run_git("show-ref", "--verify", "--quiet", remote_ref)
+            if ref_code != 0:
+                return RepoStatus.UNKNOWN, f"No origin/{branch} branch"
             return RepoStatus.UNKNOWN, err or f"Could not compare HEAD with origin/{branch}"
 
         parts = out.split()
@@ -598,7 +615,9 @@ class Repository:
 
         attempts = max(1, 1 + retries)
         for attempt in range(attempts):
-            code, out, err = self._run_git("pull", "--ff-only", remote, branch)
+            code, out, err = self._run_git(
+                "pull", "--ff-only", remote, branch, _timeout=_LONG_GIT_TIMEOUT
+            )
             if code == 0:
                 return True, out
             if attempt < attempts - 1 and "network error" in err:
@@ -626,7 +645,7 @@ class Repository:
         """Create a commit with ``message``; returns ``(ok, output)``."""
         if not message or not message.strip():
             return False, "commit message is empty"
-        code, out, err = self._run_git("commit", "-m", message)
+        code, out, err = self._run_git("commit", "-m", message, _timeout=_LONG_GIT_TIMEOUT)
         if code != 0:
             return False, err or out or "git commit failed"
         return True, out
@@ -643,9 +662,11 @@ class Repository:
             branch = self.get_current_branch()
             if not branch:
                 return False, "Could not determine current branch"
-            code, out, err = self._run_git("push", "-u", "origin", branch)
+            code, out, err = self._run_git(
+                "push", "-u", "origin", branch, _timeout=_LONG_GIT_TIMEOUT
+            )
         else:
-            code, out, err = self._run_git("push")
+            code, out, err = self._run_git("push", _timeout=_LONG_GIT_TIMEOUT)
         if code != 0:
             return False, err or out or "git push failed"
         return True, out
@@ -671,10 +692,12 @@ class Repository:
         on very large changesets. A truncated diff is signalled by a trailing
         marker line that the renderer can display to the user.
         """
-        code, diff_text, err = self._run_git("diff", "HEAD", "--no-color", _strip=False)
+        code, diff_text, err = self._run_git(
+            *_DIFF_CONFIG, "diff", "HEAD", *_DIFF_OPTIONS, _strip=False
+        )
         if code != 0 and _is_no_commits_error(err):
             code, diff_text, err = self._run_git(
-                "diff", self._empty_tree_hash(), "--no-color", _strip=False
+                *_DIFF_CONFIG, "diff", self._empty_tree_hash(), *_DIFF_OPTIONS, _strip=False
             )
         if code != 0:
             return False, err or "git diff failed", []
@@ -686,7 +709,7 @@ class Repository:
         encoded = diff_text.encode("utf-8", errors="replace")
         if len(encoded) > max_bytes:
             truncated = encoded[:max_bytes].decode("utf-8", errors="replace")
-            diff_text = truncated + "\n[gd-truncated] diff exceeded size cap\n"
+            diff_text = f"{truncated}\n{DIFF_TRUNCATED_MARKER}\n"
         elif diff_text and not diff_text.endswith("\n"):
             diff_text += "\n"
         return True, diff_text, untracked

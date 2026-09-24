@@ -22,18 +22,26 @@ export const GitDirectorStatus = async ({ $ }) => {
   const busy = new Set(); // session IDs with a turn in progress
   const waiting = new Map(); // request ID -> session ID blocked on the user
   let reported = null;
+  // Events can overlap; running the writes one at a time, and deciding the
+  // state only when a write starts, keeps the last write the current state.
+  let chain = Promise.resolve();
 
-  const report = async () => {
-    const state = waiting.size > 0 ? "waiting" : busy.size > 0 ? "running" : "idle";
-    if (state === reported) {
-      return;
-    }
-    reported = state;
-    try {
-      await $`tmux set-option -t ${pane} ${OPTION} ${state}`.quiet().nothrow();
-    } catch {
-      // Reporting must never disturb the agent.
-    }
+  const report = () => {
+    chain = chain.then(async () => {
+      const state = waiting.size > 0 ? "waiting" : busy.size > 0 ? "running" : "idle";
+      if (state === reported) {
+        return;
+      }
+      try {
+        const result = await $`tmux set-option -t ${pane} ${OPTION} ${state}`.quiet().nothrow();
+        if (result.exitCode === 0) {
+          reported = state;
+        }
+      } catch {
+        // Reporting must never disturb the agent.
+      }
+    });
+    return chain;
   };
 
   const forget = (sessionID) => {

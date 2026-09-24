@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -117,8 +118,8 @@ class SelectSessionScreen(ModalScreen[str | None]):
                     )
                     items.append(
                         Option(
-                            f"[$text]●[/] [bold]{purpose}[/bold]"
-                            f" [dim]{repo}[/dim]  {sn}{current_marker}",
+                            f"[$text]●[/] [bold]{escape(purpose)}[/bold]"
+                            f" [dim]{escape(repo)}[/dim]  {escape(sn)}{current_marker}",
                             id=sn,
                         )
                     )

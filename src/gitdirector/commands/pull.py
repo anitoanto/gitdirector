@@ -43,18 +43,10 @@ def pull_repository(path: Path) -> tuple[str, bool, str]:
     if not is_git_repository(path):
         return name, False, "path not found"
     try:
-        repo = Repository(path)
-        ok, msg = repo.pull()
-        return name, ok, msg
-    except (OSError, ValueError) as exc:
-        return name, False, str(exc)
-
-
-def _pull_one(path: Path) -> tuple[str, bool, str]:
-    try:
-        return pull_repository(path)
+        ok, msg = Repository(path).pull()
     except Exception as exc:
-        return path.name, False, str(exc)
+        return name, False, str(exc)
+    return name, ok, msg
 
 
 def register(cli: click.Group):
@@ -84,7 +76,7 @@ def register(cli: click.Group):
 
         results = run_concurrently(
             paths,
-            _pull_one,
+            pull_repository,
             max_workers=manager.config.max_workers,
             verb="pulling",
             on_error=lambda path, exc: (path.name, False, str(exc)),

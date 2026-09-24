@@ -26,6 +26,19 @@ from gitdirector.commands.tui.screens import RenamePanelScreen
 from .conftest import _mock_manager
 
 
+def _live_entries(names: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "session_name": name,
+            "repo": name.split("/")[1],
+            "repo_slug": name.split("/")[1],
+            "purpose": name.split("/")[2],
+            "description": "-",
+        }
+        for name in names
+    ]
+
+
 def _valid_panel_config(**overrides):
     return {
         "name": "Main",
@@ -929,13 +942,15 @@ class TestGitDirectorConsolePanels:
         app._suspend_and_attach.assert_called_once_with("gd/panel/main", row_key="Main")
 
     @patch(
-        "gitdirector.integrations.tmux.core._list_sessions",
-        return_value=[
-            "gd/alpha/shell/1",
-            "gd/beta/copilot/1",
-            "gd/ops/shell/1",
-            "gd/gamma/shell/1",
-        ],
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=_live_entries(
+            [
+                "gd/alpha/shell/1",
+                "gd/beta/copilot/1",
+                "gd/ops/shell/1",
+                "gd/gamma/shell/1",
+            ]
+        ),
     )
     async def test_load_panels_renders_consistent_spacing_on_each_row(self, _mock_list):
         app = GitDirectorConsole()
@@ -1031,7 +1046,7 @@ class TestGitDirectorConsolePanels:
             ) == "\n" + app._palette.panel_status_label("active")
             assert table.get_row_height("Studio") == 9
 
-    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_live_entries([]))
     async def test_load_panels_counts_only_live_sessions_in_panes_column(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
@@ -1055,8 +1070,8 @@ class TestGitDirectorConsolePanels:
             ) == "\n" + app._palette.panel_status_label("empty")
 
     @patch(
-        "gitdirector.integrations.tmux.core._list_sessions",
-        return_value=["gd/alpha/shell/1"],
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=_live_entries(["gd/alpha/shell/1"]),
     )
     async def test_load_panels_renders_stale_sessions_as_open_squares(self, _mock_list):
         app = GitDirectorConsole()
@@ -1089,8 +1104,8 @@ class TestGitDirectorConsolePanels:
             ) == "\n" + app._palette.panel_status_label("active")
 
     @patch(
-        "gitdirector.integrations.tmux.core._list_sessions",
-        return_value=["gd/alpha/shell/1", "gd/ops/shell/1"],
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=_live_entries(["gd/alpha/shell/1", "gd/ops/shell/1"]),
     )
     async def test_panel_refresh_preserves_selected_row(self, _mock_list):
         app = GitDirectorConsole()

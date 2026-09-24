@@ -537,10 +537,8 @@ class TestDiffUpdatesOnSelection:
             assert first is not second
 
     async def test_content_updates_via_clicked_event(self, mocker):
-        # The screen's on_file_tile_clicked handler is the path used
-        # by mouse clicks; ensure the diff still updates when a tile
-        # is clicked (which is a slightly different code path from
-        # keyboard nav).
+        # A mouse click goes through ListView's own selection, a
+        # different path from keyboard navigation.
         from gitdirector import repo as repo_mod
 
         mocker.patch.object(
@@ -563,9 +561,7 @@ class TestDiffUpdatesOnSelection:
             screen._render_selected_file()
             await pilot.pause()
             first = content.content
-            # Post the click event for the second tile.
-            second_tile = files_list.children[1].query_one(FileTile)
-            second_tile.post_message(FileTile.Clicked(second_tile))
+            await pilot.click(files_list.children[1].query_one(FileTile))
             await pilot.pause()
             second = content.content
             assert first is not second
@@ -741,55 +737,8 @@ class TestFocusIndicator:
             assert not content_label.has_class("--focused")
 
 
-class TestSetFilesRegression:
-    """Regression tests for the empty-list and unbounded-retry fix.
-
-    Previously, ``set_files([])`` left ``_suppress_watch=True`` forever
-    so the user could never change selection, and
-    ``_apply_initial_selection`` re-queued itself unboundedly.
-    """
-
-    def test_empty_list_clears_suppress_watch(self):
-        from textual.app import App
-
-        class _MiniApp(App):
-            pass
-
-        app = _MiniApp()
-        with app._context():  # required for widget construction
-            fl = FileTileList()
-            fl.set_files([])
-            assert fl._suppress_watch is False
-            assert fl._pending_index is None
-
-    def test_apply_initial_selection_bounded_by_retry_limit(self):
-        from textual.app import App
-
-        class _MiniApp(App):
-            pass
-
-        app = _MiniApp()
-        with app._context():
-            fl = FileTileList()
-            # Set a pending index that will never be satisfied because
-            # the list has 0 nodes.
-            fl._pending_index = 0
-            fl._pending_retry_count = 0
-            fl._suppress_watch = True
-            # Call repeatedly: should bail out at the retry limit
-            # rather than re-queue forever.
-            for _ in range(fl._PENDING_RETRY_LIMIT + 5):
-                fl._apply_initial_selection()
-            assert fl._pending_index is None
-            assert fl._suppress_watch is False
-
-    async def test_explicit_index_wins_over_pending_initial_selection(self):
-        """Regression: ``set_files`` defers ``index = 0`` via
-        ``call_after_refresh``. If a caller assigns ``index`` before
-        that fires (keyboard, click, or a test), the late callback used
-        to clobber the explicit choice back to 0. This raced on slow CI
-        runners; here we force the ordering deterministically.
-        """
+class TestSetFiles:
+    async def test_selects_the_first_file_once_mounted(self):
         from textual.app import App, ComposeResult
 
         received: list[ChangedFile | None] = []
@@ -808,16 +757,17 @@ class TestSetFilesRegression:
         app = _MiniApp()
         async with app.run_test(size=(60, 20)) as pilot:
             fl = app.query_one("#fl", FileTileList)
-            fl.set_files(files)
-            # Same tick: the deferred initial selection is still queued.
-            assert fl._pending_index == 0
+            await fl.set_files(files)
+            await pilot.pause()
+            assert fl.index == 0
+            assert received and received[-1] is files[0]
+
             fl.index = 1
             await pilot.pause()
-            await pilot.pause()
-            assert fl.index == 1
-            assert fl._pending_index is None
-            assert fl._suppress_watch is False
-            assert fl.selected_file() is files[1]
             tiles = [c.query_one(FileTile) for c in fl.children]
             assert [t.selected for t in tiles] == [False, True]
-            assert received and received[-1] is files[1]
+            assert received[-1] is files[1]
+
+            await fl.set_files([])
+            assert fl.index is None
+            assert fl.selected_file() is None

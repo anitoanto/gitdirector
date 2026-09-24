@@ -8,6 +8,7 @@ worker so the TUI never blocks on large diffs.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 
@@ -18,12 +19,13 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import ListItem, LoadingIndicator, Static
+from textual.widgets import LoadingIndicator, Static
 
 from ..diff_renderer import (
     ChangedFile,
     DiffBundle,
     build_diff_bundle,
+    diff_gutter_width,
     render_empty_state,
     render_error,
     render_file_diff,
@@ -34,7 +36,7 @@ from .commit import (
     CommitResultScreen,
     StageFilesConfirmScreen,
 )
-from .diff_files import FileTile, FileTileList
+from .diff_files import FileTileList
 
 logger = logging.getLogger(__name__)
 
@@ -202,12 +204,15 @@ class DiffReviewScreen(ModalScreen[None]):
         self.repo_name = repo_name
         self.repo_path = repo_path
         self.branch = branch
-        self._bundle: DiffBundle | None = None
         self._files: list[ChangedFile] = []
+        self._truncated = False
         self._focus_target: str = _FOCUS_FILES
         self._loading = True
         self._load_failed: str | None = None
-        self._worker = None
+        # Bumped per load so a slower, superseded worker cannot apply its
+        # result over a newer one: a thread worker cannot be interrupted.
+        self._load_generation = 0
+        self._diff_renders: dict[tuple[int, int], object] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="diff-container"):
@@ -242,8 +247,19 @@ class DiffReviewScreen(ModalScreen[None]):
             )
 
     def on_mount(self) -> None:
+        self._start_load()
+
+    def _start_load(self) -> None:
+        self._load_generation += 1
         self._show_loading()
-        self._worker = self._load_diff()
+        self._update_summary()
+        self._load_diff(self._load_generation)
+
+    async def _if_current(self, generation: int, callback, *args) -> None:
+        if generation == self._load_generation and self.is_attached:
+            result = callback(*args)
+            if inspect.isawaitable(result):
+                await result
 
     def _show_loading(self) -> None:
         self._loading = True
@@ -272,56 +288,39 @@ class DiffReviewScreen(ModalScreen[None]):
             pass
 
     @work(thread=True, exclusive=True)
-    def _load_diff(self) -> None:
+    def _load_diff(self, generation: int) -> None:
         from ....repo import Repository as _Repo
 
-        def _shutdown() -> bool:
-            app = getattr(self, "app", None)
-            if app is None:
-                return True
-            return getattr(app, "_shutdown_requested", False)
-
         def _post(callback, *args) -> None:
-            if _shutdown():
+            if getattr(self.app, "_shutdown_requested", False):
                 return
             try:
-                self.app.call_from_thread(callback, *args)
+                self.app.call_from_thread(self._if_current, generation, callback, *args)
             except Exception:
                 logger.debug("call_from_thread failed", exc_info=True)
 
         try:
             repo = _Repo(self.repo_path)
-        except Exception as exc:
-            _post(self._apply_error, str(exc))
-            return
-
-        try:
             ok, diff_text, untracked = repo.get_diff_against_head()
-        except Exception as exc:
-            _post(self._apply_error, str(exc))
-            return
+            if not ok:
+                _post(self._apply_error, diff_text or "git diff failed")
+                return
 
-        if not ok:
-            _post(self._apply_error, diff_text or "git diff failed")
-            return
+            def _lookup(rel_path: str) -> str | None:
+                try:
+                    return repo.read_file_text(rel_path)
+                except Exception:
+                    return None
 
-        def _lookup(rel_path: str) -> str | None:
-            try:
-                return repo.read_file_text(rel_path)
-            except Exception:
-                return None
-
-        try:
             bundle = build_diff_bundle(diff_text, untracked, _lookup)
         except Exception as exc:
             _post(self._apply_error, str(exc))
             return
-
         _post(self._apply_bundle, bundle)
 
     def _apply_error(self, message: str) -> None:
         self._load_failed = message
-        self._show_loading()
+        self._loading = False
         try:
             self.query_one("#diff-loading").display = False
         except Exception:
@@ -338,15 +337,16 @@ class DiffReviewScreen(ModalScreen[None]):
             pass
         self._update_summary()
 
-    def _apply_bundle(self, bundle: DiffBundle) -> None:
-        self._bundle = bundle
+    async def _apply_bundle(self, bundle: DiffBundle) -> None:
         self._files = list(bundle.files)
+        self._truncated = bundle.truncated
+        self._diff_renders.clear()
         self._loading = False
         self._load_failed = None
 
         files_list = self.query_one("#diff-files-list", FileTileList)
         if not self._files:
-            files_list.set_files([])
+            await files_list.set_files([])
             try:
                 self.query_one("#diff-loading").display = False
             except Exception:
@@ -361,7 +361,7 @@ class DiffReviewScreen(ModalScreen[None]):
             self._update_summary()
             return
 
-        files_list.set_files(self._files, repo_dir=str(self.repo_path))
+        await files_list.set_files(self._files, repo_dir=str(self.repo_path))
         self._render_selected_file()
         self._show_content()
         self._update_summary()
@@ -392,10 +392,15 @@ class DiffReviewScreen(ModalScreen[None]):
         branch_part = (
             f"  [dim]branch:[/dim] [$text-primary]{escape(self.branch)}[/]" if self.branch else ""
         )
+        truncated_part = (
+            "  [$text-warning]diff too large \u2014 later files are not shown[/]"
+            if self._truncated
+            else ""
+        )
         summary.update(
             f"[bold $text]{count} {noun}[/]"
             f"  [$text-success]+{total_add}[/]  [$text-error]-{total_del}[/]"
-            f"{branch_part}"
+            f"{branch_part}{truncated_part}"
         )
 
     def _render_selected_file(self) -> None:
@@ -412,15 +417,16 @@ class DiffReviewScreen(ModalScreen[None]):
         try:
             content = self.query_one("#diff-content", Static)
             code_width = self._diff_code_width(file)
-            content.update(render_file_diff(file, width=code_width))
-            # ``render_file_diff`` returns a Rich ``Group`` renderable,
-            # which does not report a natural width to Textual's
-            # measurement. Without an explicit width here, the Static
-            # collapses to the scroll container's width and long lines
-            # (``word_wrap=False``) get clipped instead of becoming
-            # horizontally scrollable. Set the width to the renderable's
-            # actual width so the container can scroll the overflow.
-            content.styles.width = code_width + self._diff_gutter_width(file)
+            key = (index, code_width)
+            renderable = self._diff_renders.get(key)
+            if renderable is None:
+                renderable = render_file_diff(file, width=code_width)
+                self._diff_renders[key] = renderable
+            content.update(renderable)
+            # A Rich ``Group`` reports no natural width, so without an
+            # explicit one the Static collapses to the container's width
+            # and long lines are clipped instead of scrolling horizontally.
+            content.styles.width = code_width + diff_gutter_width(file)
             self._apply_content_tone(file)
         except Exception:
             logger.debug("Failed to render diff content", exc_info=True)
@@ -464,10 +470,6 @@ class DiffReviewScreen(ModalScreen[None]):
             longest_line = max(longest_line, cell_len(line.expandtabs(4)))
         return max(self._content_width(), longest_line)
 
-    def _diff_gutter_width(self, file: ChangedFile) -> int:
-        last_line = file.last_new_line or file.first_new_line or 1
-        return max(6, len(str(last_line)) + 4)
-
     def _current_file_index(self) -> int | None:
         try:
             files_list = self.query_one("#diff-files-list", FileTileList)
@@ -504,11 +506,6 @@ class DiffReviewScreen(ModalScreen[None]):
         except Exception:
             logger.debug("Failed to apply focus", exc_info=True)
 
-    def on_list_view_highlighted(self, event) -> None:  # type: ignore[no-untyped-def]
-        if event.control is not self.query_one("#diff-files-list"):
-            return
-        self._render_selected_file()
-
     def on_file_tile_list_file_selected(self, event: FileTileList.FileSelected) -> None:
         self._render_selected_file()
 
@@ -516,20 +513,6 @@ class DiffReviewScreen(ModalScreen[None]):
         if event.control is not self.query_one("#diff-files-list"):
             return
         self._focus_target = _FOCUS_DIFF
-        self._apply_focus()
-
-    def on_file_tile_clicked(self, event) -> None:  # type: ignore[no-untyped-def]
-        # Clicking a tile moves focus to the file list so the keyboard
-        # navigation continues to work from the clicked row.
-        try:
-            files_list = self.query_one("#diff-files-list", FileTileList)
-        except Exception:
-            return
-        for i, child in enumerate(files_list.children):
-            if isinstance(child, ListItem) and child.query_one(FileTile) is event.tile:
-                files_list.index = i
-                break
-        self._focus_target = _FOCUS_FILES
         self._apply_focus()
 
     def action_switch_focus(self) -> None:
@@ -808,31 +791,12 @@ class DiffReviewScreen(ModalScreen[None]):
             self._refresh_after_commit()
 
     def _refresh_after_commit(self) -> None:
-        if self._worker is not None:
-            try:
-                self._worker.cancel()
-            except Exception:
-                pass
-        self._show_loading()
-        self._update_summary()
-        self._worker = self._load_diff()
+        self._start_load()
 
     def action_refresh(self) -> None:
-        if self._worker is not None:
-            try:
-                self._worker.cancel()
-            except Exception:
-                pass
-        self._show_loading()
-        self._update_summary()
-        self._worker = self._load_diff()
+        self._start_load()
 
     def action_close(self) -> None:
-        if self._worker is not None:
-            try:
-                self._worker.cancel()
-            except Exception:
-                pass
         self.dismiss(None)
 
 

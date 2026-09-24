@@ -12,6 +12,19 @@ from gitdirector.commands.tui import GitDirectorConsole, Panel
 from .conftest import _make_info, _mock_manager, patch_sessions
 
 
+def _live_entries(names: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "session_name": name,
+            "repo": name.split("/")[1],
+            "repo_slug": name.split("/")[1],
+            "purpose": name.split("/")[2],
+            "description": "-",
+        }
+        for name in names
+    ]
+
+
 class TestSearch:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_search_shows_input(self, _mock_sessions):
@@ -294,7 +307,7 @@ class TestPanelsSearch:
             assert table.row_count == 1
             assert table.get_row_index("Main") == 0
 
-    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_live_entries([]))
     async def test_search_filters_panels_by_visible_live_panes_label(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
@@ -324,7 +337,7 @@ class TestPanelsSearch:
             assert table.row_count == 1
             assert table.get_row_index("Main") == 0
 
-    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_live_entries([]))
     async def test_search_filters_panels_by_empty_status_when_sessions_are_closed(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])

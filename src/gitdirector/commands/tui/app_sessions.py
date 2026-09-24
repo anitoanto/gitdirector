@@ -166,6 +166,17 @@ def _render_session_row(
     return text, lines + 2
 
 
+_ROW_STATE_KEYS = frozenset({"status"})
+
+
+def _session_rows(entries: list[dict[str, str]]) -> list[tuple]:
+    """What a sessions table built from *entries* shows, minus live status."""
+    return [
+        tuple(sorted((k, v) for k, v in entry.items() if k not in _ROW_STATE_KEYS))
+        for entry in entries
+    ]
+
+
 class ConsoleSessionsMixin:
     def _next_sessions_snapshot_generation(self) -> int:
         self._sessions_snapshot_generation += 1
@@ -213,13 +224,11 @@ class ConsoleSessionsMixin:
             return
         self._sessions_loaded = True
         self._session_statuses = statuses
-        membership_changed = {entry["session_name"] for entry in entries} != {
-            entry["session_name"] for entry in self._sessions_entries
-        }
+        rows_changed = _session_rows(entries) != _session_rows(self._sessions_entries)
         # Off the Sessions tab only the cache is updated: the table is
         # repainted from it on activation, and touching it here would
         # also overwrite the active tab's status bar.
-        if self._active_tab == "sessions" and (refresh_table or membership_changed):
+        if self._active_tab == "sessions" and (refresh_table or rows_changed):
             self._populate_sessions_table(entries)
         else:
             self._sessions_entries = entries
@@ -300,11 +309,12 @@ class ConsoleSessionsMixin:
         is_empty = not entries and total == 0 and not self._search_query
         self._set_table_empty_state(table, no_msg, is_empty=is_empty)
         table.clear()
+        self._rendered_session_status = {}
         if not is_empty:
             for entry in entries:
                 row, height = _render_session_row(entry, layout, self._palette)
                 table.add_row(row, height=height, key=entry["session_name"])
-                entry["_rendered_status"] = entry["status"]
+                self._rendered_session_status[entry["session_name"]] = entry["status"]
 
         if self._resume_selection_tab == "sessions":
             self._restore_resume_selection("sessions")
@@ -315,7 +325,10 @@ class ConsoleSessionsMixin:
                 preserved_row_index,
                 restore_focus=restore_focus,
             )
-        self._update_status(self._build_sessions_loaded_status(len(entries), total))
+        # Repainting a hidden tab's table (a theme change, a removed
+        # session) must not take over the visible tab's status bar.
+        if self._active_tab == "sessions":
+            self._update_status(self._build_sessions_loaded_status(len(entries), total))
 
     def _build_sessions_loaded_status(self, shown: int, total: int) -> str:
         if total == 0 and not self._search_query:
@@ -409,32 +422,20 @@ class ConsoleSessionsMixin:
             return
         self._poll_session_statuses()
 
-    def _poll_session_statuses(self) -> Worker[None]:
-        generation = self._next_sessions_snapshot_generation()
-        return self._poll_session_statuses_worker(generation)
+    def _poll_session_statuses(self) -> None:
+        """Pick up the monitor's latest sample.
 
-    @work(thread=True, exclusive=True, group="status_poll")
-    def _poll_session_statuses_worker(self, generation: int) -> None:
-        from ...integrations.tmux import list_all_gd_sessions
-
-        if not self._should_run_session_status_tracking():
-            return
-
-        # The monitor samples tmux on its own cadence and already carries
-        # every session's metadata, so this poll normally costs no tmux call.
+        The monitor samples tmux on its own thread and keeps the result in
+        memory, so this costs no tmux call and runs on the UI thread. Before
+        its first sample there is nothing newer than the initial load.
+        """
         entries = self._monitor.entries()
         if entries is None:
-            try:
-                entries = list_all_gd_sessions()
-            except Exception:
-                logger.warning("Polling tmux sessions failed", exc_info=True)
-                return
-        statuses = self._monitor.statuses()
-        self.call_from_thread(
-            self._apply_sessions_snapshot,
-            generation,
+            return
+        self._apply_sessions_snapshot(
+            self._next_sessions_snapshot_generation(),
             entries,
-            statuses,
+            self._monitor.statuses(),
             False,
         )
 
@@ -486,15 +487,18 @@ class ConsoleSessionsMixin:
         layout = getattr(self, "_sessions_layout", None) or _resolve_sessions_layout(
             self._sessions_entries, self.size.width
         )
+        rendered = self._rendered_session_status
         for entry in self._sessions_entries:
+            session_name = entry["session_name"]
             status = self._resolve_session_status(entry)
-            if entry.get("status") == status and entry.get("_rendered_status") == status:
-                continue
             entry["status"] = status
+            # Rows filtered out by a search are not in the table at all.
+            if session_name not in rendered or rendered[session_name] == status:
+                continue
             try:
                 row, _height = _render_session_row(entry, layout, self._palette)
-                table.update_cell(entry["session_name"], self._sess_col_keys[0], row)
-                entry["_rendered_status"] = status
+                table.update_cell(session_name, self._sess_col_keys[0], row)
+                rendered[session_name] = status
             except Exception:
                 logger.debug(
                     "Failed to update session status cell %s",

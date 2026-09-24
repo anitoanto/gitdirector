@@ -276,7 +276,7 @@ class TestRepoGetStatusParsingErrors:
             if "status" in git_cmd:
                 v2 = "# branch.oid abc\n# branch.head main\n"
                 return MagicMock(returncode=0, stdout=v2, stderr="")
-            if "show-ref" in git_cmd:
+            if "show-ref" in git_cmd or "rev-list" in git_cmd:
                 return MagicMock(returncode=1, stdout="", stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -288,45 +288,45 @@ class TestRepoGetStatusParsingErrors:
 
 
 # ---------------------------------------------------------------------------
-# pull._pull_one – direct unit tests
+# pull.pull_repository – direct unit tests
 # ---------------------------------------------------------------------------
 
 
-class TestPullOne:
-    """Direct tests for _pull_one helper."""
+class TestPullRepository:
+    """Direct tests for pull_repository."""
 
     def test_path_not_found(self, tmp_path):
-        from gitdirector.commands.pull import _pull_one
+        from gitdirector.commands.pull import pull_repository
 
-        name, ok, msg = _pull_one(tmp_path / "gone")
+        name, ok, msg = pull_repository(tmp_path / "gone")
         assert ok is False
         assert "path not found" in msg
 
     def test_not_a_git_dir(self, tmp_path):
-        from gitdirector.commands.pull import _pull_one
+        from gitdirector.commands.pull import pull_repository
 
         d = tmp_path / "plain"
         d.mkdir()
-        name, ok, msg = _pull_one(d)
+        name, ok, msg = pull_repository(d)
         assert ok is False
         assert "path not found" in msg
 
     def test_success(self, fake_git_repo, mocker):
-        from gitdirector.commands.pull import _pull_one
+        from gitdirector.commands.pull import pull_repository
 
         mocker.patch(
             "gitdirector.repo._run_git_process",
             return_value=MagicMock(returncode=0, stdout="Already up to date.\n", stderr=""),
         )
-        name, ok, msg = _pull_one(fake_git_repo)
+        name, ok, msg = pull_repository(fake_git_repo)
         assert ok is True
         assert name == fake_git_repo.name
 
     def test_exception(self, fake_git_repo, mocker):
-        from gitdirector.commands.pull import _pull_one
+        from gitdirector.commands.pull import pull_repository
 
         mocker.patch("gitdirector.commands.pull.Repository", side_effect=Exception("boom"))
-        name, ok, msg = _pull_one(fake_git_repo)
+        name, ok, msg = pull_repository(fake_git_repo)
         assert ok is False
         assert "boom" in msg
 

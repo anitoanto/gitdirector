@@ -82,8 +82,14 @@ class RefreshFooter(Footer):
     def watch_refreshing(self) -> None:
         self.call_after_refresh(self.recompose)
 
-    def watch_refresh_text(self) -> None:
-        self.call_after_refresh(self.recompose)
+    def watch_refresh_text(self, text: str) -> None:
+        # The spinner ticks four times a second; recomposing the whole
+        # footer for each frame remounts every key.
+        labels = self.query(".-refresh-indicator")
+        if labels:
+            labels.first(FooterLabel).update(text)
+        else:
+            self.call_after_refresh(self.recompose)
 
     def compose(self) -> ComposeResult:
         for child in super().compose():
@@ -283,7 +289,10 @@ class GitDirectorConsole(
         from ...integrations.tmux import TmuxMonitor
 
         self.manager = RepositoryManager()
-        self.theme = self.manager.config.theme
+        # A theme a Textual upgrade removed, or a typo in config.yaml, must
+        # not stop the console from starting.
+        if self.manager.config.theme in self.available_themes:
+            self.theme = self.manager.config.theme
         self._repo_paths: list[Path] = []
         self._results: dict[str, RepositoryInfo] = {}
         self._search_query: str = ""
@@ -305,9 +314,11 @@ class GitDirectorConsole(
         self._repos_cache_updated_at: float | None = None
         self._repos_cache_saved_at: float | None = None
         self._repos_refreshing = False
+        self._repos_refresh_pending = False
         self._monitor = TmuxMonitor()
         self._session_statuses: dict[str, str] = {}
         self._sessions_snapshot_generation = 0
+        self._rendered_session_status: dict[str, str] = {}
         # Set once the first sessions snapshot has been applied; until then
         # the Sessions tab has nothing cached and must load on activation.
         self._sessions_loaded = False
@@ -580,10 +591,9 @@ class GitDirectorConsole(
             launch_command_in_tmux_session,
         )
 
-        launch_tab = self._active_tab
         purpose = purpose or agent_cmd or "shell"
         session_kwargs = {"purpose": purpose, "description": description}
-        if launch_tab == "repos" and self._selected_repo_row_is_group():
+        if self._active_tab == "repos" and self._selected_repo_row_is_group():
             repo_label = self._get_selected_group_session_repo_label()
             if repo_label:
                 session_kwargs["repo_label"] = repo_label
@@ -595,10 +605,9 @@ class GitDirectorConsole(
             return
 
         def refresh_after_launch(_value: object) -> None:
-            self.set_timer(
-                0.2,
-                lambda: self._refresh_after_session_launch(path, launch_tab),
-            )
+            # Resuming from the attach already re-fetches the repository;
+            # only the new session needs picking up before the next poll.
+            self._load_sessions()
 
         if agent_cmd:
             try:
@@ -714,9 +723,14 @@ class GitDirectorConsole(
                         attach_delay_seconds=attach_delay_seconds,
                     )
             except Exception as exc:
-                # Suspending or resuming the driver itself failed.
+                # Suspending or resuming the driver itself failed, so no
+                # resume signal will come to clear the pending restore, and
+                # tab switching stays locked until it is cleared.
                 logger.warning("tmux attach failed: %s", exc)
                 attach_error = exc
+                self._resume_target_tab = None
+                self._resume_refresh_path = None
+                self._clear_resume_selection()
         finally:
             self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
@@ -782,19 +796,6 @@ class GitDirectorConsole(
             except (AttributeError, OSError, ValueError):
                 pass
         return error
-
-    def _refresh_after_session_launch(self, path: Path, launch_tab: str) -> None:
-        if launch_tab == "repos":
-            if str(path) in self._results:
-                self._refresh_repo_for_path(path)
-            elif len(self._results) < len(self._repo_paths):
-                self._populate_initial_rows()
-            else:
-                self._apply_filter_and_sort()
-        # Whichever tab the session was launched from, pick it up in the
-        # session list right away so a switch to the Sessions tab does not
-        # have to wait for the next background poll.
-        self._load_sessions()
 
     def _resolve_repo_refresh_path(
         self, session_name: str, path: Path | None = None
@@ -1064,13 +1065,31 @@ class GitDirectorConsole(
         success_status: str,
         failure_status: str,
     ) -> None:
-        try:
-            repo = Repository(path)
-            ok, message = loader(repo)
-        except Exception as exc:
-            ok = False
-            message = str(exc)
+        # ``git log --graph --all`` on a large repository takes seconds.
+        self._run_repo_git_output(
+            path, command, loader, (success_text, failure_text, success_status, failure_status)
+        )
 
+    @work(thread=True, exclusive=True, group="repo-git-output")
+    def _run_repo_git_output(
+        self,
+        path: Path,
+        command: str,
+        loader: Callable[[Repository], tuple[bool, str]],
+        texts: tuple[str, str, str, str],
+    ) -> None:
+        try:
+            ok, message = loader(Repository(path))
+        except Exception as exc:
+            ok, message = False, str(exc)
+        if self._shutdown_requested:
+            return
+        self.call_from_thread(self._present_repo_git_output, path, command, ok, message, texts)
+
+    def _present_repo_git_output(
+        self, path: Path, command: str, ok: bool, message: str, texts: tuple[str, str, str, str]
+    ) -> None:
+        success_text, failure_text, success_status, failure_status = texts
         self.push_screen(
             GitCommandResultScreen(
                 path.name,
@@ -1339,7 +1358,7 @@ class GitDirectorConsole(
         if session_name is None:
             return
         self.push_screen(
-            ConfirmScreen(f"Remove session '{session_name}'?"),
+            ConfirmScreen(f"Remove session '{escape(session_name)}'?"),
             callback=lambda confirmed: self._do_remove(confirmed, session_name),
         )
 

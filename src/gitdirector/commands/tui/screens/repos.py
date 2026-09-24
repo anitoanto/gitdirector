@@ -53,9 +53,9 @@ class GitOperationsMenuScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static(f"[bold $text]{self.repo_name}[/]", id="menu-title")
+            yield Static(f"[bold $text]{escape(self.repo_name)}[/]", id="menu-title")
             yield Static(
-                f"[dim]branch:[/dim] [$text-primary]{self.branch or '—'}[/]",
+                f"[dim]branch:[/dim] [$text-primary]{escape(self.branch or '—')}[/]",
                 id="menu-branch",
             )
             yield OptionList(
@@ -432,17 +432,21 @@ class RepoInfoScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="info-container"):
             yield Static(
-                f"[bold $text]{self.repo_name}[/]",
+                f"[bold $text]{escape(self.repo_name)}[/]",
                 id="info-title",
             )
             yield Static(
-                f"[dim]{self.repo_path}[/dim]",
+                f"[dim]{escape(str(self.repo_path))}[/dim]",
                 id="info-path",
             )
             yield LoadingIndicator(id="info-loading")
             yield Static("", id="info-hint")
 
     def populate(self, result: RepoInfoResult) -> None:
+        # The worker finishes whenever it finishes; the user may have
+        # closed the screen by then.
+        if not self.is_attached:
+            return
         self.query_one("#info-loading", LoadingIndicator).remove()
         r = result
         stats = Static(
@@ -463,7 +467,7 @@ class RepoInfoScreen(ModalScreen[None]):
                 lines_str = f"{ft.line_count:,}" if ft.line_count is not None else "-"
                 tokens_str = f"{ft.token_count:,}" if ft.token_count is not None else "-"
                 rows += (
-                    f"[$text-primary]  {ft.extension:<12}[/]"
+                    f"[$text-primary]  {escape(ft.extension):<12}[/]"
                     f" [$text]{ft.count:>6}[/]"
                     f"   [dim]{lines_str:>8}[/dim]"
                     f"   [dim]{tokens_str:>10}[/dim]\n"
@@ -473,6 +477,8 @@ class RepoInfoScreen(ModalScreen[None]):
         hint.update("\\[esc] close")
 
     def show_error(self, message: str) -> None:
+        if not self.is_attached:
+            return
         loading = self.query("#info-loading")
         if loading:
             loading.first().remove()

@@ -165,8 +165,6 @@ class AgentSpec:
     command: str
     #: Purpose segment of the session name (``gd/<repo>/<purpose>/<N>``).
     purpose: str
-    #: Process name the running agent shows up as, for idle detection.
-    process: str
     #: Executable names ``doctor`` looks for on ``PATH``.
     executables: tuple[str, ...]
     #: Extra text shown after the label in the launch menu.
@@ -189,11 +187,10 @@ class AgentSpec:
 _CLAUDE_EXECUTABLES = ("claude", "claude-code")
 
 AGENTS: tuple[AgentSpec, ...] = (
-    AgentSpec("pi", "Pi", "pi", "pi", "pi", ("pi",)),
+    AgentSpec("pi", "Pi", "pi", "pi", ("pi",)),
     AgentSpec(
         "opencode",
         "OpenCode",
-        "opencode",
         "opencode",
         "opencode",
         ("opencode",),
@@ -202,7 +199,6 @@ AGENTS: tuple[AgentSpec, ...] = (
     AgentSpec(
         "claude",
         "Claude Code",
-        "claude",
         "claude",
         "claude",
         _CLAUDE_EXECUTABLES,
@@ -215,7 +211,6 @@ AGENTS: tuple[AgentSpec, ...] = (
         # The launch flags would otherwise be sanitized into an unreadable
         # session label, so this variant carries its own purpose.
         "claude-dangerously-skip-permissions",
-        "claude",
         _CLAUDE_EXECUTABLES,
         menu_note="--dangerously-skip-permissions",
         status_launcher=claude_launch_command,
@@ -225,20 +220,12 @@ AGENTS: tuple[AgentSpec, ...] = (
         "GitHub Copilot",
         "copilot",
         "copilot",
-        "copilot",
         ("copilot", "github-copilot-cli"),
     ),
-    AgentSpec("codex", "Codex", "codex", "codex", "codex", ("codex",)),
+    AgentSpec("codex", "Codex", "codex", "codex", ("codex",)),
 )
 
 AGENTS_BY_KEY: dict[str, AgentSpec] = {agent.key: agent for agent in AGENTS}
-
-#: Session purpose -> process name the agent runs as.
-AGENT_PURPOSE_PROCESSES: dict[str, str] = {agent.purpose: agent.process for agent in AGENTS}
-
-AGENT_PURPOSES: frozenset[str] = frozenset(AGENT_PURPOSE_PROCESSES)
-
-AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS = AGENTS_BY_KEY["claude-skip-permissions"].purpose
 
 
 def agent_tools() -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -252,9 +239,6 @@ def agent_tools() -> tuple[tuple[str, tuple[str, ...]], ...]:
 __all__ = [
     "AGENTS",
     "AGENTS_BY_KEY",
-    "AGENT_PURPOSES",
-    "AGENT_PURPOSE_CLAUDE_SKIP_PERMISSIONS",
-    "AGENT_PURPOSE_PROCESSES",
     "AGENT_INTERRUPTS_OPTION",
     "AGENT_INTERRUPTS_UNREPORTED",
     "AGENT_STATES",

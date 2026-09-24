@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.events import MouseEvent
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import ListItem, ListView, Static
@@ -39,11 +38,6 @@ from ..diff_renderer import (
 class _FileTileSpec:
     file: ChangedFile
     repo_dir: str  # absolute repo path; used to compute the relative subtitle
-
-    def title(self) -> str:
-        if self.file.is_rename and self.file.old_path:
-            return f"{self.file.old_path} \u2192 {self.file.path}"
-        return self.file.path
 
     def filename(self) -> str:
         if self.file.is_rename and self.file.old_path:
@@ -67,22 +61,6 @@ class _FileTileSpec:
 
     def icon_bg(self) -> str:
         return STATUS_PILL_BG.get(self.file.status, "#6e7681")
-
-    def icon_fg(self) -> str:
-        return "#ffffff"
-
-    def status_label(self) -> str:
-        if self.file.status == "A":
-            return "new file"
-        if self.file.status == "D":
-            return "deleted"
-        if self.file.status == "R":
-            return "renamed"
-        if self.file.status == "?":
-            return "untracked"
-        if self.file.is_binary:
-            return "binary"
-        return "modified"
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +282,6 @@ class FileTile(Static):
 
     selected = reactive(False)
 
-    class Clicked(Message):
-        def __init__(self, tile: "FileTile") -> None:
-            super().__init__()
-            self.tile = tile
-
     def __init__(self, spec: _FileTileSpec, **kwargs) -> None:
         super().__init__(**kwargs)
         self._spec = spec
@@ -343,10 +316,7 @@ class FileTile(Static):
 
     def _icon_text(self) -> Text:
         letter = self._spec.icon_letter()
-        bg = self._spec.icon_bg()
-        fg = self._spec.icon_fg()
-        text = Text(f" {letter} ", style=f"bold {fg} on {bg}")
-        return text
+        return Text(f" {letter} ", style=f"bold #ffffff on {self._spec.icon_bg()}")
 
     def _stats_text(self) -> Text:
         text = Text(justify="right")
@@ -366,10 +336,8 @@ class FileTile(Static):
     def _refresh_icon(self) -> None:
         if self._icon is None:
             return
-        icon_bg = self._spec.icon_bg()
-        icon_fg = self._spec.icon_fg()
-        self._icon.styles.background = icon_bg
-        self._icon.styles.color = icon_fg
+        self._icon.styles.background = self._spec.icon_bg()
+        self._icon.styles.color = "#ffffff"
 
     def _refresh_styles(self) -> None:
         self.set_class(self.selected, "--selected")
@@ -392,17 +360,6 @@ class FileTile(Static):
 
     def set_selected(self, value: bool) -> None:
         self.selected = value
-
-    def on_click(self, _event: MouseEvent) -> None:
-        self.post_message(self.Clicked(self))
-
-    @property
-    def spec(self) -> _FileTileSpec:
-        return self._spec
-
-    @property
-    def file(self) -> ChangedFile:
-        return self._spec.file
 
     @property
     def selection_palette(self) -> tuple[str, str, str, str]:
@@ -447,97 +404,27 @@ class FileTileList(ListView):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._specs: list[_FileTileSpec] = []
-        self._repo_dir: str = ""
-        self._pending_index: int | None = None
-        self._pending_retry_count = 0
-        self._PENDING_RETRY_LIMIT = 50
-        self._SCROLL_RETRY_LIMIT = 10
 
-    def set_files(self, files: list[ChangedFile], repo_dir: str = "") -> None:
-        self._repo_dir = repo_dir
+    async def set_files(self, files: list[ChangedFile], repo_dir: str = "") -> None:
+        """Replace the list's files and select the first one.
+
+        Awaiting the removal and the mount means the tiles exist by the time
+        the index is set, so selecting needs no deferral or retry.
+        """
         self._specs = [_FileTileSpec(f, repo_dir) for f in files]
-        self._suppress_watch = True
-        self.clear()
-        for spec in self._specs:
-            tile = FileTile(spec)
-            self.append(ListItem(tile, id=f"file-tile-{id(tile)}"))
+        await self.clear()
         if self._specs:
-            self._suppress_watch = True
-            self._pending_index = 0
-            self._pending_retry_count = 0
-            self.call_after_refresh(self._apply_initial_selection)
-        else:
-            self._suppress_watch = False
-            self._pending_index = None
-
-    def _apply_initial_selection(self) -> None:
-        pending = self._pending_index
-        if pending is None:
-            return
-        if len(self._nodes) <= pending:
-            self._pending_retry_count += 1
-            if self._pending_retry_count > self._PENDING_RETRY_LIMIT:
-                self._pending_index = None
-                self._suppress_watch = False
-                return
-            self.call_after_refresh(self._apply_initial_selection)
-            return
-        self._pending_index = None
-        self._pending_retry_count = 0
-        self._suppress_watch = False
-        self.index = pending
+            await self.extend(ListItem(FileTile(spec)) for spec in self._specs)
+            self.index = 0
 
     def watch_index(self, old: int | None, new: int | None) -> None:
-        if getattr(self, "_suppress_watch", False):
-            if new is None or self._pending_index is None:
-                return
-            # An explicit selection arrived (keyboard, click, or a
-            # caller assigning ``index``) while the deferred initial
-            # selection from ``set_files`` was still queued. Honour the
-            # explicit choice and drop the pending one; otherwise the
-            # late ``_apply_initial_selection`` would clobber it back
-            # to file 0 (this raced on slow CI runners).
-            self._pending_index = None
-            self._pending_retry_count = 0
-            self._suppress_watch = False
-        # Delegate to ListView's watch_index first so it can
-        # ``scroll_to_widget`` and keep the highlighted tile in view
-        # when the list overflows the available height.
-        try:
-            super().watch_index(old, new)
-        except TypeError:
-            # Some Textual versions pass different args; fall back
-            # to no-op rather than blowing up.
-            pass
-        self._update_selection()
+        # ListView highlights the item and scrolls it into view.
+        super().watch_index(old, new)
+        for index, selected in ((old, False), (new, True)):
+            if self._is_valid_index(index):
+                for tile in self._nodes[index].query(FileTile):
+                    tile.set_selected(selected)
         self.post_message(self.FileSelected(self.selected_file()))
-        self._ensure_index_visible(new)
-
-    def _ensure_index_visible(self, index: int | None, attempt: int = 0) -> None:
-        if index is None or index != self.index or not self._is_valid_index(index):
-            return
-        selected_widget = self._nodes[index]
-        if selected_widget.region:
-            self.scroll_to_widget(selected_widget, animate=False, immediate=True)
-            return
-        if attempt < self._SCROLL_RETRY_LIMIT:
-            self.call_after_refresh(self._ensure_index_visible, index, attempt + 1)
-
-    def _update_selection(self, attempt: int = 0) -> None:
-        deferred = False
-        for i, child in enumerate(self.children):
-            if isinstance(child, ListItem):
-                try:
-                    tile = child.query_one(FileTile)
-                except Exception:
-                    # The ListItem hasn't mounted its FileTile yet
-                    # (index was assigned in the same tick as
-                    # ``set_files``). Re-apply once it has.
-                    deferred = True
-                    continue
-                tile.set_selected(i == self.index)
-        if deferred and attempt < self._SCROLL_RETRY_LIMIT:
-            self.call_after_refresh(self._update_selection, attempt + 1)
 
     def action_cursor_down(self) -> None:
         if self.index is None:

@@ -13,6 +13,19 @@ from gitdirector.repo import RepoStatus
 from .conftest import _make_info, _mock_manager
 
 
+def _live_entries(names: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "session_name": name,
+            "repo": name.split("/")[1],
+            "repo_slug": name.split("/")[1],
+            "purpose": name.split("/")[2],
+            "description": "-",
+        }
+        for name in names
+    ]
+
+
 class TestSort:
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_sort_by_name_ascending(self, _mock_sessions):
@@ -345,8 +358,8 @@ class TestPanelsSort:
             assert str(row_key.value) == "Main"
 
     @patch(
-        "gitdirector.integrations.tmux.core._list_sessions",
-        return_value=["gd/alpha/shell/1"],
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=_live_entries(["gd/alpha/shell/1"]),
     )
     async def test_sort_panels_by_panes_descending_counts_only_live_sessions(self, _mock_list):
         app = GitDirectorConsole()

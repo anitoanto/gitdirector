@@ -899,6 +899,7 @@ class TestTabRestorationAfterSuspend:
             await pilot.pause()
 
             app._capture_resume_selection("repos")
+            app._repo_paths = [repos[0].path, repos[1].path]
             app._results = {
                 str(repos[0].path): repos[0],
                 str(repos[1].path): repos[1],
@@ -1056,8 +1057,9 @@ class TestSessionsRefreshOnReturn:
                     asyncio.to_thread(full_load_started.wait), timeout=SYNC_TIMEOUT
                 )
 
-                poll_worker = app._poll_session_statuses()
-                await poll_worker.wait()
+                app._monitor.entries = sample_sessions
+                app._monitor.statuses = lambda: {}
+                app._poll_session_statuses()
                 await pilot.pause()
 
                 release_full_load.set()
@@ -1156,8 +1158,7 @@ class TestSessionsRefreshOnReturn:
             }
             app._monitor.entries = lambda: sample_sessions() + [dict(new_entry)]
             app._monitor.statuses = lambda: {}
-            poll_worker = app._poll_session_statuses()
-            await poll_worker.wait()
+            app._poll_session_statuses()
             await pilot.pause()
 
             assert "gd/delta/shell/1" in {e["session_name"] for e in app._sessions_entries}
