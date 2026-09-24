@@ -564,19 +564,55 @@ class TestGitDirectorConsoleActionRouting:
             app.action_open_tmux.assert_called_once_with(agent_cmd="copilot", purpose="copilot")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_handle_menu_action_claude_skip_permissions(self, _):
+    @pytest.mark.parametrize(
+        ("mode", "purpose", "prefix"),
+        [
+            ("default", "claude-default", "claude --settings "),
+            ("auto", "claude-auto", "claude --permission-mode auto --settings "),
+            ("bypass", "claude-bypass", "claude --dangerously-skip-permissions --settings "),
+        ],
+    )
+    async def test_handle_menu_action_claude_modes(self, _, mode, purpose, prefix):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
         app.action_open_tmux = MagicMock()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            app._handle_menu_action("agent:claude-skip-permissions")
+            app._handle_menu_action(f"agent:claude:{mode}")
             app.action_open_tmux.assert_called_once_with(
-                agent_cmd=AGENTS_BY_KEY["claude-skip-permissions"].launch_command,
-                purpose="claude-dangerously-skip-permissions",
+                agent_cmd=AGENTS_BY_KEY["claude"].launch_command_for(mode),
+                purpose=purpose,
             )
             launched = app.action_open_tmux.call_args.kwargs["agent_cmd"]
-            assert launched.startswith("claude --dangerously-skip-permissions --settings ")
+            assert launched.startswith(prefix)
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_handle_menu_action_vscode_opens_the_selected_path(self, _):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        with patch("gitdirector.editor.open_in_vscode") as open_in_vscode:
+            async with app.run_test(size=(120, 30)) as pilot:
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                app._handle_menu_action("vscode")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                open_in_vscode.assert_called_once_with(Path("/tmp/alpha"))
+                assert "opened in VS Code" in app._status_message
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_handle_menu_action_vscode_reports_a_failure(self, _):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        failure = FileNotFoundError("VS Code not found")
+        with patch("gitdirector.editor.open_in_vscode", side_effect=failure):
+            async with app.run_test(size=(120, 30)) as pilot:
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                app._handle_menu_action("vscode")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert app._status_message == "VS Code: VS Code not found"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch(
@@ -1515,16 +1551,6 @@ class TestGitDirectorConsoleDirectBranches:
         assert app._sort_column == 2
         assert app._sort_reverse is True
         app._apply_filter_and_sort.assert_called_once_with()
-
-    def test_handle_sessions_sort_selection_applies_sort(self):
-        app = GitDirectorConsole()
-        app._apply_sessions_filter_and_sort = MagicMock()
-
-        app._handle_sessions_sort_selection((1, True))
-
-        assert app._sessions_sort_column == 1
-        assert app._sessions_sort_reverse is True
-        app._apply_sessions_filter_and_sort.assert_called_once_with()
 
     def test_pause_session_status_tracking_stops_timer_and_monitor(self):
         app = GitDirectorConsole()

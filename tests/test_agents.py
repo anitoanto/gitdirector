@@ -1,117 +1,103 @@
-"""Tests for the agent registry and the hook-based status protocol."""
+"""Tests for the agent registry and the inline status integrations."""
 
 import json
 import shlex
+import sys
 
 import pytest
 
 from gitdirector.agents import (
-    AGENT_INTERRUPTS_OPTION,
     AGENT_STATE_OPTION,
     AGENTS,
     AGENTS_BY_KEY,
-    agent_state_report_command,
+    CLAUDE_STATUS_EVENTS,
     agent_tools,
+    claude_status_hook_path,
     opencode_status_plugin_path,
 )
 
 
-def _stamps(state: str) -> str:
-    """The shell fragment that records *state* together with the current time."""
-    return f'{AGENT_STATE_OPTION} "{state} $(date +%s)"'
-
-
-class TestAgentStateReportCommand:
-    def test_sets_option_on_the_pane_session_and_never_fails(self):
-        command = agent_state_report_command("waiting")
-        assert command.startswith('[ -n "$TMUX_PANE" ] && ')
-        assert f'tmux set-option -p -t "$TMUX_PANE" {_stamps("waiting")}' in command
-        assert command.endswith("; exit 0")
-
-    def test_none_clears_both_options(self):
-        command = agent_state_report_command(None)
-        assert f'tmux set-option -p -u -t "$TMUX_PANE" {AGENT_STATE_OPTION}' in command
-        assert f'tmux set-option -p -u -t "$TMUX_PANE" {AGENT_INTERRUPTS_OPTION}' in command
-
-    def test_interrupt_flag_is_stamped_alongside_the_state(self):
-        command = agent_state_report_command("idle", interrupts_unreported=True)
-        assert _stamps("idle") in command
-        assert f"{AGENT_INTERRUPTS_OPTION} unreported" in command
-        assert AGENT_INTERRUPTS_OPTION not in agent_state_report_command("idle")
-
-    def test_rejects_unknown_states(self):
-        with pytest.raises(ValueError):
-            agent_state_report_command("busy")
+def _claude_settings(command: str) -> dict:
+    argv = shlex.split(command)
+    assert argv[-2] == "--settings"
+    return json.loads(argv[-1])
 
 
 class TestClaudeLaunchCommand:
-    @pytest.mark.parametrize("key", ["claude", "claude-skip-permissions"])
-    def test_both_claude_variants_inject_hook_settings(self, key):
-        agent = AGENTS_BY_KEY[key]
+    @pytest.mark.parametrize("mode", ["default", "auto", "bypass"])
+    def test_every_claude_mode_injects_the_hooks_inline(self, mode):
+        agent = AGENTS_BY_KEY["claude"]
         assert agent.reports_status
-        argv = shlex.split(agent.launch_command)
-        assert argv[: len(shlex.split(agent.command))] == shlex.split(agent.command)
-        assert argv[-2] == "--settings"
-        settings = json.loads(argv[-1])
-        hooks = settings["hooks"]
-        assert set(hooks) == {
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "PostToolUseFailure",
-            "PermissionRequest",
-            "PermissionDenied",
-            "Notification",
-            "Elicitation",
-            "ElicitationResult",
-            "Stop",
-            "StopFailure",
-            "SessionEnd",
+        argv = shlex.split(agent.launch_command_for(mode))
+        command = shlex.split(agent.command_for(mode))
+        assert argv[: len(command)] == command
+        settings = _claude_settings(agent.launch_command_for(mode))
+        # Only hooks: nothing else of the user's settings is overridden.
+        assert list(settings) == ["hooks"]
+        assert set(settings["hooks"]) == set(CLAUDE_STATUS_EVENTS)
+
+    def test_every_event_runs_the_shipped_hook_script_in_isolated_python(self):
+        settings = _claude_settings(AGENTS_BY_KEY["claude"].launch_command)
+        commands = {
+            hook["command"]
+            for entries in settings["hooks"].values()
+            for entry in entries
+            for hook in entry["hooks"]
         }
-        for entries in hooks.values():
-            for entry in entries:
-                for hook in entry["hooks"]:
-                    assert hook["type"] == "command"
-                    assert hook["command"].endswith("exit 0")
+        (command,) = commands
+        assert shlex.split(command) == [sys.executable, "-I", "-S", str(claude_status_hook_path())]
+        for entries in settings["hooks"].values():
+            (hook,) = entries[0]["hooks"]
+            assert hook["type"] == "command"
+            assert hook["timeout"] > 0
 
-    def test_hook_states_match_the_lifecycle(self):
-        settings = json.loads(shlex.split(AGENTS_BY_KEY["claude"].launch_command)[-1])
+    def test_hook_script_ships_with_the_package(self):
+        assert claude_status_hook_path().is_file()
 
-        def command(event: str) -> str:
-            return settings["hooks"][event][0]["hooks"][0]["command"]
-
-        assert _stamps("idle") in command("SessionStart")
-        # Claude cannot report an Escape, so it asks the monitor to watch for one.
-        assert f"{AGENT_INTERRUPTS_OPTION} unreported" in command("SessionStart")
-        assert AGENT_INTERRUPTS_OPTION not in command("Stop")
-        assert _stamps("idle") in command("Stop")
-        assert _stamps("running") in command("UserPromptSubmit")
-        assert _stamps("running") in command("PostToolUse")
-        assert _stamps("waiting") in command("PermissionRequest")
-        assert _stamps("idle") in command("PermissionDenied")
-        assert _stamps("running") in command("PostToolUseFailure")
-        # A turn ended by an API error never reaches Stop.
-        assert _stamps("idle") in command("StopFailure")
-        assert _stamps("waiting") in command("Elicitation")
-        assert _stamps("running") in command("ElicitationResult")
-        assert "set-option -p -u" in command("SessionEnd")
-        # Asking the user a question is waiting; any other tool is work.
-        pre_tool = command("PreToolUse")
-        assert "AskUserQuestion" in pre_tool
-        assert _stamps("waiting") in pre_tool
-        assert _stamps("running") in pre_tool
-        # The periodic idle reminder must not flip a finished session back.
-        notification = command("Notification")
-        assert "idle_prompt" in notification
-        assert _stamps("waiting") in notification
+    def test_noisy_events_are_left_out(self):
+        # Most notification types are not about the user being needed, and
+        # SubagentStop fires for Claude's own helpers after a turn.
+        assert "Notification" not in CLAUDE_STATUS_EVENTS
+        assert "SubagentStop" not in CLAUDE_STATUS_EVENTS
 
     def test_other_agents_launch_unchanged(self):
         for agent in AGENTS:
-            if agent.key.startswith("claude") or agent.key == "opencode":
+            if agent.key in ("claude", "opencode"):
                 continue
             assert not agent.reports_status
             assert agent.launch_command == agent.command
+
+
+class TestClaudeModes:
+    def test_modes_map_to_permission_flags(self):
+        agent = AGENTS_BY_KEY["claude"]
+        assert agent.command_for("default") == "claude"
+        assert agent.command_for("auto") == "claude --permission-mode auto"
+        assert agent.command_for("bypass") == "claude --dangerously-skip-permissions"
+
+    def test_auto_is_the_default_and_unknown_modes_fall_back_to_it(self):
+        agent = AGENTS_BY_KEY["claude"]
+        assert agent.default_mode == "auto"
+        assert agent.command_for(None) == "claude --permission-mode auto"
+        assert agent.command_for("nope") == "claude --permission-mode auto"
+        assert agent.launch_command == agent.launch_command_for("auto")
+
+    def test_only_bypass_is_flagged_dangerous(self):
+        dangerous = [mode.key for mode in AGENTS_BY_KEY["claude"].modes if mode.dangerous]
+        assert dangerous == ["bypass"]
+
+    def test_each_mode_names_its_sessions_with_a_short_slug(self):
+        agent = AGENTS_BY_KEY["claude"]
+        assert agent.purpose_for("default") == "claude-default"
+        assert agent.purpose_for("auto") == "claude-auto"
+        assert agent.purpose_for("bypass") == "claude-bypass"
+        assert agent.purpose_for(None) == "claude-auto"
+        assert AGENTS_BY_KEY["codex"].purpose_for("auto") == "codex"
+
+    def test_agents_without_modes_ignore_a_mode(self):
+        agent = AGENTS_BY_KEY["codex"]
+        assert agent.mode("auto") is None
+        assert agent.launch_command_for("auto") == "codex"
 
 
 class TestOpenCodeLaunchCommand:
@@ -144,8 +130,8 @@ class TestOpenCodeLaunchCommand:
             assert f'"{event}"' in source
         for state in ("running", "waiting", "idle"):
             assert f'"{state}"' in source
-        # Interrupts are reported by OpenCode itself, so no flag is requested.
-        assert AGENT_INTERRUPTS_OPTION not in source
+        # A retrying turn is still a turn in progress.
+        assert 'props.status?.type === "idle"' in source
 
 
 class TestAgentTools:

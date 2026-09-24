@@ -733,17 +733,54 @@ def _validate_session_name_for_kill(session_name: str) -> None:
             )
 
 
-def attach_tmux_session(session_name: str, *, skip_config_sync: bool = False) -> bool:
+def _sidebar_enabled() -> bool:
+    try:
+        return Config().sidebar
+    except Exception:
+        logger.debug("could not read the sidebar setting", exc_info=True)
+        return True
+
+
+def _opens_in_deck(session_name: str) -> bool:
+    """Repository sessions open beside the session sidebar unless it is turned off."""
+    return _parse_gd_session_name(session_name) is not None and _sidebar_enabled()
+
+
+def prepare_attach(session_name: str) -> str | None:
+    """Build the deck *session_name* will open in, or None when it attaches directly.
+
+    Callers that give up the terminal to attach (the console) build it
+    first, so the screen goes straight from them to the finished deck.
+    """
+    if not _opens_in_deck(session_name) or not _session_exists(session_name):
+        return None
+    from .deck import open_deck
+
+    return open_deck(session_name)
+
+
+def attach_tmux_session(
+    session_name: str, *, skip_config_sync: bool = False, deck: str | None = None
+) -> bool:
     """Attach to *session_name*, blocking until the client detaches or the session ends.
 
     Returns ``False`` when running inside tmux, where the current client is
     switched to the session instead and the call returns at once.
 
+    A repository session opens in a deck, beside the session sidebar (see
+    :mod:`.deck`); the client then attaches to the deck, and this blocks
+    until it leaves it.
+
     When *skip_config_sync* is true the theme sync is left out; callers that
     just created the session (and therefore synced moments ago) set it.
+    *deck* is one :func:`prepare_attach` already built for the session.
     """
     if not _session_exists(session_name):
         raise TmuxError(f"tmux session no longer exists: {session_name}")
+    if deck is not None or _opens_in_deck(session_name):
+        from .deck import attach_deck
+
+        return attach_deck(session_name, deck)
     if not skip_config_sync and session_name.startswith("gd/"):
         sync_panel_tmux_config()
     if _is_persistent_panel_session(session_name):
@@ -802,9 +839,14 @@ def _is_persistent_panel_session(session_name: str) -> bool:
     return len(parts) == 3 and parts[:2] == ["gd", "panel"] and bool(parts[2])
 
 
+def _is_deck_session(session_name: str) -> bool:
+    parts = session_name.split("/")
+    return len(parts) == 3 and parts[:2] == ["gd", "deck"] and bool(parts[2])
+
+
 def _is_helper_session(session_name: str) -> bool:
-    """A panel's view of a session, or a panel still being built."""
-    return session_name.startswith(("gd/view/", "gd/build/"))
+    """A view of a session, a panel still being built, or a deck."""
+    return session_name.startswith(("gd/view/", "gd/build/", "gd/deck/"))
 
 
 def make_panel_session_name(panel_name: str) -> str:
@@ -823,6 +865,10 @@ def _session_slug(session_name: str | None) -> str | None:
     return session_name
 
 
+# Slugs of sessions launched before Claude Code's modes; drop once none are left.
+_LEGACY_PURPOSES = {"claude-dangerously-skip-permissions": "claude-bypass"}
+
+
 def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | None:
     if not session_name:
         return None
@@ -834,7 +880,7 @@ def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | N
         return None
     if not sequence.isdigit() or int(sequence) <= 0:
         return None
-    return repo, purpose, sequence
+    return repo, _LEGACY_PURPOSES.get(purpose, purpose), sequence
 
 
 def capture_pane(
@@ -1013,7 +1059,7 @@ def _tmux_design_config_path() -> Path:
 def _session_badge_text(session_name: str) -> str:
     parts = session_name.split("/")
     if len(parts) >= 4 and parts[0] == "gd" and parts[1] != "panel":
-        return parts[2].upper()
+        return _LEGACY_PURPOSES.get(parts[2], parts[2]).upper()
     return "SESSION"
 
 
@@ -1043,8 +1089,8 @@ _STATUS_LABEL_WIDTH = "#{?#{e|>:#{window_width},70},#{e|-:#{window_width},58},12
 
 
 def _tmux_theme_config(
-    badge_text: str,
-    label_text: str,
+    badge_text: str | None,
+    label_text: str | None,
     session_name: str,
     theme_name: str | None = None,
     *,
@@ -1075,8 +1121,6 @@ def _tmux_theme_config(
             [
                 f"set-option -t {quoted_session} status-position bottom",
                 f'set-option -t {quoted_session} status-style "fg={theme.foreground},bg={theme.panel}"',
-                f"set-option -t {quoted_session} {_STATUS_BADGE_OPTION} {shlex.quote(badge_text)}",
-                f"set-option -t {quoted_session} {_STATUS_LABEL_OPTION} {shlex.quote(label_text)}",
                 # Each part truncates itself with an ellipsis instead.
                 f"set-option -t {quoted_session} status-left-length 1000",
                 f"set-option -t {quoted_session} status-right-length 24",
@@ -1084,6 +1128,15 @@ def _tmux_theme_config(
                 f"set-option -t {quoted_session} status-right {shlex.quote(status_right)}",
             ]
         )
+        # A deck sets its own, for whichever session it shows.
+        if badge_text is not None:
+            lines.append(
+                f"set-option -t {quoted_session} {_STATUS_BADGE_OPTION} {shlex.quote(badge_text)}"
+            )
+        if label_text is not None:
+            lines.append(
+                f"set-option -t {quoted_session} {_STATUS_LABEL_OPTION} {shlex.quote(label_text)}"
+            )
     else:
         lines.append(f"set-option -t {quoted_session} status off")
 
@@ -1137,6 +1190,66 @@ def _panel_tmux_config(
         window_status_current_format=_panel_window_status_format(),
         show_status=True,
     )
+
+
+def _deck_tmux_config(session_name: str, theme_name: str | None = None) -> str:
+    config = _tmux_theme_config(
+        None,
+        None,
+        session_name,
+        theme_name,
+        window_target=f"{session_name}:{_FIRST_WINDOW}",
+        # The shown session draws its own header.
+        pane_border_status="off",
+        pane_border_lines="heavy",
+        window_status_format="",
+        window_status_current_format="",
+    )
+    # The sidebar's own tint shows focus, so the divider can go: tmux 3.6+
+    # draws borders as spaces, which take the pane background and vanish.
+    window = shlex.quote(f"={session_name}:{_FIRST_WINDOW}")
+    hide = " ; ".join(
+        f"set-window-option -t {window} {option}"
+        for option in (
+            "pane-border-lines spaces",
+            'pane-border-style "fg=default,bg=default"',
+            'pane-active-border-style "fg=default,bg=default"',
+        )
+    )
+    config += f"if-shell -F '#{{>=:#{{version}},3.6}}' {shlex.quote(hide)}\n"
+    theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
+    session = shlex.quote(_session_option_target(session_name))
+    status_right = _deck_key_hints(theme) + (
+        f"#[fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}] %H:%M %d %b #[default]"
+    )
+    return config + (
+        f"set-option -t {session} status-right-length 120\n"
+        f"set-option -t {session} status-right {shlex.quote(status_right)}\n"
+    )
+
+
+# Below this client width the deck's status line keeps only the clock.
+_DECK_HINTS_MIN_WIDTH = 110
+
+
+def _blend_hex(color: str, other: str, amount: float) -> str:
+    a = [int(color[i : i + 2], 16) for i in (1, 3, 5)]
+    b = [int(other[i : i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * amount):02X}" for x, y in zip(a, b))
+
+
+def _deck_key_hints(theme) -> str:
+    """The deck's keys for the status line, drawn with the live prefix key."""
+    muted = _blend_hex(theme.foreground, theme.panel, 0.45)
+    # No commas: this sits inside a #{?...} conditional.
+    key = f"#[fg={theme.primary}]#[bold]"
+    label = f"#[nobold]#[fg={muted}]"
+    hints = (
+        f"{key}⇥ / #{{prefix}} ⇥{label} session ↔ sidebar   "
+        f"{key}#{{prefix}} b{label} toggle   "
+        f"{key}#{{prefix}} d{label} console   #[default]"
+    )
+    return f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},{hints},}}"
 
 
 def _session_tmux_config(
@@ -1239,6 +1352,7 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     windows = _live_session_windows()
     live_panel_sessions = _live_panel_sessions(windows)
     live_repo_sessions = sorted(name for name in windows if _parse_gd_session_name(name))
+    live_decks = sorted(name for name in windows if _is_deck_session(name))
 
     lines = [
         "# Generated by GitDirector",
@@ -1253,11 +1367,12 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
         _session_tmux_config(session_name, resolved_theme, window_target=windows[session_name])
         for session_name in live_repo_sessions
     )
+    lines.extend(_deck_tmux_config(session_name, resolved_theme) for session_name in live_decks)
 
     atomic_write_text(config_path, "\n".join(lines))
     # Always sourced: identical text can still mean a new session that
     # reuses a closed one's name and has never been themed.
-    if live_panel_sessions or live_repo_sessions:
+    if live_panel_sessions or live_repo_sessions or live_decks:
         try:
             _run_tmux(["source-file", str(config_path)], check=True)
         except TmuxError:
@@ -1276,6 +1391,7 @@ __all__ = [
     "list_all_gd_sessions",
     "list_repo_sessions",
     "open_in_tmux",
+    "prepare_attach",
     "send_key_to_session",
     "send_text_to_session",
     "sync_panel_tmux_config",

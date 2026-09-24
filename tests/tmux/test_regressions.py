@@ -133,9 +133,10 @@ class TestKillTmuxSessionInputValidation:
 class TestExactMatchAttachTmuxSession:
     """attach_tmux_session must use ``=`` for both switch-client and attach-session."""
 
+    @patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False)
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("subprocess.run")
-    def test_regular_session_switch_client_exact_target(self, mock_run, _mock_sync):
+    def test_regular_session_switch_client_exact_target(self, mock_run, _mock_sync, _sidebar):
         mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {"TMUX": "/tmp/tmux-1000/default,12345,0"}):
             attach_tmux_session("gd/repo/shell/1")

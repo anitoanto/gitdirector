@@ -14,7 +14,6 @@ from textual.widgets.data_table import RowDoesNotExist
 
 from .constants import (
     _PANELS_SORT_COLUMN_NAMES,
-    _SESSIONS_SORT_COLUMN_NAMES,
 )
 from .screens import SortMenuScreen
 
@@ -74,6 +73,8 @@ class ConsoleUIHelpersMixin:
             return self._active_tab == "repos"
         if action == "edit_session_description":
             return self._active_tab == "sessions"
+        if action == "sort":
+            return self._active_tab != "sessions"
         return super().check_action(action, parameters)
 
     def _arm_resume_new_panel_guard(self, restore_tab: str) -> None:
@@ -410,16 +411,10 @@ class ConsoleUIHelpersMixin:
             self._get_active_table().focus()
 
     def action_sort(self) -> None:
+        # Sessions are grouped by repo, like the sidebar; there is nothing to sort.
         if self._active_tab == "sessions":
-            self.push_screen(
-                SortMenuScreen(
-                    self._sessions_sort_column,
-                    self._sessions_sort_reverse,
-                    _SESSIONS_SORT_COLUMN_NAMES,
-                ),
-                callback=self._handle_sessions_sort_selection,
-            )
-        elif self._active_tab == "panels":
+            return
+        if self._active_tab == "panels":
             self.push_screen(
                 SortMenuScreen(
                     self._panels_sort_column,
@@ -439,12 +434,6 @@ class ConsoleUIHelpersMixin:
             return
         self._sort_column, self._sort_reverse = result
         self._apply_filter_and_sort()
-
-    def _handle_sessions_sort_selection(self, result: tuple | None) -> None:
-        if result is None:
-            return
-        self._sessions_sort_column, self._sessions_sort_reverse = result
-        self._apply_sessions_filter_and_sort()
 
     def _handle_panels_sort_selection(self, result: tuple | None) -> None:
         if result is None:

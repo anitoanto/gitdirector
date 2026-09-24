@@ -7,11 +7,11 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from textual.widgets import DataTable, Input, OptionList, Static, TabbedContent, TextArea
+from textual.widgets import DataTable, Input, Static, TabbedContent, TextArea
 
 from gitdirector.commands.tui import GitDirectorConsole, SortMenuScreen
 from gitdirector.commands.tui.app_sessions import (
-    _MIN_SESSIONS_DESCRIPTION_WIDTH,
+    _MIN_SESSIONS_ID_WIDTH,
     _SESSIONS_REPO_WIDTH,
     _resolve_sessions_layout,
 )
@@ -49,7 +49,7 @@ class TestSessionsTab:
             table = app.query_one("#sessions-table", DataTable)
             assert len(table.columns) == 1
             header = table.columns[app._sess_col_keys[0]].label.plain
-            for title in ("Status", "Session", "Repository", "Description"):
+            for title in ("Status", "Session", "Repository", "Session ID"):
                 assert title in header
 
     async def test_tab_switching_via_action(self):
@@ -253,9 +253,9 @@ class TestSessionsTab:
             lines = _session_row_lines(app, table, row_key)
             assert "shell" in lines[0]
             assert "alpha" in lines[0]
-            assert lines[0].endswith("-")
-            # The tmux session name lives on its own full-width second line.
-            assert lines[1].strip() == "gd/alpha/shell/1"
+            assert lines[0].endswith("gd/alpha/shell/1")
+            # The description lives on its own full-width second line.
+            assert lines[1].strip() == "no description"
             assert lines[2] == ""
 
 
@@ -321,7 +321,7 @@ class TestSessionsSearchAndSort:
             {"session_name": "gd/beta/claude/1", "repo": "beta", "purpose": "claude"},
         ],
     )
-    async def test_default_sessions_sort_is_session_name(self, _mock_list):
+    async def test_sessions_are_grouped_by_repo(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -329,78 +329,13 @@ class TestSessionsSearchAndSort:
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#sessions-table", DataTable)
-            table.move_cursor(row=0)
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd/alpha/shell/1"
+            assert [str(key.value) for key in table.rows] == [
+                "gd/alpha/shell/1",
+                "gd/beta/claude/1",
+                "gd/gamma/copilot/1",
+            ]
             status_text = app.query_one("#status-bar", Static).content
             assert "sort:" not in status_text
-
-    @patch_sessions()
-    async def test_sort_sessions_by_repo(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._sessions_sort_column = 2
-            app._sessions_sort_reverse = False
-            app._apply_sessions_filter_and_sort()
-            table = app.query_one("#sessions-table", DataTable)
-            assert "alpha" in _session_row_lines(app, table, "gd/alpha/shell/1")[0]
-            table.move_cursor(row=0)
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd/alpha/shell/1"
-
-    @patch_sessions()
-    async def test_sort_sessions_by_repo_descending(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._sessions_sort_column = 2
-            app._sessions_sort_reverse = True
-            app._apply_sessions_filter_and_sort()
-            table = app.query_one("#sessions-table", DataTable)
-            table.move_cursor(row=0)
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd/gamma/copilot/1"
-
-    @patch_sessions()
-    async def test_sort_sessions_by_session_name(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._sessions_sort_column = 3
-            app._sessions_sort_reverse = False
-            app._apply_sessions_filter_and_sort()
-            table = app.query_one("#sessions-table", DataTable)
-            table.move_cursor(row=0)
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd/alpha/shell/1"
-
-    @patch_sessions()
-    async def test_sort_sessions_combined_with_search(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._search_query = "gd/"
-            app._sessions_sort_column = 2
-            app._sessions_sort_reverse = True
-            app._apply_sessions_filter_and_sort()
-            table = app.query_one("#sessions-table", DataTable)
-            assert table.row_count == 3
-            table.move_cursor(row=0)
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd/gamma/copilot/1"
 
     @patch_sessions()
     async def test_sessions_status_bar_with_filter(self, _mock):
@@ -415,22 +350,6 @@ class TestSessionsSearchAndSort:
             status_text = app.query_one("#status-bar", Static).content
             assert "1 of 3" in status_text
             assert "filter:" in status_text
-
-    @patch_sessions()
-    async def test_sessions_status_bar_with_sort(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            app._sessions_sort_column = 2
-            app._sessions_sort_reverse = True
-            app._apply_sessions_filter_and_sort()
-            status_text = app.query_one("#status-bar", Static).content
-            assert "sort:" in status_text
-            assert "Repository" in status_text
-            assert "\u25bc" in status_text
 
     @patch_sessions()
     async def test_status_refresh_does_not_resort_rows_when_sorted_by_status(self, _mock):
@@ -475,7 +394,7 @@ class TestSessionsSearchAndSort:
             assert str(row_key.value) == "gd/alpha/shell/1"
 
     @patch_sessions()
-    async def test_sort_action_on_sessions_tab(self, _mock):
+    async def test_sort_is_off_on_sessions_tab(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -484,9 +403,9 @@ class TestSessionsSearchAndSort:
             await pilot.pause()
             await pilot.press("s")
             await pilot.pause()
-            assert isinstance(app.screen, SortMenuScreen)
-            menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 5
+            # Sessions are grouped by repo; there is no sort menu here.
+            assert not isinstance(app.screen, SortMenuScreen)
+            assert app.check_action("sort", ()) is False
 
     @patch_sessions()
     async def test_search_on_sessions_tab_via_input(self, _mock):
@@ -546,20 +465,6 @@ class TestSessionsSearchAndSort:
             assert app._search_query == ""
             assert table.row_count == 3
 
-    @patch_sessions()
-    async def test_handle_sessions_sort_selection_none(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            original_col = app._sessions_sort_column
-            original_rev = app._sessions_sort_reverse
-            app._handle_sessions_sort_selection(None)
-            assert app._sessions_sort_column == original_col
-            assert app._sessions_sort_reverse == original_rev
-
 
 class TestBuildSessionsLoadedStatus:
     async def test_no_sessions_no_filter(self):
@@ -591,15 +496,6 @@ class TestBuildSessionsLoadedStatus:
             msg = app._build_sessions_loaded_status(1, 3)
             assert "1 of 3" in msg
             assert "filter: 'alpha'" in msg
-
-    async def test_with_sort(self):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(80, 24)):
-            app._sessions_sort_column = 2
-            app._sessions_sort_reverse = True
-            msg = app._build_sessions_loaded_status(3, 3)
-            assert "sort: Repository \u25bc" in msg
 
 
 class TestTabRestorationAfterSuspend:
@@ -1001,17 +897,15 @@ class TestTabRestorationAfterSuspend:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             assert str(row_key.value) == "gd/beta/claude/1"
 
-    async def test_with_filter_and_sort(self):
+    async def test_with_filter(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)):
             app._search_query = "test"
-            app._sessions_sort_column = 3
-            app._sessions_sort_reverse = True
             msg = app._build_sessions_loaded_status(2, 5)
             assert "2 of 5" in msg
             assert "filter: 'test'" in msg
-            assert "sort: Session Name \u25bc" in msg
+            assert "sort:" not in msg
 
     async def test_esc_clear_search_hint_shown(self):
         app = GitDirectorConsole()
@@ -1197,6 +1091,49 @@ class TestSessionsRefreshOnReturn:
             with patch("sys.stdout"):
                 app._suspend_and_attach("gd-test-session")
         assert app._active_tab == "sessions"
+
+    async def test_the_deck_is_built_before_suspending(self):
+        """The terminal goes straight from the console to the finished deck."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        order = []
+        app.suspend = MagicMock(
+            return_value=MagicMock(
+                __enter__=MagicMock(side_effect=lambda *_: order.append("suspend")),
+                __exit__=MagicMock(return_value=False),
+            )
+        )
+
+        def prepare(session):
+            order.append("prepare")
+            return "gd/deck/1-a"
+
+        with (
+            patch("gitdirector.integrations.tmux.prepare_attach", side_effect=prepare),
+            patch("gitdirector.integrations.tmux.attach_tmux_session") as attach,
+            patch("sys.stdout"),
+        ):
+            app._suspend_and_attach("gd/repo/claude/1")
+        assert order == ["prepare", "suspend"]
+        assert attach.call_args.kwargs["deck"] == "gd/deck/1-a"
+
+    async def test_a_failed_prepare_leaves_the_attach_to_report_it(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        with (
+            patch("gitdirector.integrations.tmux.prepare_attach", side_effect=RuntimeError("x")),
+            patch("gitdirector.integrations.tmux.attach_tmux_session") as attach,
+            patch("sys.stdout"),
+        ):
+            app._suspend_and_attach("gd/repo/claude/1")
+        assert attach.call_args.kwargs["deck"] is None
 
     async def test_suspend_and_attach_failure_still_resumes_app(self):
         """An attach failure must not escape ``suspend`` (Textual never resumes)."""
@@ -1430,7 +1367,30 @@ class TestRemoveSessionUpdatesTable:
 
 class TestSessionDescription:
     @patch_sessions()
-    async def test_description_column_uses_placeholder_when_unset(self, _mock):
+    async def test_description_shows_below_the_columns(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_entries[0]["description"] = "fix the flaky test"
+            app._apply_sessions_filter_and_sort()
+            table = app.query_one("#sessions-table", DataTable)
+            lines = _session_row_lines(app, table, app._sessions_entries[0]["session_name"])
+            assert lines[1].strip() == "fix the flaky test"
+
+    def test_long_session_names_wrap_after_a_slash(self):
+        from gitdirector.commands.tui.app_sessions import _wrap_session_name
+
+        name = "gd/noa-browser-extension_ntbdq/claude-dangerously-skip-permissions/1"
+        lines = _wrap_session_name(name, 40)
+        assert "".join(lines) == name
+        assert all(len(line) <= 40 for line in lines)
+        assert lines[0] == "gd/noa-browser-extension_ntbdq/"
+
+    @patch_sessions()
+    async def test_description_line_uses_placeholder_when_unset(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1438,7 +1398,7 @@ class TestSessionDescription:
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#sessions-table", DataTable)
-            assert _session_row_lines(app, table, "gd/alpha/shell/1")[0].endswith("-")
+            assert _session_row_lines(app, table, "gd/alpha/shell/1")[1].strip() == "no description"
 
     @patch_sessions()
     async def test_search_matches_description(self, _mock):
@@ -1460,24 +1420,6 @@ class TestSessionDescription:
             assert str(row_key.value) == "gd/alpha/shell/1"
 
     @patch_sessions()
-    async def test_sort_sessions_by_description(self, _mock):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.action_tab_sessions()
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            for index, entry in enumerate(app._sessions_entries):
-                entry["description"] = ["zebra", "alpha", "mango"][index]
-            app._sessions_sort_column = 4
-            app._sessions_sort_reverse = False
-            app._apply_sessions_filter_and_sort()
-            table = app.query_one("#sessions-table", DataTable)
-            table.move_cursor(row=0)
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            assert str(row_key.value) == "gd/beta/claude/1"
-
-    @patch_sessions()
     async def test_long_description_wraps_to_max_width(self, _mock):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1485,18 +1427,19 @@ class TestSessionDescription:
             app.action_tab_sessions()
             await app.workers.wait_for_complete()
             await pilot.pause()
-            long_text = "this is a long description that should wrap over multiple lines"
+            long_text = "this is a long description that should wrap over multiple lines " * 3
+            long_text = long_text.strip()
             for entry in app._sessions_entries:
                 entry["description"] = long_text
             app._apply_sessions_filter_and_sort()
             table = app.query_one("#sessions-table", DataTable)
             layout = _resolve_sessions_layout(app._sessions_entries, app.size.width)
             lines = _session_row_lines(app, table, "gd/alpha/shell/1")
-            # Description wraps within its column, so the row gains extra lines
-            # on top of the session-name line and the trailing blank line.
+            # The description wraps in full below the columns instead of truncating.
             assert len(lines) > 3
+            assert " ".join(line.strip() for line in lines[1:]).strip() == long_text
             for line in lines:
-                assert len(line) <= layout.total
+                assert len(line) <= layout.cell_width
 
     def test_resolve_sessions_layout_repo_width_is_independent_of_names(self):
         short = _resolve_sessions_layout([{"purpose": "shell", "repo": "a"}], 160)
@@ -1507,13 +1450,13 @@ class TestSessionDescription:
 
         assert short.repo == long.repo == empty.repo == _SESSIONS_REPO_WIDTH
 
-    def test_resolve_sessions_layout_gives_description_the_remaining_width(self):
+    def test_resolve_sessions_layout_gives_the_session_id_the_remaining_width(self):
         entries = [{"purpose": "shell", "repo": "alpha"}]
         narrow = _resolve_sessions_layout(entries, 60)
         wide = _resolve_sessions_layout(entries, 160)
 
-        assert narrow.description < wide.description
-        assert narrow.description >= _MIN_SESSIONS_DESCRIPTION_WIDTH
+        assert narrow.session_id < wide.session_id
+        assert narrow.session_id >= _MIN_SESSIONS_ID_WIDTH
         assert wide.total <= 160
 
     @patch_sessions()
@@ -1528,8 +1471,8 @@ class TestSessionDescription:
             table = app.query_one("#sessions-table", DataTable)
             layout = _resolve_sessions_layout(app._sessions_entries, app.size.width)
             column = table.columns[app._sess_col_keys[0]]
-            assert column.width == layout.total
-            assert "Description" in column.label.plain
+            assert column.width == layout.cell_width
+            assert "Session ID" in column.label.plain
 
     @patch("gitdirector.integrations.tmux.core._set_session_description")
     @patch("gitdirector.integrations.tmux.core._get_session_description", return_value="-")
@@ -1625,3 +1568,63 @@ class TestSessionDescription:
             await pilot.pause()
             app.action_edit_session_description()
             app.push_screen.assert_not_called()
+
+
+class TestRepoBands:
+    def _entry(self, name: str, repo: str) -> dict[str, str]:
+        _, slug, purpose, _ = name.split("/")
+        return {
+            "session_name": name,
+            "repo": repo,
+            "repo_slug": slug,
+            "purpose": purpose,
+            "description": "-",
+        }
+
+    def test_a_repo_keeps_one_band_and_bands_alternate_by_repo(self):
+        from gitdirector.commands.tui.app_sessions import _repo_bands
+
+        entries = [
+            self._entry("gd/alpha/shell/1", "alpha"),
+            self._entry("gd/alpha/claude-auto/1", "alpha"),
+            self._entry("gd/beta/shell/1", "beta"),
+            self._entry("gd/gamma/shell/1", "gamma"),
+            self._entry("gd/gamma/shell/2", "gamma"),
+        ]
+        assert list(_repo_bands(entries).values()) == [False, False, True, False, False]
+
+    def test_sessions_of_a_repo_sit_together_in_a_stable_order(self):
+        from gitdirector.commands.tui.app_sessions import _session_order
+
+        entries = [
+            self._entry("gd/beta/shell/1", "beta"),
+            self._entry("gd/alpha/shell/10", "alpha"),
+            self._entry("gd/alpha/claude-auto/1", "alpha"),
+            self._entry("gd/alpha/shell/2", "alpha"),
+        ]
+        ordered = [entry["session_name"] for entry in sorted(entries, key=_session_order)]
+        assert ordered == [
+            "gd/alpha/claude-auto/1",
+            "gd/alpha/shell/2",
+            "gd/alpha/shell/10",
+            "gd/beta/shell/1",
+        ]
+
+    def test_a_banded_row_is_tinted_edge_to_edge(self):
+        from gitdirector.commands.tui.app_sessions import (
+            _render_session_row,
+            _resolve_sessions_layout,
+        )
+        from gitdirector.commands.tui.constants import TablePalette
+
+        palette = TablePalette(
+            success="green", yellow="yellow", muted="grey50", primary="magenta", band="#303030"
+        )
+        entry = self._entry("gd/alpha/shell/1", "alpha")
+        layout = _resolve_sessions_layout([entry], 100)
+        plain, _ = _render_session_row(entry, layout, palette)
+        banded, _ = _render_session_row(entry, layout, palette, banded=True)
+        assert plain.plain == banded.plain
+        assert all(len(line) == layout.cell_width for line in banded.plain.split("\n"))
+        assert any("on #303030" in str(span.style) for span in banded.spans)
+        assert not any("on #303030" in str(span.style) for span in plain.spans)

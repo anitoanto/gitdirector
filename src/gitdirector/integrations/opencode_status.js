@@ -10,7 +10,9 @@
 // OpenCode can hold several sessions in one process, so the report is the
 // most urgent state across all of them: waiting if any session is blocked
 // on the user, running if any is busy, idle otherwise. OpenCode reports an
-// interrupted turn as idle itself, so no extra safeguard is needed.
+// interrupted turn as idle itself, so the report is trusted as is. The
+// plugin comes in only through OPENCODE_CONFIG_CONTENT on the command
+// GitDirector launches; it writes nothing but the pane option.
 
 export const GitDirectorStatus = async ({ $ }) => {
   const pane = process.env.TMUX_PANE;
@@ -60,10 +62,11 @@ export const GitDirectorStatus = async ({ $ }) => {
       const props = event.properties ?? {};
       switch (event.type) {
         case "session.status":
-          if (props.status?.type === "busy") {
-            busy.add(props.sessionID);
-          } else {
+          // "retry" is a turn waiting to retry a failed model call: still working.
+          if (props.status?.type === "idle") {
             forget(props.sessionID);
+          } else if (props.status?.type) {
+            busy.add(props.sessionID);
           }
           break;
         case "session.idle":

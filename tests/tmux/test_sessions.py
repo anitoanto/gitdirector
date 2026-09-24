@@ -23,7 +23,10 @@ from gitdirector.integrations.tmux.core import (
     _make_session_name,
     _parse_gd_session_name,
     _repo_session_name_segment,
+    _session_badge_text,
     _session_exists,
+    _session_slug,
+    session_entry,
 )
 
 _TMUX_ENV_ARGS = [
@@ -345,6 +348,21 @@ class TestSessionNamespaceHelpers:
 
     def test_parse_gd_session_name_rejects_zero_sequence(self):
         assert _parse_gd_session_name("gd/repo/shell/0") is None
+
+    def test_legacy_skip_permissions_sessions_read_as_claude_bypass(self):
+        legacy = "gd/repo/claude-dangerously-skip-permissions/2"
+        assert _parse_gd_session_name(legacy) == ("repo", "claude-bypass", "2")
+        entry = session_entry(legacy, "repo", "")
+        assert entry["purpose"] == "claude-bypass"
+        assert entry["session_name"] == legacy
+        assert _session_slug(legacy) == "repo/claude-bypass/2"
+        assert _session_badge_text(legacy) == "CLAUDE-BYPASS"
+
+    def test_new_bypass_sessions_number_after_legacy_ones(self):
+        name = _make_session_name(
+            "repo", "claude-bypass", sessions=["gd/repo/claude-dangerously-skip-permissions/1"]
+        )
+        assert name == "gd/repo/claude-bypass/2"
 
     def test_persistent_panel_match_requires_exact_panel_shape(self):
         assert _is_persistent_panel_session("gd/panel/main") is True
@@ -697,8 +715,15 @@ class TestKillPanelTmuxSession:
         }
 
 
+@pytest.fixture
+def sidebar_off():
+    with patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False):
+        yield
+
+
+@pytest.mark.usefixtures("sidebar_off")
 class TestAttachTmuxSession:
-    """Sessions are attached directly; their header is part of the session."""
+    """With the sidebar off, sessions are attached directly; their header is part of the session."""
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("subprocess.run")
@@ -779,6 +804,69 @@ class TestAttachTmuxSession:
         with patch.dict("os.environ", {}, clear=True), pytest.raises(TmuxError) as excinfo:
             attach_tmux_session("plain-session")
         assert excinfo.value.returncode == 1
+
+
+class TestAttachOpensDeck:
+    """With the sidebar on (the default), repository sessions open in a deck."""
+
+    @patch("gitdirector.integrations.tmux.deck.attach_deck", return_value=True)
+    @patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=True)
+    @patch("subprocess.run")
+    def test_repository_session_goes_through_the_deck(self, mock_run, _enabled, mock_deck):
+        mock_run.return_value = MagicMock(returncode=0)
+        assert attach_tmux_session("gd/repo/shell/1") is True
+        mock_deck.assert_called_once_with("gd/repo/shell/1", None)
+        assert [call.args[0] for call in mock_run.call_args_list] == [
+            ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
+        ]
+
+    @patch("gitdirector.integrations.tmux.deck.attach_deck", return_value=True)
+    @patch("subprocess.run")
+    def test_a_prepared_deck_is_attached_as_is(self, mock_run, mock_deck):
+        mock_run.return_value = MagicMock(returncode=0)
+        attach_tmux_session("gd/repo/shell/1", deck="gd/deck/1-a")
+        mock_deck.assert_called_once_with("gd/repo/shell/1", "gd/deck/1-a")
+
+    @patch("gitdirector.integrations.tmux.deck.open_deck", return_value="gd/deck/1-a")
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
+    def test_prepare_attach_builds_the_deck(self, _exists, mock_open):
+        from gitdirector.integrations.tmux.core import prepare_attach
+
+        with patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=True):
+            assert prepare_attach("gd/repo/shell/1") == "gd/deck/1-a"
+            assert prepare_attach("gd/panel/dev") is None
+        with patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False):
+            assert prepare_attach("gd/repo/shell/1") is None
+        mock_open.assert_called_once_with("gd/repo/shell/1")
+
+    @patch("gitdirector.integrations.tmux.deck.attach_deck")
+    @patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=True)
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.core.reflow_panel_tmux_session")
+    @patch("gitdirector.integrations.tmux.panels._ensure_panel_prefix_bindings")
+    @patch("subprocess.run")
+    def test_panels_and_other_sessions_attach_directly(
+        self, mock_run, _bindings, _reflow, _sync, _enabled, mock_deck
+    ):
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch.dict("os.environ", {}, clear=True):
+            attach_tmux_session("gd/panel/dev")
+            attach_tmux_session("plain-session")
+        mock_deck.assert_not_called()
+
+    def test_sidebar_setting_is_read_from_config(self, config):
+        from gitdirector.integrations.tmux.core import _sidebar_enabled
+
+        assert _sidebar_enabled() is True
+        config.sidebar = False
+        config.save()
+        assert _sidebar_enabled() is False
+
+    @patch("gitdirector.integrations.tmux.core.Config", side_effect=ValueError("bad yaml"))
+    def test_unreadable_config_keeps_the_sidebar_on(self, _config):
+        from gitdirector.integrations.tmux.core import _sidebar_enabled
+
+        assert _sidebar_enabled() is True
 
 
 class TestOpenInTmux:

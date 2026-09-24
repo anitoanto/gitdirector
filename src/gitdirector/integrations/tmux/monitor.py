@@ -1,12 +1,16 @@
 """Session status monitoring for ``gd/*`` tmux sessions.
 
-Status is derived only from signals every terminal program exposes, so the
-same rules apply to a shell, a build, a dev server, or any AI agent:
+An agent that reports its own status (Claude Code's hooks, OpenCode's
+plugin; see ``agents.py``) is trusted as is, filled in only from its own
+records where its hooks are silent (see :func:`resolve_agent_status`).
+
+Everything else is classified from signals every terminal program exposes,
+so the same rules apply to a shell, a build, a dev server, or any other
+agent:
 
 * the process tree under the pane (is a shell the foreground process?)
 * whether the visible pane content changed recently
 * whether the process tree consumed CPU recently
-* whether the pane's tty is in raw mode (an interactive program reading keys)
 * the terminal bell
 
 See :func:`resolve_pane_status` for how they combine.
@@ -14,26 +18,26 @@ See :func:`resolve_pane_status` for how they combine.
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
 import os
 import re
 import shlex
 import subprocess
 import tempfile
-import termios
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import zip_longest
 from pathlib import Path
 
 from ...agents import (
-    AGENT_INTERRUPTS_OPTION,
-    AGENT_INTERRUPTS_UNREPORTED,
     AGENT_STATE_OPTION,
     AGENT_STATES,
+    AGENT_TRANSCRIPT_OPTION,
+    AGENT_WAITER_OPTION,
 )
 from .core import (
     GD_DESCRIPTION_OPTION,
@@ -142,18 +146,17 @@ _CPU_ACTIVE_MIN_SECS = 0.5
 # program drawing its own blinking cursor, not work.
 _NOISE_MAX_CELLS = 2
 
-# Agents whose hooks leave gaps (see :func:`reconcile_agent_report`) have
-# their report checked against the pane. A keypress that answered or cut
-# short a turn, followed by this long without visible change or CPU, ends it.
-_AGENT_REPORT_STALE_SECS = 5.0
-# A reported "idle" whose pane has kept changing for this long, with nobody
-# typing into it, is working. An idle Claude Code still animates for up to
-# three seconds at a time (startup, the summary line, a prompt suggestion).
-_AGENT_OUTPUT_MIN_SECS = 5.0
-# A pause longer than this ends a run of output.
-_OUTPUT_GAP_SECS = 2.5
-# A change this soon after a keypress may be the user's own typing echoed.
-_INPUT_QUIET_SECS = 2.0
+# An approved tool shows as a process the agent started after asking; one
+# that lived this long is the tool, not a short-lived hook of the user's.
+_APPROVED_TOOL_MIN_SECS = 2.0
+# ps start times are whole seconds.
+_PROCESS_START_SLACK_SECS = 1.0
+# Claude Code keeps the machine awake with this while it works.
+_AGENT_HELPERS = frozenset({"caffeinate"})
+# Where Claude Code's transcript records an interrupt.
+_INTERRUPT_MARKER = "[Request interrupted by user"
+# How much of the transcript's end is read for it.
+_TRANSCRIPT_TAIL_BYTES = 64 * 1024
 
 _PANE_LIST_SEPARATOR = "\t"
 # The user-editable description is last and the line is split at most this
@@ -169,11 +172,9 @@ _PANE_LIST_FIELDS = (
     ("pane_id", "#{pane_id}"),
     ("tty", "#{pane_tty}"),
     ("activity", "#{window_activity}"),
-    ("mouse", "#{mouse_any_flag}"),
-    ("alternate", "#{alternate_on}"),
     ("agent_state", f"#{{{AGENT_STATE_OPTION}}}"),
-    ("interrupts", f"#{{{AGENT_INTERRUPTS_OPTION}}}"),
-    ("input_activity", "#{session_activity}"),
+    ("agent_waiter", f"#{{{AGENT_WAITER_OPTION}}}"),
+    ("agent_transcript", f"#{{{AGENT_TRANSCRIPT_OPTION}}}"),
     ("repo_label", f"#{{{GD_REPO_LABEL_OPTION}}}"),
     ("description", f"#{{{GD_DESCRIPTION_OPTION}}}"),
 )
@@ -193,19 +194,16 @@ class PaneSample:
     tty: str = ""
     #: Epoch seconds of the last output tmux saw in the window (0 if unknown).
     activity: int = 0
-    #: Mouse tracking or the alternate screen is on: a full-screen program.
-    interactive_hint: bool = False
     #: Raw self-report from the agent's hooks: a status, optionally followed
-    #: by the epoch second it was made ("" when none).
+    #: by the epoch it was made ("" when none).
     agent_state: str = ""
-    #: The agent's hooks stay silent on a user interrupt.
-    agent_interrupts_unreported: bool = False
+    #: ``<agent id> <epoch>`` of a subagent blocked on the user ("" when none).
+    agent_waiter: str = ""
+    #: The agent's transcript, when it keeps one we read ("" otherwise).
+    agent_transcript: str = ""
     #: User-facing metadata stored on the session, for the Sessions tab.
     repo_label: str = ""
     description: str = ""
-    #: Epoch seconds of the last keypress (or attach) from a client of the
-    #: session (0 if unknown): tmux stamps it on input, never on output.
-    input_activity: int = 0
 
 
 @dataclass(frozen=True)
@@ -215,10 +213,12 @@ class ProcessSnapshot:
     pgid_by_pid: dict[int, int]
     tpgid_by_pid: dict[int, int]
     cpu_seconds_by_pid: dict[int, float]
+    #: Seconds since each process started.
+    elapsed_by_pid: dict[int, float] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> ProcessSnapshot:
-        return cls({}, {}, {}, {}, {})
+        return cls({}, {}, {}, {}, {}, {})
 
 
 def _normalize_process_command(raw_args: str) -> str:
@@ -229,7 +229,7 @@ def _normalize_process_command(raw_args: str) -> str:
 
 
 def _parse_cpu_seconds(text: str) -> float:
-    """Parse ``ps`` ``time`` output: ``[[dd-]hh:]mm:ss[.cc]``."""
+    """Parse ``ps`` ``time`` or ``etime`` output: ``[[dd-]hh:]mm:ss[.cc]``."""
     days = 0
     if "-" in text:
         day_text, _, text = text.partition("-")
@@ -246,13 +246,13 @@ def _parse_cpu_seconds(text: str) -> float:
     return days * 86400 + total
 
 
-_PS_ROW_RE = re.compile(r"\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(.*)")
+_PS_ROW_RE = re.compile(r"\s*(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\S+)\s+(.*)")
 
 
 def _get_process_snapshot() -> ProcessSnapshot:
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,pgid=,tpgid=,time=,args="],
+            ["ps", "-axo", "pid=,ppid=,pgid=,tpgid=,time=,etime=,args="],
             capture_output=True,
             text=True,
             check=False,
@@ -273,7 +273,8 @@ def _get_process_snapshot() -> ProcessSnapshot:
         snapshot.pgid_by_pid[pid] = int(match.group(3))
         snapshot.tpgid_by_pid[pid] = int(match.group(4))
         snapshot.cpu_seconds_by_pid[pid] = _parse_cpu_seconds(match.group(5))
-        snapshot.commands_by_pid[pid] = _normalize_process_command(match.group(6))
+        snapshot.elapsed_by_pid[pid] = _parse_cpu_seconds(match.group(6))
+        snapshot.commands_by_pid[pid] = _normalize_process_command(match.group(7))
         snapshot.children_by_parent.setdefault(ppid, []).append(pid)
     return snapshot
 
@@ -334,28 +335,6 @@ def _tree_cpu_seconds(pane_pid: int, snapshot: ProcessSnapshot) -> float:
     return total
 
 
-def _tty_is_raw(tty: str) -> bool | None:
-    """Whether the program on *tty* reads keystrokes (canonical mode off).
-
-    Interactive programs -- agents, editors, REPLs -- switch their terminal
-    to raw mode to read single keys. Servers and builds leave it in
-    canonical mode. Returns ``None`` when the tty cannot be inspected.
-    """
-    if not tty:
-        return None
-    try:
-        fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        attributes = termios.tcgetattr(fd)
-    except (OSError, termios.error):
-        return None
-    finally:
-        os.close(fd)
-    return not attributes[3] & termios.ICANON
-
-
 def _int_or_zero(text: str) -> int:
     try:
         return int(text)
@@ -392,14 +371,6 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
         values = line.split(_PANE_LIST_SEPARATOR, len(_PANE_LIST_NAMES) - 1)
         if len(values) == len(_PANE_LIST_NAMES):
             rows.append(dict(zip(_PANE_LIST_NAMES, values)))
-    # A session shown in a panel is typed into through the panel's view of
-    # it, a second session over the same pane, and tmux stamps the keypress
-    # on that one: the latest input across every session showing the pane.
-    input_by_pane: dict[str, int] = {}
-    for row in rows:
-        stamp = _int_or_zero(row["input_activity"])
-        input_by_pane[row["pane_id"]] = max(input_by_pane.get(row["pane_id"], 0), stamp)
-
     panes: dict[str, PaneSample] = {}
     for row in rows:
         session_name = row["session"]
@@ -418,12 +389,11 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
             bell=row["bell"] == "1",
             tty=row["tty"],
             activity=_int_or_zero(row["activity"]),
-            interactive_hint=row["mouse"] == "1" or row["alternate"] == "1",
             agent_state=row["agent_state"].strip(),
-            agent_interrupts_unreported=row["interrupts"].strip() == AGENT_INTERRUPTS_UNREPORTED,
+            agent_waiter=row["agent_waiter"].strip(),
+            agent_transcript=row["agent_transcript"].strip(),
             repo_label=row["repo_label"],
             description=row["description"],
-            input_activity=input_by_pane[row["pane_id"]],
         )
     return panes
 
@@ -433,12 +403,6 @@ def _capture_pane_text(session_name: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout
-
-
-def _hash_content(text: str) -> str:
-    # Identity only -- names a pane's content so changes can be detected.
-    # usedforsecurity=False keeps it working where FIPS disables md5.
-    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def _changed_cells(previous: str, current: str, limit: int) -> int:
@@ -474,7 +438,6 @@ def resolve_pane_status(
     dead: bool,
     bell: bool,
     command: str,
-    interactive: bool,
     change_age: float,
     cpu_age: float,
 ) -> str:
@@ -482,11 +445,10 @@ def resolve_pane_status(
 
     * ``dead``: the pane's process exited.
     * ``bell``: a bell rang and nothing has happened since; the program
-      asked for attention.
+      asked for someone's attention, the one sign of waiting any terminal
+      program can give.
     * ``command``: the foreground program's name, used only to recognise a
       shell prompt.
-    * ``interactive``: the program reads keystrokes (raw tty), so being
-      quiet means waiting for the user rather than merely idling.
     * ``change_age`` / ``cpu_age``: seconds since the visible content last
       changed / the process tree last consumed CPU.
     """
@@ -498,58 +460,114 @@ def resolve_pane_status(
         return STATUS_RUNNING if change_age < _SHELL_ACTIVITY_GRACE_SECS else STATUS_IDLE
     if change_age < _SILENCE_THRESHOLD_SECS or cpu_age < _SILENCE_THRESHOLD_SECS:
         return STATUS_RUNNING
-    return STATUS_WAITING if interactive else STATUS_IDLE
+    return STATUS_IDLE
 
 
-def reconcile_agent_report(
+def _parse_stamped(value: str) -> tuple[str, float | None]:
+    """``(word, epoch)`` from ``"<word> <epoch>"``; epoch is None when missing."""
+    word, _, stamp = value.strip().partition(" ")
+    try:
+        return word, float(stamp) if stamp else None
+    except ValueError:
+        return word, None
+
+
+def _parse_iso_epoch(text: object) -> float | None:
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _last_interrupt(path: str) -> float | None:
+    """When Claude Code's transcript last recorded an interrupt, if it did lately.
+
+    Escape (during a turn or at a prompt) fires no hook, but Claude writes a
+    ``[Request interrupted by user...]`` entry the moment it happens. Only
+    the transcript's end is read: anything the agent did after an interrupt
+    fired hooks that report a newer status anyway.
+    """
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if _INTERRUPT_MARKER not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        message = entry.get("message") if isinstance(entry, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        texts = (
+            [content]
+            if isinstance(content, str)
+            else [part.get("text", "") for part in content if isinstance(part, dict)]
+            if isinstance(content, list)
+            else []
+        )
+        if entry.get("type") == "user" and any(
+            isinstance(text, str) and text.startswith(_INTERRUPT_MARKER) for text in texts
+        ):
+            return _parse_iso_epoch(entry.get("timestamp"))
+    return None
+
+
+def _started_a_tool_since(
+    pane_pid: int, snapshot: ProcessSnapshot, since: float, now: float
+) -> bool:
+    """Whether the agent under *pane_pid* started a lasting process after *since*.
+
+    Approving a permission prompt fires no hook until the tool finishes, but
+    the tool runs as a new child process of the agent (Claude Code's Bash
+    tool starts a shell); a hook of the user's own is gone within moments.
+    """
+    for _depth, pid, command in _descendants(pane_pid, snapshot):
+        if command in _AGENT_HELPERS:
+            continue
+        elapsed = snapshot.elapsed_by_pid.get(pid)
+        if elapsed is None or elapsed < _APPROVED_TOOL_MIN_SECS:
+            continue
+        if now - elapsed >= since - _PROCESS_START_SLACK_SECS:
+            return True
+    return False
+
+
+def resolve_agent_status(
     *,
     reported: str,
-    quiet: bool,
-    answered: bool,
-    input_age: float,
-    unattended_output_secs: float,
+    reported_at: float,
+    waiter_at: float | None,
+    interrupted_at: float | None,
+    started_tool: bool,
 ) -> str:
-    """Check an agent's self-reported status against what its pane shows.
+    """The status of an agent that reports its own, filled in where it is silent.
 
-    Claude Code's hooks miss three transitions: Escape during a turn or at a
-    prompt fires nothing, answering a prompt fires nothing until the tool
-    finishes, and a turn that resumes on its own (a background task
-    finished) fires no ``UserPromptSubmit``, so the last ``idle`` stands
-    until the next tool call.
-
-    A static screen on its own proves nothing: Claude Code stops redrawing
-    for stretches of a turn while it waits on the model. What both an
-    interrupt and an answered prompt have that a stall lacks is a keypress
-    after the last report with a redraw right behind it (*answered*):
-
-    * ``running`` that was *answered* and then went *quiet* was
-      interrupted: idle. Otherwise it is trusted however still the pane.
-    * ``waiting`` that was not *answered* keeps waiting however long the
-      prompt sits there. Once answered it is running (the tool the user
-      approved is executing) until it goes *quiet*, which means the prompt
-      was dismissed: idle.
-    * ``idle`` while the pane keeps producing output nobody is typing is a
-      turn the hooks did not announce: running.
-
-    *quiet* is no visible change and no CPU for the stale window; the same
-    window after the keypress (*input_age*) debounces the redraw itself.
+    * A subagent blocked on the user (*waiter_at*) makes the session
+      waiting, whatever the main thread reported.
+    * An interrupt recorded after the last report (*interrupted_at*) ended
+      the turn, or dismissed the prompt: idle.
+    * A waiting that was followed by the agent starting a tool
+      (*started_tool*) was approved: the tool is running (a subagent's
+      approval hands back to the main thread's status).
     """
-    settled = answered and quiet and input_age >= _AGENT_REPORT_STALE_SECS
-    if reported == STATUS_RUNNING:
-        return STATUS_IDLE if settled else STATUS_RUNNING
-    if reported == STATUS_WAITING:
-        if not answered:
-            return STATUS_WAITING
-        return STATUS_IDLE if settled else STATUS_RUNNING
-    return STATUS_RUNNING if unattended_output_secs >= _AGENT_OUTPUT_MIN_SECS else STATUS_IDLE
-
-
-def _unattended_output_secs(activity: "_SessionActivity", now: float) -> float:
-    """Length of the current run of output nobody typed into, 0 once it pauses."""
-    start = activity.unattended_output_start
-    if start is None or now - activity.last_change_time > _OUTPUT_GAP_SECS:
-        return 0.0
-    return now - start
+    status, since = (
+        (STATUS_WAITING, waiter_at) if waiter_at is not None else (reported, reported_at)
+    )
+    if status == STATUS_IDLE:
+        return STATUS_IDLE
+    if interrupted_at is not None and interrupted_at > since:
+        return STATUS_IDLE
+    if status == STATUS_WAITING and started_tool:
+        return reported if waiter_at is not None else STATUS_RUNNING
+    return status
 
 
 @dataclass
@@ -559,8 +577,6 @@ class _SessionActivity:
     content: str | None = None
     previous_content: str | None = None
     last_change_time: float = 0.0
-    #: When the current run of output nobody typed into began (None: no run).
-    unattended_output_start: float | None = None
     last_activity: int = -1
     #: Recent ``(time, cumulative cpu seconds)`` samples, oldest first.
     cpu_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=16))
@@ -574,6 +590,9 @@ class _SessionActivity:
     reported: str = ""
     report_raw: str = ""
     report_time: float = 0.0
+    #: The transcript's size and mtime when it was last read, and what it said.
+    transcript_key: tuple | None = None
+    interrupted_at: float | None = None
     status: str = STATUS_RUNNING
 
 
@@ -688,6 +707,16 @@ class TmuxMonitor:
 
     def _sample_session(self, pane: PaneSample, snapshot: ProcessSnapshot, now: float) -> None:
         reported, stamp = _parse_agent_report(pane.agent_state) if not pane.dead else ("", None)
+        if pane.dead or pane.pane_pid <= 0:
+            command = pane.command
+            cpu_seconds = None
+        else:
+            command = _resolve_pane_command(pane.pane_pid, pane.command, snapshot)
+            cpu_seconds = _tree_cpu_seconds(pane.pane_pid, snapshot)
+        # A report outlives an agent that exited without saying so.
+        if reported and _is_shell(command):
+            reported = ""
+
         with self._lock:
             activity = self._sessions.setdefault(pane.session_name, _SessionActivity())
             first_sample = activity.last_activity < 0
@@ -698,19 +727,22 @@ class TmuxMonitor:
                 activity.reported = reported
                 activity.report_time = stamp if stamp is not None else now
 
+        if reported:
+            status = self._agent_status(pane, activity, snapshot, now)
+            with self._lock:
+                activity.bell_active = False
+                activity.status = status
+            # The pane is only watched again once the agent stops reporting.
+            activity.last_activity = -1
+            activity.content = activity.previous_content = None
+            return
+
         if first_sample:
             # tmux's own last-output stamp lets a session that has been quiet
             # for a while classify correctly on the very first sample.
             seed = float(pane.activity) if 0 < pane.activity <= now else now
             activity.last_change_time = seed
             activity.last_cpu_time = seed
-
-        if pane.dead or pane.pane_pid <= 0:
-            command = pane.command
-            cpu_seconds = None
-        else:
-            command = _resolve_pane_command(pane.pane_pid, pane.command, snapshot)
-            cpu_seconds = _tree_cpu_seconds(pane.pane_pid, snapshot)
 
         content_changed = False
         if first_sample or pane.activity != activity.last_activity:
@@ -719,39 +751,11 @@ class TmuxMonitor:
             except TmuxError:
                 text = None
             if text is not None:
-                input_age = now - pane.input_activity if pane.input_activity > 0 else float("inf")
-                content_changed = self._record_content(activity, text, now, input_age)
+                content_changed = self._record_content(activity, text, now)
         activity.last_activity = pane.activity
 
         if cpu_seconds is not None and self._cpu_active(activity, cpu_seconds, now):
             activity.last_cpu_time = now
-
-        if reported:
-            # The agent reports its own lifecycle; the pane only settles the
-            # transitions its hooks cannot announce.
-            input_time = float(pane.input_activity)
-            with self._lock:
-                activity.bell_active = False
-                activity.status = (
-                    reconcile_agent_report(
-                        reported=reported,
-                        quiet=now - activity.last_change_time >= _AGENT_REPORT_STALE_SECS
-                        and now - activity.last_cpu_time >= _AGENT_REPORT_STALE_SECS,
-                        answered=input_time > 0
-                        and input_time > activity.report_time
-                        and activity.last_change_time >= input_time,
-                        input_age=now - input_time,
-                        unattended_output_secs=_unattended_output_secs(activity, now),
-                    )
-                    if pane.agent_interrupts_unreported
-                    else reported
-                )
-            return
-
-        interactive = False
-        if not pane.dead and not _is_shell(command):
-            raw = _tty_is_raw(pane.tty)
-            interactive = pane.interactive_hint if raw is None else raw
 
         with self._lock:
             if bell_rose:
@@ -767,10 +771,46 @@ class TmuxMonitor:
                 dead=pane.dead,
                 bell=activity.bell_active,
                 command=command,
-                interactive=interactive,
                 change_age=now - activity.last_change_time,
                 cpu_age=now - activity.last_cpu_time,
             )
+
+    @staticmethod
+    def _agent_status(
+        pane: PaneSample, activity: _SessionActivity, snapshot: ProcessSnapshot, now: float
+    ) -> str:
+        waiter, waiter_at = _parse_stamped(pane.agent_waiter)
+        if not waiter:
+            waiter_at = None
+        elif waiter_at is None:
+            waiter_at = activity.report_time
+        interrupted_at = None
+        if pane.agent_transcript and (activity.reported != STATUS_IDLE or waiter_at is not None):
+            interrupted_at = TmuxMonitor._transcript_interrupt(activity, pane.agent_transcript)
+        waiting = waiter_at is not None or activity.reported == STATUS_WAITING
+        since = waiter_at if waiter_at is not None else activity.report_time
+        return resolve_agent_status(
+            reported=activity.reported,
+            reported_at=activity.report_time,
+            waiter_at=waiter_at,
+            interrupted_at=interrupted_at,
+            started_tool=waiting
+            and pane.pane_pid > 0
+            and _started_a_tool_since(pane.pane_pid, snapshot, since, now),
+        )
+
+    @staticmethod
+    def _transcript_interrupt(activity: _SessionActivity, path: str) -> float | None:
+        """The transcript's last interrupt, re-read only when the file changed."""
+        try:
+            info = os.stat(path)
+        except OSError:
+            return None
+        key = (path, info.st_size, info.st_mtime_ns)
+        if key != activity.transcript_key:
+            activity.transcript_key = key
+            activity.interrupted_at = _last_interrupt(path)
+        return activity.interrupted_at
 
     @staticmethod
     def _cpu_active(activity: _SessionActivity, cpu_seconds: float, now: float) -> bool:
@@ -787,15 +827,8 @@ class TmuxMonitor:
         return baseline is not None and cpu_seconds - baseline >= _CPU_ACTIVE_MIN_SECS
 
     @staticmethod
-    def _record_content(
-        activity: _SessionActivity, text: str, now: float, input_age: float
-    ) -> bool:
-        """Store a capture; return whether it counts as a real visible change.
-
-        *input_age* is how long ago a client last typed into the session; a
-        change that follows a keypress closely may just be its echo, so it
-        ends the run of unattended output rather than extending it.
-        """
+    def _record_content(activity: _SessionActivity, text: str, now: float) -> bool:
+        """Store a capture; return whether it counts as a real visible change."""
         previous = activity.content
         if previous == text:
             return False
@@ -805,13 +838,6 @@ class TmuxMonitor:
             return False
         if _is_cursor_blink(previous, text, before_previous):
             return False
-        if input_age < _INPUT_QUIET_SECS:
-            activity.unattended_output_start = None
-        elif (
-            activity.unattended_output_start is None
-            or now - activity.last_change_time > _OUTPUT_GAP_SECS
-        ):
-            activity.unattended_output_start = now
         activity.last_change_time = now
         return True
 
@@ -835,6 +861,6 @@ __all__ = [
     "ProcessSnapshot",
     "TmuxMonitor",
     "launch_command_in_tmux_session",
-    "reconcile_agent_report",
+    "resolve_agent_status",
     "resolve_pane_status",
 ]

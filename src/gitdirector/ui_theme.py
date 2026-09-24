@@ -108,6 +108,13 @@ def readable_on(color: Color, *backgrounds: Color, minimum: float = 4.5) -> Colo
 
 
 @lru_cache(maxsize=8)
+def textual_surface(theme_name: str | None) -> str | None:
+    """The ``$surface`` colour a Textual app paints with this theme; None when transparent."""
+    surface = _resolve_theme(theme_name).to_color_system().generate().get("surface", "")
+    return surface if surface.startswith("#") else None
+
+
+@lru_cache(maxsize=8)
 def resolve_panel_theme(theme_name: str | None) -> PanelTheme:
     theme = _resolve_theme(theme_name)
     fallback_foreground = "#F5F5F5" if theme.dark else "#1A1A1A"

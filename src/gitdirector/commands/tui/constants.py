@@ -17,6 +17,8 @@ from ...ui_theme import readable_on
 _CURSOR_TINT = 0.30
 _MIN_CONTRAST = 4.5
 _MUTED_CONTRAST = 3.5
+# How far a banded group of rows leans toward the foreground.
+_BAND_TINT = 0.04
 # The yellow used to flag attention (sync drift, uncommitted changes, a
 # waiting session, repo names). Fixed rather than taken from the theme so it
 # stays yellow in every theme; only its lightness adapts for contrast.
@@ -50,6 +52,8 @@ class TablePalette:
     yellow: str
     muted: str
     primary: str
+    #: Background that sets alternate groups of rows apart ("" for none).
+    band: str = ""
 
     def sync_label(self, status: RepoStatus, *, stale: bool = False) -> str:
         if status is RepoStatus.UP_TO_DATE:
@@ -102,11 +106,15 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
         # A focused table tints its surface 5% toward the foreground.
         surface = surface.blend(foreground, 0.05)
     tint = surface if ansi_theme else surface.blend(primary, _CURSOR_TINT)
+    # A further step toward the foreground than the table's own tint; an
+    # ANSI theme's real colours are unknown, so it gets none.
+    band = surface if ansi_theme else surface.blend(foreground, _BAND_TINT)
+    backgrounds = (surface, tint, band)
 
     def readable(name: str, fallback: str) -> str:
         source = variables.get(name) or fallback
         color = _variable_color(variables, name, fallback)
-        return _markup_color(readable_on(color, surface, tint, minimum=_MIN_CONTRAST), source)
+        return _markup_color(readable_on(color, *backgrounds, minimum=_MIN_CONTRAST), source)
 
     if ansi_theme:
         success = "bright_green"
@@ -114,13 +122,13 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
         muted = "bright_black"
     else:
         success = _markup_color(
-            readable_on(Color.parse(_LIVE_GREEN), surface, tint, minimum=_MIN_CONTRAST), ""
+            readable_on(Color.parse(_LIVE_GREEN), *backgrounds, minimum=_MIN_CONTRAST), ""
         )
         yellow = _markup_color(
-            readable_on(Color.parse(_ATTENTION_YELLOW), surface, tint, minimum=_MIN_CONTRAST), ""
+            readable_on(Color.parse(_ATTENTION_YELLOW), *backgrounds, minimum=_MIN_CONTRAST), ""
         )
         muted = _markup_color(
-            readable_on(foreground.blend(surface, 0.45), surface, tint, minimum=_MUTED_CONTRAST),
+            readable_on(foreground.blend(surface, 0.45), *backgrounds, minimum=_MUTED_CONTRAST),
             "",
         )
 
@@ -129,6 +137,7 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
         yellow=yellow,
         muted=muted,
         primary=readable("primary", "#5fd7ff"),
+        band="" if ansi_theme else band.hex6,
     )
 
 
@@ -160,16 +169,6 @@ _STATUS_ORDER = {
     RepoStatus.DIVERGED: 3,
     RepoStatus.UNKNOWN: 4,
 }
-
-_SESSIONS_SORT_COLUMN_NAMES = {
-    0: "Status",
-    1: "Session",
-    2: "Repository",
-    3: "Session Name",
-    4: "Description",
-}
-
-_DEFAULT_SESSIONS_SORT_COLUMN = 3
 
 _SESSION_STATUS_POLL_INTERVAL_SECS = 1
 _REPO_CACHE_TTL_SECS = 30 * 60

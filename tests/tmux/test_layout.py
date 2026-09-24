@@ -575,8 +575,11 @@ class TestRebuildPanelTmuxSession:
 
 
 class TestPanelPrefixBindings:
+    @patch("gitdirector.integrations.tmux.deck.ensure_deck_prefix_bindings")
     @patch("subprocess.run")
-    def test_panel_prefix_bindings_include_overlay_alias_and_slot_focus(self, mock_run):
+    def test_panel_prefix_bindings_include_overlay_alias_and_slot_focus(
+        self, mock_run, mock_deck_bindings
+    ):
         _ensure_panel_prefix_bindings()
 
         mock_run.assert_called_once()
@@ -606,6 +609,8 @@ class TestPanelPrefixBindings:
             "select-window -t :=3",
         ]
         assert len(commands) == 10
+        # prefix b loses its deck meaning above; the deck wraps it again.
+        mock_deck_bindings.assert_called_once_with()
 
 
 class TestDistributeEqual:

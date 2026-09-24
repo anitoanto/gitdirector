@@ -330,3 +330,51 @@ class TestPanelPaneTitles:
 # ---------------------------------------------------------------------------
 # Subprocess-based functions
 # ---------------------------------------------------------------------------
+
+
+class TestDeckDivider:
+    def test_the_divider_is_hidden_where_tmux_can_draw_space_borders(self):
+        import shlex
+
+        from gitdirector.integrations.tmux.core import _deck_tmux_config
+
+        config = _deck_tmux_config("gd/deck/1-a").splitlines()
+        (line,) = [line for line in config if line.startswith("if-shell")]
+        argv = shlex.split(line)
+        assert argv[:3] == ["if-shell", "-F", "#{>=:#{version},3.6}"]
+        assert "pane-border-lines spaces" in argv[3]
+        assert 'pane-border-style "fg=default,bg=default"' in argv[3]
+        assert 'pane-active-border-style "fg=default,bg=default"' in argv[3]
+
+    def test_older_tmux_keeps_the_heavy_divider(self):
+        from gitdirector.integrations.tmux.core import _deck_tmux_config
+
+        assert "pane-border-lines heavy" in _deck_tmux_config("gd/deck/1-a")
+
+
+class TestDeckStatusHints:
+    def test_keys_sit_before_the_clock_with_the_live_prefix(self):
+        import shlex
+
+        from gitdirector.integrations.tmux.core import _deck_tmux_config
+
+        config = _deck_tmux_config("gd/deck/1-a")
+        # The deck's own status-right comes last and wins over the theme's.
+        line = [line for line in config.splitlines() if " status-right " in line][-1]
+        status_right = shlex.split(line)[-1]
+        hints, clock = status_right.split("%H:%M")[0], status_right
+        assert "#{prefix} b" in hints and "toggle" in hints
+        assert "#{prefix} d" in hints and "console" in hints
+        assert "⇥ / #{prefix} ⇥" in hints and "session ↔ sidebar" in hints
+        assert status_right.index("console") < clock.index("%H:%M")
+        assert "status-right-length 120" in config
+
+    def test_narrow_clients_keep_only_the_clock(self):
+        from gitdirector.integrations.tmux.core import _DECK_HINTS_MIN_WIDTH, _deck_key_hints
+        from gitdirector.ui_theme import resolve_panel_theme
+
+        hints = _deck_key_hints(resolve_panel_theme(None))
+        assert hints.startswith(f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},")
+        # A comma inside the branch would end it early.
+        branch = hints[len(f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},") : -2]
+        assert "," not in branch

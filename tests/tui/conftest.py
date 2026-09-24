@@ -57,6 +57,8 @@ def _isolate_tui_tmux_config(monkeypatch, tmp_path):
         "gitdirector.integrations.tmux.sync_panel_tmux_config",
         lambda *_args, **_kwargs: tmp_path / ".gitdirector" / "tmux.conf",
     )
+    # It would build a deck on whatever tmux server is running.
+    monkeypatch.setattr("gitdirector.integrations.tmux.prepare_attach", lambda _session: None)
 
 
 def _status_is_loading(app) -> bool:

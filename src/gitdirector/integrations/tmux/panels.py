@@ -539,6 +539,10 @@ def _ensure_panel_prefix_bindings() -> None:
         for slot in range(1, 10)
     )
     _run_tmux(_chain_tmux_commands(commands), check=True)
+    # prefix b was just rebound without its deck meaning.
+    from .deck import ensure_deck_prefix_bindings
+
+    ensure_deck_prefix_bindings()
 
 
 def _configure_panel_window(

@@ -15,7 +15,7 @@ from .storage import (
 
 logger = logging.getLogger(__name__)
 
-_MAIN_KEYS = frozenset({"repositories", "max_workers", "theme"})
+_MAIN_KEYS = frozenset({"repositories", "max_workers", "theme", "sidebar"})
 _SECRET_KEYS = frozenset({"github_username", "github_PAT"})
 
 
@@ -25,6 +25,7 @@ class _Settings:
 
     max_workers: int
     theme: str
+    sidebar: bool
     github_username: str | None
     github_PAT: str | None
 
@@ -44,6 +45,7 @@ class Config:
         self._repo_set: set[Path] = set()
         self.max_workers = self.DEFAULT_MAX_WORKERS
         self.theme = self.DEFAULT_THEME
+        self.sidebar = True
         self.github_username: str | None = None
         self.github_PAT: str | None = None
         # What was last read from or written to disk. A field that still
@@ -116,6 +118,12 @@ class Config:
         return value
 
     @staticmethod
+    def _validate_sidebar(value: object) -> bool:
+        if not isinstance(value, bool):
+            raise ValueError("Invalid sidebar: expected true or false")
+        return value
+
+    @staticmethod
     def _validate_theme(value: object) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("Invalid theme: expected a nonempty string")
@@ -130,6 +138,7 @@ class Config:
                 main_data.get("max_workers", cls.DEFAULT_MAX_WORKERS)
             ),
             theme=cls._validate_theme(main_data.get("theme", cls.DEFAULT_THEME)),
+            sidebar=cls._validate_sidebar(main_data.get("sidebar", True)),
             github_username=cls._optional_str(
                 secrets_data.get("github_username"), "github_username"
             ),
@@ -159,6 +168,7 @@ class Config:
         return _Settings(
             max_workers=self.max_workers,
             theme=self.theme,
+            sidebar=self.sidebar,
             github_username=self.github_username,
             github_PAT=self.github_PAT,
         )
@@ -168,6 +178,7 @@ class Config:
         self._repo_set = set(repositories)
         self.max_workers = settings.max_workers
         self.theme = settings.theme
+        self.sidebar = settings.sidebar
         self.github_username = settings.github_username
         self.github_PAT = settings.github_PAT
         self._snapshot_repositories = tuple(repositories)
@@ -230,6 +241,8 @@ class Config:
             main_data["max_workers"] = settings.max_workers
         if settings.theme != self.DEFAULT_THEME:
             main_data["theme"] = settings.theme
+        if not settings.sidebar:
+            main_data["sidebar"] = False
         main_data.update({k: v for k, v in latest_main.items() if k not in _MAIN_KEYS})
         write_yaml_atomic(self.config_file, main_data)
 

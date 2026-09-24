@@ -29,6 +29,8 @@
   server there. Each lives in its own named tmux session.
 - **Live session status.** Every session shows `running`, `waiting` (blocked
   on you), or `idle`, so you can leave an agent alone until it needs an answer.
+- **Session sidebar.** An open session sits beside a list of every other
+  session and its status; click one to switch.
 - **Panels.** Reusable tmux layouts that show several sessions side by side.
 - **Git without leaving the console.** Status, log, branches, remotes, pull,
   push, and a two-pane diff viewer that can stage, commit, and push.
@@ -66,7 +68,7 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 | `j` / `k`, arrows | Move between rows (`h` / `l` scroll wide tables sideways) |
 | `enter` | Act on the row: action menu (repositories), attach (sessions), open (panels) |
 | `/` | Filter the table |
-| `s` | Sort |
+| `s` | Sort (Repositories and Panels tabs) |
 | `r` | Refresh |
 | `g` | Git menu for the highlighted repo |
 | `i` | Repo info: files, lines, tokens, and depth per extension |
@@ -77,26 +79,59 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 
 **Repositories** shows sync state (`up to date`, `ahead`, `behind`,
 `diverged`), branch, changes, and the last commit; repos sharing a parent
-directory collapse into a group. `enter` opens the action menu (start a shell,
-attach, launch an AI agent, remove a session). `g` opens the git menu: status,
+directory collapse into a group. `enter` opens the action menu: start a shell,
+open the repo or group in VS Code, launch an AI agent, attach to or remove a
+session. Claude Code's permission mode is picked on its row with Tab or `←`/`→`:
+`default` (your own settings), `auto` (preselected), or `bypass`
+(`--dangerously-skip-permissions`). `g` opens the git menu: status,
 timeline, branches, remotes, pull, push, and **Review Diff** — a two-pane view
 of uncommitted changes with real line numbers, where `g` stages everything and
 commits (optionally pushing).
 
 **Sessions** lists every gitdirector tmux session with its status, purpose,
-repo, and description: `running` (working), `waiting` (blocked on you — a
-permission question or prompt), or `idle` (a shell prompt, a finished turn).
-Claude Code and OpenCode report their own status through lifecycle hooks;
-everything else is classified from its pane (see [DEV.md](DEV.md)).
+repo, and tmux session name, with its description on the line below (wrapped,
+never cut off). A repo's sessions are always kept together, and alternate repos
+sit on a subtle band. Statuses are `running` (the agent or program is working),
+`waiting` (it needs you: a permission prompt, a question, a bell), or `idle`
+(nothing is happening). Claude Code and OpenCode report their own status
+through hooks passed inline on the command GitDirector launches (your own
+settings are never touched); everything else is classified from its pane (see
+[DEV.md](DEV.md)).
 
 **Panels** are reusable tmux layouts showing several sessions side by side,
 each under its own header with its slot number. `prefix 1`–`9` jumps to a
 slot, and proportions hold as the window resizes.
 
 Every session carries its own themed header and status line, so it looks the
-same attached directly, in a panel, or from a plain `tmux attach`. Detaching
-(`prefix d`) or the program exiting returns you to the console. Sessions never
-learn which directory gitdirector was started from.
+same attached directly, in a panel, or from a plain `tmux attach`. Sessions
+never learn which directory gitdirector was started from.
+
+### Session sidebar
+
+Opening a session (from the console, the Sessions tab, or `gitdirector cd`)
+shows it beside a sidebar listing every session, grouped by repo, with its
+live status. Click a session, or select it and press Enter, to show it on the
+right; the session you leave keeps running.
+
+| Key | Action |
+| --- | --- |
+| `prefix Tab` | From the session, focus the sidebar (reopening it if it was closed) |
+| `prefix b` | Collapse the sidebar to a rail of status dots, or expand it |
+| `prefix d` | Detach and go back to the console |
+| `↑`/`↓`, `j`/`k`, Enter | In the sidebar: move, open the session |
+| Tab, `→`, `l`, Esc | In the sidebar: focus the session |
+
+The `«` next to the sidebar's title goes back to the console, like `prefix d`, and `◧`
+collapses or expands it. The keys are listed on the status line beside the clock
+when the window is wide enough.
+
+The usual tmux ways of moving between panes (`prefix ←`/`→`, `prefix o`, a
+click) work too. `prefix Tab` and `prefix b` only mean this inside the sidebar
+view; everywhere else they keep whatever they were bound to.
+
+When the shown session ends, the sidebar says so and takes focus so you can
+pick another; when no sessions are left you are back in the console. Set
+`sidebar: false` in the config to attach to sessions directly instead.
 
 ## Commands
 
@@ -146,6 +181,7 @@ repositories:
   - /path/to/repo1
 max_workers: 10   # optional, 1-32, default 10
 theme: rose-pine  # optional
+sidebar: true     # optional; false attaches to sessions without the sidebar
 ```
 
 Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`,

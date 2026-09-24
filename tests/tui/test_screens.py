@@ -12,7 +12,6 @@ from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Input, LoadingIndicator, OptionList, Static
 
 from gitdirector.commands.tui import (
-    _SESSIONS_SORT_COLUMN_NAMES,
     ActionMenuScreen,
     AgentLoadingScreen,
     ConfirmScreen,
@@ -213,6 +212,114 @@ class TestActionMenuScreen:
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
             assert menu.option_count == 15
+
+
+class TestActionMenuAgentModes:
+    async def _open(self, pilot, app, results):
+        screen = ActionMenuScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+        app.push_screen(screen, callback=lambda v: results.append(v))
+        await pilot.pause()
+        menu = app.screen.query_one("#action-menu", OptionList)
+        menu.highlighted = menu.get_option_index("agent:claude")
+        await pilot.pause()
+        return menu
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_claude_launches_in_auto_mode_by_default(self, _):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(pilot, app, results)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["agent:claude:auto"]
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_arrows_cycle_the_mode_and_wrap(self, _):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(pilot, app, results)
+            await pilot.press("right")
+            assert app.screen._modes["claude"] == "bypass"
+            await pilot.press("right")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["agent:claude:default"]
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_h_and_l_cycle_too(self, _):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(pilot, app, results)
+            await pilot.press("h")
+            await pilot.press("h")
+            await pilot.press("l")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["agent:claude:default"]
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_tab_cycles_forward_and_shift_tab_back(self, _):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await self._open(pilot, app, results)
+            await pilot.press("tab")
+            assert app.screen._modes["claude"] == "bypass"
+            await pilot.press("tab")
+            assert app.screen._modes["claude"] == "default"
+            await pilot.press("shift+tab")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["agent:claude:bypass"]
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_arrows_do_nothing_on_rows_without_modes(self, _):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            menu = await self._open(pilot, app, results)
+            menu.highlighted = menu.get_option_index("agent:codex")
+            await pilot.pause()
+            await pilot.press("right")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["agent:codex"]
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_mode_hint_shows_only_on_rows_with_modes(self, _):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            menu = await self._open(pilot, app, [])
+            hint = app.screen.query_one("#menu-hint", Static)
+            assert "mode" in str(hint.content)
+            menu.highlighted = menu.get_option_index("new_session")
+            await pilot.pause()
+            assert "mode" not in str(hint.content)
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_vscode_is_offered(self, _):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 32)) as pilot:
+            app.push_screen(
+                ActionMenuScreen("my-repo", Path("/tmp/my-repo")),
+                callback=lambda v: results.append(v),
+            )
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["vscode"]
 
 
 class TestGitOperationsMenuScreen:
@@ -1328,9 +1435,12 @@ class TestSortMenuScreen:
             assert menu.highlighted == initial
 
 
+_CUSTOM_COLUMNS = {0: "Status", 1: "Name", 2: "Size", 3: "Owner", 4: "Notes"}
+
+
 class TestSortMenuScreenCustomColumns:
     async def test_custom_column_names(self):
-        screen = SortMenuScreen(0, False, _SESSIONS_SORT_COLUMN_NAMES)
+        screen = SortMenuScreen(0, False, _CUSTOM_COLUMNS)
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -1351,7 +1461,7 @@ class TestSortMenuScreenCustomColumns:
 
     async def test_toggle_on_custom_column(self):
         results: list = []
-        screen = SortMenuScreen(1, False, _SESSIONS_SORT_COLUMN_NAMES)
+        screen = SortMenuScreen(1, False, _CUSTOM_COLUMNS)
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)) as pilot:

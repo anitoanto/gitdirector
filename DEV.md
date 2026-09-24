@@ -40,9 +40,10 @@ Do the same for any manual experiment: `tmux -L <name>` or a private
 
 ## Sessions and panels in tmux
 
-**Attaching.** The console, `gitdirector cd`, and the Sessions tab attach a
-tmux client straight to the session; detaching (`prefix d`) or the session
-ending returns to the console. Every `gd/<repo>_<id>/<purpose>/<N>` session carries
+**Attaching.** The console, `gitdirector cd`, and the Sessions tab open a
+repository session in a *deck* beside the session sidebar (below), or attach
+a tmux client straight to it with `sidebar: false`; detaching (`prefix d`)
+returns to the console. Every `gd/<repo>_<id>/<purpose>/<N>` session carries
 its own look, applied by `sync_panel_tmux_config`: a heavy top border with the
 session's label (`pane-border-status top`, also set on new windows through an
 `after-new-window` hook), the themed status line, and `detach-on-destroy on`
@@ -68,6 +69,56 @@ proportions are restored inside tmux the moment the window changes size.
 `tests/tmux/test_panel_resize.py` checks every layout against the exact
 layout at several sizes.
 
+**Decks (the session sidebar).** `attach_tmux_session` hands every
+`gd/<repo>/<purpose>/<N>` session to `integrations/tmux/deck.py`, which builds
+a `gd/deck/<pid>-<hex>` session for that one client. Its window has two
+panes: the sidebar (`python -m gitdirector.commands.tui.sidebar <deck>`, a
+Textual app) and the main pane, a nested tmux client (`tmux -S <socket>`) on
+a view of the shown session, exactly like a panel slot. Showing another
+session creates a new view and runs `switch-client -c <main pane tty>`; the
+old view loses its client and tmux destroys it. The deck's session options
+record the panes and the shown session (`@gd_deck_main`, `@gd_deck_sidebar`,
+`@gd_deck_target`), and its status line shows the shown session's badge and,
+on clients at least 110 columns wide, the deck's keys with the live `#{prefix}`.
+On tmux 3.6+ the divider between sidebar and session is drawn as spaces on the
+terminal background, so it disappears; older tmux keeps a heavy line.
+
+The sidebar owns the deck. Every 0.3 s it reads the deck in one tmux call
+(`read_deck_state`) and repairs it: a shown session gone from
+`list-sessions` gets a "session ended" message in the main pane and focus
+moves to the sidebar (checked by name, because a killed session's window
+lives on in the view until the view goes); a main pane whose client exited
+(its command falls back to `sleep`) gets a message too; a closed main pane is
+recreated; and when no repository session is left the deck is closed, which
+returns the client to the console. Statuses come from its own `TmuxMonitor`,
+the console's being paused while it is attached.
+
+`prefix Tab` (unbound in tmux by default) and `prefix b` are rebound as
+`if-shell -F '#{m:gd/deck/*,...}' <deck command> <original>`, so outside a
+deck they do whatever they did before; the original is kept in
+`@gd_prefix_original_<key>` so wrapping is
+idempotent (panel bindings rewrap after rebinding `b`); `prefix s`, which an
+earlier version wrapped, gets its original back. `prefix Tab` toggles
+focus, or splits a new sidebar in from `@gd_deck_respawn_sidebar` when it
+was closed; `prefix b` sends `b` to the sidebar, which flips the global
+`@gd_sidebar_collapsed` and resizes itself. The window's `window-resized`
+hook applies the width format (32 columns, a third of narrow windows, 5 when
+collapsed), and the sidebar renders as a rail of status dots under 14.
+
+Opening is one frame change, from the console to the finished deck. The
+console builds the deck before it suspends (`prepare_attach`), at the
+client's exact size less the status line, so attaching resizes nothing; the
+sidebar pane comes first so the main pane's client attaches once, at its
+final width. tmux paints the sidebar pane in Textual's `$surface` before the
+app starts, and the app keeps its widgets hidden until the monitor's first
+sample is in, then shows them all at once.
+
+A deck gets `destroy-unattached` only once its client is on it, so it dies
+when the client detaches; `reap_stale_decks` removes any a crash left
+unattached. From inside tmux the client switches in, and closing the deck
+switches it back to `@gd_deck_return`: `detach-on-destroy previous` means
+the previous session alphabetically, not the one the client came from.
+
 **Launch directory.** A tmux server keeps the working directory of the
 client that forked it, and `tmux list-clients` leads from any session to the
 attached client and its parent. Every tmux client therefore runs from the
@@ -78,74 +129,86 @@ home directory, and `console` and `cd` re-exec themselves there without
 
 ### Agent-reported status
 
-An agent with lifecycle hooks can report its own status, which the monitor
-trusts over every heuristic below. The protocol is a tmux pane option,
-`@gitdirector_agent_state`, holding `running`, `waiting`, or `idle`,
-optionally followed by the epoch second of the report (`running 1788714352`)
-so repeated reports of the same state still show when the agent last spoke;
-the hook stamps it with `tmux set-option -p -t "$TMUX_PANE" ...`, which works
-whether or not GitDirector is running, and `list-panes` reads it back for
-free every second. It is pane scoped because a session shown in a panel is
-also reachable through the panel's grouped view session, and a session
-option set through `$TMUX_PANE` lands on whichever of the two tmux picks. An agent whose hooks leave gaps also sets
-`@gitdirector_agent_interrupts unreported`, which enables the reconciliation
-described below.
+Three statuses, one meaning each: `running` (the agent is working), `waiting`
+(it needs a human to act), `idle` (it is doing nothing). An agent with
+lifecycle hooks reports its own, and the monitor trusts it instead of
+watching the pane (no captures, no heuristics). The protocol is a tmux pane
+option, `@gitdirector_agent_state`, holding `running`, `waiting`, or `idle`,
+optionally followed by the epoch of the report (`running 1788714352.120`).
+It is pane scoped because a session shown in a panel is also reachable
+through the panel's grouped view session, and a session option set through
+`$TMUX_PANE` lands on whichever of the two tmux picks. `list-panes` reads it
+back for free every second.
 
-**Claude Code.** Both Claude launch entries pass `--settings '{"hooks": ...}'`
-on the command line (Claude merges it with the user's own settings, which
-are never modified):
+Both integrations are inline: they ride on the command GitDirector launches,
+never touch the user's configuration, and write nothing to disk. Everything
+they keep is in pane options, which go away with the pane.
 
-| Hook | State |
+**Claude Code.** The launch command carries `--settings '{"hooks": ...}'`
+(Claude merges it with the user's settings for that process only). Every
+event in `CLAUDE_STATUS_EVENTS` runs one shipped script,
+`src/gitdirector/integrations/claude_status.py`, as `python -I -S` (about
+20 ms, one tmux call per event, prints nothing, always exits 0). Main-thread
+events:
+
+| Hook | Status |
 | --- | --- |
-| `SessionStart`, `Stop` (turn finished, prompt is back), `StopFailure` (turn ended by an API error), `PermissionDenied` | `idle` |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `ElicitationResult` | `running` |
-| `PreToolUse` for `AskUserQuestion`, `PermissionRequest`, `Elicitation`, `Notification` (except `idle_prompt`) | `waiting` |
-| `SessionEnd` | option cleared |
+| `SessionStart`, `Stop`, `StopFailure`, `PostCompact` (manual) | `idle` |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionDenied` (auto mode denied; Claude carries on), `ElicitationResult`, `PreCompact`, `PostCompact` (auto) | `running` |
+| `PermissionRequest` (also fired for `AskUserQuestion`), `Elicitation` | `waiting` |
+| `SessionEnd` | options cleared |
 
-`SubagentStop` is deliberately unmapped: Claude Code's own helper that
-generates the prompt suggestion after a turn fires it while the session is
-idle.
+Events from subagents carry an `agent_id` and keep firing after the main
+turn has ended (a background subagent's tool calls), so they only set
+`@gitdirector_agent_waiter` = `<agent id> <epoch>` on a `PermissionRequest`
+or `Elicitation`, and that subagent's next tool result clears it (inside tmux,
+with `if-shell`, so concurrent hooks cannot race). A new prompt clears it too.
+`Notification` is not used: most of its types (`agent_completed`,
+`elicitation_response`, `auth_success`, ...) are not about the user being
+needed, and `PermissionRequest` already reports the ones that are.
+`SubagentStop` fires for Claude's own helpers after a turn.
 
-Three transitions have no hook, and the monitor settles them from the pane
-(`reconcile_agent_report` in `monitor.py`). A static screen alone proves
-nothing: Claude Code stops redrawing for stretches of a turn while it waits
-on the model, so a reported `running` is trusted however still the pane. An
-interrupt (Escape) and an answered prompt both show a keypress after the
-last report (tmux's `session_activity`, which only client input moves) with
-a redraw right behind it; when that is followed by 5 s without visible
-change or CPU, a `running` was interrupted and a `waiting` was dismissed,
-so both become `idle`. An answered `waiting` that keeps drawing is `running`
-(the approved tool is executing) until `PostToolUse` reports. Finally, a
-turn that resumes on its own after a background task finished fires no
-`UserPromptSubmit`, so a reported `idle` whose pane keeps producing output
-for 5 s with nobody typing into it is shown as `running`; an idle Claude
-animates for at most about 3 s at a time.
+Two transitions fire no hook; the monitor fills them from Claude's own
+records (`resolve_agent_status` in `monitor.py`):
 
-The hook fragments live in `src/gitdirector/agents.py`.
+- **Escape**, during a turn or at a prompt (and "No" at a prompt): Claude
+  writes a `[Request interrupted by user...]` user entry to the transcript at
+  once. The hooks store the transcript path in `@gitdirector_agent_transcript`;
+  while the report is `running` or `waiting`, the monitor reads the file's
+  last 64 KB whenever its size or mtime changes, and an interrupt newer than
+  the report means `idle`.
+- **Approving a prompt**: nothing fires until the tool finishes. The approved
+  tool runs as a new child process of Claude (the Bash tool starts a shell),
+  so a `waiting` whose agent started a process that has lived at least 2 s
+  since the report is `running` (`caffeinate`, which Claude keeps running
+  while it works, is ignored).
+
+A finished background task or subagent comes back as a queued message, which
+fires `UserPromptSubmit`, so it needs no special case. Verified live against
+Claude Code 2.1.280.
 
 **OpenCode.** The launch entry sets `OPENCODE_CONFIG_CONTENT` to a config
 that adds one plugin, `src/gitdirector/integrations/opencode_status.js`
 (shipped in the wheel). OpenCode merges that JSON with the user's own
-config. The plugin subscribes to OpenCode's event bus and reports the most
-urgent state across every session the process holds:
+config in memory. The plugin subscribes to OpenCode's event bus and reports
+the most urgent state across every session the process holds:
 
 | Event | Effect |
 | --- | --- |
 | `permission.asked`, `question.asked` | the request is pending |
 | `permission.replied`, `question.replied`, `question.rejected` | the request is no longer pending |
-| `session.status` busy | the session has a turn in progress |
-| `session.status` not busy, `session.idle`, `session.error`, `session.deleted` | the session is no longer busy, and its pending requests are dropped |
+| `session.status` `busy` or `retry` | the session has a turn in progress |
+| `session.status` `idle`, `session.idle`, `session.error`, `session.deleted` | the session is no longer busy, and its pending requests are dropped |
 
 After every event the reported state is `waiting` if any request is pending,
 else `running` if any session is busy, else `idle`; the option is only
-rewritten when that state changes.
+rewritten when that state changes. OpenCode reports an interrupted turn as
+idle itself. `opencode --pure` disables external plugins and therefore this
+reporting.
 
-OpenCode reports an interrupted turn as idle itself, so it does not set the
-interrupts flag. `opencode --pure` disables external plugins and therefore
-this reporting.
-
-An agent started some other way (`gd-tmux repo claude`, or by hand) has no
-hooks and falls back to the heuristics.
+A report whose pane is back at a shell prompt (the agent exited without
+saying so) is ignored. An agent started some other way (`gd-tmux repo
+claude`, or by hand) has no hooks and is classified like any other program.
 
 ### Heuristics for everything else
 
@@ -168,8 +231,6 @@ changed      visible pane content differs from the last capture, ignoring
              drawing its own blinking cursor)
 cpu          the process tree burned >= 0.5 s of CPU within the last 3 s
              (a lone housekeeping burst from an idle agent does not count)
-interactive  the pane's tty is in raw mode (the program reads keystrokes);
-             tmux's mouse/alternate-screen flags are the fallback
 bell         tmux's window bell flag rose (tmux only raises it while no
              client is attached, so the monitor never attaches one);
              cleared by a real content change >= 1 s later or on attach
@@ -178,14 +239,12 @@ if pane is dead:                                        idle
 elif bell:                                              waiting
 elif command is a shell:   running if changed < 2 s ago, else idle
 elif changed < 4 s ago or cpu < 4 s ago:                running
-elif interactive:                                       waiting
 else:                                                   idle
 ```
 
-- `waiting` means the program is alive and blocked on the user: an agent at
-  its prompt or a permission question, an editor, a REPL.
-- `idle` means nothing is happening: a shell prompt, or a non-interactive
-  program (dev server, build) that has gone quiet.
+- `waiting` needs a sign that a human is needed, and the bell is the only one
+  every terminal program can give; a program that is merely quiet (an agent
+  at its prompt, an editor, a dev server) is `idle`.
 - The first sample seeds the "last change" time from tmux's own
   `window_activity` stamp, so a long-quiet session classifies correctly
   immediately instead of after a settling period.

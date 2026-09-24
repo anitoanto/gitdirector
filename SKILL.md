@@ -80,5 +80,6 @@ gitdirector gd-send "$SESSION" "continue and run the tests" --enter
 ```
 
 Sessions started from the console's agent menu are named after the agent
-(`.../claude/1`, `.../opencode/2`). The Sessions tab shows every live session
+(`.../opencode/2`); Claude Code's also name its permission mode
+(`.../claude-auto/1`, `.../claude-default/1`, `.../claude-bypass/1`). The Sessions tab shows every live session
 name, and `gd-capture`/`gd-send` accept any of them.

@@ -33,7 +33,6 @@ from .app_sessions import ConsoleSessionsMixin
 from .app_ui import ConsoleUIHelpersMixin
 from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
-    _DEFAULT_SESSIONS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
     _SESSION_STATUS_POLL_INTERVAL_SECS,
     TablePalette,
@@ -301,8 +300,6 @@ class GitDirectorConsole(
         self._sort_reverse: bool = False
         self._active_tab: str = "repos"
         self._sessions_entries: list[dict[str, str]] = []
-        self._sessions_sort_column: int = _DEFAULT_SESSIONS_SORT_COLUMN
-        self._sessions_sort_reverse: bool = False
         self._sessions_layout = None
         self._panels_entries: list[Panel] = []
         self._panels_sort_column: int = _DEFAULT_PANELS_SORT_COLUMN
@@ -366,7 +363,12 @@ class GitDirectorConsole(
             with TabPane("[2] Sessions", id="sessions"):
                 yield Static("", id="sessions-search-indicator", classes="search-indicator")
                 yield DataTable(
-                    id="sessions-table", cursor_type="row", cursor_foreground_priority="renderable"
+                    id="sessions-table",
+                    cursor_type="row",
+                    cursor_foreground_priority="renderable",
+                    # The hover and cursor tints must cover a repo's band.
+                    cursor_background_priority="css",
+                    cell_padding=0,
                 )
                 yield Static(
                     "No active sessions.  Open a repository and start a tmux session"
@@ -698,6 +700,7 @@ class GitDirectorConsole(
         )
 
         self._pause_session_status_tracking(wait=False)
+        deck = self._prepare_attach(session_name)
         attach_error: Exception | None = None
         try:
             try:
@@ -714,6 +717,7 @@ class GitDirectorConsole(
                     attach_error = self._attach_while_suspended(
                         session_name,
                         skip_config_sync=skip_config_sync,
+                        deck=deck,
                     )
             except Exception as exc:
                 # Suspending or resuming the driver itself failed, so no
@@ -721,6 +725,7 @@ class GitDirectorConsole(
                 # tab switching stays locked until it is cleared.
                 logger.warning("tmux attach failed: %s", exc)
                 attach_error = exc
+                self._discard_deck(deck)
                 self._resume_target_tab = None
                 self._resume_refresh_path = None
                 self._clear_resume_selection()
@@ -734,10 +739,34 @@ class GitDirectorConsole(
         self._active_tab = restore_tab
 
     @staticmethod
+    def _prepare_attach(session_name: str) -> str | None:
+        """Build the session's deck while the console is still on screen.
+
+        The terminal then goes straight from the console to the finished
+        deck. A failure is left for the attach itself to report.
+        """
+        from ...integrations.tmux import prepare_attach
+
+        try:
+            return prepare_attach(session_name)
+        except Exception:
+            logger.debug("could not prepare %s", session_name, exc_info=True)
+            return None
+
+    @staticmethod
+    def _discard_deck(deck: str | None) -> None:
+        if deck is None:
+            return
+        from ...integrations.tmux import kill_tmux_session
+
+        kill_tmux_session(deck)
+
+    @staticmethod
     def _attach_while_suspended(
         session_name: str,
         *,
         skip_config_sync: bool,
+        deck: str | None = None,
     ) -> Exception | None:
         """Run the blocking tmux attach with the TUI suspended.
 
@@ -766,7 +795,7 @@ class GitDirectorConsole(
                 # screen never flashes between the TUI and the session.
                 write_terminal("\033[?1049h\033[H\033[2J\033[?25l")
                 entered_manual_alt_screen = True
-            attach_tmux_session(session_name, skip_config_sync=skip_config_sync)
+            attach_tmux_session(session_name, skip_config_sync=skip_config_sync, deck=deck)
         except Exception as exc:
             logger.warning("tmux attach failed: %s", exc)
             error = exc
@@ -1313,10 +1342,18 @@ class GitDirectorConsole(
             return
         if action == "new_session":
             self.action_open_tmux()
+        elif action == "vscode":
+            path = self._get_selected_path()
+            if path is not None:
+                self._open_in_vscode(path)
         elif action.startswith("agent:"):
-            agent = AGENTS_BY_KEY.get(action[len("agent:") :])
+            key, _, mode = action[len("agent:") :].partition(":")
+            agent = AGENTS_BY_KEY.get(key)
             if agent is not None:
-                self.action_open_tmux(agent_cmd=agent.launch_command, purpose=agent.purpose)
+                self.action_open_tmux(
+                    agent_cmd=agent.launch_command_for(mode or None),
+                    purpose=agent.purpose_for(mode or None),
+                )
         elif action.startswith("attach:"):
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
@@ -1328,6 +1365,22 @@ class GitDirectorConsole(
                     RemoveSessionScreen(path.name, path),
                     callback=self._handle_remove_selection,
                 )
+
+    @work(thread=True)
+    def _open_in_vscode(self, path: Path) -> None:
+        from ...editor import open_in_vscode
+
+        try:
+            open_in_vscode(path)
+        except Exception as exc:
+            logger.warning("opening VS Code failed: %s", exc)
+            message = f"VS Code: {exc}"
+        else:
+            message = f"{path.name}: opened in VS Code"
+        try:
+            self.call_from_thread(self._update_status, message)
+        except Exception:
+            logger.debug("Failed to post VS Code result to UI", exc_info=True)
 
     def _open_review_diff(self, path: Path | None = None) -> None:
         if path is None:
