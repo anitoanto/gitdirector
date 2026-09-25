@@ -370,16 +370,6 @@ class TestPanelStoreKillFailurePath:
         assert store.get("Renamed") is None
 
 
-class TestTabStyling:
-    def test_tab_headers_use_three_row_height(self):
-        assert "#tabs Tabs" in GitDirectorConsole.CSS
-        assert "height: 3;" in GitDirectorConsole.CSS
-
-    def test_active_tab_uses_filled_style(self):
-        assert "#tabs Tab.-active" in GitDirectorConsole.CSS
-        assert "background: $accent;" in GitDirectorConsole.CSS
-
-
 class TestGitDirectorConsolePanels:
     async def test_empty_panels_show_message_without_table(self):
         app = GitDirectorConsole()

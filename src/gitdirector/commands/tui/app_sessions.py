@@ -571,6 +571,7 @@ class ConsoleSessionsMixin:
                 waiting += 1
         count_changed = waiting != self._waiting_count
         self._waiting_count = waiting
+        self._refresh_top_bar()
 
         if self._active_tab == "sessions" and self._sessions_entries:
             self._update_session_status_cells()

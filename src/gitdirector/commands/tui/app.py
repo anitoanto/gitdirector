@@ -16,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Header, Input, Static, TabbedContent, TabPane
+from textual.widgets import DataTable, Footer, Input, Static, TabbedContent, TabPane
 from textual.widgets._footer import FooterKey, FooterLabel
 from textual.worker import NoActiveWorker, Worker, get_current_worker
 
@@ -54,6 +54,7 @@ from .screens.repos import (
 )
 from .screens.sessions import EditSessionDescriptionScreen, RemoveSessionScreen
 from .terminal_caps import host_color_system, no_color_requested
+from .topbar import TopBar
 from .widgets import ConsoleTable
 
 _panel_row_height = _app_panels._panel_row_height
@@ -131,9 +132,6 @@ class GitDirectorConsole(
         background: $surface;
         overflow: hidden;
     }
-    HeaderTitle {
-        padding: 0 10 0 8;
-    }
     #status-bar {
         dock: bottom;
         height: 1;
@@ -200,6 +198,13 @@ class GitDirectorConsole(
     DataTable > .datatable--hover {
         background: $primary 12%;
     }
+    /* Column titles sit on the table's own surface as quiet labels, not
+       as another bar under the top one. */
+    DataTable > .datatable--header {
+        background: $surface;
+        color: $text-muted;
+        text-style: bold;
+    }
     DataTable > .datatable--header-hover {
         background: $primary 12%;
     }
@@ -240,22 +245,9 @@ class GitDirectorConsole(
     TabbedContent {
         height: 1fr;
     }
-    #tabs Tabs {
-        height: 3;
-    }
-    #tabs Tab {
-        height: 3;
-        content-align: center middle;
-    }
-    #tabs Tab.-active {
-        background: $accent;
-        color: $text;
-        text-style: bold;
-    }
-    #tabs Tabs:focus Tab.-active {
-        background: $accent;
-        color: $text;
-        text-style: bold;
+    /* The top bar switches tabs; TabbedContent only swaps the content. */
+    #tabs > ContentTabs {
+        display: none;
     }
     TabPane {
         padding: 0;
@@ -371,7 +363,7 @@ class GitDirectorConsole(
         return self._palette_cache[1]
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True, icon="☰")
+        yield TopBar(get_version(), id="top-bar")
         with TabbedContent(id="tabs"):
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
@@ -438,6 +430,8 @@ class GitDirectorConsole(
         )
         self._sync_session_status_tracking()
         self.set_interval(0.25, self._advance_refresh_indicator)
+        # Counts that change without a status poll (repos, panels) catch up here.
+        self.set_interval(1, self._refresh_top_bar)
         self._prepare_attach_terminal()
         self._load_update_notice()
         self._load_repos_from_cache()

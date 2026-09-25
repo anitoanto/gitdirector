@@ -7,7 +7,7 @@ from pathlib import Path
 from time import monotonic
 
 from rich.markup import escape
-from textual.app import App
+from textual.app import App, ScreenStackError
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Input, Static, TabbedContent
 from textual.widgets.data_table import RowDoesNotExist
@@ -16,6 +16,7 @@ from .constants import (
     _PANELS_SORT_COLUMN_NAMES,
 )
 from .screens import SortMenuScreen
+from .topbar import NavState, TopBar
 
 _POST_RESUME_NEW_PANEL_GUARD_SECONDS = 0.25
 
@@ -48,6 +49,22 @@ class ConsoleUIHelpersMixin:
             )
         except NoMatches:
             return
+
+    def _refresh_top_bar(self) -> None:
+        try:
+            bar = self.query_one(TopBar)
+        except (NoMatches, ScreenStackError):
+            return
+        bar.show(
+            NavState(
+                active=self._active_tab,
+                repos=len(self._repo_paths),
+                sessions=len(self._sessions_entries),
+                waiting=self._waiting_count,
+                panels=len(self._panel_store.panels),
+                attention=self._palette.yellow,
+            )
+        )
 
     def action_tab_repos(self) -> None:
         if self._resume_target_tab is not None and self._resume_target_tab != "repos":
@@ -93,6 +110,7 @@ class ConsoleUIHelpersMixin:
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
+        self.call_after_refresh(self._refresh_top_bar)
         if self._resume_tab_activation_guard == tab_id:
             self._resume_tab_activation_guard = None
             self._active_tab = tab_id
@@ -149,6 +167,7 @@ class ConsoleUIHelpersMixin:
         self._active_tab = restore_tab
         self.refresh_bindings()
         self._sync_session_status_tracking()
+        self._refresh_top_bar()
 
         if restore_tab == "sessions":
             # Repaint from the cache so the selection is restored now; the

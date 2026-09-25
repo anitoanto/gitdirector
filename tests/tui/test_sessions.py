@@ -1465,7 +1465,7 @@ class TestMouseAfterReturn:
                 await pilot.pause()
             assert app.mouse_captured is None
 
-            await pilot.click("#--content-tab-repos")
+            await pilot.click("#nav-repos")
             await pilot.pause()
             assert app._active_tab == "repos"
 

@@ -157,7 +157,7 @@ class TestGitDirectorConsole:
             assert app.query_one("#repo-table", DataTable)
             assert app.query_one("#status-bar", Static)
             assert len(app.query("Footer")) == 1
-            assert len(app.query("Header")) == 1
+            assert len(app.query("#top-bar")) == 1
 
     async def test_empty_repo_list(self):
         app = GitDirectorConsole()
