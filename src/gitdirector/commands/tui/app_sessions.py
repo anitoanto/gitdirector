@@ -33,7 +33,7 @@ _SESSIONS_FALLBACK_TOTAL_WIDTH = 80
 _SESSIONS_CELL_PADDING = 1
 # The tab's own margin, the widget's ``padding: 0 1``, and the scrollbar,
 # less the cell padding each line draws itself.
-_SESSIONS_TABLE_CHROME_WIDTH = 6
+_SESSIONS_TABLE_CHROME_WIDTH = 5
 # A repo's sessions hang off one guide line in front of the repo column.
 _GUIDE_WIDTH = 2
 _BRACKET_OPEN = "╭"
@@ -580,6 +580,9 @@ class ConsoleSessionsMixin:
             live_session_names = {entry["session_name"] for entry in self._sessions_entries}
             if live_session_names != self._panels_live_sessions:
                 self._apply_panels_filter_and_sort(live_session_names)
+
+        if self._active_tab == "repos":
+            self._refresh_repo_session_cells()
 
         if self._active_tab == "repos" and count_changed:
             total = len(self._results)

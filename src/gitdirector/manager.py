@@ -49,7 +49,7 @@ def describe_resolution_failure(target: str, matches: list[Path], path_attempted
         return f"No tracked repository at path: {target}"
     if matches:
         paths_list = "\n".join(f"  {path}" for path in matches)
-        return f"Multiple repositories named '{target}' — use the full path:\n{paths_list}"
+        return f"Multiple repositories named '{target}'; use the full path:\n{paths_list}"
     return f"No tracked repository named: {target}"
 
 

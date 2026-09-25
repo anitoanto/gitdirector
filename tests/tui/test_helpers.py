@@ -6,54 +6,16 @@ from textual.theme import BUILTIN_THEMES
 
 from gitdirector.commands.tui import (
     _SORT_COLUMN_NAMES,
-    _STATUS_ORDER,
     TablePalette,
     resolve_table_palette,
 )
-from gitdirector.commands.tui.constants import _CURSOR_TINT, _changes_sort_key
-from gitdirector.repo import RepoStatus
+from gitdirector.commands.tui.constants import _CURSOR_TINT
 from gitdirector.ui_theme import contrast_ratio, readable_on
-
-from .conftest import _make_info
 
 PALETTE = TablePalette(success="#00aa00", yellow="#ffaa00", muted="#888888", primary="#6699ff")
 
 
 class TestTablePaletteLabels:
-    def test_changes_label_uses_warning_colour(self):
-        assert PALETTE.changes_label(_make_info(staged=True, unstaged=True)) == (
-            "[bold #ffaa00]staged+unstaged[/]"
-        )
-        assert PALETTE.changes_label(_make_info(staged=True, unstaged=False)) == (
-            "[bold #ffaa00]staged[/]"
-        )
-        assert PALETTE.changes_label(_make_info(staged=False, unstaged=True)) == (
-            "[bold #ffaa00]unstaged[/]"
-        )
-        assert PALETTE.changes_label(_make_info(staged=False, unstaged=False)) == "—"
-
-    def test_changes_sort_key(self):
-        assert _changes_sort_key(_make_info(staged=True, unstaged=True)) == "staged+unstaged"
-        assert _changes_sort_key(_make_info(staged=False, unstaged=False)) == "—"
-
-    def test_sync_label_covers_every_status(self):
-        assert PALETTE.sync_label(RepoStatus.UP_TO_DATE) == "up to date"
-        for status in (
-            RepoStatus.BEHIND,
-            RepoStatus.AHEAD,
-            RepoStatus.DIVERGED,
-            RepoStatus.UNKNOWN,
-        ):
-            assert PALETTE.sync_label(status) == f"[bold #ffaa00]{status.value}[/]"
-
-    def test_sync_label_marks_a_stale_comparison(self):
-        assert PALETTE.sync_label(RepoStatus.UP_TO_DATE, stale=True) == (
-            "up to date [#888888](offline)[/]"
-        )
-        assert PALETTE.sync_label(RepoStatus.AHEAD, stale=True) == (
-            "[bold #ffaa00]ahead[/] [#888888](offline)[/]"
-        )
-
     def test_session_status_styles(self):
         assert PALETTE.session_status("waiting") == ("● waiting", "bold #ffaa00")
         assert PALETTE.session_status("running") == ("● running", "#00aa00")
@@ -152,9 +114,11 @@ class TestResolveTablePalette:
 
 
 class TestSortConstants:
-    def test_sort_column_names_count(self):
-        assert len(_SORT_COLUMN_NAMES) == 6
-
-    def test_status_order_covers_all(self):
-        for s in RepoStatus:
-            assert s in _STATUS_ORDER
+    def test_sort_column_names(self):
+        assert list(_SORT_COLUMN_NAMES.values()) == [
+            "Repository",
+            "Needs attention",
+            "Branch",
+            "Last commit",
+            "Sessions",
+        ]

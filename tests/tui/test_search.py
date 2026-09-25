@@ -388,3 +388,37 @@ class TestPanelsSearch:
 
             assert app._search_query == ""
             assert table.row_count == 2
+
+
+class TestResultsBarFollowsTheFilter:
+    async def test_typing_shows_the_bar_before_enter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("slash")
+            await pilot.press("a", "l")
+            await pilot.pause()
+            bar = app.query_one("#repo-search-indicator")
+            # Filtered as it is typed, and it says so straight away.
+            assert bar.display
+            assert "Search results for 'al'" in str(bar.render())
+            assert "\u2014" not in str(bar.render())
+
+            await pilot.press("backspace", "backspace")
+            await pilot.pause()
+            assert not bar.display
+
+    async def test_every_tab_shows_the_same_filter(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("slash", "x", "enter")
+            await pilot.pause()
+            for tab in ("repo", "sessions", "panels"):
+                assert app.query_one(f"#{tab}-search-indicator").display
+            await pilot.press("escape")
+            await pilot.pause()
+            for tab in ("repo", "sessions", "panels"):
+                assert not app.query_one(f"#{tab}-search-indicator").display

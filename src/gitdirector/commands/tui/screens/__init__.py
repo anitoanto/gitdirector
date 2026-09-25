@@ -1,14 +1,12 @@
 """Modal screen classes for the TUI, split by domain:
 
-- ``screens.repos``   — repository action menu, git command results, pull, info
-- ``screens.sessions`` — tmux session selection and removal
-- ``screens.panels``  — panel create/reconfigure/rename/action and agent loading
-- ``screens.commit``  — stage-all confirm, commit message, commit loading,
-  commit result
-- ``screens._shared`` — generic confirm and sort dialogs, plus the shared ANSI
+- ``screens.repos``: repository launcher, git menu and results, pull, info
+- ``screens.sessions``: tmux session selection and removal
+- ``screens.panels``: panel create/reconfigure/rename/action and agent loading
+- ``screens.commit``: stage-all confirm, commit message, loading and result
+- ``screens._shared``: generic confirm and sort dialogs, plus the shared ANSI
   renderer
-
-The package re-exports every screen so callers can import them from one place.
+- ``screens.card``: the card layout every popup shares
 """
 
 from __future__ import annotations

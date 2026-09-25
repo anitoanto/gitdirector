@@ -30,6 +30,7 @@ from ..diff_renderer import (
     render_error,
     render_file_diff,
 )
+from .card import key_hints
 from .commit import (
     CommitLoadingScreen,
     CommitMessageScreen,
@@ -81,84 +82,74 @@ class DiffReviewScreen(ModalScreen[None]):
         Binding("r", "refresh", "r refresh", show=True),
     ]
 
+    # Full-bleed, like the console: the top bar's header, hairlines between
+    # the parts, and the same line of key hints at the bottom.
     DEFAULT_CSS = """
     DiffReviewScreen {
-        align: center middle;
-        background: $panel 80%;
+        background: $surface;
     }
     #diff-container {
-        width: 98%;
-        height: 96%;
-        border: round $primary;
-        background: $panel;
-        padding: 0 0;
+        width: 1fr;
+        height: 1fr;
+        background: $surface;
     }
     #diff-header {
-        height: 2;
-        padding: 0 1;
-        background: $boost;
-        border-bottom: solid $primary;
+        height: 3;
+        padding: 0 2;
+        background: $panel;
     }
     #diff-title {
-        text-align: center;
+        width: 1fr;
+        height: 100%;
+        content-align-vertical: middle;
         color: $text;
-        text-style: bold;
     }
     #diff-summary {
-        text-align: center;
+        width: auto;
+        height: 100%;
+        content-align-vertical: middle;
         color: $text-muted;
-        height: 1;
     }
     #diff-body {
         height: 1fr;
-        padding: 0 0;
     }
     #diff-files-pane {
-        width: 52;
+        width: 48;
         height: 1fr;
-        border-right: solid $boost;
-        padding: 0 0;
+        border-right: solid $foreground 10%;
         background: $surface;
     }
     .diff-pane-label {
         height: 1;
-        padding: 0 1;
-        background: $boost;
+        padding: 0 2;
         color: $text-muted;
         text-style: bold;
     }
     .diff-pane-label.--focused {
-        background: $accent;
-        color: $text;
+        color: $accent;
     }
     #diff-files-list {
         width: 1fr;
         height: 1fr;
-        padding: 0 0;
         background: $surface;
     }
     #diff-content-pane {
         width: 1fr;
         height: 1fr;
-        padding: 0 0;
     }
     #diff-content-scroll {
         width: 1fr;
         height: 1fr;
         border: none;
         background: #0d1117;
-        padding: 0 0;
         overflow-x: auto;
         overflow-y: auto;
-        scrollbar-size-vertical: 1;
-        scrollbar-size-horizontal: 1;
     }
     #diff-content {
         width: auto;
         height: auto;
         color: #c9d1d9;
         background: #0d1117;
-        padding: 0 0;
     }
     #diff-content-scroll.--added,
     #diff-content.--added {
@@ -174,7 +165,7 @@ class DiffReviewScreen(ModalScreen[None]):
         background: $surface;
     }
     #diff-loading LoadingIndicator {
-        height: 3;
+        height: 1;
         color: $primary;
     }
     #diff-loading-text {
@@ -184,18 +175,16 @@ class DiffReviewScreen(ModalScreen[None]):
     }
     #diff-empty {
         height: 1fr;
-        align: center middle;
         content-align: center middle;
         padding: 0 2;
-        color: $text;
+        color: $text-muted;
     }
     #diff-hint {
         dock: bottom;
         height: 1;
-        background: $boost;
+        background: $panel;
         color: $text-muted;
-        padding: 0 1;
-        text-align: center;
+        padding: 0 2;
     }
     """
 
@@ -216,9 +205,9 @@ class DiffReviewScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="diff-container"):
-            with Vertical(id="diff-header"):
+            with Horizontal(id="diff-header"):
                 yield Static(
-                    f"[bold $text]{escape(self.repo_name)}[/]  [dim]\u2014  Review Diff[/dim]",
+                    f"[bold]{escape(self.repo_name)}[/]   [dim]review changes[/dim]",
                     id="diff-title",
                 )
                 yield Static("", id="diff-summary")
@@ -235,14 +224,16 @@ class DiffReviewScreen(ModalScreen[None]):
                         yield Static("Loading diff\u2026", id="diff-loading-text")
                     yield Static("", id="diff-empty")
             yield Static(
-                "[bold]tab[/bold] toggle focus  "
-                "[bold]j/k[/bold] line  "
-                "[bold]J/K[/bold] page  "
-                "[bold]h/l[/bold] horizontal  "
-                "[bold]\\[ ][/bold] cycle  "
-                "[bold]g[/bold] commit  "
-                "[bold]r[/bold] refresh  "
-                "[bold]esc[/bold] close",
+                key_hints(
+                    ("tab", "switch pane"),
+                    ("j/k", "line"),
+                    ("J/K", "page"),
+                    ("h/l", "scroll"),
+                    ("\\[ ]", "file"),
+                    ("g", "commit"),
+                    ("r", "refresh"),
+                    ("esc", "close"),
+                ),
                 id="diff-hint",
             )
 
@@ -369,38 +360,26 @@ class DiffReviewScreen(ModalScreen[None]):
 
     def _update_summary(self) -> None:
         summary = self.query_one("#diff-summary", Static)
+        branch = f"   [bold]{escape(self.branch)}[/]" if self.branch else ""
         if self._load_failed:
-            summary.update(
-                f"[$text-error]diff failed[/]  [dim]\u2014  {escape(self._load_failed)}[/dim]"
-            )
+            summary.update(f"[$text-error]diff failed: {escape(self._load_failed)}[/]")
             return
         if self._loading:
-            summary.update("[dim]loading uncommitted changes\u2026[/dim]")
+            summary.update(f"loading…{branch}")
             return
         if not self._files:
-            branch_part = (
-                f"  [dim]branch:[/dim] [$text-primary]{escape(self.branch)}[/]"
-                if self.branch
-                else ""
-            )
-            summary.update(f"[$text-success]working tree clean[/]{branch_part}")
+            summary.update(f"[$text-success]working tree clean[/]{branch}")
             return
         total_add = sum(f.additions for f in self._files)
         total_del = sum(f.deletions for f in self._files)
         count = len(self._files)
         noun = "file" if count == 1 else "files"
-        branch_part = (
-            f"  [dim]branch:[/dim] [$text-primary]{escape(self.branch)}[/]" if self.branch else ""
-        )
-        truncated_part = (
-            "  [$text-warning]diff too large \u2014 later files are not shown[/]"
-            if self._truncated
-            else ""
+        truncated = (
+            "   [$text-warning]too large: later files not shown[/]" if self._truncated else ""
         )
         summary.update(
-            f"[bold $text]{count} {noun}[/]"
-            f"  [$text-success]+{total_add}[/]  [$text-error]-{total_del}[/]"
-            f"{branch_part}{truncated_part}"
+            f"{count} {noun}   [$text-success]+{total_add}[/] [$text-error]-{total_del}[/]"
+            f"{branch}{truncated}"
         )
 
     def _render_selected_file(self) -> None:
@@ -785,7 +764,7 @@ class DiffReviewScreen(ModalScreen[None]):
             )
         )
         # After a successful commit (with or without push) the
-        # diff is no longer representative — refresh it so the
+        # diff is no longer representative, so refresh it so the
         # next view shows the new state of the working tree.
         if commit_ok:
             self._refresh_after_commit()

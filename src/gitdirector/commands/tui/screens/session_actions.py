@@ -1,46 +1,42 @@
-"""Shared modal screen helpers for session-oriented action menus."""
+"""The launcher: start an agent, a shell or the editor in a repository, or rejoin a session."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from rich.markup import escape
-from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from ....agents import AGENTS, AGENTS_BY_KEY, AgentSpec
-from ..constants import _MODAL_BINDINGS, _MODAL_CSS
-from ..terminal_caps import strip_unsupported_css as _safe_css
+from ..constants import _MODAL_BINDINGS
+from .card import (
+    ShortcutKeys,
+    card_css,
+    card_palette,
+    heading,
+    key_hints,
+    menu_row,
+    spacer,
+)
 
-_HINT = "↑↓ select    \\[enter] open    \\[esc] close"
-_MODE_HINT = "↑↓ select    ⇥ mode    \\[enter] open    \\[esc] close"
+# One key per launcher line; j/k/h/l stay free for moving and picking modes.
+_AGENT_KEYS = {"claude": "c", "opencode": "o", "codex": "x", "copilot": "p", "pi": "i"}
+_SHELL_KEY = "s"
+_EDITOR_KEY = "v"
+_SESSION_KEYS = "123456789"
+
+_HINT = key_hints(("↑↓", "select"), ("⏎", "open"), ("key", "jump"), ("esc", "close"))
+_MODE_HINT = key_hints(("↑↓", "select"), ("⇥", "mode"), ("⏎", "launch"), ("esc", "close"))
 
 
 def session_action_menu_css(screen_name: str) -> str:
-    return _safe_css(
-        f"{screen_name} {{"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS + f"{screen_name} #menu-container {{ min-width: 60; max-width: 88; }}"
-    )
-
-
-def _row(left: str, right: Text | str = "") -> Table:
-    """A menu row with *right* pinned to the right edge."""
-    grid = Table.grid(expand=True)
-    grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
-    grid.add_column(justify="right", no_wrap=True, overflow="ellipsis")
-    grid.add_row(Text.from_markup(left), right if isinstance(right, Text) else Text(right))
-    return grid
-
-
-def _heading(label: str) -> Option:
-    return Option(f"[dim]{label}[/dim]", disabled=True)
+    return card_css(screen_name, width=70)
 
 
 def _mode_picker(agent: AgentSpec, selected: str | None, success: str, danger: str) -> Text:
@@ -57,8 +53,8 @@ def _mode_picker(agent: AgentSpec, selected: str | None, success: str, danger: s
     return picker
 
 
-class SessionActionMenuScreen(ModalScreen[str]):
-    """Base menu for creating, attaching, and removing tmux sessions."""
+class SessionActionMenuScreen(ShortcutKeys, ModalScreen[str]):
+    """Launch an agent, a shell or VS Code, or rejoin one of the running sessions."""
 
     BINDINGS = [
         *_MODAL_BINDINGS,
@@ -75,75 +71,120 @@ class SessionActionMenuScreen(ModalScreen[str]):
         self._modes: dict[str, str] = {
             agent.key: agent.default_mode for agent in AGENTS if agent.default_mode
         }
+        self._shortcuts: dict[str, str] = {}
 
     def _subtitle(self) -> str:
         return ""
 
+    def _meta(self) -> Text:
+        return Text()
+
+    def _palette(self):
+        return card_palette(self.app)
+
+    def _agent_prompt(self, agent: AgentSpec):
+        label = Text.assemble(("◆ ", "dim"), (agent.label, "bold"))
+        detail = Text()
+        if agent.modes:
+            palette = self._palette()
+            selected = self._modes.get(agent.key)
+            detail = _mode_picker(agent, selected, palette.success, palette.danger)
+        return menu_row(label, detail, _AGENT_KEYS.get(agent.key, ""))
+
+    def _agent_options(self) -> list[Option]:
+        items = [heading("Start an agent")]
+        items.extend(Option(self._agent_prompt(agent), id=f"agent:{agent.key}") for agent in AGENTS)
+        return items
+
     def _primary_options(self) -> list[Option]:
         return [
-            Option(_row("+ [bold]Shell[/bold]", Text("tmux", style="dim")), id="new_session"),
-            Option(_row("› [bold]VS Code[/bold]", Text("editor", style="dim")), id="vscode"),
+            spacer(),
+            heading("Open"),
+            Option(
+                menu_row(
+                    Text.assemble(("› ", "dim"), ("Shell", "bold")),
+                    Text("new tmux session", style="dim"),
+                    _SHELL_KEY,
+                ),
+                id="new_session",
+            ),
+            Option(
+                menu_row(
+                    Text.assemble(("› ", "dim"), ("VS Code", "bold")),
+                    Text("editor", style="dim"),
+                    _EDITOR_KEY,
+                ),
+                id="vscode",
+            ),
         ]
+
+    def _session_statuses(self) -> dict[str, str]:
+        entries = getattr(self.app, "_sessions_entries", None) or []
+        return {entry["session_name"]: entry.get("status", "") for entry in entries}
 
     def _session_options(self, sessions: list[str]) -> list[Option]:
         if not sessions:
             return []
         from ....integrations.tmux.core import _parse_gd_session_name
 
-        items = [Option("", disabled=True), _heading(f"{len(sessions)} active")]
-        for session_name in sessions:
+        palette = self._palette()
+        styles = {
+            "waiting": ("●", f"bold {palette.yellow}"),
+            "running": ("●", palette.success),
+            "idle": ("○", palette.muted),
+        }
+        statuses = self._session_statuses()
+        items = [spacer(), heading(f"Running · {len(sessions)}")]
+        for index, session_name in enumerate(sessions):
             parsed = _parse_gd_session_name(session_name)
-            session_label = f"{parsed[1]}/{parsed[2]}" if parsed else session_name
+            label = f"{parsed[1]}/{parsed[2]}" if parsed else session_name
+            status = statuses.get(session_name, "")
+            dot, style = styles.get(status, ("●", "dim"))
+            key = _SESSION_KEYS[index] if index < len(_SESSION_KEYS) else ""
             items.append(
                 Option(
-                    _row(
-                        f"● [bold]{escape(session_label)}[/bold]",
-                        Text(session_name, style="dim"),
+                    menu_row(
+                        Text.assemble((f"{dot} ", style), (label, "bold")),
+                        Text(status, style=style),
+                        key,
                     ),
                     id=f"attach:{session_name}",
                 )
             )
         return items
 
-    def _agent_prompt(self, agent: AgentSpec) -> Table:
-        label = f"◆ [bold]{escape(agent.label)}[/bold]"
-        if not agent.modes:
-            return _row(label)
-        from ..constants import resolve_table_palette
-
-        palette = getattr(self.app, "_palette", None) or resolve_table_palette(
-            self.app.get_css_variables()
-        )
-        selected = self._modes.get(agent.key)
-        return _row(label, _mode_picker(agent, selected, palette.success, palette.danger))
-
-    def _agent_options(self) -> list[Option]:
-        items = [Option("", disabled=True), _heading("Agents")]
-        items.extend(Option(self._agent_prompt(agent), id=f"agent:{agent.key}") for agent in AGENTS)
-        return items
-
     def _remove_options(self, sessions: list[str]) -> list[Option]:
         if not sessions:
             return []
         return [
-            Option("", disabled=True),
-            Option("[$text]✕[/] [dim]Remove session…[/dim]", id="remove_session"),
+            Option(
+                menu_row(Text.assemble(("✕ ", "dim"), ("Remove a session…", "dim"))),
+                id="remove_session",
+            )
         ]
 
     def compose(self) -> ComposeResult:
         from ....integrations.tmux import list_repo_sessions
 
         sessions = list_repo_sessions(self.path)
-        items = self._primary_options()
-        items.extend(self._agent_options())
+        items = self._agent_options()
+        items.extend(self._primary_options())
         items.extend(self._session_options(sessions))
         items.extend(self._remove_options(sessions))
 
+        self._shortcuts = {key: f"agent:{agent}" for agent, key in _AGENT_KEYS.items()}
+        self._shortcuts[_SHELL_KEY] = "new_session"
+        self._shortcuts[_EDITOR_KEY] = "vscode"
+        for key, session_name in zip(_SESSION_KEYS, sessions):
+            self._shortcuts[key] = f"attach:{session_name}"
+
         with Vertical(id="menu-container"):
-            yield Static(f"[bold $text]{escape(self.title)}[/]", id="menu-title")
+            with Horizontal(id="menu-header"):
+                yield Static(escape(self.title), id="menu-title")
+                yield Static(self._meta(), id="menu-meta")
             yield Static(self._subtitle(), id="menu-branch")
             yield OptionList(*items, id="action-menu")
-            yield Static(_HINT, id="menu-hint")
+            yield Static(_MODE_HINT, id="menu-hint")
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()
@@ -160,12 +201,14 @@ class SessionActionMenuScreen(ModalScreen[str]):
         hint = _MODE_HINT if agent is not None and agent.modes else _HINT
         self.query_one("#menu-hint", Static).update(hint)
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        action = event.option.id
+    def _choose(self, action: str) -> None:
         agent = AGENTS_BY_KEY.get(action[len("agent:") :]) if action.startswith("agent:") else None
         if agent is not None and agent.key in self._modes:
             action = f"{action}:{self._modes[agent.key]}"
         self.dismiss(action)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self._choose(event.option.id)
 
     def action_cycle_mode(self, step: int) -> None:
         agent = self._highlighted_agent()

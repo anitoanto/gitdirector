@@ -13,7 +13,7 @@ from textual.widgets._footer import FooterKey
 from gitdirector.commands.tui import AgentLoadingScreen, GitDirectorConsole, GroupActionMenuScreen
 from gitdirector.commands.tui.app_groups import detect_repo_groups, group_row_key
 
-from .conftest import _make_info, _mock_manager
+from .conftest import _make_info, _mock_manager, repo_row_text
 
 
 class TestRepoGroupDetection:
@@ -82,20 +82,22 @@ class TestRepositoryGroups:
 
             table = app.query_one("#repo-table", DataTable)
             group_key = group_row_key(Path("/tmp/work"))
-            assert table.row_count == 4
-            assert "work" in str(table.get_cell(group_key, app._col_keys[0]))
-            assert "[2 repos]" not in str(table.get_cell(group_key, app._col_keys[0]))
-            assert "[2 repos]" in str(table.get_cell(group_key, app._col_keys[1]))
-            assert table.get_cell(group_key, app._col_keys[2]) == ""
-            assert table.get_cell(group_key, app._col_keys[3]) == ""
-            assert table.get_cell(group_key, app._col_keys[4]) == ""
-            assert table.get_cell(group_key, app._col_keys[5]) == "/tmp/work"
-            assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
-            assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"
-            assert table.get_cell("/tmp/other/solo", app._col_keys[0]) == "solo"
+            # Standalone repositories first, then each group under its heading.
+            assert [str(key.value) for key in table.rows] == [
+                "/tmp/other/solo",
+                group_key,
+                "/tmp/work/alpha",
+                "/tmp/work/beta",
+            ]
+            heading = repo_row_text(app, group_key)
+            assert heading.splitlines()[-1].strip() == "▾ work"
+            # Names line up: standalone repos with group names, members one level in.
+            assert repo_row_text(app, "/tmp/other/solo").startswith("   solo")
+            assert repo_row_text(app, "/tmp/work/alpha").startswith("     alpha")
+            assert repo_row_text(app, "/tmp/work/beta").startswith("     beta")
             assert "[space] toggle" in app.query_one("#status-bar", Static).content
 
-            table.move_cursor(row=0)
+            table.move_cursor(row=1)
             assert app._get_selected_path() == Path("/tmp/work")
             assert app._get_selected_group().name == "work"
 
@@ -199,8 +201,8 @@ class TestRepositoryGroups:
             app.action_toggle_group()
             await pilot.pause()
 
-            assert table.get_cell("/tmp/work/alpha", app._col_keys[1]) != "... ... ... ..."
-            assert table.get_cell("/tmp/work/beta", app._col_keys[1]) == "... ... ... ..."
+            assert "checking…" not in repo_row_text(app, "/tmp/work/alpha")
+            assert "checking…" in repo_row_text(app, "/tmp/work/beta")
 
     async def test_search_by_group_name_shows_group_repositories(self):
         repos = [
@@ -221,8 +223,8 @@ class TestRepositoryGroups:
 
             table = app.query_one("#repo-table", DataTable)
             assert table.row_count == 3
-            assert table.get_cell("/tmp/work/alpha", app._col_keys[0]) == "  alpha"
-            assert table.get_cell("/tmp/work/beta", app._col_keys[0]) == "  beta"
+            assert repo_row_text(app, "/tmp/work/alpha").strip().startswith("alpha")
+            assert repo_row_text(app, "/tmp/work/beta").strip().startswith("beta")
 
     async def test_action_show_menu_uses_group_action_screen(self):
         repos = [
@@ -326,9 +328,9 @@ class TestGroupActionMenuScreen:
             branch_label = app.screen.query_one("#menu-branch", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
 
-            assert "work" in title.content
-            assert "alpha, beta" in branch_label.content
-            assert menu.option_count == 9
+            assert "work" in str(title.render())
+            assert "alpha, beta" in str(branch_label.render())
+            assert menu.highlighted_option.id == "agent:claude"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_select_new_session(self, _mock_sessions):
@@ -340,7 +342,7 @@ class TestGroupActionMenuScreen:
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(screen, callback=lambda value: results.append(value))
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("s")
             await pilot.pause()
 
             assert results == ["new_session"]

@@ -18,7 +18,7 @@ from gitdirector.repo import RepositoryInfo, RepoStatus
 
 class TestFormatSize:
     def test_none(self):
-        assert _format_size(None).plain == "—"
+        assert _format_size(None).plain == "-"
 
     def test_bytes(self):
         assert "B" in _format_size(500).plain
@@ -50,7 +50,7 @@ class TestStatusText:
 
 class TestChangesText:
     def test_none(self):
-        assert _changes_text(False, False).plain == "—"
+        assert _changes_text(False, False).plain == "-"
 
     def test_staged(self):
         assert "staged" in _changes_text(True, False).plain

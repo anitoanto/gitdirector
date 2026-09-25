@@ -152,3 +152,16 @@ def test_every_layout_keeps_its_slots_and_proportions(tmp_path, monkeypatch):
         finally:
             _run_tmux(["kill-server"])
             _cleanup_tmux_tmpdir(tmux_dir)
+
+
+class TestPanesVanishingMidBuild:
+    """A pane closed while its panel is laid out ends the build cleanly."""
+
+    def test_a_missing_pane_is_a_tmux_error(self, monkeypatch):
+        from gitdirector.commands.tui.panels import resolve_panel_layout
+        from gitdirector.integrations.tmux.core import TmuxError
+
+        monkeypatch.setattr(P, "_tmux_output", lambda *args: "80 24")
+        layout = resolve_panel_layout("grid_2x2")
+        with pytest.raises(TmuxError, match="went away"):
+            P._equalize_panel_layout("gd/build/x", ["%1", "%2"], layout)

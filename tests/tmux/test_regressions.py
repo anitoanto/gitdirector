@@ -100,12 +100,21 @@ class TestKillTmuxSessionInputValidation:
     def test_valid_full_name_still_works(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         kill_tmux_session("gd/repo/shell/1")
+        # A work session takes its deck and panel views with it.
         assert mock_run.call_args[0][0] == [
             "tmux",
             "kill-session",
+            "-g",
             "-t",
             "=gd/repo/shell/1",
         ]
+
+    @patch("subprocess.run")
+    def test_a_view_is_killed_alone(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        # -g on a view would take the real session down with it.
+        kill_tmux_session("gd/view/deck-1-7")
+        assert mock_run.call_args[0][0] == ["tmux", "kill-session", "-t", "=gd/view/deck-1-7"]
 
     @patch("subprocess.run")
     def test_panel_session_name_with_three_segments_is_valid(self, mock_run):
@@ -195,10 +204,16 @@ class TestExactMatchPanelPaneCommand:
 
     def test_assigned_pane_views_the_session_through_an_exact_target(self):
         script = shlex.split(_panel_pane_command("Dev", 2, "gd/repo/shell/1"))[2]
-        assert "new-session -t =gd/repo/shell/1 -s gd/view/dev-2-$$" in script
-        assert "set-option status off" in script
-        assert "set-option @gd_slot 2" in script
-        assert "set-option destroy-unattached on" in script
+        view = '"=gd/view/dev-2-$$:"'
+        # Created detached, then attached: tmux 3.7c dies if new-session
+        # attaches a client whose terminal has already gone.
+        assert 'new-session -d -t =gd/repo/shell/1 -s "gd/view/dev-2-$$"' in script
+        assert f"set-option -t {view} status off" in script
+        assert f"set-option -t {view} @gd_slot 2" in script
+        assert script.index('attach-session -t "=gd/view/dev-2-$$"') < script.index(
+            f"set-option -t {view} destroy-unattached on"
+        )
+        assert '|| env -u TMUX tmux kill-session -t "=gd/view/dev-2-$$"' in script
 
     def test_unassigned_pane_has_no_tmux_target(self):
         cmd = _panel_pane_command("Dev", 1, None)
@@ -309,21 +324,25 @@ class TestReapStalePanelHelpers:
     @patch("gitdirector.integrations.tmux.panels._process_alive")
     @patch("gitdirector.integrations.tmux.panels._list_sessions")
     def test_kills_only_helpers_whose_process_is_gone(self, mock_list, mock_alive, mock_kill):
+        import os
+
+        # Never this process's own pid, which a container can make small.
+        gone, alive = [pid for pid in range(111, 120) if pid != os.getpid()][:2]
         mock_list.return_value = [
-            "gd/build/0123abcd4567-111-a1b2c3",
-            "gd/build/0123abcd4567-222-a1b2c3",
-            "gd/panel/main_orphaned-111-1700000000000",
+            f"gd/build/0123abcd4567-{gone}-a1b2c3",
+            f"gd/build/0123abcd4567-{alive}-a1b2c3",
+            f"gd/panel/main_orphaned-{gone}-1700000000000",
             "gd/panel/main",
             "gd/repo_abcd2/shell/1",
-            "gd/view/main-1-111",
+            f"gd/view/main-1-{gone}",
         ]
-        mock_alive.side_effect = lambda pid: pid == 222
+        mock_alive.side_effect = lambda pid: pid == alive
 
         reaped = tmux_panels.reap_stale_panel_helpers()
 
         assert reaped == [
-            "gd/build/0123abcd4567-111-a1b2c3",
-            "gd/panel/main_orphaned-111-1700000000000",
+            f"gd/build/0123abcd4567-{gone}-a1b2c3",
+            f"gd/panel/main_orphaned-{gone}-1700000000000",
         ]
         assert [call.args[0] for call in mock_kill.call_args_list] == reaped
 
@@ -418,7 +437,7 @@ class TestExactMatchLaunchCommand:
     def test_cleanup_script_kill_session_uses_equals(self, mock_run, _mock_marker):
         launch_command_in_tmux_session("gd/my-repo/copilot/1", "copilot")
         cleanup_cmd = mock_run.call_args[0][0][-1]
-        assert f"kill-session -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
+        assert f"kill-session -g -t {shlex.quote('=gd/my-repo/copilot/1')}" in cleanup_cmd
 
 
 class TestExactMatchCapturePaneText:

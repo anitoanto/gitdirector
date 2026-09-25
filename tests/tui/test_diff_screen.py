@@ -136,7 +136,10 @@ class TestDiffReviewScreenCompose:
 
             title = app.screen.query_one("#diff-title", Static)
             assert "my-repo" in title.content
-            assert "Review Diff" in title.content
+            assert "review changes" in title.content
+            # Full-bleed: the viewer takes the whole screen, no outer margins.
+            container = app.screen.query_one("#diff-container")
+            assert container.region.size == app.screen.size
 
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             assert files_list is not None
@@ -148,8 +151,8 @@ class TestDiffReviewScreenCompose:
             hint_text = hint.content.lower()
             assert "tab" in hint_text
             assert "esc" in hint_text
-            assert "toggle focus" in hint_text
-            assert "cycle" in hint_text
+            assert "switch pane" in hint_text
+            assert "file" in hint_text
             assert "brackets" not in hint_text
             assert "n/p" not in hint_text
 
@@ -725,9 +728,8 @@ class TestReviewDiffActionMenuIntegration:
             menu = app.screen.query_one("#action-menu", OptionList)
             ids = [opt.id for opt in menu.options if opt.id is not None]
             assert "review_diff" in ids
-            labels = [str(opt.prompt) for opt in menu.options]
-            assert any("Review Diff" in label for label in labels)
-            assert any("Review" in label and "Diff" not in label for label in labels)
+            headings = [str(opt.prompt) for opt in menu.options if opt.disabled]
+            assert "REVIEW" in headings
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_app_opens_review_diff_screen(self, _mock_sessions, mocker):

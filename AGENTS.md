@@ -4,7 +4,7 @@
 
 This project uses **uv**. The `.venv` always lives in the project root.
 
-Run `uv sync` first, then prefix every command with `uv run` — it resolves the
+Run `uv sync` first, then prefix every command with `uv run`; it resolves the
 right environment automatically. Never activate `.venv` manually.
 
 ```bash
@@ -16,7 +16,7 @@ uv run nox -s clean   # wipe caches, coverage, and build artifacts
 
 ## Code style
 
-Keep comments minimal — let the code speak for itself. Comment *why*, not
+Keep comments minimal: let the code speak for itself. Comment *why*, not
 *what*, and only where the reasoning is not obvious from the code.
 
 ## Before pushing
@@ -34,7 +34,7 @@ the tests, and include the formatting fix with your changes.
 
 The test suite runs in randomized order. If a test fails, replay it with the
 seed pytest printed (`--randomly-seed=<seed>`) before assuming it is unrelated
-noise — see [DEV.md](DEV.md).
+noise; see [DEV.md](DEV.md).
 
 Never run tmux experiments against the user's own tmux server: use
 `tmux -L <name>` or a private `TMUX_TMPDIR`, and kill that server afterwards.
@@ -50,6 +50,6 @@ Read-only inspection (`status`, `diff`, `log`) needs no permission.
 
 ## Docs
 
-- [README.md](README.md) — overview, commands, configuration
-- [DEV.md](DEV.md) — dev workflow, tests, how sessions and panels work, release
-- [SKILL.md](SKILL.md) — driving GitDirector headlessly from a shell
+- [README.md](README.md): overview, commands, configuration
+- [DEV.md](DEV.md): dev workflow, tests, how sessions and panels work, release
+- [SKILL.md](SKILL.md): driving GitDirector headlessly from a shell

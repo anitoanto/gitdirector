@@ -72,11 +72,12 @@ class TestSort:
             assert app._get_selected_path() == Path("/tmp/alpha")
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_sort_by_status(self, _mock_sessions):
+    async def test_sort_by_needs_attention(self, _mock_sessions):
         repos = [
-            _make_info("c", Path("/tmp/c"), status=RepoStatus.UNKNOWN),
-            _make_info("a", Path("/tmp/a"), status=RepoStatus.UP_TO_DATE),
-            _make_info("b", Path("/tmp/b"), status=RepoStatus.BEHIND),
+            _make_info("clean", Path("/tmp/clean")),
+            _make_info("unknown", Path("/tmp/unknown"), status=RepoStatus.UNKNOWN),
+            _make_info("dirty", Path("/tmp/dirty"), unstaged=True),
+            _make_info("behind", Path("/tmp/behind"), status=RepoStatus.BEHIND),
         ]
         app = GitDirectorConsole()
         app.manager = _mock_manager(repos)
@@ -88,12 +89,60 @@ class TestSort:
             app._apply_filter_and_sort()
             await pilot.pause()
             table = app.query_one("#repo-table", DataTable)
-            table.move_cursor(row=1)
-            assert app._get_selected_path() == Path("/tmp/a")
-            table.move_cursor(row=2)
-            assert app._get_selected_path() == Path("/tmp/b")
-            table.move_cursor(row=3)
-            assert app._get_selected_path() == Path("/tmp/c")
+            order = [str(key.value) for key in table.rows][1:]
+            assert order == ["/tmp/behind", "/tmp/dirty", "/tmp/unknown", "/tmp/clean"]
+
+    async def test_a_waiting_session_needs_attention_first(self):
+        from gitdirector.integrations.tmux.core import _repo_session_name_segment
+
+        repos = [
+            _make_info("behind", Path("/tmp/behind"), status=RepoStatus.BEHIND),
+            _make_info("quiet", Path("/tmp/quiet")),
+        ]
+        slug = _repo_session_name_segment(Path("/tmp/quiet"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._sessions_entries = [
+                {
+                    "session_name": f"gd/{slug}/claude/1",
+                    "repo_slug": slug,
+                    "purpose": "claude",
+                    "status": "waiting",
+                }
+            ]
+            app._sort_column = 1
+            app._apply_filter_and_sort()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            order = [str(key.value) for key in table.rows][1:]
+            assert order == ["/tmp/quiet", "/tmp/behind"]
+
+    async def test_sort_by_sessions_puts_busiest_first(self):
+        from gitdirector.integrations.tmux.core import _repo_session_name_segment
+
+        repos = [_make_info(name, Path(f"/tmp/{name}")) for name in ("none", "one", "two")]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            entries = []
+            for name, count in (("one", 1), ("two", 2)):
+                slug = _repo_session_name_segment(Path(f"/tmp/{name}"))
+                entries += [
+                    {"session_name": f"gd/{slug}/shell/{n}", "repo_slug": slug, "purpose": "shell"}
+                    for n in range(count)
+                ]
+            app._sessions_entries = entries
+            app._sort_column = 4
+            app._apply_filter_and_sort()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            order = [str(key.value) for key in table.rows][1:]
+            assert order == ["/tmp/two", "/tmp/one", "/tmp/none"]
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_sort_by_branch(self, _mock_sessions):
@@ -142,7 +191,7 @@ class TestSort:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sort_column = 4
+            app._sort_column = 3
             app._sort_reverse = False
             app._apply_filter_and_sort()
             await pilot.pause()
@@ -175,7 +224,7 @@ class TestSort:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sort_column = 4
+            app._sort_column = 3
             app._sort_reverse = True
             app._apply_filter_and_sort()
             await pilot.pause()
@@ -204,7 +253,7 @@ class TestSort:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            app._sort_column = 4
+            app._sort_column = 3
             app._sort_reverse = False
             app._apply_filter_and_sort()
             await pilot.pause()

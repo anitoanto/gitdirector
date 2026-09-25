@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.markup import escape
+from rich.text import Text
 
 from .session_actions import SessionActionMenuScreen, session_action_menu_css
 
@@ -25,6 +26,9 @@ class GroupActionMenuScreen(SessionActionMenuScreen):
         self.repo_count = repo_count
         self.repo_names = repo_names
 
+    def _meta(self) -> Text:
+        repo_label = "repo" if self.repo_count == 1 else "repos"
+        return Text(f"group · {self.repo_count} {repo_label}", style="dim")
+
     def _subtitle(self) -> str:
-        repo_label = "repository" if self.repo_count == 1 else "repositories"
-        return f"[dim]{self.repo_count} {repo_label}:[/dim] [$text-primary]{escape(self.repo_names)}[/]"
+        return escape(self.repo_names)

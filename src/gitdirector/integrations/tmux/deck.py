@@ -45,9 +45,11 @@ from .core import (
     _tmux_child_environment_command,
     _tmux_new_session_environment_args,
     attach_client_env,
+    guard_session_window,
     kill_tmux_session,
     respawn_pane,
     sync_panel_tmux_config,
+    view_attach_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,12 +154,8 @@ def _view_command(socket: str, session_name: str, view: str) -> str:
     says; ``env -u TMUX`` lets it attach from inside a pane at all.
     """
     tmux = f"tmux -S {shlex.quote(socket)}"
-    script = (
-        f"{tmux} new-session -t {shlex.quote(f'={session_name}')} -s {shlex.quote(view)}"
-        " \\; set-option status off \\; set-option mouse on"
-        " \\; set-option detach-on-destroy on \\; set-option destroy-unattached on; "
-        f"clear; {_WAIT_FOREVER}"
-    )
+    attach = view_attach_command(tmux, session_name, view, "mouse on", "detach-on-destroy on")
+    script = f"{attach}; clear; {_WAIT_FOREVER}"
     return _tmux_child_environment_command(f"env -u TMUX sh -c {shlex.quote(script)}")
 
 
@@ -359,6 +357,8 @@ def create_deck(session_name: str, *, return_to: str | None = None) -> str:
     )
     try:
         _scrub_session_environment(deck)
+        # A view is about to be grouped with it: its window must not close itself.
+        guard_session_window(session_name)
         respawn_sidebar = shlex.join(["split-window", "-h", "-b", "-f", "-l", str(width)]) + (
             f" {shlex.quote(_sidebar_command(deck))}"
         )
@@ -425,6 +425,8 @@ def show_session(deck: str, session_name: str, *, focus: bool = True) -> None:
     if state.main is None:
         raise TmuxError(f"deck has no main pane: {deck}")
     view = _new_view_name(deck)
+    # A view is about to be grouped with it: its window must not close itself.
+    guard_session_window(session_name)
     if state.main_attached:
         view_target = _session_option_target(view)
         commands = [

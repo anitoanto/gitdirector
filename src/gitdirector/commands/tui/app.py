@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from rich.markup import escape
+from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -35,11 +36,19 @@ from .app_ui import ConsoleUIHelpersMixin
 from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
     _DEFAULT_SORT_COLUMN,
+    _LOCAL_REFRESH_SECS,
     _SESSION_STATUS_POLL_INTERVAL_SECS,
     TablePalette,
     resolve_table_palette,
 )
 from .panels import Panel, PanelStore
+from .repo_rows import (
+    RepoSessions,
+    group_facts,
+    repo_facts,
+    resolve_repo_layout,
+    status_text,
+)
 from .screens._shared import ConfirmScreen
 from .screens.diff import DiffReviewScreen
 from .screens.groups import GroupActionMenuScreen
@@ -110,6 +119,11 @@ def _is_no_upstream_push_error(message: str) -> bool:
     return any(marker in message_lower for marker in _NO_UPSTREAM_PUSH_MARKERS)
 
 
+def _newer_version(status: version_check.UpdateStatus | None) -> str | None:
+    """The PyPI release to point at, when it is newer than this one."""
+    return status.latest_version if status is not None and status.update_available else None
+
+
 def _is_horizontal_mouse_scroll(event: events.Event) -> bool:
     if isinstance(event, (events.MouseScrollLeft, events.MouseScrollRight)):
         return True
@@ -128,6 +142,11 @@ class GitDirectorConsole(
 ):
     TITLE = f"GitDirector [v{get_version()}]"
     CSS = """
+    /* Thin scrollbars everywhere, modals included; a rule of its own wins. */
+    * {
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+    }
     Screen {
         background: $surface;
         overflow: hidden;
@@ -167,11 +186,14 @@ class GitDirectorConsole(
         background: $boost;
         color: $text;
     }
+    /* A blank line after the last row; a margin, so the scrollbar keeps the
+       table's full height. */
     DataTable {
         height: 1fr;
         overflow-x: auto;
         overflow-y: auto;
         padding: 0 1;
+        margin: 0 0 1 0;
         scrollbar-size-horizontal: 0;
     }
     /* A focused table keeps its background: the tint would cover only the
@@ -180,8 +202,9 @@ class GitDirectorConsole(
     DataTable:focus {
         background-tint: $foreground 0%;
     }
-    /* Its rows are laid out to fit, so there is never anything to scroll to. */
-    #sessions-table {
+    /* Their rows are laid out to fit, so there is never anything to scroll to. */
+    #sessions-table,
+    #repo-table {
         overflow-x: hidden;
     }
     /* Highlight rows and options with a translucent tint of the theme's
@@ -288,13 +311,13 @@ class GitDirectorConsole(
         # its render Console. ``Strip.render()`` uses ``console._color_system``
         # to pick the SGR format; if it resolves to ``"256"``, every
         # truecolor segment produced by child agents gets quantised to
-        # the 256-colour palette — visible banding in gradients.
+        # the 256-colour palette: visible banding in gradients.
         #
         # Rich's auto-detection runs inside ``App.__init__`` using a
         # snapshot of ``os.environ``, so the variable must be set
         # *before* ``super().__init__()`` is called. We only force
         # ``COLORTERM=truecolor`` when the host actually advertises
-        # truecolor — never downgrade a host that can't render it.
+        # truecolor; never downgrade a host that can't render it.
         if not no_color_requested() and host_color_system() == "truecolor":
             os.environ["COLORTERM"] = "truecolor"
         super().__init__()
@@ -345,7 +368,9 @@ class GitDirectorConsole(
         self._stale_input_before: float = 0.0
         self._panel_store = PanelStore()
         self._status_message = ""
-        self._update_notice = version_check.get_cached_update_notice()
+        cached_update = version_check.get_cached_update_status()
+        self._update_notice = version_check.format_update_notice(cached_update)
+        self._latest_version = _newer_version(cached_update)
         self._session_status_tracking_paused = False
         self._session_status_tracking_running = False
         self._shutdown_requested = False
@@ -353,6 +378,14 @@ class GitDirectorConsole(
         self._refresh_operations = 0
         self._refresh_frame = 0
         self._palette_cache: tuple[str, TablePalette] | None = None
+        self._repo_layout = resolve_repo_layout((), (), 0)
+        self._repo_slugs: dict[Path, str] = {}
+        self._rendered_repo_sessions: dict[Path, RepoSessions] = {}
+        self._shown_repo_rows: dict[str, Text] = {}
+        # Bumped whenever a fetch writes a result, so a slower local-only read
+        # started before it is dropped rather than applied over it.
+        self._repo_results_version = 0
+        self._local_refresh_running = False
 
     @property
     def _palette(self) -> TablePalette:
@@ -368,7 +401,10 @@ class GitDirectorConsole(
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
                 yield ConsoleTable(
-                    id="repo-table", cursor_type="row", cursor_foreground_priority="renderable"
+                    id="repo-table",
+                    cursor_type="row",
+                    cursor_foreground_priority="renderable",
+                    cell_padding=0,
                 )
                 yield Static(
                     "No repositories linked.  Run"
@@ -410,9 +446,9 @@ class GitDirectorConsole(
 
     def on_mount(self) -> None:
         table = self.query_one("#repo-table", DataTable)
-        self._col_keys = table.add_columns(
-            "Repository", "Sync", "Branch", "Changes", "Last Commit", "Path"
-        )
+        # Like the sessions table, each repository row is one composed line
+        # (see repo_rows), so group headers can span the width.
+        self._col_keys = table.add_columns("Repositories")
         sessions_table = self.query_one("#sessions-table", DataTable)
         # The sessions tab renders each row as one composed full-width block
         # (columns on the first line, tmux session name on the second), so it
@@ -430,8 +466,10 @@ class GitDirectorConsole(
         )
         self._sync_session_status_tracking()
         self.set_interval(0.25, self._advance_refresh_indicator)
-        # Counts that change without a status poll (repos, panels) catch up here.
+        # Also ticks the top bar's clock; counts that change without a status
+        # poll (repos, panels) catch up here.
         self.set_interval(1, self._refresh_top_bar)
+        self.set_interval(_LOCAL_REFRESH_SECS, self._refresh_local_statuses)
         self._prepare_attach_terminal()
         self._load_update_notice()
         self._load_repos_from_cache()
@@ -519,12 +557,15 @@ class GitDirectorConsole(
 
     @work(thread=True)
     def _load_update_notice(self) -> None:
-        notice = version_check.format_update_notice(version_check.get_update_status())
-        self.call_from_thread(self._set_update_notice, notice)
+        status = version_check.get_update_status()
+        notice = version_check.format_update_notice(status)
+        self.call_from_thread(self._set_update_notice, notice, _newer_version(status))
 
-    def _set_update_notice(self, notice: str | None) -> None:
+    def _set_update_notice(self, notice: str | None, latest: str | None = None) -> None:
         self._update_notice = notice
+        self._latest_version = latest
         self._refresh_status_bar()
+        self._refresh_top_bar()
 
     def _sync_tmux_theme_config(self, theme_name: str | None = None) -> None:
         from ...integrations.tmux import sync_panel_tmux_config
@@ -624,9 +665,9 @@ class GitDirectorConsole(
         try:
             session_name = create_tmux_session(path.name, path, **session_kwargs)
         except Exception as exc:
-            logger.warning("tmux session creation failed: %s", exc)
-            self._update_status(f"tmux session creation failed: {exc}")
+            self._report_failure("Couldn't start the session", exc)
             return
+        self._show_new_session(session_name, session_kwargs.get("repo_label") or "", description)
 
         def refresh_after_launch(_value: object) -> None:
             # Resuming from the attach already re-fetches the repository;
@@ -637,9 +678,9 @@ class GitDirectorConsole(
             try:
                 ready_marker = launch_command_in_tmux_session(session_name, agent_cmd)
             except Exception as exc:
-                logger.warning("tmux agent launch failed: %s", exc)
                 kill_tmux_session(session_name)
-                self._update_status(f"tmux agent launch failed: {exc}")
+                self._forget_session(session_name)
+                self._report_failure("Couldn't launch the agent", exc)
                 return
             self._show_attach_loading_screen(
                 session_name,
@@ -764,7 +805,7 @@ class GitDirectorConsole(
             self._resume_session_status_tracking()
 
         if attach_error is not None:
-            self._update_status(f"tmux attach failed: {attach_error}")
+            self._report_failure("Couldn't open the session", attach_error)
         self.call_after_refresh(self._release_held_frame)
 
         self._active_tab = restore_tab
@@ -933,6 +974,7 @@ class GitDirectorConsole(
                 return
 
             self._results[str(path)] = info
+            self._repo_results_version += 1
             if self._repos_cache_saved_at is not None and len(self._results) == len(
                 self._repo_paths
             ):
@@ -963,9 +1005,13 @@ class GitDirectorConsole(
                 )
                 return
         info = self._results.get(str(path))
-        branch = info.branch if info else None
         self.push_screen(
-            ActionMenuScreen(path.name, path, branch),
+            ActionMenuScreen(
+                path.name,
+                path,
+                info.branch if info else None,
+                status_text(info, self._palette) if info else None,
+            ),
             callback=self._handle_menu_action,
         )
 
@@ -983,7 +1029,7 @@ class GitDirectorConsole(
         info = self._results.get(str(path))
         branch = info.branch if info else None
         self.push_screen(
-            GitOperationsMenuScreen(path.name, branch),
+            GitOperationsMenuScreen(path.name, branch, info, path),
             callback=lambda action: self._handle_git_menu_action(action, path),
         )
 
@@ -994,16 +1040,27 @@ class GitDirectorConsole(
     def action_show_info(self) -> None:
         if self._active_tab != "repos":
             return
+        sessions = self._repo_sessions()
         group = self._get_selected_group()
         if group is not None:
-            screen = RepoInfoScreen(f"{group.name} ({group.repo_count} repos)", group.path)
+            infos = [info for path in group.repositories if (info := self._results.get(str(path)))]
+            screen = RepoInfoScreen(
+                group.name,
+                group.path,
+                group_facts(group, infos, sessions, self._palette),
+                Text(f"group · {group.repo_count} repos", style="dim"),
+            )
             self.push_screen(screen)
             self._gather_and_show_group_info(group, screen)
             return
         path = self._get_selected_path()
         if path is None:
             return
-        screen = RepoInfoScreen(path.name, path)
+        info = self._results.get(str(path))
+        meta = Text(info.branch or "detached", style="bold") if info else Text()
+        screen = RepoInfoScreen(
+            path.name, path, repo_facts(info, sessions.get(path), self._palette), meta
+        )
         self.push_screen(screen)
         self._gather_and_show_info(path, screen)
 
@@ -1026,12 +1083,13 @@ class GitDirectorConsole(
     def _handle_description_edit(self, session_name: str, value: str | None) -> None:
         if value is None:
             return
-        from ...integrations.tmux.core import _set_session_description
+        from ...integrations.tmux.core import GD_DEFAULT_DESCRIPTION, _set_session_description
 
         _set_session_description(session_name, value)
+        self._monitor.invalidate()
         for entry in self._sessions_entries:
             if entry["session_name"] == session_name:
-                entry["description"] = value if value else "-"
+                entry["description"] = value or GD_DEFAULT_DESCRIPTION
                 break
         self._apply_sessions_filter_and_sort()
 
@@ -1041,6 +1099,9 @@ class GitDirectorConsole(
         self._apply_sessions_column_layout()
         if self._active_tab == "sessions" and self._sessions_entries:
             self._apply_sessions_filter_and_sort()
+        infos, loading = self._repo_row_infos()
+        if infos and self._resolve_repo_layout(infos, loading) != self._repo_layout:
+            self._apply_filter_and_sort(update_status=False)
 
     @work(thread=True)
     def _gather_and_show_info(self, path: Path, screen: RepoInfoScreen) -> None:
@@ -1137,10 +1198,15 @@ class GitDirectorConsole(
         failure_text: str,
         success_status: str,
         failure_status: str,
+        graph: bool = False,
     ) -> None:
         # ``git log --graph --all`` on a large repository takes seconds.
         self._run_repo_git_output(
-            path, command, loader, (success_text, failure_text, success_status, failure_status)
+            path,
+            command,
+            loader,
+            (success_text, failure_text, success_status, failure_status),
+            graph,
         )
 
     @work(thread=True, exclusive=True, group="repo-git-output")
@@ -1150,6 +1216,7 @@ class GitDirectorConsole(
         command: str,
         loader: Callable[[Repository], tuple[bool, str]],
         texts: tuple[str, str, str, str],
+        graph: bool = False,
     ) -> None:
         try:
             ok, message = loader(Repository(path))
@@ -1157,10 +1224,18 @@ class GitDirectorConsole(
             ok, message = False, str(exc)
         if self._shutdown_requested:
             return
-        self.call_from_thread(self._present_repo_git_output, path, command, ok, message, texts)
+        self.call_from_thread(
+            self._present_repo_git_output, path, command, ok, message, texts, graph
+        )
 
     def _present_repo_git_output(
-        self, path: Path, command: str, ok: bool, message: str, texts: tuple[str, str, str, str]
+        self,
+        path: Path,
+        command: str,
+        ok: bool,
+        message: str,
+        texts: tuple[str, str, str, str],
+        graph: bool = False,
     ) -> None:
         success_text, failure_text, success_status, failure_status = texts
         self.push_screen(
@@ -1171,6 +1246,7 @@ class GitDirectorConsole(
                 message,
                 success_text=success_text,
                 failure_text=failure_text,
+                graph=graph,
             ),
             callback=lambda action: self._handle_git_result_dismissal(action, path),
         )
@@ -1190,15 +1266,13 @@ class GitDirectorConsole(
     def _show_repo_git_timeline(self, path: Path) -> None:
         self._show_repo_git_output(
             path,
-            command=(
-                "git log --max-count=1000 --graph --decorate --all --color=always --date=short "
-                "--pretty=format:%C(auto)%h%Creset %C(blue)%ad%Creset %C(auto)%d%Creset %s"
-            ),
+            command="git log --graph --decorate --all",
             loader=lambda repo: repo.timeline_output(),
             success_text="Timeline shown",
             failure_text="Timeline failed",
             success_status="timeline shown",
             failure_status="timeline failed",
+            graph=True,
         )
 
     def _show_repo_git_branches(self, path: Path) -> None:
@@ -1465,11 +1539,45 @@ class GitDirectorConsole(
 
             kill_tmux_session(session_name)
             sync_panel_tmux_config()
+            self._forget_session(session_name)
 
-            self._sessions_entries = [
-                e for e in self._sessions_entries if e["session_name"] != session_name
-            ]
+    def _report_failure(self, title: str, error: BaseException) -> None:
+        """Say plainly why something could not start, where it cannot be missed."""
+        from ...integrations.tmux.core import explain_tmux_failure
+
+        logger.warning("%s: %s", title, error)
+        message = explain_tmux_failure(error)
+        self._update_status(f"{title}: {message}")
+        self.notify(message, title=title, severity="error", timeout=12)
+
+    def _show_new_session(
+        self, session_name: str, repo_label: str, description: str | None
+    ) -> None:
+        """List a session the moment it exists, before any tmux sample sees it."""
+        from ...integrations.tmux.core import session_entry
+
+        self._monitor.invalidate()
+        entry = session_entry(session_name, repo_label, description or "")
+        if entry is None or any(e["session_name"] == session_name for e in self._sessions_entries):
+            return
+        entry["status"] = self._resolve_session_status(entry)
+        self._sessions_entries = sorted(
+            [*self._sessions_entries, entry], key=lambda e: e["session_name"]
+        )
+        self._refresh_session_views()
+
+    def _forget_session(self, session_name: str) -> None:
+        """Drop a session the console just removed, before any tmux sample."""
+        self._monitor.invalidate()
+        self._sessions_entries = [
+            e for e in self._sessions_entries if e["session_name"] != session_name
+        ]
+        self._refresh_session_views()
+
+    def _refresh_session_views(self) -> None:
+        if self._active_tab == "sessions":
             self._apply_sessions_filter_and_sort()
+        self._on_statuses_updated()
 
 
 def _run_console() -> None:

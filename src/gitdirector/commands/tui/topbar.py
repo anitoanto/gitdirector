@@ -35,6 +35,8 @@ class NavState:
     waiting: int = 0
     panels: int = 0
     attention: str = "yellow"
+    #: A newer release on PyPI, when there is one.
+    update: str | None = None
 
 
 def _tab_markup(label: str, count: int, waiting: int, attention: str) -> str:
@@ -139,8 +141,8 @@ class TopBar(Horizontal):
             yield PaletteButton("≡", id="palette")
 
     def on_mount(self) -> None:
+        # The console calls show() every second, which also ticks the clock.
         self._render_state()
-        self.set_interval(1, self._render_state)
 
     def on_resize(self, event: Resize) -> None:
         self._render_state()
@@ -159,7 +161,13 @@ class TopBar(Horizontal):
                 short if compact else label, counts[tab_id], waiting, state.attention
             )
         clock = datetime.now().strftime("%H:%M")
-        texts["top-meta"] = clock if compact else f"v{self._version}  {clock}"
+        update = f"[bold {state.attention}]v{state.update}[/]" if state.update else ""
+        if compact:
+            version = f"↑ {update}  " if update else ""
+        else:
+            version = f"v{self._version} [$text-muted]→[/] {update}  " if update else ""
+            version = version or f"v{self._version}  "
+        texts["top-meta"] = f"{version}{clock}"
         return texts
 
     def _fits(self, texts: dict[str, str]) -> bool:
@@ -180,3 +188,12 @@ class TopBar(Horizontal):
                 self._items[widget_id].update(text)
         for tab_id, *_ in _TABS:
             self._items[f"nav-{tab_id}"].set_class(tab_id == self._state.active, "-active")
+        update = self._state.update
+        self._items["top-meta"].tooltip = (
+            f"GitDirector v{update} is out.\n"
+            "pip install -U gitdirector\n"
+            "pipx upgrade gitdirector\n"
+            "uv tool upgrade gitdirector"
+            if update
+            else None
+        )

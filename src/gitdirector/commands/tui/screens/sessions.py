@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -12,47 +13,27 @@ from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from ..constants import _MODAL_BINDINGS, _MODAL_CSS
-from ..terminal_caps import strip_unsupported_css as _safe_css
+from ..constants import _MODAL_BINDINGS
+from .card import ShortcutKeys, card_css, card_subtitle, key_hints, menu_row, spacer
+
+_SESSION_KEYS = "123456789"
+_PICK_HINT = key_hints(("↑↓", "select"), ("⏎", "choose"), ("1-9", "jump"), ("esc", "cancel"))
 
 
-class RemoveSessionScreen(ModalScreen[str | None]):
-    """Modal listing sessions available for removal."""
+def _session_label(session_name: str) -> str:
+    """``claude/1`` for ``gd/<repo>/claude/1``."""
+    parts = session_name.split("/")
+    return "/".join(parts[2:]) if len(parts) > 2 else session_name
 
+
+class _SessionPicker(ShortcutKeys, ModalScreen[str | None]):
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "RemoveSessionScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
-
-    def __init__(self, repo_name: str, repo_path: Path) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.repo_path = repo_path
-
-    def compose(self) -> ComposeResult:
-        from ....integrations.tmux import list_repo_sessions
-
-        sessions = list_repo_sessions(self.repo_path)
-
-        with Vertical(id="menu-container"):
-            yield Static("[bold $text]Select session to remove[/]", id="menu-title")
-            if sessions:
-                options = [
-                    Option(
-                        f"[$text-error]●[/] [bold]"
-                        f"{'/'.join(s.split('/')[2:]) if '/' in s else s}"
-                        f"[/bold] [dim]{s}[/dim]",
-                        id=s,
-                    )
-                    for s in sessions
-                ]
-                yield OptionList(*options, id="action-menu")
-            else:
-                yield Static("[dim]No active sessions[/dim]", id="menu-branch")
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
+    def _keyed(self, session_names: list[str]) -> list[str]:
+        """Give the first nine sessions their number key; returns the keys in order."""
+        keys = list(_SESSION_KEYS[: len(session_names)])
+        self._shortcuts.update(zip(keys, session_names))
+        return keys + [""] * (len(session_names) - len(keys))
 
     def on_mount(self) -> None:
         menu = self.query("#action-menu")
@@ -60,7 +41,7 @@ class RemoveSessionScreen(ModalScreen[str | None]):
             menu.first().focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
+        self._choose(event.option.id)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -76,72 +57,88 @@ class RemoveSessionScreen(ModalScreen[str | None]):
             menu.first().action_cursor_up()
 
 
-class SelectSessionScreen(ModalScreen[str | None]):
-    """Modal for selecting a tmux session to assign to a pane."""
+class RemoveSessionScreen(_SessionPicker):
+    """Pick one of a repository's sessions to remove."""
 
-    BINDINGS = _MODAL_BINDINGS
+    CSS = card_css("RemoveSessionScreen")
 
-    CSS = _safe_css(
-        "SelectSessionScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
+    def __init__(self, repo_name: str, repo_path: Path) -> None:
+        super().__init__()
+        self.repo_name = repo_name
+        self.repo_path = repo_path
+        self._shortcuts = {}
+
+    def compose(self) -> ComposeResult:
+        from ....integrations.tmux import list_repo_sessions
+
+        sessions = list_repo_sessions(self.repo_path)
+
+        with Vertical(id="menu-container"):
+            yield Static("Remove a session", id="menu-title")
+            yield Static(card_subtitle(self.repo_path), id="menu-branch")
+            if sessions:
+                options = [
+                    Option(
+                        menu_row(
+                            Text.assemble(("✕ ", "dim"), (_session_label(name), "bold")),
+                            Text(name, style="dim"),
+                            key,
+                        ),
+                        id=name,
+                    )
+                    for name, key in zip(sessions, self._keyed(sessions))
+                ]
+                yield OptionList(*options, id="action-menu")
+                yield Static(_PICK_HINT, id="menu-hint")
+            else:
+                yield Static("No running sessions.", classes="card-body")
+                yield Static(key_hints(("esc", "close")), id="menu-hint")
+
+
+class SelectSessionScreen(_SessionPicker):
+    """Pick the session a panel pane shows, or clear the pane."""
+
+    CSS = card_css("SelectSessionScreen", width=72)
 
     def __init__(self, pane_index: int, current_session: str | None = None) -> None:
         super().__init__()
         self.pane_index = pane_index
         self.current_session = current_session
+        self._shortcuts = {"x": "__clear__"} if current_session else {}
 
     def compose(self) -> ComposeResult:
         from ....integrations.tmux import list_all_gd_sessions
 
         sessions = list_all_gd_sessions()
+        names = [entry["session_name"] for entry in sessions]
 
         with Vertical(id="menu-container"):
-            yield Static(
-                f"[bold $text]Assign Session to Pane {self.pane_index}[/]",
-                id="menu-title",
-            )
+            yield Static(f"Pane {self.pane_index}", id="menu-title")
+            yield Static("Choose the session this pane shows.", id="menu-branch")
             items: list[Option] = []
             if self.current_session:
                 items.append(
-                    Option("[$text-error]✕[/] [dim]Clear pane[/dim]", id="__clear__"),
+                    Option(
+                        menu_row(Text.assemble(("✕ ", "dim"), ("Clear pane", "dim")), "", "x"),
+                        id="__clear__",
+                    )
                 )
-                items.append(Option("", disabled=True))
-            if sessions:
-                for entry in sessions:
-                    sn = entry["session_name"]
-                    repo = entry["repo"]
-                    purpose = entry["purpose"]
-                    current_marker = (
-                        " [$text-primary]◄ current[/]" if sn == self.current_session else ""
-                    )
-                    items.append(
-                        Option(
-                            f"[$text]●[/] [bold]{escape(purpose)}[/bold]"
-                            f" [dim]{escape(repo)}[/dim]  {escape(sn)}{current_marker}",
-                            id=sn,
-                        )
-                    )
-            else:
-                items.append(Option("[dim]No active sessions[/dim]", disabled=True))
+                items.append(spacer())
+            for entry, key in zip(sessions, self._keyed(names)):
+                name = entry["session_name"]
+                current = name == self.current_session
+                label = Text.assemble(
+                    ("● " if current else "○ ", "bold" if current else "dim"),
+                    (entry["purpose"], "bold"),
+                    ("  ", ""),
+                    (entry["repo"], "dim"),
+                )
+                detail = Text("current", style="bold") if current else Text(name, style="dim")
+                items.append(Option(menu_row(label, detail, key), id=name))
+            if not sessions:
+                items.append(Option(Text("No running sessions.", style="dim"), disabled=True))
             yield OptionList(*items, id="action-menu")
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] cancel", id="menu-hint")
-
-    def on_mount(self) -> None:
-        self.query_one("#action-menu", OptionList).focus()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_cursor_down(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_down()
-
-    def action_cursor_up(self) -> None:
-        self.query_one("#action-menu", OptionList).action_cursor_up()
+            yield Static(_PICK_HINT, id="menu-hint")
 
 
 __all__ = ["EditSessionDescriptionScreen", "RemoveSessionScreen", "SelectSessionScreen"]
@@ -165,34 +162,16 @@ class EditSessionDescriptionScreen(ModalScreen[str | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "EditSessionDescriptionScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        + _MODAL_CSS
-        + """
-    EditSessionDescriptionScreen #menu-container {
-        width: 64;
-    }
+    CSS = card_css(
+        "EditSessionDescriptionScreen",
+        extra="""
     EditSessionDescriptionScreen #description-input {
-        width: 1fr;
-        height: auto;
         min-height: 3;
         max-height: 10;
-        border: none;
-        background: $boost;
-        color: $text;
-        margin: 1 0;
-        padding: 0 1;
         scrollbar-size-vertical: 0;
         overflow-y: hidden;
     }
-    #description-session-name {
-        text-align: center;
-        padding: 0 1 0 1;
-        color: $text-muted;
-    }
-    """
+    """,
     )
 
     def __init__(self, session_name: str, current_description: str) -> None:
@@ -203,14 +182,15 @@ class EditSessionDescriptionScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static("[bold $text]Edit Description[/]", id="menu-title")
-            yield Static(f"[dim]{self.session_name}[/dim]", id="description-session-name")
+            yield Static("Description", id="menu-title")
+            yield Static(escape(self.session_name), id="description-session-name")
             yield DescriptionTextArea(
                 self._initial_value,
-                placeholder="description (leave empty to reset to '-')",
+                placeholder="What is this session for? Empty resets it.",
                 id="description-input",
+                classes="card-input",
             )
-            yield Static("\\[enter] save    \\[esc] cancel", id="menu-hint")
+            yield Static(key_hints(("⏎", "save"), ("esc", "cancel")), id="menu-hint")
 
     def on_mount(self) -> None:
         inp = self.query_one("#description-input", TextArea)

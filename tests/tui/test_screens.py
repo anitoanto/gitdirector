@@ -4,10 +4,13 @@ RemoveSessionScreen)."""
 
 from __future__ import annotations
 
+import io
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from rich.console import Console
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Input, LoadingIndicator, OptionList, Static
@@ -30,6 +33,7 @@ from gitdirector.commands.tui import (
 from gitdirector.commands.tui.panels import get_create_panel_layouts
 from gitdirector.commands.tui.screens import PanelActionMenuScreen
 from gitdirector.info import FileTypeInfo, RepoInfoResult
+from gitdirector.repo import RepoStatus
 
 from .conftest import _make_info, _mock_manager, _wait_for_animated_scroll
 
@@ -130,13 +134,17 @@ class TestActionMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             title = app.screen.query_one("#menu-title", Static)
-            assert "my-repo" in title.content
-            branch_label = app.screen.query_one("#menu-branch", Static)
+            assert "my-repo" in str(title.render())
+            assert str(app.screen.query_one("#menu-meta", Static).render()) == "main"
+            assert str(app.screen.query_one("#menu-branch", Static).render()) == "/tmp/my-repo"
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert "main" in branch_label.content
-            assert menu.option_count == 9
             ids = [opt.id for opt in menu.options if opt.id is not None]
-            assert "review_diff" not in ids
+            # Agents lead: they are what the launcher is for.
+            assert ids[:5] == [
+                f"agent:{key}" for key in ("claude", "opencode", "codex", "copilot", "pi")
+            ]
+            assert ids[5:] == ["new_session", "vscode"]
+            assert menu.highlighted_option.id == "agent:claude"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_no_branch_shows_dash(self, mock_sessions):
@@ -146,8 +154,7 @@ class TestActionMenuScreen:
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(screen)
             await pilot.pause()
-            branch_label = app.screen.query_one("#menu-branch", Static)
-            assert "\u2014" in branch_label.content
+            assert str(app.screen.query_one("#menu-meta", Static).render()) == "detached"
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
@@ -196,9 +203,55 @@ class TestActionMenuScreen:
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(screen, callback=lambda v: results.append(v))
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("s")
             await pilot.pause()
             assert results == ["new_session"]
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_letter_launches_agent_in_its_mode(self, mock_sessions):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                ActionMenuScreen("my-repo", Path("/tmp/my-repo")),
+                callback=lambda v: results.append(v),
+            )
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+            assert results == ["agent:claude:auto"]
+
+    @patch(
+        "gitdirector.integrations.tmux.list_repo_sessions",
+        return_value=["gd/my-repo/shell/1", "gd/my-repo/claude/1"],
+    )
+    async def test_digit_rejoins_session_instead_of_switching_tab(self, mock_sessions):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                ActionMenuScreen("my-repo", Path("/tmp/my-repo")),
+                callback=lambda v: results.append(v),
+            )
+            await pilot.pause()
+            await pilot.press("2")
+            await pilot.pause()
+            assert results == ["attach:gd/my-repo/claude/1"]
+            assert app._active_tab == "repos"
+
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_status_sits_under_the_path(self, mock_sessions):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                ActionMenuScreen("my-repo", Path("/tmp/my-repo"), "main", Text("↑1 to push"))
+            )
+            await pilot.pause()
+            subtitle = str(app.screen.query_one("#menu-branch", Static).render())
+            assert subtitle.splitlines() == ["/tmp/my-repo", "↑1 to push"]
 
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
@@ -317,8 +370,7 @@ class TestActionMenuAgentModes:
                 callback=lambda v: results.append(v),
             )
             await pilot.pause()
-            await pilot.press("down")
-            await pilot.press("enter")
+            await pilot.press("v")
             await pilot.pause()
             assert results == ["vscode"]
 
@@ -334,14 +386,59 @@ class TestGitOperationsMenuScreen:
             await pilot.pause()
 
             title = app.screen.query_one("#menu-title", Static)
-            branch_label = app.screen.query_one("#menu-branch", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
 
-            assert "my-repo" in title.content
-            assert "main" in branch_label.content
-            assert menu.option_count == 9
+            assert "my-repo" in str(title.render())
+            assert str(app.screen.query_one("#menu-meta", Static).render()) == "main"
             ids = [opt.id for opt in menu.options if opt.id is not None]
-            assert "review_diff" in ids
+            assert ids == [
+                "status",
+                "timeline",
+                "branches",
+                "remotes",
+                "pull",
+                "push",
+                "review_diff",
+            ]
+
+    async def test_shows_what_pull_push_and_review_would_do(self):
+        info = replace(
+            _make_info("my-repo", Path("/tmp/my-repo"), RepoStatus.DIVERGED, staged=True),
+            ahead=1,
+            behind=3,
+            staged_files=["a", "b"],
+        )
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.push_screen(GitOperationsMenuScreen("my-repo", "main", info, info.path))
+            await pilot.pause()
+            menu = app.screen.query_one("#action-menu", OptionList)
+
+            def line(action: str) -> str:
+                console = Console(width=60, record=True, file=io.StringIO())
+                console.print(menu.get_option(action).prompt)
+                return console.export_text()
+
+            assert "↓3 commits to pull" in line("pull")
+            assert "↑1 commit to push" in line("push")
+            # Push needs Shift, and its key says so.
+            assert line("push").rstrip().endswith("⇧P")
+            assert "2 staged" in line("review_diff")
+            assert "git status" in line("status")
+
+    async def test_shift_p_pushes(self):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                GitOperationsMenuScreen("my-repo", "main"), callback=lambda v: results.append(v)
+            )
+            await pilot.pause()
+            await pilot.press("P")
+            await pilot.pause()
+            assert results == ["push"]
 
     async def test_select_status(self):
         results: list[str | None] = []
@@ -444,6 +541,21 @@ class TestGitOperationsMenuScreen:
 
 
 class TestPanelActionMenuScreen:
+    async def test_letters_pick_actions(self):
+        from gitdirector.commands.tui.panels import Panel
+
+        results: list = []
+        panel = Panel(name="Main", rows=1, cols=2, panes={1: None, 2: None})
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        with patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[]):
+            async with app.run_test(size=(100, 30)) as pilot:
+                app.push_screen(PanelActionMenuScreen(panel), callback=results.append)
+                await pilot.pause()
+                await pilot.press("e")
+                await pilot.pause()
+        assert results == ["reconfigure"]
+
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=[
@@ -477,7 +589,8 @@ class TestPanelActionMenuScreen:
             menu = app.screen.query_one("#action-menu", OptionList)
 
             assert "Main" in title.content
-            assert "2×2" in subtitle.content and "gd/panel/main" in subtitle.content
+            assert str(app.screen.query_one("#menu-meta", Static).render()) == "2×2"
+            assert str(subtitle.render()) == "gd/panel/main"
             for pane in "1234":
                 assert pane in preview.content.plain
             lines = sessions.content.plain.splitlines()
@@ -531,15 +644,18 @@ class TestPullResultScreen:
             app.push_screen(screen)
             await pilot.pause()
 
-            title = app.screen.query_one("#pull-result-title", Static)
-            command = app.screen.query_one("#pull-result-command", Static)
-            status = app.screen.query_one("#pull-result-status", Static)
-            scroll = app.screen.query_one("#pull-result-output-scroll", VerticalScroll)
-            output = app.screen.query_one("#pull-result-output", Static)
+            title = app.screen.query_one("#menu-title", Static)
+            command = app.screen.query_one("#menu-branch", Static)
+            status = app.screen.query_one("#result-status", Static)
+            scroll = app.screen.query_one("#result-output-scroll", VerticalScroll)
+            output = app.screen.query_one("#result-output", Static)
 
-            assert "my-repo" in title.content
-            assert "git pull --ff-only origin main" in command.content
-            assert "Pull completed" in status.content
+            assert "my-repo" in str(title.render())
+            # The badge sits beside the title without squeezing it.
+            assert title.region.width >= len("my-repo")
+            assert status.region.width == len("✓ Pull completed")
+            assert str(command.render()) == "$ git pull --ff-only origin main"
+            assert str(status.render()) == "✓ Pull completed"
             assert scroll is not None
             assert "Already up to date." in output.content
 
@@ -580,7 +696,7 @@ class TestPullResultScreen:
             app.push_screen(screen)
             await pilot.pause()
 
-            output = app.screen.query_one("#pull-result-output", Static)
+            output = app.screen.query_one("#result-output", Static)
 
             assert isinstance(output.content, Text)
             assert output.content.plain == "Already up to date."
@@ -596,7 +712,7 @@ class TestPullResultScreen:
             app.push_screen(screen)
             await pilot.pause()
 
-            scroll = app.screen.query_one("#pull-result-output-scroll", VerticalScroll)
+            scroll = app.screen.query_one("#result-output-scroll", VerticalScroll)
             assert scroll.max_scroll_y > 0
             assert scroll.scroll_y == 0
 
@@ -620,6 +736,47 @@ class TestPullResultScreen:
             assert scroll.scroll_y <= after_up
 
 
+class TestCardsSitCentred:
+    @pytest.mark.parametrize(
+        "make",
+        [
+            lambda: GitCommandResultScreen("my-repo", "git status", True, "x"),
+            lambda: PullResultScreen("my-repo", "git pull", True, "x"),
+            lambda: PullLoadingScreen("my-repo", "git pull"),
+        ],
+        ids=["git-output", "pull-result", "pull-loading"],
+    )
+    async def test_subclassed_cards_are_centred(self, make):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(make())
+            await pilot.pause()
+            card = app.screen.query_one("#menu-container").region
+            assert abs(card.x - (120 - card.right)) <= 1
+            assert abs(card.y - (40 - card.bottom)) <= 1
+
+    async def test_output_card_takes_most_of_the_screen(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(GitCommandResultScreen("my-repo", "git status", True, "x"))
+            await pilot.pause()
+            card = app.screen.query_one("#menu-container").region
+            assert card.width == 108 and card.height == 34
+
+
+class TestPrettyGraph:
+    def test_graph_prefix_is_drawn_with_box_characters(self):
+        from gitdirector.commands.tui.screens.repos import pretty_graph
+
+        raw = Text.from_ansi("* \x1b[33mabc1234\x1b[0m main work\n|\\  \n| * def5678 a/b fix")
+        pretty = pretty_graph(raw)
+        assert pretty.plain.splitlines() == ["● abc1234 main work", "│╲  ", "│ ● def5678 a/b fix"]
+        # The colour of the hash stays on the hash.
+        assert pretty.spans == raw.spans
+
+
 class TestGitCommandResultScreen:
     async def test_compose_shows_status_output(self):
         screen = GitCommandResultScreen(
@@ -637,13 +794,13 @@ class TestGitCommandResultScreen:
             app.push_screen(screen)
             await pilot.pause()
 
-            command = app.screen.query_one("#git-command-result-command", Static)
-            status = app.screen.query_one("#git-command-result-status", Static)
-            scroll = app.screen.query_one("#git-command-result-output-scroll", VerticalScroll)
-            output = app.screen.query_one("#git-command-result-output", Static)
+            command = app.screen.query_one("#menu-branch", Static)
+            status = app.screen.query_one("#result-status", Static)
+            scroll = app.screen.query_one("#result-output-scroll", VerticalScroll)
+            output = app.screen.query_one("#result-output", Static)
 
-            assert "git status" in command.content
-            assert "Status output" in status.content
+            assert str(command.render()) == "$ git status"
+            assert str(status.render()) == "✓ Status output"
             assert scroll is not None
             assert "working tree clean" in output.content
 
@@ -680,7 +837,7 @@ class TestGitCommandResultScreen:
             app.push_screen(screen)
             await pilot.pause()
 
-            output = app.screen.query_one("#git-command-result-output", Static)
+            output = app.screen.query_one("#result-output", Static)
 
             assert isinstance(output.content, Text)
             assert output.content.plain == "* abc1234 add timeline"
@@ -697,15 +854,12 @@ class TestPullLoadingScreen:
             app.push_screen(screen)
             await pilot.pause()
 
-            title = app.screen.query_one("#pull-loading-title", Static)
-            command = app.screen.query_one("#pull-loading-command", Static)
-            hint = app.screen.query_one("#pull-loading-hint", Static)
+            title = str(app.screen.query_one("#menu-title", Static).render())
+            command = str(app.screen.query_one("#menu-branch", Static).render())
             loading = app.screen.query_one("LoadingIndicator", LoadingIndicator)
 
-            assert "Pulling" in title.content
-            assert "my-repo" in title.content
-            assert "git pull --ff-only origin main" in command.content
-            assert "please wait" in hint.content
+            assert title == "Pulling my-repo"
+            assert command == "$ git pull --ff-only origin main"
             assert loading is not None
 
 
@@ -774,14 +928,20 @@ class TestCreatePanelScreen:
         app = GitDirectorConsole()
         async with app.run_test(size=(130, 36)) as pilot:
             await self._open(pilot, app, screen, results)
-            # Naming: no preview yet, the tmux name is spelled out.
+            # Naming: a compact card, just the input; no preview yet.
             assert screen._step == 1
+            container = app.screen.query_one("#create-panel-container")
+            assert container.has_class("-naming")
+            assert container.region.width == 56
             assert not app.screen.query_one("#create-panel-right").display
+            assert not app.screen.query_one("#left-label").display
             await pilot.press(*"Ops")
-            assert "gd/panel/ops" in str(app.screen.query_one("#panel-name-help").content)
             await pilot.press("enter")
-            # Layout: the preview follows the highlight.
+            # Layout: the wide view opens and the preview follows the highlight.
             assert screen._step == 2
+            await pilot.pause()
+            assert not container.has_class("-naming")
+            assert container.region.width > 56
             assert app.screen.query_one("#create-panel-right").display
             await pilot.press("down", "down", "down")
             assert screen._layout_key == "grid_2x2"
@@ -1050,7 +1210,7 @@ class TestSortMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 6
+            assert menu.option_count == 5
 
     async def test_title_shows_sort_by(self):
         screen = SortMenuScreen(0, False)
@@ -1136,7 +1296,7 @@ class TestSortMenuScreenCustomColumns:
             app.push_screen(screen)
             await pilot.pause()
             menu = app.screen.query_one("#action-menu", OptionList)
-            assert menu.option_count == 6
+            assert menu.option_count == 5
 
     async def test_toggle_on_custom_column(self):
         results: list = []
@@ -1233,14 +1393,27 @@ class TestRepoInfoScreen:
         async with app.run_test(size=(120, 30)) as pilot:
             app.push_screen(screen)
             await pilot.pause()
-            title = app.screen.query_one("#info-title", Static)
-            path_label = app.screen.query_one("#info-path", Static)
+            title = app.screen.query_one("#menu-title", Static)
+            path_label = app.screen.query_one("#menu-branch", Static)
             loading = app.screen.query_one("#info-loading", LoadingIndicator)
-            hint = app.screen.query_one("#info-hint", Static)
-            assert "my-repo" in title.content
-            assert "/tmp/my-repo" in path_label.content
+            assert "my-repo" in str(title.render())
+            assert "/tmp/my-repo" in str(path_label.render())
             assert loading is not None
-            assert hint.content == ""
+            # Without git facts there is no summary to show.
+            assert not app.screen.query("#info-facts")
+
+    async def test_shows_git_facts_above_the_code(self):
+        facts = [("Branch", Text("main")), ("Worktree", Text("2 changed"))]
+        screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"), facts, Text("main"))
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            console = Console(width=80, record=True, file=io.StringIO())
+            console.print(app.screen.query_one("#info-facts", Static).content)
+            lines = [line.split() for line in console.export_text().splitlines()]
+            assert lines == [["Branch", "main"], ["Worktree", "2", "changed"]]
 
     async def test_populate_renders_stats_and_table(self):
         screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"))
@@ -1262,13 +1435,15 @@ class TestRepoInfoScreen:
             screen.populate(result)
             await pilot.pause()
             assert len(app.screen.query("#info-loading")) == 0
-            stats = app.screen.query_one("#info-stats", Static)
-            table = app.screen.query_one("#info-table", Static)
-            hint = app.screen.query_one("#info-hint", Static)
-            assert "Files" in stats.content
-            assert "EXTENSION" in table.content
-            assert ".py" in table.content
-            assert "close" in hint.content
+            stats = str(app.screen.query_one("#info-stats", Static).render())
+            assert stats == "3 files   10 lines   20 tokens   2 levels deep"
+            console = Console(width=100, record=True, file=io.StringIO())
+            console.print(app.screen.query_one("#info-table", Static).content)
+            rows = console.export_text().splitlines()
+            # .py holds every line, so its bar is full; .txt has no lines to count.
+            assert rows[0].startswith(".py   " + "█" * 18)
+            assert rows[1].startswith(".txt  " + "░" * 18)
+            assert "2 files" in rows[0] and "10 lines" in rows[0]
 
     async def test_populate_without_file_types_skips_table(self):
         screen = RepoInfoScreen("my-repo", Path("/tmp/my-repo"))
@@ -1314,11 +1489,12 @@ class TestAgentLoadingScreen:
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(screen)
             await pilot.pause()
-            loading_text = app.screen.query_one("#loading-text", Static)
-            loading_hint = app.screen.query_one("#loading-hint", Static)
-            assert "Launching" in loading_text.content
-            assert "copilot" in loading_text.content
-            assert "waiting for agent to initialize" in loading_hint.content
+            title = str(app.screen.query_one("#menu-title", Static).render())
+            subtitle = str(app.screen.query_one("#menu-branch", Static).render())
+            hint = str(app.screen.query_one("#menu-hint", Static).render())
+            assert title == "Launching copilot"
+            assert subtitle == "gd/my-repo/copilot/1"
+            assert hint == "waiting for agent to initialize\u2026"
 
     @patch("gitdirector.commands.tui.screens.panels.time.monotonic", return_value=42.0)
     def test_on_mount_starts_poll_and_timeout_timers(self, mock_monotonic):

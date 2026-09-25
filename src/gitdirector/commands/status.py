@@ -17,7 +17,7 @@ def _build_dirty_display(results: list[RepositoryInfo]) -> Text:
     output = Text()
     for repo in dirty_repos:
         output.append(f"  {repo.name}", style="bold white")
-        output.append(f"  {repo.branch or '—'}\n", style="dim")
+        output.append(f"  {repo.branch or '-'}\n", style="dim")
         for f in repo.staged_files or ():
             output.append("    ")
             output.append("staged:", style="cyan")

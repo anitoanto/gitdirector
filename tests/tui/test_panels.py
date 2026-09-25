@@ -1073,5 +1073,5 @@ class TestPanelOpenFailureIsContained:
 
             mock_attach.assert_not_called()
             assert app.is_running
-            assert "failed to open" in app._status_message
+            assert "Couldn't open panel 'work'" in app._status_message
             assert "the tmux server exited" in app._status_message

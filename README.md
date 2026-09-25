@@ -54,7 +54,7 @@ gitdirector link ~/work --discover   # track every repo under a directory
 gitdirector console                  # open the dashboard
 ```
 
-> If GitDirector is useful to you, please star the repo — it needs stars to
+> If GitDirector is useful to you, please star the repo: it needs stars to
 > qualify for Homebrew inclusion.
 
 ## Console
@@ -84,7 +84,7 @@ open the repo or group in VS Code, launch an AI agent, attach to or remove a
 session. Claude Code's permission mode is picked on its row with Tab or `←`/`→`:
 `default` (your own settings), `auto` (preselected), or `bypass`
 (`--dangerously-skip-permissions`). `g` opens the git menu: status,
-timeline, branches, remotes, pull, push, and **Review Diff** — a two-pane view
+timeline, branches, remotes, pull, push, and **Review Diff**, a two-pane view
 of uncommitted changes with real line numbers, where `g` stages everything and
 commits (optionally pushing).
 
@@ -226,7 +226,7 @@ github_PAT: github_pat_...
 ```
 
 It is only used to retry a command that failed authentication, through a
-temporary credential helper — never on the command line or in the TUI. The
+temporary credential helper, never on the command line or in the TUI. The
 file is plaintext, so scope the token narrowly.
 
 ## Shell completion

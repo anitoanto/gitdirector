@@ -6,9 +6,7 @@ from .constants import (
     _PANELS_SORT_COLUMN_NAMES,
     _SESSION_STATUS_ORDER,
     _SORT_COLUMN_NAMES,
-    _STATUS_ORDER,
     TablePalette,
-    _changes_sort_key,
     resolve_table_palette,
 )
 from .panels import Panel, PanelStore
@@ -57,6 +55,4 @@ __all__ = [
     "resolve_table_palette",
     "_SESSION_STATUS_ORDER",
     "_SORT_COLUMN_NAMES",
-    "_STATUS_ORDER",
-    "_changes_sort_key",
 ]

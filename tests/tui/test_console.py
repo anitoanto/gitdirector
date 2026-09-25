@@ -21,7 +21,6 @@ from gitdirector.commands.tui import (
 )
 from gitdirector.commands.tui.app import RefreshFooter, _run_console
 from gitdirector.commands.tui.app_groups import RepoGroup
-from gitdirector.commands.tui.app_repos import _REPO_LOADING_CELL_VALUE
 from gitdirector.commands.tui.constants import _REPO_CACHE_TTL_SECS
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 from gitdirector.integrations.tmux.core import _repo_session_name_segment
@@ -29,7 +28,7 @@ from gitdirector.repo import Repository, RepoStatus
 from gitdirector.storage import load_yaml_mapping
 
 from .._timeouts import SYNC_TIMEOUT
-from .conftest import _make_info, _mock_manager
+from .conftest import _make_info, _mock_manager, repo_row_text
 
 
 def _run_git_output_inline(app: GitDirectorConsole) -> None:
@@ -67,13 +66,13 @@ class TestGitDirectorConsole:
 
             assert table.row_count == 1
             assert fetch_started.is_set()
-            assert table.get_cell(str(info.path), app._col_keys[1]) == "up to date"
+            assert "to pull" not in repo_row_text(app, str(info.path))
 
             release_fetch.set()
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-        assert "behind" in str(table.get_cell(str(info.path), app._col_keys[1]))
+            assert "to pull" in repo_row_text(app, str(info.path))
 
     @patch("gitdirector.commands.tui.app_repos.time")
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -99,14 +98,13 @@ class TestGitDirectorConsole:
         app.manager.get_repository_status.side_effect = delayed_status
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            table = app.query_one("#repo-table", DataTable)
             footer = app.query_one(RefreshFooter)
 
             try:
                 assert fetch_started.is_set()
                 assert footer.refreshing is True
                 assert len(footer.query(".-refresh-indicator")) == 1
-                assert table.get_cell(str(info.path), app._col_keys[1]) == _REPO_LOADING_CELL_VALUE
+                assert "checking…" in repo_row_text(app, str(info.path))
                 status = str(app.query_one("#status-bar", Static).content)
                 assert not status.startswith(("Loading ", "Checking "))
             finally:
@@ -388,7 +386,8 @@ class TestGitDirectorConsole:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as _:
             table = app.query_one("#repo-table", DataTable)
-            assert len(table.columns) == 6
+            # One composed column: see repo_rows.
+            assert len(table.columns) == 1
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_handle_menu_action_new_session(self, _mock_sessions):
@@ -426,9 +425,7 @@ class TestGitDirectorConsole:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            table = app.query_one("#repo-table", DataTable)
-            row_key = str(repos[0].path)
-            assert table.get_cell(row_key, app._col_keys[5]) == str(repos[0].path)
+            assert "alpha" in repo_row_text(app, str(repos[0].path))
             mock_sessions.assert_not_called()
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -449,14 +446,10 @@ class TestGitDirectorConsole:
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            table = app.query_one("#repo-table", DataTable)
-            row_key = str(repos[0].path)
-            ck = app._col_keys
-            assert table.get_cell(row_key, ck[1]) == app._palette.sync_label(RepoStatus.BEHIND)
-            assert table.get_cell(row_key, ck[2]) == "develop"
-            assert table.get_cell(row_key, ck[3]) == f"[bold {app._palette.yellow}]staged[/]"
-            assert table.get_cell(row_key, ck[4]) == "5 min ago"
-            assert table.get_cell(row_key, ck[5]) == str(repos[0].path)
+            row = repo_row_text(app, str(repos[0].path))
+            assert "develop" in row
+            assert "to pull" in row
+            assert "staged" in row
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_multiple_repos_status(self, _mock_sessions):
@@ -664,11 +657,15 @@ class TestGitDirectorConsoleActionRouting:
     async def test_do_remove_calls_kill_tmux_session(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._sessions_entries = [{"session_name": "gd-test"}, {"session_name": "gd-other"}]
         app._apply_sessions_filter_and_sort = MagicMock()
+        app._on_statuses_updated = MagicMock()
         with patch("gitdirector.integrations.tmux.kill_tmux_session") as kill_session:
             app._do_remove(True, "gd-test")
             kill_session.assert_called_once_with("gd-test")
             app._apply_sessions_filter_and_sort.assert_called_once()
+        assert [e["session_name"] for e in app._sessions_entries] == ["gd-other"]
 
     async def test_handle_menu_action_remove_session_pushes_confirm(self):
         app = GitDirectorConsole()
@@ -770,10 +767,8 @@ class TestGitDirectorConsoleActionRouting:
 
         screen = app.push_screen.call_args.args[0]
         assert isinstance(screen, GitCommandResultScreen)
-        assert screen.command == (
-            "git log --max-count=1000 --graph --decorate --all --color=always --date=short "
-            "--pretty=format:%C(auto)%h%Creset %C(blue)%ad%Creset %C(auto)%d%Creset %s"
-        )
+        assert screen.command == "git log --graph --decorate --all"
+        assert screen.graph is True
         assert screen.ok is True
         assert "Add timeline view" in screen.output
         app._update_status.assert_called_once_with("alpha: timeline shown")
@@ -1075,7 +1070,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_show_git_menu()
 
-        mock_screen_cls.assert_called_once_with("alpha", "main")
+        mock_screen_cls.assert_called_once_with("alpha", "main", app._results[str(path)], path)
         app.push_screen.assert_called_once()
 
     def test_action_show_info_ignored_outside_repo_tab(self):
@@ -1112,7 +1107,10 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_show_info()
 
-        mock_screen_cls.assert_called_once_with("alpha", path)
+        name, screen_path, facts, _meta = mock_screen_cls.call_args.args
+        assert (name, screen_path) == ("alpha", path)
+        # Not loaded yet: the git summary says so instead of guessing.
+        assert [label for label, _ in facts] == ["Status"]
         app.push_screen.assert_called_once_with(screen)
         app._gather_and_show_info.assert_called_once_with(path, screen)
 
@@ -1130,7 +1128,10 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_show_info()
 
-        mock_screen_cls.assert_called_once_with("work (2 repos)", Path("/tmp/work"))
+        name, screen_path, facts, meta = mock_screen_cls.call_args.args
+        assert (name, screen_path) == ("work", Path("/tmp/work"))
+        assert meta.plain == "group · 2 repos"
+        assert ("Repositories", "alpha, beta") in [(label, v.plain) for label, v in facts]
         app.push_screen.assert_called_once_with(screen)
         app._gather_and_show_group_info.assert_called_once_with(group, screen)
         app._get_selected_path.assert_not_called()
@@ -1232,32 +1233,17 @@ class TestGitDirectorConsoleDirectBranches:
         app.call_from_thread.assert_called_once_with(app._hide_refresh_indicator)
         app._save_repos_cache.assert_not_called()
 
-    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_cached_repo_rows_keep_loading_column_widths(self, _mock_sessions):
-        info = _make_info("alpha", Path("/tmp/alpha"), branch="m", last_updated="now")
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            await app.workers.wait_for_complete()
-            app._repo_paths = [info.path]
-            app._groups_entries = []
-            app._results = {str(info.path): info}
-            app._populate_initial_rows()
-            await pilot.pause()
-
-            table = app.query_one("#repo-table", DataTable)
-            width = len(_REPO_LOADING_CELL_VALUE)
-            for index in (1, 2, 3, 4):
-                assert table.columns[app._col_keys[index]].content_width >= width
-
     def test_update_row_ignores_table_errors(self):
         app = GitDirectorConsole()
-        app._col_keys = ("repo", "sync", "branch", "changes", "last", "path")
+        app._col_keys = ("repo",)
+        info = _make_info("alpha", Path("/tmp/alpha"))
+        app._repo_paths = [info.path]
+        app._results = {str(info.path): info}
+        app._repo_layout = app._resolve_repo_layout([info], set())
         table = MagicMock()
+        table.rows = {str(info.path): MagicMock(height=1)}
         table.update_cell.side_effect = RuntimeError("boom")
         app.query_one = MagicMock(return_value=table)
-        info = _make_info("alpha", Path("/tmp/alpha"))
 
         app._update_row(info)
 
@@ -1783,7 +1769,10 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_show_menu()
 
-        mock_screen_cls.assert_called_once_with("alpha", path, "main")
+        name, screen_path, branch, status = mock_screen_cls.call_args.args
+        assert (name, screen_path, branch) == ("alpha", path, "main")
+        # Clean and in step with origin: nothing to report.
+        assert status.plain == ""
         app.push_screen.assert_called_once()
 
     def test_handle_remove_selection_none_is_noop(self):
@@ -1819,7 +1808,7 @@ class TestGitDirectorConsoleDirectBranches:
         app._load_repos.assert_not_called()
         app._load_panels.assert_called_once_with()
 
-    def test_action_refresh_reloads_repos_with_loading_rows(self):
+    def test_action_refresh_keeps_the_last_results_up_while_fetching(self):
         app = GitDirectorConsole()
         app._active_tab = "repos"
         result = object()
@@ -1830,7 +1819,8 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.action_refresh()
 
-        assert app._results == {}
+        # Blanking the table to "checking…" and refilling it is the flicker.
+        assert app._results == {"/tmp/alpha": result}
         assert app._repos_cache_updated_at == 123.0
         app._show_refresh_indicator.assert_called_once_with()
         app._load_repos.assert_called_once_with()
@@ -1848,7 +1838,7 @@ class TestGitDirectorConsoleDirectBranches:
         app._show_refresh_indicator.assert_called_once_with()
         app._load_repos.assert_called_once_with()
 
-    def test_refresh_repos_forces_loading_after_config_change(self):
+    def test_a_config_change_keeps_the_results_of_repositories_that_stay(self):
         app = GitDirectorConsole()
         result = object()
         app._results = {"/tmp/alpha": result}
@@ -1858,7 +1848,8 @@ class TestGitDirectorConsoleDirectBranches:
 
         app._refresh_repos()
 
-        assert app._results == {}
+        # The load drops repositories no longer configured; the rest stay up.
+        assert app._results == {"/tmp/alpha": result}
         app._show_refresh_indicator.assert_called_once_with()
         app._load_repos.assert_called_once_with()
 
@@ -1874,7 +1865,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.on_tabbed_content_tab_activated(event)
 
-        app._refresh_repos.assert_called_once_with(show_loading=True)
+        app._refresh_repos.assert_called_once_with()
 
     def test_repo_tab_activation_refreshes_when_config_changed(self):
         app = GitDirectorConsole()
@@ -1888,7 +1879,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         app.on_tabbed_content_tab_activated(event)
 
-        app._refresh_repos.assert_called_once_with(show_loading=True)
+        app._refresh_repos.assert_called_once_with()
 
     @patch("gitdirector.commands.tui.app.GitDirectorConsole")
     def test_run_console_shuts_down_background_work_when_run_raises(self, mock_console_cls):
@@ -1954,7 +1945,7 @@ class TestBuildLoadedStatus:
             msg = app._build_loaded_status(2, 5)
             assert "2 of 5" in msg
             assert "filter: 'api'" in msg
-            assert "sort: Sync \u25bc" in msg
+            assert "sort: Needs attention \u25bc" in msg
 
 
 class TestTUIEdgeCases:
@@ -2040,13 +2031,11 @@ class TestRefreshRepoForPath:
             app._refresh_repo_for_path(Path("/tmp/alpha"))
             await app.workers.wait_for_complete()
             await pilot.pause()
-            table = app.query_one("#repo-table", DataTable)
-            ck = app._col_keys
             row_key = str(Path("/tmp/alpha"))
-            assert table.get_cell(row_key, ck[1]) == app._palette.sync_label(RepoStatus.BEHIND)
-            assert table.get_cell(row_key, ck[2]) == "develop"
-            assert table.get_cell(row_key, ck[3]) == f"[bold {app._palette.yellow}]staged[/]"
-            assert table.get_cell(row_key, ck[5]) == row_key
+            row = repo_row_text(app, row_key)
+            assert "develop" in row
+            assert "to pull" in row
+            assert "staged" in row
             assert app._results[row_key].status == RepoStatus.BEHIND
             app.manager.get_repository_status.assert_any_call(Path("/tmp/alpha"), fetch=True)
             mock_list.assert_not_called()
@@ -2086,7 +2075,7 @@ class TestRepoTableWhileLoading:
 
             table = app.query_one("#repo-table", DataTable)
             assert [str(key.value) for key in table.rows] == ["/tmp/beta"]
-            assert table.get_cell("/tmp/beta", app._col_keys[1]) == _REPO_LOADING_CELL_VALUE
+            assert "checking…" in repo_row_text(app, "/tmp/beta")
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_sorting_puts_loading_repositories_last(self, _mock_sessions):

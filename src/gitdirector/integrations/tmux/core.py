@@ -109,6 +109,56 @@ class TmuxError(RuntimeError):
         self.stderr = stderr
 
 
+# What tmux prints when the machine cannot give it what a new pane needs,
+# and what to tell the user instead.
+_RESOURCE_FAILURES = (
+    (
+        (
+            "Device not configured",
+            "fork failed: No space left on device",
+            "No more ptys",
+            "openpty",
+            "open terminal failed",
+        ),
+        "No free terminal (pty) is left: the system limit is reached. "
+        "Close sessions or terminal windows you no longer need, then try again.",
+    ),
+    (
+        ("Resource temporarily unavailable",),
+        "The limit on running processes is reached. "
+        "Close programs you no longer need, then try again.",
+    ),
+    (
+        ("Too many open files",),
+        "Too many files are open. Close programs you no longer need, then try again.",
+    ),
+    (
+        ("server exited unexpectedly", "lost server"),
+        "tmux stopped while the session was starting. Try again.",
+    ),
+)
+
+
+def explain_tmux_failure(error: BaseException | str) -> str:
+    """Why tmux could not start something, in words the user can act on.
+
+    Resource exhaustion (no free pty: ``Device not configured`` on macOS,
+    ``No space left on device`` on Linux; the process limit) gets a plain
+    explanation; anything else is passed on as tmux said it.
+    """
+    text = str(error)
+    # A failed subprocess keeps tmux's own words in stderr, not in its message.
+    stderr = getattr(error, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    if isinstance(stderr, str) and stderr.strip() and stderr.strip() not in text:
+        text = f"{text}: {stderr.strip()}"
+    for markers, explanation in _RESOURCE_FAILURES:
+        if any(marker in text for marker in markers):
+            return explanation
+    return text
+
+
 def _run_tmux(
     args: list[str],
     *,
@@ -258,7 +308,7 @@ def _make_session_name(
     :func:`_parse_gd_session_name` and the TUI Sessions tab rely on. The
     full unsanitized purpose (e.g. a ``gitdirector gd-tmux`` command) is
     still embedded verbatim in the session's working command, so no
-    information is lost — only the session-name label is normalized.
+    information is lost; only the session-name label is normalized.
     """
     if sessions is None:
         sessions = _list_sessions()
@@ -283,6 +333,68 @@ def _session_exists(session_name: str) -> bool:
 def _protect_session(session_name: str) -> None:
     """Ensure a gd session survives detach regardless of global tmux config."""
     _run_tmux(["set-option", "-t", f"={session_name}:", "destroy-unattached", "off"], check=True)
+
+
+def _is_work_session(session_name: str) -> bool:
+    """A ``gd/<repo>/<purpose>/<n>`` session: what decks and panels group views with."""
+    return _parse_gd_session_name(session_name) is not None
+
+
+def _kill_session_args(session_name: str) -> list[str]:
+    """``kill-session`` for *session_name*; a work session takes its views with it."""
+    group = ["-g"] if _is_work_session(session_name) else []
+    return ["kill-session", *group, "-t", f"={session_name}"]
+
+
+def view_attach_command(tmux: str, session_name: str, view: str, *options: str) -> str:
+    """Shell for a pane's client to show *session_name* through a new view *view*.
+
+    The view is created detached, then attached: ``new-session`` attaching a
+    client whose terminal has just gone (its pane was killed) makes tmux 3.7c
+    exit on ``tcgetattr failed``, taking every session with it, where
+    ``attach-session`` only fails. ``destroy-unattached`` goes on last, once
+    attached (set on a detached session it destroys it at once), and a view
+    whose attach failed is removed. *view* is a gitdirector-made name and is
+    double-quoted, so a ``$$`` in it expands in the pane's shell. *options*
+    are ``name value`` pairs for the view.
+    """
+    target = f'"={view}:"'
+    settings = [f"set-option -t {target} {option}" for option in ("status off", *options)]
+    chain = r" \; ".join(
+        [
+            f'new-session -d -t {shlex.quote(f"={session_name}")} -s "{view}"',
+            *settings,
+            f'attach-session -t "={view}"',
+            f"set-option -t {target} destroy-unattached on",
+        ]
+    )
+    return f'{tmux} {chain} || {tmux} kill-session -t "={view}" >/dev/null 2>&1'
+
+
+def guard_session_window(session_name: str) -> None:
+    """Keep a work session's window from ever closing on its own.
+
+    Decks and panels show a session through views grouped with it, and tmux
+    3.7c can segfault, taking every session down, when a window of a session
+    group closes on its own (its program exits or is killed):
+    ``server_kill_window`` destroys the whole group while still walking the
+    session list (fixed upstream after 3.7c). With ``remain-on-exit`` the
+    pane stays, dead, instead, and the ``pane-died`` hook removes the session
+    and its views with ``kill-session -g``, a path that is safe. The hook
+    names its session: a bare ``kill-session`` in a hook acts on whichever
+    session tmux calls current, which can be a panel's.
+    """
+    window = f"={session_name}:{_FIRST_WINDOW}"
+    kill_group = shlex.join(_kill_session_args(session_name))
+    _run_tmux(
+        _chain_tmux_commands(
+            [
+                ["set-window-option", "-t", window, "remain-on-exit", "on"],
+                ["set-hook", "-w", "-t", window, "pane-died", kill_group],
+            ]
+        ),
+        check=True,
+    )
 
 
 # gitdirector creates its own sessions with one window, which is window 0
@@ -635,6 +747,7 @@ def create_tmux_session(
         )
     try:
         _protect_session(session_name)
+        guard_session_window(session_name)
         # Order matters: scrub first so the removals are in place, then
         # respawn the shell that new-session already started with the
         # unscrubbed environment.
@@ -663,7 +776,7 @@ def kill_tmux_session(session_name: str) -> bool:
     """Kill a tmux session by its **full exact name**. Returns True on success.
 
     The argument MUST be a complete session name (e.g. ``gd/repo/shell/1``).
-    Anything else is rejected with ``ValueError`` — partial names, glob
+    Anything else is rejected with ``ValueError``: partial names, glob
     patterns, empty strings, names already prefixed with ``=``, or names
     containing the tmux target separator ``:`` would otherwise be unsafe
     to forward to ``tmux kill-session -t <target>``. tmux's ``-t`` flag
@@ -677,7 +790,7 @@ def kill_tmux_session(session_name: str) -> bool:
     """
     _validate_session_name_for_kill(session_name)
     try:
-        result = _run_tmux(["kill-session", "-t", f"={session_name}"])
+        result = _run_tmux(_kill_session_args(session_name))
         if result.returncode != 0:
             logger.debug(
                 "tmux kill-session %s exited %s: %s",
@@ -699,8 +812,8 @@ def kill_all_gd_sessions() -> list[str]:
     Uses :func:`list_all_gd_sessions` plus persistent panel sessions to
     enumerate, then forwards each name through :func:`kill_tmux_session` so
     the same exact-match and ``gd/`` prefix guarantees apply. Names that fail
-    to kill (already gone, server crashed mid-iteration) are silently skipped
-    — this is best-effort cleanup, not a hard guarantee, so a partially-stale
+    to kill (already gone, server crashed mid-iteration) are silently skipped;
+    this is best-effort cleanup, not a hard guarantee, so a partially-stale
     list is acceptable.
 
     Returns the list of session names that were successfully killed, which

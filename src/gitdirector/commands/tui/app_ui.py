@@ -63,6 +63,7 @@ class ConsoleUIHelpersMixin:
                 waiting=self._waiting_count,
                 panels=len(self._panel_store.panels),
                 attention=self._palette.yellow,
+                update=self._latest_version,
             )
         )
 
@@ -134,7 +135,7 @@ class ConsoleUIHelpersMixin:
             self._load_panels()
         elif tab_id == "repos":
             if self._reload_config_if_changed() or self._repo_cache_expired():
-                self._refresh_repos(show_loading=True)
+                self._refresh_repos()
             else:
                 total = len(self._results)
                 try:
@@ -196,25 +197,19 @@ class ConsoleUIHelpersMixin:
         self._refresh_status_bar()
 
     def _update_search_indicator(self) -> None:
-        repo_ind = self.query_one("#repo-search-indicator", Static)
-        sess_ind = self.query_one("#sessions-search-indicator", Static)
-        panel_ind = self.query_one("#panels-search-indicator", Static)
-        if self._search_query:
-            escaped_query = escape(self._search_query)
-            text = (
-                f"Search results for '[bold]{escaped_query}[/bold]'"
-                "  —  press [bold]esc[/bold] to clear"
-            )
-            repo_ind.update(text)
-            sess_ind.update(text)
-            panel_ind.update(text)
-            repo_ind.display = True
-            sess_ind.display = True
-            panel_ind.display = True
-        else:
-            repo_ind.display = False
-            sess_ind.display = False
-            panel_ind.display = False
+        """Every tab's results bar says what the tables are filtered by."""
+        text = (
+            f"[bold]Search results[/bold] for '[bold]{escape(self._search_query)}[/bold]'"
+            "   [bold]esc[/bold] clear"
+        )
+        try:
+            indicators = list(self.query(".search-indicator"))
+        except ScreenStackError:
+            return
+        for indicator in indicators:
+            if self._search_query:
+                indicator.update(text)
+            indicator.display = bool(self._search_query)
 
     def _get_selected_path(self) -> Path | None:
         """Filesystem path of the selected row, or None when it has none.
@@ -395,30 +390,30 @@ class ConsoleUIHelpersMixin:
         else:
             self._apply_filter_and_sort()
 
+    def _set_search_query(self, query: str) -> None:
+        """Filter by *query*; the results bar shows whenever a filter is on."""
+        self._search_query = query
+        self._update_search_indicator()
+        self._apply_active_filter_and_sort()
+
     def action_close_search(self) -> None:
         container = self.query_one("#search-container")
         if container.display:
             self.query_one("#search-bar", Input).value = ""
             container.display = False
-            self._search_query = ""
-            self._update_search_indicator()
-            self._apply_active_filter_and_sort()
+            self._set_search_query("")
             self._get_active_table().focus()
         elif self._search_query:
-            self._search_query = ""
-            self._update_search_indicator()
-            self._apply_active_filter_and_sort()
+            self._set_search_query("")
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "search-bar":
-            self._search_query = event.value
-            self._apply_active_filter_and_sort()
+        if event.input.id == "search-bar" and event.value != self._search_query:
+            self._set_search_query(event.value)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-bar":
-            self._search_query = event.value
-            self._update_search_indicator()
-            self._apply_active_filter_and_sort()
+            if event.value != self._search_query:
+                self._set_search_query(event.value)
             self.query_one("#search-container").display = False
             self._get_active_table().focus()
 

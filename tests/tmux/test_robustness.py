@@ -7,6 +7,7 @@ import resource
 import shutil
 import subprocess
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -168,3 +169,57 @@ def test_a_pane_left_broken_by_a_failed_respawn_does_not_take_the_server_down(mo
         finally:
             _run_tmux(["kill-server"])
             _cleanup_tmux_tmpdir(tmux_dir)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+class TestGroupedSessionEnd:
+    """A session shown in decks or panels must end without taking tmux down.
+
+    Decks and panels group views with a session. In tmux 3.7c a window of a
+    session group closing on its own could segfault the server (found by the
+    stress harness): every session was lost. The window is now kept open by
+    remain-on-exit and the session and its views removed by a hook instead.
+    """
+
+    @pytest.mark.parametrize("ending", ["exit", "sigkill"])
+    def test_the_server_survives_and_the_views_go(self, tmp_path, monkeypatch, ending):
+        from pathlib import Path
+
+        from gitdirector.integrations.tmux.core import create_tmux_session
+
+        from ._shared import _make_shell_home
+
+        with _tmux_integration_lock():
+            monkeypatch.setenv("HOME", str(_make_shell_home(tmp_path / "home")))
+            tmux_dir = _make_short_tmux_tmpdir()
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+            try:
+                _run_tmux(["new-session", "-d", "-s", "keepalive", "sleep 100000"], check=True)
+                session = create_tmux_session("alpha", Path(tmp_path))
+                for view in ("gd/view/deck-1", "gd/view/panel-2"):
+                    _run_tmux(["new-session", "-d", "-t", f"={session}", "-s", view], check=True)
+
+                target = f"={session}:"
+                if ending == "exit":
+                    _run_tmux(["send-keys", "-t", target, "exit", "Enter"], check=True)
+                else:
+                    pid = _run_tmux(
+                        ["display-message", "-p", "-t", target, "#{pane_pid}"], text=True
+                    )
+                    os.kill(int(pid.stdout.strip()), 9)
+
+                def sessions() -> list[str]:
+                    return _run_tmux(
+                        ["list-sessions", "-F", "#{session_name}"], text=True
+                    ).stdout.split()
+
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and len(sessions()) > 1:
+                    time.sleep(0.1)
+                assert sessions() == ["keepalive"]
+            finally:
+                subprocess.run(
+                    ["tmux", "kill-server"], capture_output=True, check=False, timeout=10
+                )
+                _cleanup_tmux_tmpdir(tmux_dir)

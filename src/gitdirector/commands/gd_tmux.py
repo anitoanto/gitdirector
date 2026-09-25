@@ -36,6 +36,7 @@ def register(cli: click.Group):
         from ..integrations.tmux import (
             TmuxError,
             create_tmux_session,
+            explain_tmux_failure,
             kill_tmux_session,
             launch_command_in_tmux_session,
         )
@@ -50,7 +51,7 @@ def register(cli: click.Group):
         except TmuxError as exc:
             if session_name is not None:
                 kill_tmux_session(session_name)
-            print_error(f"tmux command failed: {exc}")
+            print_error(f"tmux command failed: {explain_tmux_failure(exc)}")
             raise SystemExit(1) from exc
         except BaseException:
             if session_name is not None:

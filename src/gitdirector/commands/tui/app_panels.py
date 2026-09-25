@@ -411,7 +411,7 @@ class ConsolePanelsMixin:
                 )
             except Exception as exc:
                 logger.warning("panel %s failed to build", panel_name, exc_info=True)
-                self._update_status(f"panel '{panel_name}' failed to open: {exc}")
+                self._report_failure(f"Couldn't open panel '{panel_name}'", exc)
                 return
         self._suspend_and_attach(session_name, row_key=panel.name)
 

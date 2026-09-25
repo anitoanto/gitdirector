@@ -1,0 +1,23 @@
+# Stress gitdirector against a real tmux 3.7c on Linux. See DEV.md.
+services:
+  stress:
+    build:
+      context: .
+      args:
+        TMUX_VERSION: "3.7c"
+    image: gitdirector-stress:tmux-3.7c
+    # Remounting /dev/pts with a small pty limit (the ptystarve phase) needs it.
+    privileged: true
+    init: true
+    environment:
+      STRESS_SECONDS: "${STRESS_SECONDS:-60}"
+      STRESS_PHASES: "${STRESS_PHASES:-normal ptystarve nproc chaos}"
+      SKIP_PYTEST: "${SKIP_PYTEST:-0}"
+      STRESS_TMUX_LOG: "${STRESS_TMUX_LOG:-0}"
+    volumes:
+      - "..:/src:ro"
+      - ./stress.py:/stress/stress.py:ro
+      - ./run.sh:/stress/run.sh:ro
+      - ./crash.sh:/stress/crash.sh:ro
+      - ./out:/out
+    command: ["bash", "/stress/run.sh"]

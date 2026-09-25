@@ -85,31 +85,22 @@ GITHUB_DARK_REMOVED_PANEL_BG = "#1f0a0d"
 GITHUB_DARK_HUNK_BG = "#1f6feb33"
 
 # Status pill colours (used in the file list)
-STATUS_PILL_BG: dict[str, str] = {
-    "A": "#238636",  # GitHub green
-    "M": "#9e6a03",  # amber
-    "D": "#da3633",  # GitHub red
-    "R": "#1f6feb",  # blue
-    "?": "#8957e5",  # purple
-    "C": "#1f6feb",
-    "T": "#9e6a03",
-    "U": "#da3633",
-    "X": "#6e7681",
-    "B": "#6e7681",
+# The status letter as text on the dark diff background, for headers and
+# the file list; the pill colours above are too dark to read that way.
+STATUS_TEXT: dict[str, str] = {
+    "A": "#3fb950",
+    "M": "#d29922",
+    "D": "#f85149",
+    "R": "#58a6ff",
+    "C": "#58a6ff",
+    "?": "#bc8cff",
+    "U": "#f85149",
 }
 
-STATUS_PILL_FG: dict[str, str] = {
-    "A": "#ffffff",
-    "M": "#ffffff",
-    "D": "#ffffff",
-    "R": "#ffffff",
-    "?": "#ffffff",
-    "C": "#ffffff",
-    "T": "#ffffff",
-    "U": "#ffffff",
-    "X": "#ffffff",
-    "B": "#ffffff",
-}
+
+def status_letter(status: str) -> RichText:
+    label = "U" if status == "?" else (status[:1].upper() or "\u00b7")
+    return RichText(label, style=f"bold {STATUS_TEXT.get(status, GITHUB_DARK_MUTED)}")
 
 
 class GithubDarkStyle(Style):
@@ -139,7 +130,7 @@ class GithubDarkStyle(Style):
         Generic.Emph: f"italic {GITHUB_DARK_TEXT}",
         Generic.EmphStrong: f"bold italic {GITHUB_DARK_TEXT}",
         # Shell session output and prompts default to dark navy/grey
-        # in Pygments' default style — both invisible on our dark bg.
+        # in Pygments' default style, both invisible on our dark bg.
         Generic.Output: GITHUB_DARK_MUTED,
         Generic.Prompt: f"bold {GITHUB_DARK_HEADING}",
         Generic.Traceback: "#ffa198",
@@ -577,49 +568,6 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
     return DiffBundle(files=files, raw=diff_text, truncated=truncated)
 
 
-def _status_pill_text(status: str) -> RichText:
-    """Return a GitHub-style coloured pill for the given status code."""
-    bg = STATUS_PILL_BG.get(status, "#6e7681")
-    fg = STATUS_PILL_FG.get(status, "#ffffff")
-    label = status if status != "?" else "U"
-    return RichText(f" {label} ", style=f"bold {fg} on {bg}")
-
-
-def render_change_summary(
-    file: ChangedFile, *, path_width: int = 56, show_new_badge: bool = True
-) -> RichText:
-    """Single-line summary used in the left-hand file list.
-
-    Layout (GitHub-inspired): a coloured status pill, the file path, an
-    optional ``new`` chip for additions, and ``+N -M`` stats.
-    """
-    text = RichText()
-    text.append_text(_status_pill_text(file.status))
-    text.append(" ")
-    display = file.display_path
-    if len(display) > path_width and path_width > 3:
-        display = "\u2026" + display[-(path_width - 1) :]
-    text.append(display, style="bold")
-    if show_new_badge and file.status == "A":
-        text.append(" ")
-        text.append(" new ", style="bold #aff5b4 on #238636")
-    if file.is_rename:
-        text.append(" ")
-        text.append("renamed", style="dim italic")
-    if file.is_binary:
-        text.append("  ")
-        text.append("[binary]", style="dim")
-    elif file.is_image:
-        text.append("  ")
-        text.append("[image]", style="dim")
-    elif file.additions or file.deletions:
-        text.append("  ")
-        text.append(f"+{file.additions}", style="#3fb950")
-        text.append(" ")
-        text.append(f"-{file.deletions}", style="#f85149")
-    return text
-
-
 def render_file_diff(
     file: ChangedFile,
     *,
@@ -781,10 +729,9 @@ def _render_diff_meta_lines(lines: list[str]) -> RenderableType:
 
 
 def _render_file_header(file: ChangedFile) -> RenderableType:
-    """Coloured header bar for a file diff (GitHub's file header style)."""
-    bg = STATUS_PILL_BG.get(file.status, "#21262d")
+    """The file's header line: status letter, path, lines shown and counts."""
     text = RichText()
-    text.append_text(_status_pill_text(file.status))
+    text.append_text(status_letter(file.status))
     text.append("  ")
     text.append(file.display_path, style="bold white")
     if file.status != "D" and file.first_new_line is not None and file.last_new_line is not None:
@@ -809,18 +756,7 @@ def _render_file_header(file: ChangedFile) -> RenderableType:
     elif file.status == "?":
         text.append("  ")
         text.append("untracked", style="bold #d2a8ff")
-    return Padding(text, (0, 2), style=f"on {bg}")
-
-
-def format_status_badge(status: str) -> str:
-    """Return the human label for a git status code (M, A, D, R, ?)."""
-    if not status:
-        return "\u00b7"
-    if status == "?":
-        return "U"
-    if status in _STATUS_LABEL:
-        return _STATUS_LABEL[status][:1].upper()
-    return status.upper()
+    return Padding(text, (0, 2), style="on #161b22")
 
 
 def render_empty_state(repo_name: str, branch: str | None) -> RichText:
@@ -854,14 +790,11 @@ __all__ = [
     "GITHUB_DARK_REMOVED_BG",
     "GITHUB_DARK_REMOVED_FG",
     "GithubDarkStyle",
-    "STATUS_PILL_BG",
-    "STATUS_PILL_FG",
+    "STATUS_TEXT",
     "build_diff_bundle",
     "detect_language",
     "diff_gutter_width",
-    "format_status_badge",
     "parse_diff_files",
-    "render_change_summary",
     "render_empty_state",
     "render_error",
     "render_file_diff",

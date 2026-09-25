@@ -194,7 +194,7 @@ def _status_text(status: RepoStatus) -> Text:
 
 def _format_size(size: int | None) -> Text:
     if size is None:
-        return Text("—", style="bright_black")
+        return Text("-", style="bright_black")
     for unit, threshold in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
         if size >= threshold:
             return Text(f"{size / threshold:.1f} {unit}", style="dim")
@@ -208,7 +208,7 @@ def _changes_text(staged: bool, unstaged: bool) -> Text:
         return Text("staged", style="cyan")
     if unstaged:
         return Text("unstaged", style="yellow")
-    return Text("—", style="bright_black")
+    return Text("-", style="bright_black")
 
 
 def _path_text(path: str) -> Text:
@@ -243,9 +243,9 @@ def _build_repo_table(results: list) -> Table:
         table.add_row(
             info.name,
             _status_text(info.status),
-            info.branch or "—",
+            info.branch or "-",
             _changes_text(info.staged, info.unstaged),
-            info.last_updated or "—",
+            info.last_updated or "-",
             _format_size(info.size),
             _path_text(str(info.path)),
         )

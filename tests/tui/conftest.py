@@ -218,3 +218,11 @@ def patch_sessions(entries=None):
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         side_effect=lambda *_args, **_kwargs: sample_sessions(entries),
     )
+
+
+def repo_row_text(app, row_key: str) -> str:
+    """The plain text of one composed repositories-table row."""
+    from textual.widgets import DataTable
+
+    table = app.query_one("#repo-table", DataTable)
+    return table.get_cell(row_key, app._col_keys[0]).plain

@@ -19,6 +19,7 @@ from .core import (
     PANEL_SLOT_OPTION,
     TmuxError,
     _chain_tmux_commands,
+    _is_work_session,
     _list_sessions,
     _panel_pane_title,
     _protect_session,
@@ -29,10 +30,12 @@ from .core import (
     _tmux_child_environment_command,
     _tmux_new_session_environment_args,
     _tmux_server_is_gone,
+    guard_session_window,
     kill_tmux_session,
     make_panel_session_name,
     respawn_pane,
     sync_panel_tmux_config,
+    view_attach_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -377,6 +380,8 @@ def _equalize_panel_layout(
         raise TmuxError(f"could not read the size of {window_target}: {dims!r}") from exc
 
     sorted_placements = sorted(layout.placements, key=lambda p: (p.row, p.col))
+    if len(pane_ids) < len(sorted_placements):
+        raise TmuxError(f"a pane of {session_name} went away while the panel was being built")
     pane_id_map: dict[tuple[int, int], int] = {}
     for i, p in enumerate(sorted_placements):
         pane_id_map[(p.row, p.col)] = int(pane_ids[i].lstrip("%"))
@@ -405,7 +410,8 @@ def _equalize_panel_layout(
         top = sum(row_heights[: placement.row]) + placement.row
         by_slot.append(pane_at.get((left, top)))
     if None in by_slot or len(set(by_slot)) != len(by_slot):
-        raise ValueError(f"panel layout did not land as planned: {applied!r}")
+        # Something closed or split a pane while this was being laid out.
+        raise TmuxError(f"panel layout did not land as planned: {applied!r}")
     return by_slot
 
 
@@ -617,11 +623,10 @@ def _panel_view_command(panel_name: str, slot: int, session_name: str) -> str:
     its slot, which the session's header shows as a badge -- never touch
     the real session. tmux deletes it when this pane's client goes away.
     """
+    # $$ is the pane shell's pid, so a view whose pane is gone can be reaped.
     view_name = f"gd/view/{_sanitize_view_part(panel_name)}-{slot}-$$"
-    return (
-        f"env -u TMUX tmux new-session -t {shlex.quote(f'={session_name}')} -s {view_name}"
-        f" \\; set-option status off \\; set-option {PANEL_SLOT_OPTION} {slot}"
-        " \\; set-option destroy-unattached on"
+    return view_attach_command(
+        "env -u TMUX tmux", session_name, view_name, f"{PANEL_SLOT_OPTION} {slot}"
     )
 
 
@@ -698,6 +703,9 @@ def _rebuild_panel_tmux_session(
     for session in panes.values():
         if session and _session_exists(session):
             _protect_session(session)
+            # Views of it are about to be grouped with it.
+            if _is_work_session(session):
+                guard_session_window(session)
 
     reap_stale_panel_helpers()
 

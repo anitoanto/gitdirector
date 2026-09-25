@@ -1,43 +1,28 @@
-"""File-list tile widget for the ``DiffReviewScreen``.
+"""File list for the ``DiffReviewScreen``.
 
-Renders each changed file as a "list tile": a fixed-width status icon on the
-left, a title (the filename) and subtitle (the full path) stacked on the
-right, and an aligned ``+N -M`` stats block on the far right.
-
-The widget is a custom subclass of ``ListView`` so that selection, focus,
-and arrow-key navigation all work out of the box. The colour choices for
-the selected state are picked to be legible against the status icon's
-background — see :mod:`gitdirector.commands.tui.diff_renderer` for the
-palette.
+Each changed file is a two-line tile: its status letter, name and ``+N -M``
+on the first line, the folder it sits in under it. The selected tile takes
+the console's row tint, so the list reads like every other list.
 """
 
 from __future__ import annotations
 
-import colorsys
-import re
 from dataclasses import dataclass
 
 from rich.text import Text
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import ListItem, ListView, Static
 
-from ..diff_renderer import (
-    STATUS_PILL_BG,
-    ChangedFile,
-)
-
-# ---------------------------------------------------------------------------
-# Tile data
-# ---------------------------------------------------------------------------
+from ..diff_renderer import ChangedFile, status_letter
 
 
 @dataclass(frozen=True)
 class _FileTileSpec:
     file: ChangedFile
-    repo_dir: str  # absolute repo path; used to compute the relative subtitle
+    repo_dir: str  # absolute repo path
 
     def filename(self) -> str:
         if self.file.is_rename and self.file.old_path:
@@ -48,207 +33,35 @@ class _FileTileSpec:
         return path
 
     def subtitle(self) -> str:
-        path = self.repo_dir.rstrip("/") + "/" + self.file.path
-        return path
+        """The folder the file is in, relative to the repository."""
+        folder = self.file.path.rpartition("/")[0]
+        return f"{folder}/" if folder else "./"
 
     def icon_letter(self) -> str:
-        status = self.file.status
-        if status == "?":
-            return "U"
-        if status in ("A", "M", "D", "R"):
-            return status
-        return status[:1].upper() if status else "\u00b7"
-
-    def icon_bg(self) -> str:
-        return STATUS_PILL_BG.get(self.file.status, "#6e7681")
-
-
-# ---------------------------------------------------------------------------
-# Color helpers
-# ---------------------------------------------------------------------------
-
-_HEX_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
-
-
-def _parse_hex(color: str) -> tuple[float, float, float] | None:
-    """Convert ``#rgb`` / ``#rrggbb`` to an ``(r, g, b)`` tuple in 0..1.
-
-    Returns ``None`` for anything that isn't a hex literal (CSS named
-    colours, ``$surface`` theme tokens, etc.) so callers can fall back to a
-    sensible default.
-    """
-    if not color:
-        return None
-    match = _HEX_COLOR_RE.match(color.strip())
-    if not match:
-        return None
-    raw = match.group(1)
-    if len(raw) == 3:
-        raw = "".join(ch * 2 for ch in raw)
-    r = int(raw[0:2], 16) / 255.0
-    g = int(raw[2:4], 16) / 255.0
-    b = int(raw[4:6], 16) / 255.0
-    return r, g, b
-
-
-def _to_hex(rgb: tuple[float, float, float]) -> str:
-    r, g, b = (max(0.0, min(1.0, v)) for v in rgb)
-    return f"#{int(round(r * 255)):02x}{int(round(g * 255)):02x}{int(round(b * 255)):02x}"
-
-
-def _luminance(rgb: tuple[float, float, float]) -> float:
-    r, g, b = (max(0.0, min(1.0, v)) for v in rgb)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-
-def _relative_luminance(rgb: tuple[float, float, float]) -> float:
-    """WCAG-style relative luminance (sRGB linearised)."""
-
-    def linearise(c: float) -> float:
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-
-    r, g, b = (max(0.0, min(1.0, v)) for v in rgb)
-    return 0.2126 * linearise(r) + 0.7152 * linearise(g) + 0.0722 * linearise(b)
-
-
-def _contrast_ratio(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
-    la = _relative_luminance(a)
-    lb = _relative_luminance(b)
-    lighter, darker = max(la, lb), min(la, lb)
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-def _darken(rgb: tuple[float, float, float], amount: float) -> tuple[float, float, float]:
-    h, lit, s = colorsys.rgb_to_hls(*rgb)
-    lit = max(0.0, lit - amount)
-    return colorsys.hls_to_rgb(h, lit, s)
-
-
-def _lighten(rgb: tuple[float, float, float], amount: float) -> tuple[float, float, float]:
-    h, lit, s = colorsys.rgb_to_hls(*rgb)
-    lit = min(1.0, lit + amount)
-    return colorsys.hls_to_rgb(h, lit, s)
-
-
-def _shift_hue(rgb: tuple[float, float, float], delta: float) -> tuple[float, float, float]:
-    h, lit, s = colorsys.rgb_to_hls(*rgb)
-    h = (h + delta) % 1.0
-    return colorsys.hls_to_rgb(h, lit, s)
-
-
-def selection_colors(icon_bg: str) -> tuple[str, str, str, str]:
-    """Pick an intelligent selection palette given the status icon bg.
-
-    Returns ``(tile_bg, border, title_fg, subtitle_fg)``. The result is
-    always high-contrast against ``icon_bg`` *and* the white text the body
-    of the tile uses, so we never end up with the previous
-    near-illegible combinations (e.g. white text on a dark-grey selection
-    sitting next to a yellow ``#9e6a03`` modified icon).
-
-    The strategy:
-
-    1. If ``icon_bg`` parses as a hex colour, blend the icon's hue into
-       a darkened surface so the selection reads as a tinted
-       continuation of the icon — but only when the icon isn't
-       achromatic. This keeps "modified" rows warm, "added" rows
-       greenish, "deleted" rows reddish, etc.
-    2. Pick the title/subtitle foregrounds from a small palette of
-       pre-validated, AA-grade combinations so the final render is
-       always legible regardless of the tile's background.
-
-    The return value is a deterministic function of ``icon_bg`` so the
-    tests can pin it down.
-    """
-    rgb = _parse_hex(icon_bg)
-    if rgb is None:
-        return ("#1f2937", "#1f6feb", "#f0f6fc", "#8b949e")
-
-    lum = _luminance(rgb)
-    _, _, sat = colorsys.rgb_to_hls(*rgb)
-
-    # Achromatic icons (greys) → fall back to a neutral selection
-    # instead of a tinted one so we don't end up with a "muted
-    # brown" selection that fights the surrounding surface.
-    if sat < 0.08:
-        tile_bg = _to_hex(_darken(rgb, 0.18))
-        return (tile_bg, _to_hex(_lighten(rgb, 0.18)), "#f0f6fc", "#c9d1d9")
-
-    # Bright icons: darken heavily so the white text wins.
-    if lum > 0.45:
-        base = _darken(rgb, 0.30)
-    else:
-        base = _darken(rgb, 0.10)
-    tile_bg = _to_hex(base)
-
-    # Border colour: a brighter, more saturated echo of the icon. We
-    # nudge the hue by a small amount so it doesn't blur into the bg.
-    border_rgb = _lighten(_shift_hue(rgb, 0.02), 0.15)
-    border = _to_hex(border_rgb)
-
-    # Title + subtitle. We always reach for a high-contrast
-    # foreground; the only thing we vary is whether the subtitle leans
-    # a touch toward the icon's hue so the row feels like part of a
-    # set.
-    title_fg = "#f0f6fc"
-    sub_rgb = _shift_hue(rgb, -0.02) if lum > 0.45 else _shift_hue(rgb, 0.02)
-    sub_h, _, sub_s = colorsys.rgb_to_hls(*sub_rgb)
-    sub_lit = 0.72 if _luminance(sub_rgb) < 0.55 else 0.85
-    sub_rgb = colorsys.hls_to_rgb(sub_h, sub_lit, sub_s)
-    subtitle_fg = _to_hex(sub_rgb)
-    # Final legibility check: if the title / bg contrast slipped below
-    # WCAG AA for body text we fall back to a known-safe pair. This
-    # matters for very-saturated bgs (e.g. pure green / red pills).
-    if _contrast_ratio(base, _parse_hex(title_fg) or (0.0, 0.0, 0.0)) < 4.5:
-        title_fg = "#ffffff"
-        subtitle_fg = "#c9d1d9"
-    return (tile_bg, border, title_fg, subtitle_fg)
-
-
-# ---------------------------------------------------------------------------
-# Individual tile widget
-# ---------------------------------------------------------------------------
+        return status_letter(self.file.status).plain
 
 
 class FileTile(Static):
-    """A single file row in the diff file list.
-
-    Layout:
-
-    * 3-cell-wide status icon on the left
-    * Title row (filename + right-aligned ``+N -M`` stats)
-    * Subtitle row (full path)
-    """
+    """A single file row in the diff file list."""
 
     DEFAULT_CSS = """
     FileTile {
         width: 1fr;
-        height: 3;
-        padding: 0 1;
-        background: $surface;
+        height: 2;
+        padding: 0 2;
     }
     FileTile:hover {
-        background: $boost;
+        background: $primary 12%;
     }
     FileTile.--selected {
-        background: #1f2937;
-    }
-    FileTile .tile-row {
-        width: 1fr;
-        height: 3;
-    }
-    FileTile .tile-icon {
-        width: 3;
-        height: 3;
-        content-align: center middle;
-        text-align: center;
-    }
-    FileTile .tile-body {
-        width: 1fr;
-        height: 3;
-        padding: 0 1;
+        background: $primary 30%;
     }
     FileTile .tile-title-row {
         width: 1fr;
+        height: 1;
+    }
+    FileTile .tile-icon {
+        width: 2;
         height: 1;
     }
     FileTile .tile-title {
@@ -261,22 +74,14 @@ class FileTile(Static):
     FileTile .tile-stats {
         width: auto;
         height: 1;
-        padding: 0 1;
-        content-align: right middle;
+        padding: 0 0 0 1;
     }
     FileTile .tile-subtitle {
         width: 1fr;
         height: 1;
+        padding: 0 0 0 2;
         color: $text-muted;
         text-overflow: ellipsis;
-    }
-    FileTile .tile-stats-add {
-        color: #3fb950;
-        text-style: bold;
-    }
-    FileTile .tile-stats-del {
-        color: #f85149;
-        text-style: bold;
     }
     """
 
@@ -285,90 +90,32 @@ class FileTile(Static):
     def __init__(self, spec: _FileTileSpec, **kwargs) -> None:
         super().__init__(**kwargs)
         self._spec = spec
-        self._icon: Static | None = None
-        self._title: Static | None = None
-        self._subtitle: Static | None = None
-        self._stats: Static | None = None
-        self._selection_palette: tuple[str, str, str, str] = (
-            "#1f2937",
-            "#1f6feb",
-            "#f0f6fc",
-            "#8b949e",
-        )
 
     def compose(self):
-        with Horizontal(classes="tile-row"):
-            yield Static(self._icon_text(), classes="tile-icon", markup=False)
-            with Vertical(classes="tile-body"):
-                with Horizontal(classes="tile-title-row"):
-                    yield Static(self._spec.filename(), classes="tile-title")
-                    yield Static(self._stats_text(), classes="tile-stats")
-                yield Static(self._spec.subtitle(), classes="tile-subtitle")
-
-    def on_mount(self) -> None:
-        self._icon = self.query_one(".tile-icon")
-        self._title = self.query_one(".tile-title")
-        self._subtitle = self.query_one(".tile-subtitle")
-        self._stats = self.query_one(".tile-stats")
-        self._selection_palette = selection_colors(self._spec.icon_bg())
-        self._refresh_icon()
-        self._refresh_styles()
-
-    def _icon_text(self) -> Text:
-        letter = self._spec.icon_letter()
-        return Text(f" {letter} ", style=f"bold #ffffff on {self._spec.icon_bg()}")
+        with Horizontal(classes="tile-title-row"):
+            yield Static(status_letter(self._spec.file.status), classes="tile-icon")
+            yield Static(self._spec.filename(), classes="tile-title", markup=False)
+            yield Static(self._stats_text(), classes="tile-stats")
+        yield Static(self._spec.subtitle(), classes="tile-subtitle", markup=False)
 
     def _stats_text(self) -> Text:
         text = Text(justify="right")
         if self._spec.file.is_binary:
-            text.append("[binary]", style="#8b949e")
+            text.append("binary", style="#8b949e")
             return text
         if self._spec.file.is_image:
-            text.append("[image]", style="#8b949e")
+            text.append("image", style="#8b949e")
             return text
-        additions = self._spec.file.additions
-        deletions = self._spec.file.deletions
-        text.append(f"+{additions}", style="bold #3fb950")
+        text.append(f"+{self._spec.file.additions}", style="bold #3fb950")
         text.append(" ")
-        text.append(f"-{deletions}", style="bold #f85149")
+        text.append(f"-{self._spec.file.deletions}", style="bold #f85149")
         return text
 
-    def _refresh_icon(self) -> None:
-        if self._icon is None:
-            return
-        self._icon.styles.background = self._spec.icon_bg()
-        self._icon.styles.color = "#ffffff"
-
-    def _refresh_styles(self) -> None:
-        self.set_class(self.selected, "--selected")
-        if self.selected:
-            tile_bg, _border, title_fg, subtitle_fg = self._selection_palette
-            self.styles.background = tile_bg
-            if self._title is not None:
-                self._title.styles.color = title_fg
-            if self._subtitle is not None:
-                self._subtitle.styles.color = subtitle_fg
-        else:
-            self.styles.background = None
-            if self._title is not None:
-                self._title.styles.color = None
-            if self._subtitle is not None:
-                self._subtitle.styles.color = None
-
-    def watch_selected(self, _old: bool, _new: bool) -> None:
-        self._refresh_styles()
+    def watch_selected(self, _old: bool, new: bool) -> None:
+        self.set_class(new, "--selected")
 
     def set_selected(self, value: bool) -> None:
         self.selected = value
-
-    @property
-    def selection_palette(self) -> tuple[str, str, str, str]:
-        return self._selection_palette
-
-
-# ---------------------------------------------------------------------------
-# List container
-# ---------------------------------------------------------------------------
 
 
 class FileTileList(ListView):
@@ -383,7 +130,13 @@ class FileTileList(ListView):
     }
     FileTileList > ListItem {
         padding: 0 0;
-        height: 3;
+        height: 2;
+        background: transparent;
+    }
+    /* The tile shows the selection; ListView's own highlight would double it. */
+    FileTileList > ListItem.-highlight,
+    FileTileList:focus > ListItem.-highlight {
+        background: transparent;
     }
     """
 
@@ -451,5 +204,4 @@ class FileTileList(ListView):
 __all__ = [
     "FileTile",
     "FileTileList",
-    "selection_colors",
 ]

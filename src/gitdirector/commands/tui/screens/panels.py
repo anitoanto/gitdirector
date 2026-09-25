@@ -12,10 +12,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, LoadingIndicator, OptionList, Static
+from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ..constants import _MODAL_BINDINGS, _MODAL_CSS
+from ..constants import _MODAL_BINDINGS
 from ..panels import (
     DEFAULT_PANEL_LAYOUT_KEY,
     Panel,
@@ -26,6 +26,15 @@ from ..panels import (
     resolve_panel_layout,
 )
 from ..terminal_caps import strip_unsupported_css as _safe_css
+from .card import (
+    LoadingCard,
+    ShortcutKeys,
+    card_css,
+    key_hints,
+    menu_row,
+    modal_screen_css,
+    spacer,
+)
 
 __all__ = [
     "AgentLoadingScreen",
@@ -64,43 +73,27 @@ def _session_labels() -> dict[str, tuple[str, str]]:
     }
 
 
-class PanelActionMenuScreen(ModalScreen[str]):
+class PanelActionMenuScreen(ShortcutKeys, ModalScreen[str]):
     """What a panel shows, and what can be done with it."""
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "PanelActionMenuScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        + _MODAL_CSS
-        + """
-    PanelActionMenuScreen #menu-container {
-        width: 84;
-        padding: 1 2;
-    }
-    PanelActionMenuScreen #menu-title {
-        padding: 0 1 0 1;
-    }
-    PanelActionMenuScreen #menu-branch {
-        padding: 0 1 1 1;
-    }
+    CSS = card_css(
+        "PanelActionMenuScreen",
+        width=84,
+        extra="""
     #panel-action-layout {
         height: auto;
+        padding: 0 0 0 0;
     }
     #panel-action-main {
-        width: 30;
+        width: 36;
         height: auto;
     }
     #panel-preview-pane {
         width: 1fr;
         height: auto;
-        padding: 0 0 0 2;
-    }
-    PanelActionMenuScreen #action-menu {
-        height: auto;
-        padding: 0 1;
-        margin: 0;
+        padding: 1 2 0 1;
     }
     #panel-layout-preview {
         width: auto;
@@ -110,12 +103,13 @@ class PanelActionMenuScreen(ModalScreen[str]):
         height: auto;
         padding: 1 0 0 0;
     }
-    """
+    """,
     )
 
     def __init__(self, panel: Panel) -> None:
         super().__init__()
         self.panel = panel
+        self._shortcuts = {"o": "open", "e": "reconfigure", "r": "rename", "d": "delete"}
 
     def compose(self) -> ComposeResult:
         from ....integrations.tmux.core import make_panel_session_name
@@ -125,20 +119,25 @@ class PanelActionMenuScreen(ModalScreen[str]):
         labels = _session_labels()
         live = set(labels)
         session_name = make_panel_session_name(self.panel.name)
+
+        def row(option_id: str, icon: str, label: str, style: str = "bold") -> Option:
+            key = next(k for k, v in self._shortcuts.items() if v == option_id)
+            label_text = Text.assemble((f"{icon} ", "dim"), (label, style))
+            return Option(menu_row(label_text, "", key), id=option_id)
+
         with Vertical(id="menu-container"):
-            yield Static(f"[bold $text]{escape(self.panel.name)}[/]", id="menu-title")
-            yield Static(
-                f"[dim]{escape(self.panel.layout_label)} · {escape(session_name)}[/dim]",
-                id="menu-branch",
-            )
+            with Horizontal(id="menu-header"):
+                yield Static(escape(self.panel.name), id="menu-title")
+                yield Static(Text(self.panel.layout_label, style="bold"), id="menu-meta")
+            yield Static(Text(session_name, style="dim"), id="menu-branch")
             with Horizontal(id="panel-action-layout"):
                 with Vertical(id="panel-action-main"):
                     yield OptionList(
-                        Option("[$text]▶[/] [bold]Open[/bold]", id="open"),
-                        Option("[$text]✎[/] [bold]Edit layout & sessions[/bold]", id="reconfigure"),
-                        Option("[$text]Aa[/] [bold]Rename[/bold]", id="rename"),
-                        Option("", disabled=True),
-                        Option("[$text-error]✕[/] [bold]Delete[/bold]", id="delete"),
+                        row("open", "▶", "Open"),
+                        row("reconfigure", "✎", "Edit layout & sessions"),
+                        row("rename", "✎", "Rename"),
+                        spacer(),
+                        row("delete", "✕", "Delete", f"bold {palette.danger}"),
                         id="action-menu",
                     )
                 with Vertical(id="panel-preview-pane"):
@@ -150,7 +149,10 @@ class PanelActionMenuScreen(ModalScreen[str]):
                         panel_session_lines(self.panel, live, labels, palette),
                         id="panel-sessions",
                     )
-            yield Static("↑↓ select    \\[enter] choose    \\[esc] close", id="menu-hint")
+            yield Static(
+                key_hints(("↑↓", "select"), ("⏎", "choose"), ("key", "jump"), ("esc", "close")),
+                id="menu-hint",
+            )
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()
@@ -173,11 +175,7 @@ class RenamePanelScreen(ModalScreen[str | None]):
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "RenamePanelScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
+    CSS = card_css("RenamePanelScreen", width=56)
 
     def __init__(self, current_name: str) -> None:
         super().__init__()
@@ -185,10 +183,10 @@ class RenamePanelScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):
-            yield Static("[bold $text]Rename Panel[/]", id="menu-title")
-            yield Static(f"[dim]Current: {escape(self.current_name)}[/dim]", id="menu-branch")
-            yield Input(value=self.current_name, id="rename-input")
-            yield Static("\\[enter] confirm    \\[esc] cancel", id="menu-hint")
+            yield Static("Rename panel", id="menu-title")
+            yield Static(Text(self.current_name, style="dim"), id="menu-branch")
+            yield Input(value=self.current_name, id="rename-input", classes="card-input")
+            yield Static(key_hints(("⏎", "rename"), ("esc", "cancel")), id="menu-hint")
 
     def on_mount(self) -> None:
         inp = self.query_one("#rename-input", Input)
@@ -210,41 +208,12 @@ class RenamePanelScreen(ModalScreen[str | None]):
         pass
 
 
-class AgentLoadingScreen(ModalScreen[None]):
-    """Full-screen loading overlay shown while a tmux session initialises."""
+class AgentLoadingScreen(LoadingCard):
+    """Shown while a new session starts; attaches to it once it is ready."""
 
     _POLL_INTERVAL = 0.1
     _MIN_WAIT = 0.2
     _MAX_WAIT = 15.0
-
-    DEFAULT_CSS = _safe_css("""
-    AgentLoadingScreen {
-        align: center middle;
-        background: $panel 80%;
-        hatch: right $primary 30%;
-    }
-    #loading-container {
-        width: 50%;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #loading-container LoadingIndicator {
-        height: 3;
-        color: $primary;
-    }
-    #loading-text {
-        text-align: center;
-        color: $text;
-        padding: 1 0 0 0;
-    }
-    #loading-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """)
 
     def __init__(
         self,
@@ -255,7 +224,11 @@ class AgentLoadingScreen(ModalScreen[None]):
         loading_hint: str = "waiting for agent to initialize\u2026",
         on_attach: Callable[[], None] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            f"Launching [bold]{escape(agent_cmd)}[/bold]",
+            f"[dim]{escape(session_name)}[/dim]",
+            loading_hint,
+        )
         self._agent_cmd = agent_cmd
         self._session_name = session_name
         self._ready_marker = ready_marker
@@ -263,15 +236,6 @@ class AgentLoadingScreen(ModalScreen[None]):
         self._on_attach = on_attach
         self._dismissed = False
         self._start_time = 0.0
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="loading-container"):
-            yield LoadingIndicator()
-            yield Static(
-                f"Launching [bold]{escape(self._agent_cmd)}[/bold]",
-                id="loading-text",
-            )
-            yield Static(self._loading_hint, id="loading-hint")
 
     def on_mount(self) -> None:
         self._start_time = time.monotonic()
@@ -349,32 +313,40 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     ]
 
     CSS = _safe_css(
-        "CreatePanelScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        """
+        modal_screen_css("CreatePanelScreen")
+        + """
     #create-panel-container {
         width: 104;
+        max-width: 95%;
         height: auto;
-        max-height: 100%;
-        border: round $primary;
+        max-height: 95%;
+        border: round $primary 45%;
         background: $panel;
-        padding: 1 2;
+        padding: 0;
+    }
+    /* Naming needs only a line: the wide view with the preview opens after. */
+    #create-panel-container.-naming {
+        width: 56;
     }
     #create-panel-title {
-        text-align: center;
+        padding: 1 2 0 2;
         color: $text;
+        text-style: bold;
     }
     #create-panel-steps {
-        text-align: center;
-        padding: 0 0 1 0;
+        padding: 0 2 1 2;
+        border-bottom: solid $foreground 10%;
     }
     #create-panel-body {
         height: auto;
+        padding: 1 2 0 2;
     }
     #create-panel-left {
         width: 50;
         height: auto;
+    }
+    #create-panel-container.-naming #create-panel-left {
+        width: 1fr;
     }
     #create-panel-right {
         width: 1fr;
@@ -384,15 +356,18 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     }
     .section-label {
         color: $text-muted;
-        padding: 0 0 0 1;
+        text-style: bold;
+        padding: 0 0 1 0;
     }
     #panel-name-input {
         width: 100%;
-        margin: 0 0 0 0;
+        border: none;
+        background: $surface;
+        padding: 0 1;
     }
-    #panel-name-help {
-        color: $text-muted;
-        padding: 0 0 0 1;
+    #panel-name-input:focus {
+        border: none;
+        background-tint: $foreground 0%;
     }
     #layout-menu,
     #pane-menu,
@@ -403,23 +378,27 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         padding: 0;
         background: $panel;
     }
+    #layout-menu:focus,
+    #pane-menu:focus,
+    #session-menu:focus {
+        border: none;
+        background-tint: $foreground 0%;
+    }
     #grid-preview {
         width: auto;
         height: auto;
     }
     #create-panel-error {
         color: $error;
-        text-align: center;
-        padding: 1 0 0 0;
+        padding: 1 2 0 2;
         display: none;
     }
     #create-panel-error.-shown {
         display: block;
     }
     #create-panel-hint {
-        text-align: center;
         color: $text-muted;
-        padding: 1 0 0 0;
+        padding: 1 2 1 2;
     }
     """
     )
@@ -464,15 +443,14 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
                     yield Static(id="left-label", classes="section-label")
                     yield Input(
                         value=self._panel_name,
-                        placeholder="e.g. agents, review, frontend",
+                        placeholder="Name it after what it is for: agents, review…",
                         id="panel-name-input",
                     )
-                    yield Static(id="panel-name-help")
                     yield OptionList(*self._layout_options(), id="layout-menu")
                     yield OptionList(id="pane-menu")
                     yield OptionList(id="session-menu")
                 with Vertical(id="create-panel-right"):
-                    yield Static("Preview", classes="section-label")
+                    yield Static("PREVIEW", classes="section-label")
                     yield Static(id="grid-preview")
             yield Static(id="create-panel-error")
             yield Static(id="create-panel-hint")
@@ -489,15 +467,15 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def _title_markup(self) -> str:
         if self._editing:
-            return f"[bold $text]Edit panel[/]  [bold $text-primary]{escape(self._panel_name)}[/]"
-        return "[bold $text]New panel[/]"
+            return f"Edit panel  [$text-primary]{escape(self._panel_name)}[/]"
+        return "New panel"
 
     def _steps_text(self) -> Text:
         palette = _palette(self.app)
         text = Text()
         for index, label in enumerate(_STEPS, start=1):
             if index > 1:
-                text.append("   ›   ", style=palette.muted)
+                text.append("  ›  ", style=palette.muted)
             if index < self._step or (self._editing and index == 1):
                 text.append(f"✓ {label}", style=palette.success)
             elif index == self._step:
@@ -621,14 +599,23 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
     def _hint(self) -> str:
         if self._step == 1:
-            return "type a name    \\[enter] next    \\[esc] cancel"
+            return key_hints(("⏎", "next"), ("esc", "cancel"))
         if self._step == 2:
             back = "cancel" if self._editing else "back"
-            return f"↑↓ choose    \\[enter] next    \\[esc] {back}"
+            return key_hints(("↑↓", "choose"), ("⏎", "next"), ("esc", back))
         if self._picking is not None:
-            return f"↑↓ choose    \\[enter] put in pane {self._picking}    \\[esc] keep as is"
+            return key_hints(
+                ("↑↓", "choose"), ("⏎", f"put in pane {self._picking}"), ("esc", "keep as is")
+            )
         finish = "save" if self._editing else "create"
-        return f"↑↓ pane   \\[enter] choose   a fill empty   x clear   ^o {finish}   \\[esc] back"
+        return key_hints(
+            ("↑↓", "pane"),
+            ("⏎", "choose"),
+            ("a", "fill empty"),
+            ("x", "clear"),
+            ("^o", finish),
+            ("esc", "back"),
+        )
 
     def _refresh_view(self) -> None:
         self.query_one("#create-panel-steps", Static).update(self._steps_text())
@@ -644,43 +631,31 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         layout_menu = self.query_one("#layout-menu", OptionList)
         pane_menu = self.query_one("#pane-menu", OptionList)
         session_menu = self.query_one("#session-menu", OptionList)
-        help_text = self.query_one("#panel-name-help", Static)
         label = self.query_one("#left-label", Static)
         name_input.display = step == 1
-        help_text.display = step == 1
+        # The step trail already says "Name"; a label would repeat it.
+        label.display = step != 1
+        self.query_one("#create-panel-container").set_class(step == 1, "-naming")
         # The layout step shows the preview; while naming it would only distract.
         self.query_one("#create-panel-right").display = step != 1
         layout_menu.display = step == 2
         pane_menu.display = step == 3 and self._picking is None
         session_menu.display = step == 3 and self._picking is not None
         if step == 1:
-            label.update("Name")
-            help_text.update(self._name_help())
             name_input.focus()
         elif step == 2:
-            label.update("Layout")
+            label.update("LAYOUT")
             layout_menu.focus()
         elif self._picking is not None:
             palette = _palette(self.app)
             label.update(
-                Text.assemble(
-                    "Choose the session for ",
-                    (f" pane {self._picking} ", f"bold {palette.primary} reverse"),
-                )
+                Text.assemble(("SESSION FOR ", ""), (f"PANE {self._picking}", palette.primary))
             )
             session_menu.focus()
         else:
-            label.update("Panes")
+            label.update("PANES")
             pane_menu.focus()
         self._refresh_view()
-
-    def _name_help(self) -> str:
-        from ....integrations.tmux.core import make_panel_session_name
-
-        name = self.query_one("#panel-name-input", Input).value.strip()
-        if not name:
-            return "Name it after what it is for."
-        return f"Opens as [bold]{escape(make_panel_session_name(name))}[/bold]"
 
     def _render_pane_menu(self, highlight: int | None = None) -> None:
         menu = self.query_one("#pane-menu", OptionList)
@@ -752,7 +727,6 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "panel-name-input":
             self._error = None
-            self.query_one("#panel-name-help", Static).update(self._name_help())
             self._refresh_view()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:

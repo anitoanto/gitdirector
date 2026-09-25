@@ -471,18 +471,21 @@ class TestGetStatusSync:
         info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.AHEAD
         assert "ahead 3" in info.message
+        assert (info.ahead, info.behind) == (3, 0)
 
     def test_behind(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind="5\t0")
         info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.BEHIND
         assert "behind 5" in info.message
+        assert (info.ahead, info.behind) == (0, 5)
 
     def test_diverged(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind="2\t3")
         info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.DIVERGED
         assert "ahead" in info.message and "behind" in info.message
+        assert info.ahead > 0 and info.behind > 0
 
     def test_fetch_failure_keeps_local_comparison(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind="0\t2", fetch_ok=False)
@@ -497,6 +500,7 @@ class TestGetStatusSync:
         assert info.status == RepoStatus.UNKNOWN
         assert info.sync_stale is True
         assert "fetch error" in info.message
+        assert (info.ahead, info.behind) == (0, 0)
 
     def test_successful_fetch_is_not_stale(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind="0\t0")

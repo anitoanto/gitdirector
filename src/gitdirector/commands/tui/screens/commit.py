@@ -1,22 +1,11 @@
-"""Modals for the ``Review Diff`` → commit → push flow.
+"""Modals for the diff viewer's commit → push flow.
 
-The flow is:
+1. ``StageFilesConfirmScreen``: stage everything (``git add -A``) first?
+2. ``CommitMessageScreen``: the message, and commit or commit and push.
+3. ``CommitLoadingScreen``: a spinner while the worker thread runs.
+4. ``CommitResultScreen``: how the commit (and push) went.
 
-1. ``StageFilesConfirmScreen`` — asks the user to stage every change
-   (``git add -A``) before committing. Shows the aggregated ``+N -M``
-   stats so the user can sanity-check what they're about to commit.
-2. ``CommitMessageScreen`` — collects a commit message and lets the
-   user pick "commit" or "commit & push" as the final action. Uses a
-   single-line ``Input`` (multi-line commits aren't supported by the
-   project's existing UX patterns — see ``RenamePanelScreen``).
-3. ``CommitLoadingScreen`` — spinner with a status line while the
-   commit/push runs in a worker thread (the TUI must not block).
-4. ``CommitResultScreen`` — shows the outcome of the commit and (if
-   requested) the push, with a footer hint to close.
-
-The screens follow the same design language as the rest of the TUI
-(rounded ``$primary`` border, ``$panel`` background, ``$boost`` docked
-hint bar) so they sit naturally on top of the ``DiffReviewScreen``.
+They are cards like every other popup (see ``card``).
 """
 
 from __future__ import annotations
@@ -24,39 +13,51 @@ from __future__ import annotations
 from typing import Optional
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import LoadingIndicator, OptionList, Static, TextArea
+from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from ..constants import _MODAL_BINDINGS, _MODAL_CSS
-from ..terminal_caps import strip_unsupported_css as _safe_css
+from ..constants import _MODAL_BINDINGS
+from .card import (
+    LoadingCard,
+    ShortcutKeys,
+    card_css,
+    card_palette,
+    key_hints,
+    menu_row,
+)
+
+
+def _stats(app, additions: int, deletions: int, file_count: int) -> Text:
+    palette = card_palette(app)
+    noun = "file" if file_count == 1 else "files"
+    return Text.assemble(
+        (f"+{additions}", f"bold {palette.success}"),
+        " ",
+        (f"-{deletions}", f"bold {palette.danger}"),
+        (f"  ·  {file_count} {noun}", "dim"),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Stage-all confirm
 # ---------------------------------------------------------------------------
 
 
-class StageFilesConfirmScreen(ModalScreen[bool]):
-    """Ask the user whether to ``git add -A`` before committing.
-
-    The prompt includes the aggregated ``+N -M`` stats across every
-    file in the current diff so the user sees exactly what would be
-    staged if they answer Yes.
+class StageFilesConfirmScreen(ShortcutKeys, ModalScreen[bool]):
+    """Ask whether to ``git add -A`` before committing, showing what that stages.
 
     Dismisses with ``True`` for "Yes, stage everything", ``False`` for
-    "No, don't stage" or any cancel path.
+    "No" or any cancel path.
     """
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "StageFilesConfirmScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
+    CSS = card_css("StageFilesConfirmScreen", width=56)
 
     def __init__(self, repo_name: str, additions: int, deletions: int, file_count: int) -> None:
         super().__init__()
@@ -64,37 +65,32 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
         self.additions = additions
         self.deletions = deletions
         self.file_count = file_count
+        self._shortcuts = {"n": "no", "y": "yes"}
 
     def compose(self) -> ComposeResult:
-        noun = "file" if self.file_count == 1 else "files"
         with Vertical(id="menu-container"):
-            yield Static(
-                f"[bold $text]Stage all changes in[/] "
-                f"[$text-primary]{escape(self.repo_name)}[/]"
-                f"[bold $text]?[/]",
-                id="menu-title",
-            )
-            yield Static(
-                f"[$text-success]+{self.additions}[/]  "
-                f"[$text-error]-{self.deletions}[/]  "
-                f"[dim]\u00b7  {self.file_count} {noun}[/dim]",
-                id="menu-stats",
-            )
+            with Horizontal(id="menu-header"):
+                yield Static("Stage all changes?", id="menu-title")
+                yield Static(
+                    _stats(self.app, self.additions, self.deletions, self.file_count),
+                    id="menu-stats",
+                )
+            yield Static(Text(self.repo_name, style="dim"), id="menu-branch")
             yield OptionList(
-                Option("[dim]\u2717 No, keep working[/dim]", id="no"),
-                Option("[$text]\u2713[/] [bold]Yes, stage everything[/bold]", id="yes"),
+                Option(menu_row(Text("No, keep working", style="bold"), "", "n"), id="no"),
+                Option(menu_row(Text("Yes, stage everything", style="bold"), "", "y"), id="yes"),
                 id="action-menu",
             )
-            yield Static(
-                "[$text-success]+N[/] additions  [$text-error]-N[/] deletions  \u00b7  esc to cancel",
-                id="menu-hint",
-            )
+            yield Static(key_hints(("y", "stage"), ("n", "no"), ("esc", "cancel")), id="menu-hint")
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()
 
+    def _choose(self, option_id: str) -> None:
+        self.dismiss(option_id == "yes")
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(event.option.id == "yes")
+        self._choose(event.option.id)
 
     def action_cancel(self) -> None:
         self.dismiss(False)
@@ -112,12 +108,7 @@ class StageFilesConfirmScreen(ModalScreen[bool]):
 
 
 class _CommitActionOptionList(OptionList):
-    """OptionList used as the commit/push picker with vim-style j/k keys.
-
-    The ``j``/``k`` bindings live on the widget itself so they only
-    fire when the picker has focus. This keeps typing ``j`` or ``k``
-    inside the commit message input working as expected.
-    """
+    """The commit/push picker; j/k live here so typing them in the message works."""
 
     BINDINGS = [
         Binding("j", "cursor_down", show=False),
@@ -128,25 +119,14 @@ class _CommitActionOptionList(OptionList):
 class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
     """Collect a commit message and the final action (commit / commit & push).
 
-    Dismisses with a tuple ``(message, push_after)`` on confirm, or
-    ``None`` on cancel. ``push_after=True`` means the user picked
-    "commit & push" so the caller should run ``git push`` after the
-    commit succeeds.
-
-    Two picker entries below the input act as the action
-    picker; the first option ("commit") is highlighted by default.
-    Pressing ``enter`` from the input field commits with the currently
-    highlighted action, matching the project's existing form
-    conventions (see ``CreatePanelScreen``).
-
-    Focus toggles between the input and the action picker with
-    ``tab`` / ``shift+tab``. While the picker is focused, ``j`` /
-    ``k`` (and ``up`` / ``down``) move the selection.
+    Dismisses with ``(message, push_after)`` on confirm, or ``None`` on
+    cancel. Tab moves between the message and the action picker; Enter on
+    the picker, or ctrl+enter anywhere, commits with the highlighted action.
     """
 
     # Up/down and j/k are handled by the focused widget: the TextArea moves
-    # its own cursor and the action picker (``_CommitActionOptionList``)
-    # binds j/k itself, so the screen only owns confirm, cancel, and focus.
+    # its own cursor and the action picker binds j/k itself, so the screen
+    # only owns confirm, cancel, and focus.
     BINDINGS = [
         Binding("escape", "cancel", "Esc cancel", show=True),
         Binding("ctrl+enter", "confirm", "Confirm", show=False),
@@ -154,58 +134,17 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         Binding("shift+tab", "focus_toggle", "Shift+Tab switch focus", show=False),
     ]
 
-    CSS = _safe_css(
-        "CommitMessageScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        + _MODAL_CSS
-        + """
-        #commit-message-container {
-            width: 60%;
-            height: auto;
-            border: round $primary;
-            background: $panel;
-            padding: 1 2;
-        }
-        #commit-message-title {
-            text-align: center;
-            padding: 0 1 1 1;
-            color: $text;
-        }
-        #commit-message-stats {
-            text-align: center;
-            padding: 0 1 1 1;
-            color: $text-muted;
-        }
-        #commit-message-input {
-            width: 1fr;
-            height: auto;
-            min-height: 3;
-            max-height: 10;
-            border: none;
-            background: $boost;
-            color: $text;
-            margin: 0 0 1 0;
-            padding: 0 1;
-            scrollbar-size-vertical: 0;
-            overflow-y: hidden;
-        }
-        #commit-message-input:focus {
-            background: $boost;
-        }
-        #commit-message-action-list {
-            width: 1fr;
-            height: auto;
-            border: none;
-            padding: 0 1;
-            margin: 0 0 1 0;
-        }
-        #commit-message-hint {
-            text-align: center;
-            padding: 0 1;
-            color: $text-muted;
-        }
-    """
+    CSS = card_css(
+        "CommitMessageScreen",
+        width=72,
+        extra="""
+    #commit-message-input {
+        min-height: 3;
+        max-height: 10;
+        scrollbar-size-vertical: 0;
+        overflow-y: hidden;
+    }
+    """,
     )
 
     def __init__(self, repo_name: str, additions: int, deletions: int, file_count: int) -> None:
@@ -217,32 +156,35 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         self._in_message = True
 
     def compose(self) -> ComposeResult:
-        noun = "file" if self.file_count == 1 else "files"
-        with Vertical(id="commit-message-container"):
-            yield Static(
-                f"[bold $text]Commit changes in[/] [$text-primary]{escape(self.repo_name)}[/]",
-                id="commit-message-title",
-            )
-            yield Static(
-                f"[$text-success]+{self.additions}[/]  "
-                f"[$text-error]-{self.deletions}[/]  "
-                f"[dim]\u00b7  {self.file_count} {noun}[/dim]",
-                id="commit-message-stats",
-            )
+        with Vertical(id="menu-container"):
+            with Horizontal(id="menu-header"):
+                yield Static("Commit", id="menu-title")
+                yield Static(
+                    _stats(self.app, self.additions, self.deletions, self.file_count),
+                    id="menu-meta",
+                )
+            yield Static(Text(self.repo_name, style="dim"), id="menu-branch")
             yield TextArea(
                 "",
-                placeholder="Commit message\u2026",
+                placeholder="What changed and why…",
                 id="commit-message-input",
+                classes="card-input",
             )
             yield _CommitActionOptionList(
-                Option("[$text-primary]\u2191[/] [bold]Commit and push[/bold]", id="commit_push"),
-                Option("[$text]\u2713[/] [bold]Commit[/bold]", id="commit"),
+                Option(
+                    menu_row(Text.assemble(("↑ ", "dim"), ("Commit and push", "bold"))),
+                    id="commit_push",
+                ),
+                Option(
+                    menu_row(Text.assemble(("✓ ", "dim"), ("Commit", "bold"))),
+                    id="commit",
+                ),
                 id="commit-message-action-list",
+                classes="card-actions",
             )
             yield Static(
-                "type message    \\[tab] switch    [\u2191\u2193/jk] pick action"
-                "    [ctrl+enter] confirm    \\[esc] cancel",
-                id="commit-message-hint",
+                key_hints(("tab", "switch"), ("↑↓", "action"), ("^⏎", "commit"), ("esc", "cancel")),
+                id="menu-hint",
             )
 
     def on_mount(self) -> None:
@@ -321,63 +263,27 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
 # ---------------------------------------------------------------------------
 
 
-class CommitLoadingScreen(ModalScreen[None]):
+class CommitLoadingScreen(LoadingCard):
     """Spinner shown while the commit/push worker runs in a thread."""
 
     BINDINGS = [Binding("escape", "noop", "Esc", show=False)]
 
-    CSS = _safe_css(
-        "CommitLoadingScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        + _MODAL_CSS
-        + """
-        #commit-loading-container {
-            width: 50%;
-            height: auto;
-            border: round $primary;
-            background: $panel;
-            padding: 1 2;
-        }
-        #commit-loading-title {
-            text-align: center;
-            color: $text;
-            padding: 0 1;
-        }
-        #commit-loading-status {
-            text-align: center;
-            color: $text-muted;
-            padding: 1 1 0 1;
-        }
-    """
-    )
-
     def __init__(self, repo_name: str, push_after: bool) -> None:
-        super().__init__()
+        verb = "Committing and pushing" if push_after else "Committing"
+        super().__init__(f"{verb} [bold]{escape(repo_name)}[/bold]", "", "Staging…")
         self.repo_name = repo_name
         self.push_after = push_after
-        self._status = "Staging\u2026"
-
-    def compose(self) -> ComposeResult:
-        with Container(id="commit-loading-container"):
-            yield Static(
-                f"[bold $text]{'Commit & push' if self.push_after else 'Commit'}"
-                f" \u2014 {escape(self.repo_name)}[/]",
-                id="commit-loading-title",
-            )
-            yield LoadingIndicator(id="commit-loading-spinner")
-            yield Static(self._status, id="commit-loading-status")
 
     def set_status(self, message: str) -> None:
-        """Update the spinner status line from the worker thread."""
-        self._status = message
+        """Update the status line from the worker thread."""
+        self.hint = message
         try:
-            self.query_one("#commit-loading-status", Static).update(message)
+            self.query_one("#menu-hint", Static).update(message)
         except Exception:
             pass
 
     def action_noop(self) -> None:
-        # Esc does nothing on the loading screen — the worker must
+        # Esc does nothing on the loading screen: the worker must
         # finish or the app must shut down for the modal to go away.
         return None
 
@@ -388,47 +294,23 @@ class CommitLoadingScreen(ModalScreen[None]):
 
 
 class CommitResultScreen(ModalScreen[None]):
-    """Show the outcome of a commit (and optional push) to the user."""
+    """How the commit (and optional push) went."""
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "CommitResultScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        + _MODAL_CSS
-        + """
-        #commit-result-container {
-            width: 60%;
-            height: auto;
-            border: round $primary;
-            background: $panel;
-            padding: 1 2;
-        }
-        #commit-result-title {
-            text-align: center;
-            color: $text;
-            padding: 0 1;
-        }
-        #commit-result-message {
-            text-align: center;
-            color: $text-muted;
-            padding: 0 1 1 1;
-        }
-        #commit-result-output {
-            width: 1fr;
-            height: auto;
-            max-height: 12;
-            padding: 0 1;
-            background: $boost;
-            color: $text;
-        }
-        #commit-result-hint {
-            text-align: center;
-            padding: 1 1 0 1;
-            color: $text-muted;
-        }
-    """
+    CSS = card_css(
+        "CommitResultScreen",
+        width=84,
+        extra="""
+    #commit-result-output {
+        height: auto;
+        max-height: 12;
+        margin: 1 2 0 2;
+        padding: 0 1;
+        background: $surface;
+        color: $text;
+    }
+    """,
     )
 
     def __init__(
@@ -446,39 +328,26 @@ class CommitResultScreen(ModalScreen[None]):
         self.push_ok = push_ok
         self.output = output
 
+    def _badge(self) -> Text:
+        palette = card_palette(self.app)
+        good, bad = f"bold {palette.success}", f"bold {palette.danger}"
+        if not self.commit_ok:
+            return Text("✕ Commit failed", style=bad)
+        if self.push_ok is True:
+            return Text("✓ Committed and pushed", style=good)
+        if self.push_ok is False:
+            return Text.assemble(("✓ Committed", good), ("  ·  ", "dim"), ("✕ push failed", bad))
+        return Text("✓ Committed", style=good)
+
     def compose(self) -> ComposeResult:
-        if self.commit_ok:
-            title = (
-                f"[bold green]\u2713 Pushed[/bold green]  "
-                f"[dim]\u2014  {escape(self.repo_name)}[/dim]"
-                if self.push_ok is True
-                else f"[bold green]\u2713 Committed[/bold green]  "
-                f"[dim]\u2014  {escape(self.repo_name)}[/dim]"
-            )
-        else:
-            title = (
-                f"[bold red]\u2717 Commit failed[/bold red]  "
-                f"[dim]\u2014  {escape(self.repo_name)}[/dim]"
-            )
-
-        with Container(id="commit-result-container"):
-            yield Static(title, id="commit-result-title")
-            yield Static(
-                f"[dim]message:[/dim] [italic]{escape(self.commit_message)}[/italic]",
-                id="commit-result-message",
-            )
-            yield Static(escape(self.output) if self.output else "", id="commit-result-output")
-            yield Static(
-                "\\[enter]/\\[esc] close",
-                id="commit-result-hint",
-            )
-
-    def on_mount(self) -> None:
-        # Focus the container so any key press (enter/space) dismisses.
-        try:
-            self.query_one("#commit-result-container").focus()
-        except Exception:
-            pass
+        with Vertical(id="menu-container"):
+            with Horizontal(id="menu-header"):
+                yield Static(escape(self.repo_name), id="menu-title")
+                yield Static(self._badge(), id="result-status")
+            yield Static(Text(self.commit_message, style="italic dim"), id="commit-result-message")
+            if self.output:
+                yield Static(Text(self.output), id="commit-result-output")
+            yield Static(key_hints(("⏎", "close"), ("esc", "close")), id="menu-hint")
 
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
         if event.key in {"enter", "space"}:

@@ -368,7 +368,7 @@ def _print_check(check: DoctorCheck) -> None:
     summary = check.summary.strip()
     heading = f"{_status_label(check.status)} [white]{check.name}[/white]"
     if summary:
-        heading = f"{heading} [dim]— {summary}[/dim]"
+        heading = f"{heading} [dim]· {summary}[/dim]"
     console.print(heading)
     for detail in check.details:
         if detail.endswith(": not installed"):

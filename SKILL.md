@@ -1,19 +1,19 @@
 ---
 name: gitdirector
-description: Drive GitDirector headlessly from a shell — run long-lived commands in background tmux sessions, read their output, and send them input. Use when the user asks you to use GitDirector, `gitdirector`, or `gd` to start dev servers, watchers, REPLs, or AI agents.
+description: Drive GitDirector headlessly from a shell: run long-lived commands in background tmux sessions, read their output, and send them input. Use when the user asks you to use GitDirector, `gitdirector`, or `gd` to start dev servers, watchers, REPLs, or AI agents.
 ---
 
 # GitDirector for coding agents
 
 GitDirector runs commands in named, detached tmux sessions that keep running
-after your call returns, and that you can read from and write to later — which
+after your call returns, and that you can read from and write to later, which
 a normal shell call, blocking until the command exits, cannot do.
 
 ## When to use it
 
 Use it **only** when the user has asked for GitDirector / `gd`, **and** the
-command is long-lived — dev server, build/file watcher, REPL, or an interactive
-AI agent.
+command is long-lived (dev server, build/file watcher, REPL, or an interactive
+AI agent).
 
 Not for one-off commands: the session closes the moment its command exits,
 taking the output with it. Run those in your normal shell.

@@ -9,7 +9,7 @@ from textual.widgets import Static, TabbedContent
 from gitdirector.commands.tui import GitDirectorConsole
 from gitdirector.commands.tui.topbar import NavState, TopBar
 
-from .conftest import _make_info, _mock_manager
+from .conftest import SAMPLE_SESSIONS, _make_info, _mock_manager, patch_sessions
 
 
 def _text(app, widget_id: str) -> str:
@@ -66,16 +66,17 @@ class TestTopBar:
             await pilot.pause()
             assert app.query_one("#nav-panels").has_class("-active")
 
-    async def test_shows_the_console_counts_and_the_waiting_badge(self):
+    # The sample sessions, not whatever tmux happens to run on this machine.
+    @patch_sessions()
+    async def test_shows_the_console_counts_and_the_waiting_badge(self, _mock_list):
         app = _console()
         async with app.run_test(size=(120, 30)) as pilot:
             await app.workers.wait_for_complete()
-            sessions = len(app._sessions_entries)
             app._waiting_count = 2
             app._refresh_top_bar()
             await pilot.pause()
             assert _text(app, "nav-repos") == "Repositories 1"
-            assert _text(app, "nav-sessions") == f"Sessions {sessions} ●2"
+            assert _text(app, "nav-sessions") == f"Sessions {len(SAMPLE_SESSIONS)} ●2"
             assert _text(app, "nav-panels") == "Panels"
 
 
@@ -99,3 +100,44 @@ class TestNavMarkup:
             assert _text(pilot.app, "brand") == "◆"
             assert _text(pilot.app, "nav-repos").startswith("Repos")
             assert "v" not in _text(pilot.app, "top-meta")
+
+
+class TestUpdateNotice:
+    async def test_a_newer_release_is_shown_next_to_the_version(self):
+        app = _console()
+        async with app.run_test(size=(140, 30)) as pilot:
+            # The console's own check (finding nothing here) must not land after.
+            await app.workers.wait_for_complete()
+            app._set_update_notice("Update available: v9.9.9 (current v1.0.0)", "9.9.9")
+            await pilot.pause()
+            meta = app.query_one("#top-meta", Static)
+            assert "→ v9.9.9" in _text(app, "top-meta")
+            assert "pip install -U gitdirector" in str(meta.tooltip)
+
+    async def test_nothing_extra_without_an_update(self):
+        app = _console()
+        async with app.run_test(size=(140, 30)) as pilot:
+            # The console's own check (finding nothing here) must not land after.
+            await app.workers.wait_for_complete()
+            app._set_update_notice(None, None)
+            await pilot.pause()
+            assert "→" not in _text(app, "top-meta")
+            assert app.query_one("#top-meta", Static).tooltip is None
+
+    async def test_narrow_bar_keeps_the_update(self):
+        app = _console()
+        async with app.run_test(size=(60, 30)) as pilot:
+            # The console's own check (finding nothing here) must not land after.
+            await app.workers.wait_for_complete()
+            app._set_update_notice("Update available", "9.9.9")
+            await pilot.pause()
+            assert _text(app, "top-meta").startswith("↑ v9.9.9")
+
+    def test_only_a_newer_release_counts(self):
+        from gitdirector.commands.tui.app import _newer_version
+        from gitdirector.version_check import UpdateStatus
+
+        assert _newer_version(UpdateStatus("1.8.8", "1.9.0")) == "1.9.0"
+        assert _newer_version(UpdateStatus("1.8.8", "1.8.8")) is None
+        assert _newer_version(UpdateStatus("1.8.8", None)) is None
+        assert _newer_version(None) is None

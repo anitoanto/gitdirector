@@ -1,6 +1,6 @@
 """The ``gd-capture`` command: dump the current scrollback of a live gd session.
 
-gd-tmux sessions are ephemeral — they self-destruct when the command exits —
+gd-tmux sessions are ephemeral (they self-destruct when the command exits),
 so this only works for *running* sessions. For finished sessions, the only
 option is to redirect the command's own output to a file:
 

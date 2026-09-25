@@ -5,87 +5,140 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.markup import escape
+from rich.table import Table
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ....info import RepoInfoResult
-from ..constants import _MODAL_BINDINGS, _MODAL_CSS
-from ..terminal_caps import strip_unsupported_css as _safe_css
+from ....repo import RepositoryInfo, RepoStatus
+from ..constants import _MODAL_BINDINGS
+from ..repo_rows import status_text
 from ._shared import _render_ansi_output
+from .card import (
+    LoadingCard,
+    ShortcutKeys,
+    card_css,
+    card_palette,
+    card_subtitle,
+    heading,
+    key_hints,
+    menu_row,
+    spacer,
+)
 from .session_actions import SessionActionMenuScreen, session_action_menu_css
 
 
 class ActionMenuScreen(SessionActionMenuScreen):
-    """Modal popup with actions for the selected repository."""
+    """The launcher for one repository, headed by its branch and status."""
 
     CSS = session_action_menu_css("ActionMenuScreen")
 
-    def __init__(self, repo_name: str, repo_path: Path, branch: str | None = None) -> None:
+    def __init__(
+        self,
+        repo_name: str,
+        repo_path: Path,
+        branch: str | None = None,
+        status: Text | None = None,
+    ) -> None:
         super().__init__(repo_name, repo_path)
         self.branch = branch
+        self.status = status
 
-    def _subtitle(self) -> str:
-        return f"[dim]branch:[/dim] [$text-primary]{self.branch or '—'}[/]"
+    def _meta(self) -> Text:
+        return Text(self.branch or "detached", style="bold")
 
-    def _primary_options(self) -> list[Option]:
-        return super()._primary_options()
+    def _subtitle(self) -> Text:
+        return card_subtitle(self.path, self.status)
 
 
-class GitOperationsMenuScreen(ModalScreen[str]):
-    """Modal popup with git operations for the selected repository."""
+_GIT_ACTIONS = (
+    ("Inspect", "status", "Status", "git status", "s"),
+    ("Inspect", "timeline", "Timeline", "git log --graph --all", "t"),
+    ("Inspect", "branches", "Branches", "git branch -a", "b"),
+    ("Inspect", "remotes", "Remotes", "git remote -v", "r"),
+    ("Sync", "pull", "Pull", "git pull --ff-only", "p"),
+    ("Sync", "push", "Push", "git push", "P"),
+    ("Review", "review_diff", "Review changes", "diff and commit", "d"),
+)
+
+
+def _commits(count: int) -> str:
+    return f"{count} commit{'' if count == 1 else 's'}"
+
+
+class GitOperationsMenuScreen(ShortcutKeys, ModalScreen[str]):
+    """Git for one repository: what to inspect, sync and review, with what is pending."""
 
     BINDINGS = _MODAL_BINDINGS
 
-    CSS = _safe_css(
-        "GitOperationsMenuScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }" + _MODAL_CSS
-    )
+    CSS = card_css("GitOperationsMenuScreen")
 
-    def __init__(self, repo_name: str, branch: str | None = None) -> None:
+    def __init__(
+        self,
+        repo_name: str,
+        branch: str | None = None,
+        info: RepositoryInfo | None = None,
+        path: Path | None = None,
+    ) -> None:
         super().__init__()
         self.repo_name = repo_name
         self.branch = branch
+        self.info = info
+        self.path = path
+        self._shortcuts = {key: action for _, action, _, _, key in _GIT_ACTIONS}
+
+    def _detail(self, action: str) -> Text:
+        """What an action would do right now, when the last status says."""
+        info = self.info
+        if info is None:
+            return Text()
+        pending = f"bold {card_palette(self.app).yellow}"
+        if action == "pull" and info.behind:
+            return Text(f"↓{_commits(info.behind)} to pull", style=pending)
+        if action == "push" and info.ahead:
+            return Text(f"↑{_commits(info.ahead)} to push", style=pending)
+        if action in ("pull", "push") and info.status is RepoStatus.UP_TO_DATE:
+            return Text("up to date", style="dim")
+        if action == "review_diff":
+            staged = len(info.staged_files or ())
+            changed = len(info.unstaged_files or ())
+            parts = [f"{staged} staged"] if staged else []
+            parts += [f"{changed} changed"] if changed else []
+            return Text(" · ".join(parts) or "nothing to review", style="dim")
+        return Text()
+
+    def _options(self) -> list[Option]:
+        items: list[Option] = []
+        section = None
+        for group, action, label, command, key in _GIT_ACTIONS:
+            if group != section:
+                if section is not None:
+                    items.append(spacer())
+                items.append(heading(group))
+                section = group
+            detail = self._detail(action)
+            if not detail.plain:
+                detail = Text(command, style="dim")
+            items.append(Option(menu_row(Text(label, style="bold"), detail, key), id=action))
+        return items
 
     def compose(self) -> ComposeResult:
+        status = status_text(self.info, card_palette(self.app)) if self.info else None
         with Vertical(id="menu-container"):
-            yield Static(f"[bold $text]{escape(self.repo_name)}[/]", id="menu-title")
+            with Horizontal(id="menu-header"):
+                yield Static(escape(self.repo_name), id="menu-title")
+                yield Static(Text(self.branch or "detached", style="bold"), id="menu-meta")
+            yield Static(card_subtitle(self.path, status), id="menu-branch")
+            yield OptionList(*self._options(), id="action-menu")
             yield Static(
-                f"[dim]branch:[/dim] [$text-primary]{escape(self.branch or '—')}[/]",
-                id="menu-branch",
+                key_hints(("↑↓", "select"), ("⏎", "run"), ("key", "jump"), ("esc", "close")),
+                id="menu-hint",
             )
-            yield OptionList(
-                Option("[$text]>[/] [bold]Status[/bold] [dim]git status[/dim]", id="status"),
-                Option(
-                    "[$text]*[/] [bold]Timeline[/bold] [dim]git log --graph --decorate --all[/dim]",
-                    id="timeline",
-                ),
-                Option(
-                    "[$text]⑂[/] [bold]Branches[/bold] [dim]git branch -a[/dim]",
-                    id="branches",
-                ),
-                Option(
-                    "[$text]◎[/] [bold]Remotes[/bold] [dim]git remote -v[/dim]",
-                    id="remotes",
-                ),
-                Option(
-                    "[$text]↓[/] [bold]Pull[/bold] [dim]git pull --ff-only[/dim]",
-                    id="pull",
-                ),
-                Option("[$text]↑[/] [bold]Push[/bold] [dim]git push[/dim]", id="push"),
-                Option("", disabled=True),
-                Option("[dim]Review[/dim]", disabled=True),
-                Option(
-                    "[$text]\u00b1[/] [bold]Review Diff[/bold] [dim]uncommitted changes[/dim]",
-                    id="review_diff",
-                ),
-                id="action-menu",
-            )
-            yield Static("↑↓/jk select    \\[enter] confirm    \\[esc] close", id="menu-hint")
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()
@@ -103,8 +156,52 @@ class GitOperationsMenuScreen(ModalScreen[str]):
         self.query_one("#action-menu", OptionList).action_cursor_up()
 
 
-class GitCommandResultScreen(ModalScreen[str | None]):
-    """Modal popup showing the output of a git command."""
+_OUTPUT_HINT = key_hints(("↑↓", "scroll"), ("⏎", "close"), ("esc", "back"))
+# Output is for reading: the card takes most of the screen.
+_OUTPUT_CSS = """
+    .-output-card #menu-container {
+        height: 85%;
+    }
+    #result-output-scroll {
+        height: 1fr;
+        margin: 1 2 0 2;
+        padding: 0 1;
+        background: $surface;
+    }
+    /* A wrapped line would break the graph's columns. */
+    #result-output.-graph {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+"""
+_GRAPH_GLYPHS = str.maketrans({"*": "●", "|": "│", "/": "╱", "\\": "╲", "_": "─"})
+_GRAPH_CHARS = frozenset("*|/\\_ -.")
+
+
+def pretty_graph(text: Text) -> Text:
+    """``git log --graph``'s ASCII lines drawn with box characters, colours kept.
+
+    Only each line's graph prefix changes; one character stays one
+    character, so git's colour spans still line up.
+    """
+    lines = []
+    for line in text.plain.split("\n"):
+        width = len(line) - len(line.lstrip("".join(_GRAPH_CHARS)))
+        lines.append(line[:width].translate(_GRAPH_GLYPHS) + line[width:])
+    pretty = Text("\n".join(lines), style=text.style, no_wrap=True)
+    pretty.spans = list(text.spans)
+    return pretty
+
+
+def result_badge(ok: bool, label: str, app) -> Text:
+    palette = card_palette(app)
+    if ok:
+        return Text(f"✓ {label}", style=f"bold {palette.success}")
+    return Text(f"✕ {label}", style=f"bold {palette.danger}")
+
+
+class OutputCard(ModalScreen[str | None]):
+    """What a git command printed: the repository, how it went, and the output."""
 
     BINDINGS = [
         Binding("escape", "back", "Esc back", show=False),
@@ -115,48 +212,64 @@ class GitCommandResultScreen(ModalScreen[str | None]):
         Binding("k", "scroll_up", "↑", show=False),
     ]
 
-    DEFAULT_CSS = _safe_css("""
-    GitCommandResultScreen {
-        align: center middle;
-        background: $panel 80%;
-        hatch: right $primary 30%;
-    }
-    #git-command-result-container {
-        width: 84;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #git-command-result-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #git-command-result-command {
-        text-align: center;
-        padding: 0 1 1 1;
-        color: $text-muted;
-    }
-    #git-command-result-status {
-        text-align: center;
-        padding: 0 1 1 1;
-    }
-    #git-command-result-output-scroll {
-        height: 12;
-        border: round $surface;
-        padding: 0 1;
-        margin: 0 1;
-    }
-    #git-command-result-output {
-        color: $text;
-    }
-    #git-command-result-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """)
+    DEFAULT_CLASSES = "-output-card"
+    # Textual scopes a screen's CSS under the concrete class, which would keep
+    # these rules off every subclass; the class selector is specific enough.
+    SCOPED_CSS = False
+
+    CSS = card_css(".-output-card", width="90%", extra=_OUTPUT_CSS)
+
+    def __init__(
+        self,
+        repo_name: str,
+        command: str | None,
+        ok: bool,
+        output: str,
+        status: str,
+        *,
+        graph: bool = False,
+    ):
+        super().__init__()
+        self.repo_name = repo_name
+        self.command = command
+        self.ok = ok
+        self.output = output
+        self.status = status
+        self.graph = graph
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="menu-container"):
+            with Horizontal(id="menu-header"):
+                yield Static(escape(self.repo_name), id="menu-title")
+                yield Static(result_badge(self.ok, self.status, self.app), id="result-status")
+            yield Static(
+                Text(f"$ {self.command}" if self.command else "", style="dim"),
+                id="menu-branch",
+            )
+            output = _render_ansi_output(self.output)
+            with VerticalScroll(id="result-output-scroll"):
+                yield Static(
+                    pretty_graph(output) if self.graph else output,
+                    id="result-output",
+                    classes="-graph" if self.graph else "",
+                )
+            yield Static(_OUTPUT_HINT, id="menu-hint")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_back(self) -> None:
+        self.dismiss("back")
+
+    def action_scroll_down(self) -> None:
+        self.query_one("#result-output-scroll", VerticalScroll).action_scroll_down()
+
+    def action_scroll_up(self) -> None:
+        self.query_one("#result-output-scroll", VerticalScroll).action_scroll_up()
+
+
+class GitCommandResultScreen(OutputCard):
+    """The output of a read-only git command (status, log, branches, remotes)."""
 
     def __init__(
         self,
@@ -167,107 +280,15 @@ class GitCommandResultScreen(ModalScreen[str | None]):
         *,
         success_text: str = "Command completed",
         failure_text: str = "Command failed",
+        graph: bool = False,
     ) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.command = command
-        self.ok = ok
-        self.output = output.strip() or ("No output." if not ok else "Command completed.")
-        self.success_text = success_text
-        self.failure_text = failure_text
-
-    def compose(self) -> ComposeResult:
-        status_text = self.success_text if self.ok else self.failure_text
-        status_style = "green" if self.ok else "red"
-
-        with Vertical(id="git-command-result-container"):
-            yield Static(
-                f"[bold $text]{escape(self.repo_name)}[/]",
-                id="git-command-result-title",
-            )
-            if self.command:
-                yield Static(
-                    f"[dim]{escape(self.command)}[/dim]",
-                    id="git-command-result-command",
-                )
-            yield Static(
-                f"[{status_style}]{escape(status_text)}[/{status_style}]",
-                id="git-command-result-status",
-            )
-            with VerticalScroll(id="git-command-result-output-scroll"):
-                yield Static(_render_ansi_output(self.output), id="git-command-result-output")
-            yield Static(
-                "↑↓/jk scroll    \\[enter] close    \\[esc] back",
-                id="git-command-result-hint",
-            )
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_back(self) -> None:
-        self.dismiss("back")
-
-    def action_scroll_down(self) -> None:
-        self.query_one("#git-command-result-output-scroll", VerticalScroll).action_scroll_down()
-
-    def action_scroll_up(self) -> None:
-        self.query_one("#git-command-result-output-scroll", VerticalScroll).action_scroll_up()
+        output = output.strip() or ("No output." if not ok else "Command completed.")
+        status = success_text if ok else failure_text
+        super().__init__(repo_name, command, ok, output, status, graph=graph and ok)
 
 
-class PullResultScreen(ModalScreen[str | None]):
-    """Modal popup showing the outcome of a repository pull."""
-
-    BINDINGS = [
-        Binding("escape", "back", "Esc back", show=False),
-        Binding("enter", "cancel", "Enter close", show=False),
-        Binding("down", "scroll_down", "↓", show=False),
-        Binding("j", "scroll_down", "↓", show=False),
-        Binding("up", "scroll_up", "↑", show=False),
-        Binding("k", "scroll_up", "↑", show=False),
-    ]
-
-    CSS = _safe_css(
-        "PullResultScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        """
-    #pull-result-container {
-        width: 84;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #pull-result-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #pull-result-command {
-        text-align: center;
-        padding: 0 1 1 1;
-        color: $text-muted;
-    }
-    #pull-result-status {
-        text-align: center;
-        padding: 0 1 1 1;
-    }
-    #pull-result-output-scroll {
-        height: 12;
-        border: round $surface;
-        padding: 0 1;
-        margin: 0 1;
-    }
-    #pull-result-output {
-        color: $text;
-    }
-    #pull-result-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """
-    )
+class PullResultScreen(OutputCard):
+    """How a pull or push went."""
 
     def __init__(
         self,
@@ -279,168 +300,119 @@ class PullResultScreen(ModalScreen[str | None]):
         operation: str = "Pull",
         empty_success: str = "Already up to date.",
     ) -> None:
-        super().__init__()
-        self.repo_name = repo_name
-        self.command = command
-        self.ok = ok
+        output = output.strip() or (empty_success if ok else "No output.")
+        status = f"{operation} completed" if ok else f"{operation} failed"
+        super().__init__(repo_name, command, ok, output, status)
         self.operation = operation
-        self.output = output.strip() or (empty_success if ok else "No output.")
-
-    def compose(self) -> ComposeResult:
-        status_text = f"{self.operation} completed" if self.ok else f"{self.operation} failed"
-        status_style = "green" if self.ok else "red"
-
-        with Vertical(id="pull-result-container"):
-            yield Static(
-                f"[bold $text]{escape(self.repo_name)}[/]",
-                id="pull-result-title",
-            )
-            if self.command:
-                yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-result-command")
-            yield Static(
-                f"[{status_style}]{status_text}[/{status_style}]",
-                id="pull-result-status",
-            )
-            with VerticalScroll(id="pull-result-output-scroll"):
-                yield Static(_render_ansi_output(self.output), id="pull-result-output")
-            yield Static(
-                "↑↓/jk scroll    \\[enter] close    \\[esc] back",
-                id="pull-result-hint",
-            )
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def action_back(self) -> None:
-        self.dismiss("back")
-
-    def action_scroll_down(self) -> None:
-        self.query_one("#pull-result-output-scroll", VerticalScroll).action_scroll_down()
-
-    def action_scroll_up(self) -> None:
-        self.query_one("#pull-result-output-scroll", VerticalScroll).action_scroll_up()
 
 
-class PullLoadingScreen(ModalScreen[None]):
-    """Loading overlay shown while a repository pull is in progress."""
-
-    DEFAULT_CSS = _safe_css("""
-    PullLoadingScreen {
-        align: center middle;
-        background: $panel 80%;
-        hatch: right $primary 30%;
-    }
-    #pull-loading-container {
-        width: 50%;
-        height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
-    }
-    #pull-loading-container LoadingIndicator {
-        height: 3;
-        color: $primary;
-    }
-    #pull-loading-title {
-        text-align: center;
-        color: $text;
-        padding: 1 0 0 0;
-    }
-    #pull-loading-command {
-        text-align: center;
-        color: $text-muted;
-        padding: 0 0 1 0;
-    }
-    #pull-loading-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """)
+class PullLoadingScreen(LoadingCard):
+    """Shown while a pull or push runs."""
 
     def __init__(self, repo_name: str, command: str, *, verb: str = "Pulling") -> None:
-        super().__init__()
+        super().__init__(
+            f"{escape(verb)} [bold]{escape(repo_name)}[/bold]",
+            f"[dim]$ {escape(command)}[/dim]",
+        )
         self.repo_name = repo_name
         self.command = command
         self.verb = verb
 
-    def compose(self) -> ComposeResult:
-        with Vertical(id="pull-loading-container"):
-            yield LoadingIndicator()
-            yield Static(
-                f"{escape(self.verb)} [bold]{escape(self.repo_name)}[/bold]",
-                id="pull-loading-title",
-            )
-            yield Static(f"[dim]{escape(self.command)}[/dim]", id="pull-loading-command")
-            yield Static("please wait...", id="pull-loading-hint")
+
+_BAR_WIDTH = 18
+_MAX_FILE_TYPES = 8
+
+
+def _facts_grid(facts: list[tuple[str, Text]]) -> Table:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", no_wrap=True)
+    grid.add_column(overflow="fold")
+    for label, value in facts:
+        grid.add_row(label, value)
+    return grid
+
+
+def _language_grid(result: RepoInfoResult, accent: str) -> Table:
+    """One line per file type, with a bar for its share of the lines (or files)."""
+    by_lines = result.total_lines > 0
+    total = result.total_lines if by_lines else result.total_files
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(no_wrap=True)
+    grid.add_column(no_wrap=True)
+    for column in range(3):
+        grid.add_column(justify="right", no_wrap=True)
+    shown = result.file_types[:_MAX_FILE_TYPES]
+    for ft in shown:
+        amount = (ft.line_count or 0) if by_lines else ft.count
+        filled = round(_BAR_WIDTH * amount / total) if total else 0
+        bar = Text("█" * filled, style=accent)
+        bar.append("░" * (_BAR_WIDTH - filled), style="dim")
+        grid.add_row(
+            Text(ft.extension, style="bold"),
+            bar,
+            Text(f"{ft.count:,} files", style="dim"),
+            Text(f"{ft.line_count:,} lines" if ft.line_count is not None else "", style="dim"),
+            Text(f"{ft.token_count:,} tok" if ft.token_count is not None else "", style="dim"),
+        )
+    rest = len(result.file_types) - len(shown)
+    if rest > 0:
+        grid.add_row(Text(f"+{rest} more", style="dim"), "", "", "", "")
+    return grid
 
 
 class RepoInfoScreen(ModalScreen[None]):
-    """Modal popup showing repository file statistics."""
+    """A repository (or group) at a glance: its git state, then its code by language."""
 
     BINDINGS = [_MODAL_BINDINGS[0]]
 
-    CSS = _safe_css(
-        "RepoInfoScreen {"
-        " align: center middle; background: $panel 80%; hatch: right $primary 30%;"
-        " }"
-        """
-    #info-container {
-        width: 80;
+    CSS = card_css(
+        "RepoInfoScreen",
+        width=84,
+        extra="""
+    RepoInfoScreen .info-section {
         height: auto;
-        border: round $primary;
-        background: $panel;
-        padding: 1 2;
+        padding: 1 2 0 2;
     }
-    #info-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #info-path {
-        text-align: center;
-        padding: 0 1 1 1;
+    RepoInfoScreen .info-heading {
+        height: 1;
+        padding: 1 2 0 2;
         color: $text-muted;
+        text-style: bold;
     }
-    #info-loading {
+    RepoInfoScreen #info-loading {
         height: 3;
         padding: 1 0;
     }
-    #info-stats {
-        padding: 0 3;
-        color: $text;
-        text-align: center;
+    RepoInfoScreen #menu-hint {
+        margin: 1 0 1 0;
     }
-    #info-table {
-        padding: 1 3 0 3;
-        color: $text;
-        text-align: center;
-    }
-    #info-hint {
-        text-align: center;
-        padding: 1 1 1 1;
-        color: $text-muted;
-    }
-    """
+    """,
     )
 
-    def __init__(self, repo_name: str, repo_path: Path) -> None:
+    def __init__(
+        self,
+        repo_name: str,
+        repo_path: Path,
+        facts: list[tuple[str, Text]] | None = None,
+        meta: Text | None = None,
+    ) -> None:
         super().__init__()
         self.repo_name = repo_name
         self.repo_path = repo_path
+        self.facts = facts or []
+        self.meta = meta or Text()
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="info-container"):
-            yield Static(
-                f"[bold $text]{escape(self.repo_name)}[/]",
-                id="info-title",
-            )
-            yield Static(
-                f"[dim]{escape(str(self.repo_path))}[/dim]",
-                id="info-path",
-            )
+        with Vertical(id="menu-container"):
+            with Horizontal(id="menu-header"):
+                yield Static(escape(self.repo_name), id="menu-title")
+                yield Static(self.meta, id="menu-meta")
+            yield Static(card_subtitle(self.repo_path), id="menu-branch")
+            if self.facts:
+                yield Static(_facts_grid(self.facts), id="info-facts", classes="info-section")
+            yield Static("CODE", classes="info-heading")
             yield LoadingIndicator(id="info-loading")
-            yield Static("", id="info-hint")
+            yield Static(key_hints(("esc", "close")), id="menu-hint")
 
     def populate(self, result: RepoInfoResult) -> None:
         # The worker finishes whenever it finishes; the user may have
@@ -449,32 +421,27 @@ class RepoInfoScreen(ModalScreen[None]):
             return
         self.query_one("#info-loading", LoadingIndicator).remove()
         r = result
-        stats = Static(
-            f"[dim]Files[/dim]  [bold $text]{r.total_files:,}[/]    "
-            f"[dim]Lines[/dim]  [bold $text]{r.total_lines:,}[/]\n"
-            f"[dim]Tokens[/dim]  [bold $text]{r.total_tokens:,}[/]    "
-            f"[dim]Max Depth[/dim]  [bold $text]{r.max_depth}[/]",
-            id="info-stats",
-        )
-        hint = self.query_one("#info-hint", Static)
-        hint.mount(stats, before=hint)
-        if r.file_types:
-            rows = (
-                f"[dim]{'':>2}{'EXTENSION':<12} {'FILES':>6}   {'LINES':>8}"
-                f"   {'TOKENS':>10}[/dim]\n"
+        stats = Text()
+        for index, (value, label) in enumerate(
+            (
+                (r.total_files, "files"),
+                (r.total_lines, "lines"),
+                (r.total_tokens, "tokens"),
+                (r.max_depth, "levels deep"),
             )
-            for ft in r.file_types:
-                lines_str = f"{ft.line_count:,}" if ft.line_count is not None else "-"
-                tokens_str = f"{ft.token_count:,}" if ft.token_count is not None else "-"
-                rows += (
-                    f"[$text-primary]  {escape(ft.extension):<12}[/]"
-                    f" [$text]{ft.count:>6}[/]"
-                    f"   [dim]{lines_str:>8}[/dim]"
-                    f"   [dim]{tokens_str:>10}[/dim]\n"
-                )
-            table = Static(rows.rstrip(), id="info-table")
-            hint.mount(table, before=hint)
-        hint.update("\\[esc] close")
+        ):
+            if index:
+                stats.append("   ")
+            stats.append(f"{value:,}", style="bold")
+            stats.append(f" {label}", style="dim")
+        hint = self.query_one("#menu-hint", Static)
+        hint.mount(Static(stats, id="info-stats", classes="info-section"), before=hint)
+        if r.file_types:
+            accent = card_palette(self.app).primary
+            hint.mount(
+                Static(_language_grid(r, accent), id="info-table", classes="info-section"),
+                before=hint,
+            )
 
     def show_error(self, message: str) -> None:
         if not self.is_attached:
@@ -482,8 +449,11 @@ class RepoInfoScreen(ModalScreen[None]):
         loading = self.query("#info-loading")
         if loading:
             loading.first().remove()
-        hint = self.query_one("#info-hint", Static)
-        hint.update(f"[$text-error]{escape(message)}[/]\n\\[esc] close")
+        hint = self.query_one("#menu-hint", Static)
+        hint.mount(
+            Static(f"[$text-error]{escape(message)}[/]", id="info-error", classes="info-section"),
+            before=hint,
+        )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -491,6 +461,8 @@ class RepoInfoScreen(ModalScreen[None]):
 
 __all__ = [
     "ActionMenuScreen",
+    "LoadingCard",
+    "OutputCard",
     "GitCommandResultScreen",
     "GitOperationsMenuScreen",
     "PullLoadingScreen",

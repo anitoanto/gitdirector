@@ -161,7 +161,7 @@ def render_rail_session(
 
 
 def render_group(repo: str, palette: TablePalette, *, width: int) -> Text:
-    label = Text(f" {repo}", style=f"bold {palette.yellow}")
+    label = Text(f" {repo}", style=f"bold {palette.primary}")
     return _fit([Text(), label], width)
 
 
@@ -260,6 +260,10 @@ class BackToConsole(Static):
 
 class SessionSidebar(App):
     CSS = """
+    * {
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+    }
     Screen {
         background: $surface;
         overflow: hidden;
@@ -286,12 +290,13 @@ class SessionSidebar(App):
         content-align: center middle;
         color: $text-muted;
     }
+    /* A hairline sets the way back apart, like the console's tab dividers. */
     #back {
-        width: 3;
+        width: 4;
         height: 100%;
         content-align: center middle;
-        background: $panel-lighten-1;
         color: $text-muted;
+        border-right: solid $foreground 10%;
     }
     /* The space above the first repository is its group's blank line, not
        padding, so the scrollbar runs the full height of the list. */
@@ -300,6 +305,7 @@ class SessionSidebar(App):
         max-height: 100%;
         border: none;
         padding: 0;
+        margin: 0 0 1 0;
         background: $surface;
         scrollbar-size-vertical: 1;
     }

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from textual.binding import Binding
 from textual.color import Color
 
-from ...repo import RepositoryInfo, RepoStatus
 from ...ui_theme import readable_on
 
 # Rows are Rich markup, which cannot reference theme variables, so table
@@ -56,23 +55,6 @@ class TablePalette:
     muted: str
     primary: str
     danger: str = "red"
-
-    def sync_label(self, status: RepoStatus, *, stale: bool = False) -> str:
-        if status is RepoStatus.UP_TO_DATE:
-            label = "up to date"
-        else:
-            label = f"[bold {self.yellow}]{status.value}[/]"
-        if stale:
-            # The remote was unreachable, so this compares against the refs
-            # already on disk. Say so rather than passing it off as current.
-            return f"{label} [{self.muted}](offline)[/]"
-        return label
-
-    def changes_label(self, info: RepositoryInfo) -> str:
-        key = _changes_sort_key(info)
-        if key == "—":
-            return "—"
-        return f"[bold {self.yellow}]{key}[/]"
 
     def group_label(self, text: str) -> str:
         return f"[bold {self.primary}]{text}[/]"
@@ -144,37 +126,20 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
     )
 
 
-def _changes_sort_key(info: RepositoryInfo) -> str:
-    if info.staged and info.unstaged:
-        return "staged+unstaged"
-    if info.staged:
-        return "staged"
-    if info.unstaged:
-        return "unstaged"
-    return "—"
-
-
 _SORT_COLUMN_NAMES = {
     0: "Repository",
-    1: "Sync",
+    1: "Needs attention",
     2: "Branch",
-    3: "Changes",
-    4: "Last Commit",
-    5: "Path",
+    3: "Last commit",
+    4: "Sessions",
 }
 
 _DEFAULT_SORT_COLUMN = 0
 
-_STATUS_ORDER = {
-    RepoStatus.UP_TO_DATE: 0,
-    RepoStatus.AHEAD: 1,
-    RepoStatus.BEHIND: 2,
-    RepoStatus.DIVERGED: 3,
-    RepoStatus.UNKNOWN: 4,
-}
-
 _SESSION_STATUS_POLL_INTERVAL_SECS = 1
 _REPO_CACHE_TTL_SECS = 30 * 60
+# Worktree-only re-read of every repository; no fetch, so cheap and offline.
+_LOCAL_REFRESH_SECS = 15
 
 _PANELS_SORT_COLUMN_NAMES = {
     0: "Name",
@@ -193,35 +158,94 @@ _SESSION_STATUS_ORDER = {
 }
 
 
+# The card every popup shares: a quiet rounded frame, a header (title, meta
+# on the right, a muted subtitle over a hairline), the body, and a line of
+# key hints. See screens/card.py for the pieces that fill it.
 _MODAL_CSS = """
     #menu-container {
-        width: 50%;
+        width: 64;
+        max-width: 95%;
         height: auto;
-        border: round $primary;
+        max-height: 95%;
+        border: round $primary 45%;
         background: $panel;
-        padding: 1 2;
+        padding: 0;
+    }
+    #menu-header {
+        height: auto;
+        padding: 1 2 0 2;
     }
     #menu-title {
-        text-align: center;
-        padding: 1 1 0 1;
-        color: $text;
-    }
-    #menu-branch {
-        text-align: center;
-        padding: 0 1 1 1;
-        color: $text-muted;
-    }
-    #action-menu {
         width: 1fr;
         height: auto;
+        padding: 1 2 0 2;
+        color: $text;
+        text-style: bold;
+        text-align: left;
+    }
+    #menu-header #menu-title {
+        padding: 0;
+    }
+    #menu-meta,
+    #menu-stats,
+    #result-status {
+        width: auto;
+        max-width: 60%;
+        padding: 0;
+    }
+    #menu-branch,
+    #description-session-name,
+    #commit-result-message {
+        height: auto;
+        padding: 0 2 1 2;
+        color: $text-muted;
+        text-align: left;
+        border-bottom: solid $foreground 10%;
+    }
+    #action-menu {
+        height: auto;
+        max-height: 30;
         border: none;
-        padding: 1 2;
-        margin: 1 0;
+        padding: 1 1;
+        margin: 0;
+        background: $panel;
+    }
+    #action-menu:focus {
+        border: none;
+        background-tint: $foreground 0%;
     }
     #menu-hint {
-        text-align: center;
-        padding: 1 1 1 1;
+        height: auto;
+        padding: 1 2 1 2;
+        text-align: left;
         color: $text-muted;
+    }
+    .card-body {
+        height: auto;
+        padding: 1 2 0 2;
+    }
+    .card-input {
+        width: 1fr;
+        height: auto;
+        margin: 1 2 0 2;
+        border: none;
+        background: $surface;
+        color: $text;
+        padding: 0 1;
+    }
+    .card-input:focus {
+        border: none;
+        background-tint: $foreground 0%;
+    }
+    .card-actions {
+        height: auto;
+        border: none;
+        padding: 1 1 0 1;
+        background: $panel;
+    }
+    .card-actions:focus {
+        border: none;
+        background-tint: $foreground 0%;
     }
 """
 

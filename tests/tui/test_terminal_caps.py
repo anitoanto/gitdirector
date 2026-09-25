@@ -1,7 +1,7 @@
 """Tests for the host terminal capability detection helper.
 
 Covers the cases the TUI's animation/visual code depends on:
-hatch rendering, alpha backgrounds, truecolor, NO_COLOR/TERM=dumb
+alpha backgrounds, truecolor, NO_COLOR/TERM=dumb
 suppression, and the CSS-stripping wrapper.
 """
 
@@ -16,7 +16,6 @@ from gitdirector.commands.tui.terminal_caps import (
     _DUMB_TERMS,
     host_color_system,
     host_supports_alpha,
-    host_supports_hatch,
     host_supports_truecolor,
     is_dumb_terminal,
     no_color_requested,
@@ -93,10 +92,6 @@ class TestHostCapabilityDetection:
         monkeypatch.delenv("COLORTERM", raising=False)
         assert host_color_system() == "8"
 
-    def test_dumb_terminal_does_not_support_hatch(self, monkeypatch):
-        monkeypatch.setenv("TERM", "dumb")
-        assert host_supports_hatch() is False
-
     def test_no_color_disables_alpha(self, monkeypatch):
         monkeypatch.setenv("TERM", "xterm-256color")
         monkeypatch.setenv("COLORTERM", "")
@@ -110,17 +105,17 @@ class TestStripUnsupportedCss:
     def test_empty_input_returns_empty(self):
         assert strip_unsupported_css("") == ""
 
-    def test_hatch_directive_intact_when_supported(self, monkeypatch):
+    def test_alpha_background_intact_when_supported(self, monkeypatch):
         monkeypatch.setenv("TERM", "xterm-256color")
-        css = "hatch: right $primary 30%;"
-        # On a real terminal, nothing should be stripped.
+        monkeypatch.setenv("COLORTERM", "truecolor")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        css = "Foo { background: $background 60%; }"
         assert strip_unsupported_css(css) == css
 
-    def test_no_color_strips_hatch_when_unsupported(self, monkeypatch):
+    def test_dumb_terminal_strips_alpha_background(self, monkeypatch):
         monkeypatch.setenv("TERM", "dumb")
-        css = "Foo { background: $panel 80%; hatch: right $primary 30%; }"
+        css = "Foo { background: $panel 80%; }"
         out = strip_unsupported_css(css)
-        assert "hatch" not in out
         assert "background: $panel 80%" not in out
         # The braces and rest of the CSS survive.
         assert "Foo {" in out

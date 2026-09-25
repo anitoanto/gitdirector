@@ -14,9 +14,7 @@ from gitdirector.commands.tui.diff_renderer import (
     DiffBundle,
     build_diff_bundle,
     detect_language,
-    format_status_badge,
     parse_diff_files,
-    render_change_summary,
     render_empty_state,
     render_error,
     render_file_diff,
@@ -515,79 +513,6 @@ class TestDetectLanguage:
         assert detect_language("src/foo/bar.py") == "python"
 
 
-class TestFormatStatusBadge:
-    def test_known_statuses(self):
-        assert format_status_badge("M") == "M"
-        assert format_status_badge("A") == "A"
-        assert format_status_badge("D") == "D"
-        assert format_status_badge("R") == "R"
-        assert format_status_badge("?") == "U"
-
-    def test_empty_returns_middle_dot(self):
-        assert format_status_badge("") == "\u00b7"
-
-    def test_unknown_status_returns_itself(self):
-        assert format_status_badge("Z") == "Z"
-
-
-class TestRenderChangeSummary:
-    def test_includes_path_and_stats(self):
-        f = ChangedFile(path="src/foo.py", status="M", additions=3, deletions=1)
-        text = render_change_summary(f)
-        assert isinstance(text, Text)
-        assert "foo.py" in text.plain
-        assert "+3" in text.plain
-        assert "-1" in text.plain
-        assert "M" in text.plain
-
-    def test_untracked_badge(self):
-        f = ChangedFile(path="new.py", status="?", additions=10)
-        text = render_change_summary(f)
-        # The pill shows "U" for untracked, and there's an "untracked" word
-        # in the new header design.
-        plain = text.plain
-        assert "U" in plain
-        assert "new.py" in plain
-
-    def test_added_file_shows_new_chip(self):
-        f = ChangedFile(path="added.py", status="A", additions=10, deletions=0)
-        text = render_change_summary(f)
-        plain = text.plain
-        assert "new" in plain.lower()
-        assert "added.py" in plain
-        assert "+10" in plain
-        assert "A" in plain
-
-    def test_renamed_file_shows_marker(self):
-        f = ChangedFile(
-            path="new_name.py",
-            status="R",
-            is_rename=True,
-            old_path="old_name.py",
-            additions=1,
-            deletions=1,
-        )
-        text = render_change_summary(f)
-        plain = text.plain
-        assert "old_name.py" in plain
-        assert "new_name.py" in plain
-        assert "renamed" in plain
-
-    def test_binary_file_skips_stats(self):
-        f = ChangedFile(path="img.png", status="M", is_binary=True, additions=0, deletions=0)
-        text = render_change_summary(f)
-        plain = text.plain
-        assert "[binary]" in plain
-
-    def test_long_path_truncated_with_ellipsis(self):
-        long_path = "a/very/very/long/path/to/some/file.py"
-        f = ChangedFile(path=long_path, status="M", additions=1)
-        text = render_change_summary(f, path_width=20)
-        plain = text.plain
-        assert "\u2026" in plain
-        assert "very/long" not in plain or plain.endswith("file.py")
-
-
 class TestRenderFileHeader:
     def test_added_file_header_includes_new_label(self):
         from gitdirector.commands.tui.diff_renderer import _render_file_header
@@ -705,13 +630,14 @@ class TestGithubDarkStyle:
             assert max(r, g, b) > 100, f"{token} colour {color} too dark to read on dark bg"
 
 
-class TestStatusPillColors:
-    def test_all_known_statuses_have_a_pill(self):
-        from gitdirector.commands.tui.diff_renderer import STATUS_PILL_BG, STATUS_PILL_FG
+class TestStatusText:
+    def test_every_status_letter_has_a_colour(self):
+        from gitdirector.commands.tui.diff_renderer import STATUS_TEXT, status_letter
 
-        for status in ("A", "M", "D", "R", "?", "C", "T", "U"):
-            assert status in STATUS_PILL_BG
-            assert status in STATUS_PILL_FG
+        for status in ("A", "M", "D", "R", "?"):
+            letter = status_letter(status)
+            assert letter.plain == ("U" if status == "?" else status)
+            assert STATUS_TEXT[status] in str(letter.style)
 
 
 class TestPerLineTint:
@@ -847,12 +773,6 @@ class TestHunkGutter:
         )
         row = _body_text(render_file_diff(f)).plain.splitlines()[2]
         assert row[diff_gutter_width(f) :] == "y"
-
-    def test_long_path_truncated(self):
-        f = ChangedFile(path="a/very/very/long/path/to/some/file.py", status="M", additions=1)
-        text = render_change_summary(f, path_width=15)
-        plain = text.plain
-        assert "very/long/path" not in plain or "..." in plain or len(plain) < 60
 
 
 class TestRenderFileDiff:

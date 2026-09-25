@@ -1,22 +1,19 @@
 """Detect host terminal capabilities for graceful degradation.
 
-The TUI's animated/visual elements (truecolor, hatch backgrounds, alpha
-modulated surfaces, the embedded terminal pane) silently break on
+The TUI's visual elements (truecolor, alpha-modulated surfaces, the embedded terminal pane) silently break on
 terminals that don't advertise support. The defaults in Textual and
 Rich already auto-detect, but a few code paths force-enable features
 (``force_terminal=True``, ``color_system="truecolor"``) which makes
 those paths misbehave on minimal hosts.
 
 Use :func:`host_color_system` instead of hard-coding ``"truecolor"``,
-and :func:`host_supports_hatch` / :func:`host_supports_alpha` to
-conditionally enable visual flourishes.
+and :func:`host_supports_alpha` to conditionally enable visual flourishes.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import sys
 
 _DUMB_TERMS = frozenset({"dumb", ""})
 
@@ -74,24 +71,11 @@ def host_supports_truecolor() -> bool:
     return host_color_system() == "truecolor"
 
 
-def host_supports_hatch() -> bool:
-    """Return ``True`` if the host can render Textual ``hatch:`` patterns.
-
-    Hatch requires a Unicode-aware terminal with decent box-drawing
-    support. On ``TERM=dumb`` or an ASCII-only terminal the hatch
-    characters render as ``?`` and should be suppressed.
-    """
-    if is_dumb_terminal():
-        return False
-    encoding = (sys.stdout.encoding or "").lower()
-    return encoding not in {"ascii", "us-ascii"}
-
-
 def host_supports_alpha() -> bool:
     """Return ``True`` if the host supports alpha-blended backgrounds.
 
     Alpha (``background: $panel 80%;``) degrades to opaque on terminals
-    that don't support it, so it's mostly safe — but skipping it on
+    that don't support it, so it's mostly safe, but skipping it on
     dumb terminals avoids a visible flash of nothing when the
     background is computed.
     """
@@ -101,19 +85,10 @@ def host_supports_alpha() -> bool:
 
 
 def strip_unsupported_css(css: str) -> str:
-    """Return ``css`` with directives removed for features the host
-    doesn't support.
-
-    Currently this strips ``hatch: right $primary 30%;`` and
-    ``background: $panel 80%;`` (alpha) on hosts that can't render
-    them. The host's own degradation already produces a reasonable
-    fallback, so this is purely a perf/clarity tweak — it prevents
-    the user from seeing ``?`` boxes where hatch characters should be.
-    """
+    """Return ``css`` without alpha backgrounds (``background: $panel 80%;``)
+    on hosts that cannot blend them; the rest is left as it is."""
     if not css:
         return css
-    if not host_supports_hatch():
-        css = re.sub(r"\s*hatch:\s*right\s+\$[a-zA-Z_-]+\s+\d+%;", "", css)
     if not host_supports_alpha():
         css = re.sub(r"\s*background:\s*\$[a-zA-Z_-]+\s+\d+%;", "", css)
     return css

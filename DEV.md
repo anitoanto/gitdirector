@@ -1,7 +1,7 @@
 # Dev
 
 This project uses [uv](https://docs.astral.sh/uv/). Every command runs through
-`uv run` — never activate `.venv` by hand.
+`uv run`; never activate `.venv` by hand.
 
 ```bash
 uv sync                              # set up / update .venv
@@ -23,7 +23,7 @@ project, and never touches `.git`, virtualenvs, or `node_modules`.
 shows up quickly. Replay a failure with the printed `--randomly-seed=<seed>`,
 or pin the order with `-p no:randomly`.
 
-Two rules keep it stable — see `tests/_timeouts.py`:
+Two rules keep it stable (see `tests/_timeouts.py`):
 
 - **Never share mutable fixture data.** Anything handed to the app may be
   mutated in place and leak into later tests. Shared sample data is exposed as
@@ -35,8 +35,42 @@ Two rules keep it stable — see `tests/_timeouts.py`:
 
 Tests needing tmux start their own private server (`TMUX_TMPDIR`), never the
 developer's, are skipped without `tmux`, and are serialized behind a file lock.
-Do the same for any manual experiment: `tmux -L <name>` or a private
-`TMUX_TMPDIR`.
+On top of that, `tests/conftest.py` makes the whole run private: it removes
+`$TMUX` and `$TMUX_PANE` (tmux prefers `$TMUX` over `TMUX_TMPDIR`, so a run
+started inside tmux would otherwise reach the developer's server) and points
+`TMUX_TMPDIR` at a fresh directory. At the end it kills those servers by
+explicit socket and hangs up any orphan left running in the run's temp tree:
+a pane shell that outlives its server keeps a pty, and enough of them run the
+machine out of ptys, after which every tmux spawn fails.
+
+Do the same for any manual experiment: `tmux -S /tmp/<name>.sock` (or
+`env -u TMUX` with a private `TMUX_TMPDIR`). Never a bare `tmux kill-server`
+from a shell inside tmux: it kills the server that shell runs in.
+
+## Stress test
+
+`stress/` runs gitdirector against a real tmux 3.7c on Linux, in Docker, as a
+non-root user with zsh login shells (like a Mac):
+
+```bash
+cd stress && docker compose build && docker compose run --rm stress
+```
+
+It runs the test suite first, then one phase per process (`STRESS_PHASES`,
+`STRESS_SECONDS` each):
+
+- `normal`: concurrent sessions, descriptions, agent launches, panels, decks
+  with the real sidebar and attached clients, and the monitor.
+- `ptystarve`: the same with `/dev/pts` capped just above what is in use, so
+  pane spawns fail the way they do on a Mac out of ptys.
+- `nproc`: the same with the tmux server under a tight process limit.
+- `chaos`: the same while pane programs and clients are killed, panes
+  respawned and windows resized underneath.
+
+A phase passes only if the tmux server never dies, no pane is left broken
+(`#{pane_pid}` -1), every resource failure reaches the user explained, and
+killing the server leaves no process and no pty behind. Reports land in
+`stress/out/<run>-<phase>/`.
 
 ## Sessions and panels in tmux
 
@@ -60,6 +94,22 @@ view is deleted by tmux (`destroy-unattached`) when its pane's client goes
 away, and the real session is never modified. `prefix N` selects slot N by
 the panes' `@gd_slot` option: tmux numbers panes in layout-tree order, which
 is not slot order for every layout.
+
+**tmux 3.7c crashes worked around.** Found by the stress test (below); each
+took every session down:
+
+- A window of a session group closing on its own (its program exits or is
+  killed) can segfault the server: `server_kill_window` destroys the group
+  while still walking the session list. Every work session's window therefore
+  has `remain-on-exit on` and a `pane-died` hook that removes the session and
+  its views with `kill-session -g` (`guard_session_window`), and removing a
+  work session always takes its views (`kill_tmux_session`). Never
+  `kill-pane`/`kill-window` a window that views share.
+- `new-session` attaching a client whose terminal has just gone exits the
+  server (`fatal: tcgetattr failed`). Views are created detached, then
+  attached with `attach-session`, which only fails (`view_attach_command`).
+- Re-respawning a pane whose respawn failed to fork segfaults the server:
+  every respawn goes through `respawn_pane`, which never retries.
 
 **Resizing.** tmux keeps pane sizes roughly on a window resize but lets the
 ratios drift. When a panel is laid out, `_panel_resize_commands` turns its
@@ -294,7 +344,7 @@ else:                                                   idle
 
 ## Token counting
 
-`gitdirector info` counts tokens with `tiktoken` using `cl100k_base` — the same
+`gitdirector info` counts tokens with `tiktoken` using `cl100k_base`, the same
 encoding as OpenAI's `text-embedding-3-*` and `text-embedding-ada-002`.
 Special-token-like strings such as `<|endoftext|>` are counted as ordinary text
 so counting never fails on source content.
@@ -306,8 +356,8 @@ so counting never fails on source content.
 3. Merge to `main`.
 
 CI (`.github/workflows/main.yml`) runs the shared checks from `checks.yml`
-— `ruff format --check`, `ruff check`, and the test suite on Python 3.10
-through 3.14 — then compares the version against PyPI and, if that version
+(`ruff format --check`, `ruff check`, and the test suite on Python 3.10
+through 3.14), then compares the version against PyPI and, if that version
 is not yet released, builds and publishes it, then creates the `v<version>`
 tag and a GitHub release with auto-generated notes and the built sdist/wheel
 attached. Pull requests run only the checks.

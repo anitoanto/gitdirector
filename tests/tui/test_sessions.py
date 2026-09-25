@@ -1164,7 +1164,7 @@ class TestSessionsRefreshOnReturn:
         written = "".join(call.args[0] for call in stdout.write.call_args_list)
         assert "\033[?1049h" in written
         assert written.endswith("\033[?25h\033[?1049l")
-        app._update_status.assert_called_once_with("tmux attach failed: tmux exploded")
+        app._update_status.assert_called_once_with("Couldn't open the session: tmux exploded")
         assert app._active_tab == "sessions"
         assert app._session_status_tracking_paused is False
 

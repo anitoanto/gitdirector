@@ -58,7 +58,7 @@ class TestLaunchCommandInTmuxSession:
             "touch /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "sh -lc copilot; status=$?; "
             f"tmux detach-client -s {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
-            f"tmux kill-session -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
+            f"tmux kill-session -g -t {shlex.quote('=gd/my-repo/copilot/1')} >/dev/null 2>&1 || true; "
             "rm -f /tmp/gitdirector-agent.ready >/dev/null 2>&1 || true; "
             "exit $status"
         )
@@ -273,7 +273,7 @@ class TestCommandQuotingInCleanupScript:
         # The session name (containing a literal quote) appears as a
         # shlex.quote–escaped argument to the kill-session / detach-client
         # calls, never unquoted.
-        assert "tmux kill-session -t " in script
+        assert "tmux kill-session -g -t " in script
         assert "tmux detach-client -s " in script
         # The escaped form must be present; the unescaped literal would
         # corrupt the shell parsing of the script.
@@ -924,6 +924,9 @@ class _FakeTmux:
                 self.panes[session_name] = replace(self.panes[session_name], activity=int(self.now))
 
 
+_REAL_START = TmuxMonitor.start
+
+
 class TestTmuxMonitorRefresh:
     def _world(self):
         from contextlib import ExitStack
@@ -932,6 +935,58 @@ class TestTmuxMonitorRefresh:
         world = _FakeTmux()
         world.install(stack)
         return stack, world
+
+    def test_a_local_change_withholds_older_samples_until_a_new_one(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/alpha/shell/1", command="zsh", description="old")
+            monitor.refresh()
+            assert monitor.entries()[0]["description"] == "old"
+
+            monitor.invalidate()
+            # Until a sample begun after the change is in, there is nothing to trust.
+            assert monitor.entries() is None
+            world.pane("gd/alpha/shell/1", command="zsh", description="new")
+            monitor.refresh()
+            assert monitor.entries()[0]["description"] == "new"
+
+    def test_a_sample_begun_before_the_change_is_withheld(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/alpha/shell/1", command="zsh", description="old")
+            listed = dict(world.panes)
+
+            def list_then_change():
+                # The console changes tmux while this sample is under way.
+                monitor.invalidate()
+                return listed
+
+            with patch("gitdirector.integrations.tmux.monitor._list_gd_panes", list_then_change):
+                monitor.refresh()
+            assert monitor.entries() is None
+
+    def test_invalidate_wakes_the_sampler(self):
+        monitor = TmuxMonitor()
+        monitor._wake.clear()
+        monitor.invalidate()
+        assert monitor._wake.is_set()
+
+    def test_start_discards_what_was_sampled_before(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/alpha/shell/1", command="zsh")
+            monitor.refresh()
+            # conftest stubs start() for every test; this one needs the real one.
+            with (
+                patch.object(TmuxMonitor, "start", _REAL_START),
+                patch.object(monitor, "_sync_sessions"),
+            ):
+                monitor.start()
+                assert monitor.entries() is None
+                monitor.stop()
 
     def test_entries_come_from_the_same_sample(self):
         stack, world = self._world()
@@ -1265,6 +1320,31 @@ class TestTmuxMonitorRefresh:
             # Later output means the program moved on.
             world.advance(_BELL_GRACE_SECS, "gd/repo/agent/1", "working again \u2819")
             assert monitor.refresh()["gd/repo/agent/1"] == "running"
+
+    def test_a_shell_session_is_never_waiting(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1", command="zsh")
+            world.content["gd/repo/shell/1"] = "$ "
+            world.at_prompt("gd/repo/shell/1")
+            monitor.refresh()
+            # A bell at the prompt (say, a failed completion) is still idle.
+            world.pane("gd/repo/shell/1", command="zsh", bell=True)
+            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+            assert monitor.get_bell_state("gd/repo/shell/1") is False
+
+    def test_a_shell_session_running_a_command_is_running_despite_a_bell(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1")
+            world.content["gd/repo/shell/1"] = "building \u280b"
+            world.run_program("gd/repo/shell/1", "make")
+            monitor.refresh()
+            world.pane("gd/repo/shell/1", bell=True)
+            world.advance(1.0, "gd/repo/shell/1", "building \u2819")
+            assert monitor.refresh()["gd/repo/shell/1"] == "running"
 
     def test_agent_reported_state_wins_over_heuristics(self):
         stack, world = self._world()

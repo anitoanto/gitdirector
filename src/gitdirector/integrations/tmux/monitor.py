@@ -93,7 +93,7 @@ def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
         f"{command_script}; "
         "status=$?; "
         f"tmux detach-client -s {quoted_session_target} >/dev/null 2>&1 || true; "
-        f"tmux kill-session -t {quoted_session_target} >/dev/null 2>&1 || true; "
+        f"tmux kill-session -g -t {quoted_session_target} >/dev/null 2>&1 || true; "
         f"rm -f {ready_marker_quoted} >/dev/null 2>&1 || true; "
         "exit $status"
     )
@@ -461,6 +461,16 @@ def _is_cursor_blink(previous: str, current: str, before_previous: str | None) -
     return _changed_cells(previous, current, _NOISE_MAX_CELLS) <= _NOISE_MAX_CELLS
 
 
+def _ignores_bell(session_name: str) -> bool:
+    """Whether a bell in this session says nothing about someone being needed.
+
+    A plain shell session is either running a command or idle at its prompt:
+    its bells (a failed completion, a job that finished) never mean waiting.
+    """
+    parsed = _parse_gd_session_name(session_name)
+    return parsed is not None and parsed[1] == "shell"
+
+
 def resolve_pane_status(
     *,
     dead: bool,
@@ -648,12 +658,21 @@ class TmuxMonitor:
         # noticed its stop yet can never be revived by a later start.
         self._stop_event: threading.Event | None = None
         self._entries: list[dict[str, str]] | None = None
+        # A sample describes tmux as it was when the sample began. Each local
+        # change (a session created, described, removed) bumps the
+        # generation; a sample begun before the latest bump is withheld, so
+        # it can never undo what the console already shows.
+        self._generation = 0
+        self._entries_generation = 0
+        self._wake = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
 
     def start(self):
         if self._stop_event is not None:
             return
+        # Whatever was sampled before the stop is old news.
+        self.invalidate()
         stop_event = threading.Event()
         self._stop_event = stop_event
         self._sync_thread = threading.Thread(
@@ -666,6 +685,7 @@ class TmuxMonitor:
         sync_thread, self._sync_thread = self._sync_thread, None
         if stop_event is not None:
             stop_event.set()
+            self._wake.set()
         if (
             wait
             and sync_thread is not None
@@ -681,13 +701,22 @@ class TmuxMonitor:
             return {name: activity.status for name, activity in self._sessions.items()}
 
     def entries(self) -> list[dict[str, str]] | None:
-        """Sessions-tab entries from the last sample, or None before the first.
+        """Sessions-tab entries from the last sample, or None when there is none
+        begun since the last :meth:`invalidate`.
 
         The same shape as :func:`~.core.list_all_gd_sessions`, without a
         further tmux call: the sample already carried the metadata.
         """
         with self._lock:
-            return None if self._entries is None else [dict(e) for e in self._entries]
+            if self._entries is None or self._entries_generation < self._generation:
+                return None
+            return [dict(e) for e in self._entries]
+
+    def invalidate(self) -> None:
+        """Say tmux just changed here: drop older samples and take a new one now."""
+        with self._lock:
+            self._generation += 1
+        self._wake.set()
 
     def status_for(self, session_name: str) -> str | None:
         with self._lock:
@@ -710,6 +739,8 @@ class TmuxMonitor:
     def refresh(self) -> dict[str, str]:
         """Sample tmux once and return the resulting statuses."""
         with self._poll_lock:
+            with self._lock:
+                generation = self._generation
             try:
                 panes = _list_gd_panes()
             except TmuxError:
@@ -734,6 +765,7 @@ class TmuxMonitor:
                 for stale in set(self._sessions) - set(panes):
                     del self._sessions[stale]
                 self._entries = entries
+                self._entries_generation = generation
         return self.statuses()
 
     def _sample_session(self, pane: PaneSample, snapshot: ProcessSnapshot, now: float) -> None:
@@ -753,7 +785,9 @@ class TmuxMonitor:
         with self._lock:
             activity = self._sessions.setdefault(pane.session_name, _SessionActivity())
             first_sample = activity.last_activity < 0
-            bell_rose = pane.bell and not activity.bell_flag
+            bell_rose = (
+                pane.bell and not activity.bell_flag and not _ignores_bell(pane.session_name)
+            )
             activity.bell_flag = pane.bell
             if pane.agent_state != activity.report_raw or reported != activity.reported:
                 activity.report_raw = pane.agent_state
@@ -887,11 +921,13 @@ class TmuxMonitor:
     def _sync_sessions(self, stop_event: threading.Event):
         while not stop_event.is_set():
             started = time.monotonic()
+            self._wake.clear()
             try:
                 self.refresh()
             except Exception:
                 logger.warning("tmux session monitor poll failed", exc_info=True)
-            stop_event.wait(max(0.0, started + _POLL_SECS - time.monotonic()))
+            # invalidate() cuts the wait short; stop() sets both.
+            self._wake.wait(max(0.0, started + _POLL_SECS - time.monotonic()))
 
 
 __all__ = [

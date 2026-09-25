@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic, time
 
 from rich.markup import escape
+from rich.text import Text
 from textual import work
 from textual.widgets import DataTable, Static
 
@@ -18,14 +20,22 @@ from .constants import (
     _DEFAULT_SORT_COLUMN,
     _REPO_CACHE_TTL_SECS,
     _SORT_COLUMN_NAMES,
-    _STATUS_ORDER,
-    _changes_sort_key,
+)
+from .repo_rows import (
+    RepoLayout,
+    RepoSessions,
+    attention_rank,
+    group_row,
+    name_width,
+    repo_header,
+    repo_row,
+    resolve_repo_layout,
+    row_height,
+    status_text,
+    summarise_sessions,
 )
 
 logger = logging.getLogger(__name__)
-
-_REPO_LOADING_CELL_VALUE = "... ... ... ..."
-_REPO_LOADING_WIDTH_COLUMNS = (1, 2, 3, 4)
 
 
 class ConsoleReposMixin:
@@ -53,6 +63,8 @@ class ConsoleReposMixin:
                     "last_commit_timestamp": info.last_commit_timestamp,
                     "size": info.size,
                     "sync_stale": info.sync_stale,
+                    "ahead": info.ahead,
+                    "behind": info.behind,
                 }
                 for info in self._results.values()
             ],
@@ -108,6 +120,8 @@ class ConsoleReposMixin:
                     for value in (
                         entry.get("last_commit_timestamp"),
                         entry.get("size"),
+                        entry.get("ahead"),
+                        entry.get("behind"),
                     )
                 ):
                     return False
@@ -137,6 +151,8 @@ class ConsoleReposMixin:
                     last_commit_timestamp=entry.get("last_commit_timestamp"),
                     size=entry.get("size"),
                     sync_stale=entry["sync_stale"],
+                    ahead=entry.get("ahead") or 0,
+                    behind=entry.get("behind") or 0,
                 )
                 infos[str(info.path)] = info
         except (KeyError, TypeError, ValueError, OSError):
@@ -215,6 +231,7 @@ class ConsoleReposMixin:
                     if shutdown_requested():
                         break
                     self._results[str(info.path)] = info
+                    self._repo_results_version += 1
                     safe_call(self._update_row, info)
             finally:
                 executor.shutdown(
@@ -234,7 +251,57 @@ class ConsoleReposMixin:
             safe_call(self._hide_refresh_indicator)
             if self._repos_refresh_pending and not shutdown_requested():
                 self._repos_refresh_pending = False
-                safe_call(self._refresh_repos, show_loading=True)
+                safe_call(self._refresh_repos)
+
+    def _refresh_local_statuses(self) -> None:
+        """Re-read every repository's worktree and local refs, without the network.
+
+        Keeps the table honest while agents edit files in their sessions; only
+        a full refresh fetches from origin.
+        """
+        if (
+            self._active_tab != "repos"
+            or self._repos_refreshing
+            or self._local_refresh_running
+            or self._session_status_tracking_paused
+            or not self._results
+        ):
+            return
+        self._local_refresh_running = True
+        self._load_local_statuses(list(self._repo_paths), self._repo_results_version)
+
+    @work(thread=True)
+    def _load_local_statuses(self, paths: list[Path], version: int) -> None:
+        worker = self._current_worker_or_none()
+        try:
+            changed: list[RepositoryInfo] = []
+            for path in paths:
+                if self._background_shutdown_requested(worker):
+                    return
+                previous = self._results.get(str(path))
+                if previous is None:
+                    continue
+                try:
+                    info = self.manager.get_repository_status(path)
+                except Exception:
+                    logger.debug("local status failed for %s", path, exc_info=True)
+                    continue
+                # Nothing was fetched, so whether origin was reachable is unchanged.
+                info = replace(info, sync_stale=previous.sync_stale)
+                if info != previous:
+                    changed.append(info)
+            if changed and not self._background_shutdown_requested(worker):
+                self.call_from_thread(self._apply_local_statuses, changed, version)
+        finally:
+            self._local_refresh_running = False
+
+    def _apply_local_statuses(self, infos: list[RepositoryInfo], version: int) -> None:
+        # A fetch that landed meanwhile knows more than this local read.
+        if version != self._repo_results_version or self._repos_refreshing:
+            return
+        for info in infos:
+            self._results[str(info.path)] = info
+            self._update_row(info)
 
     def _repo_cache_expired(self) -> bool:
         updated_at = self._repos_cache_updated_at
@@ -255,18 +322,20 @@ class ConsoleReposMixin:
         self._repos_cache_saved_at = None
         return True
 
-    def _refresh_repos(self, *, show_loading: bool = False) -> None:
+    def _refresh_repos(self) -> None:
+        """Fetch every repository again, in place.
+
+        What is on screen stays until each fresh result replaces it, so a
+        refresh never blanks the table; repositories new to the config show
+        as checking until theirs arrives.
+        """
         config_changed = self._reload_config_if_changed()
         if self._repos_refreshing:
             # The running load read the repository list before this change;
             # run again once it finishes rather than dropping the change.
             self._repos_refresh_pending = self._repos_refresh_pending or config_changed
             return
-        if config_changed:
-            show_loading = True
         self._repos_refreshing = True
-        if show_loading:
-            self._results = {}
         self._show_refresh_indicator()
         self._load_repos()
 
@@ -275,18 +344,154 @@ class ConsoleReposMixin:
         self._apply_filter_and_sort(update_status=False)
 
     def _update_row(self, info: RepositoryInfo) -> None:
+        try:
+            self._repaint_repo_row(info)
+        except Exception:
+            # A late result can land while the table is torn down.
+            logger.debug("Failed to update repo row %s", info.path, exc_info=True)
+
+    def _repaint_repo_row(self, info: RepositoryInfo) -> None:
+        table = self.query_one("#repo-table", DataTable)
+        infos, loading = self._repo_row_infos()
+        if self._resolve_repo_layout(infos, loading) != self._repo_layout:
+            self._apply_filter_and_sort(update_status=False)
+            return
         row_key = str(info.path)
+        if row_key not in table.rows:
+            return
+        sessions = self._repo_sessions()
+        group = self._repo_group_containing(info.path)
+        row = repo_row(
+            info,
+            self._repo_layout,
+            self._palette,
+            grouped=group is not None,
+            sessions=sessions.get(info.path),
+        )
+        if not self._set_repo_row(table, row_key, row):
+            return
+        if group is not None:
+            self._update_group_row(table, group, infos, loading, sessions)
+
+    def _set_repo_row(self, table: DataTable, row_key: str, row) -> bool:
+        """Repaint one row in place; if it now needs more or fewer lines, rebuild.
+
+        Returns False when the table was rebuilt instead.
+        """
+        if table.rows[row_key].height != row_height(row):
+            self._apply_filter_and_sort(update_status=False)
+            return False
+        table.update_cell(row_key, self._col_keys[0], row)
+        return True
+
+    def _update_group_row(
+        self,
+        table: DataTable,
+        group: RepoGroup,
+        infos: list[RepositoryInfo],
+        loading: set[Path],
+        sessions: dict[Path, RepoSessions],
+    ) -> None:
+        key = self._group_row_key(group.path)
+        if key not in table.rows:
+            return
+        members = set(group.repositories)
+        group_infos = [info for info in infos if info.path in members]
+        lead = table.get_row_index(key) > 0
+        table.update_cell(
+            key,
+            self._col_keys[0],
+            self._repo_group_row(group, group_infos, loading, sessions, lead=lead),
+        )
+
+    def _repo_group_containing(self, path: Path) -> RepoGroup | None:
+        for group in self._groups_entries:
+            if path in group.repositories:
+                return group
+        return None
+
+    def _repo_sessions(self) -> dict[Path, RepoSessions]:
+        """Live sessions per repository, matched through the session name's repo segment."""
+        from ...integrations.tmux.core import _repo_session_name_segment
+
+        by_slug: dict[str, Path] = {}
+        for path in self._repo_paths:
+            slug = self._repo_slugs.get(path)
+            if slug is None:
+                slug = self._repo_slugs[path] = _repo_session_name_segment(path)
+            by_slug[slug] = path
+        grouped: dict[Path, list[dict[str, str]]] = {}
+        for entry in self._sessions_entries:
+            path = by_slug.get(entry.get("repo_slug", ""))
+            if path is not None:
+                grouped.setdefault(path, []).append(entry)
+        return {path: summarise_sessions(entries) for path, entries in grouped.items()}
+
+    def _refresh_repo_session_cells(self) -> None:
+        """Repaint the rows whose sessions changed, without rebuilding the table."""
+        sessions = self._repo_sessions()
+        if sessions == self._rendered_repo_sessions:
+            return
+        changed = {
+            path
+            for path in set(sessions) | set(self._rendered_repo_sessions)
+            if sessions.get(path) != self._rendered_repo_sessions.get(path)
+        }
+        self._rendered_repo_sessions = sessions
         try:
             table = self.query_one("#repo-table", DataTable)
-            ck = self._col_keys
-            table.update_cell(
-                row_key, ck[1], self._palette.sync_label(info.status, stale=info.sync_stale)
-            )
-            table.update_cell(row_key, ck[2], info.branch or "—")
-            table.update_cell(row_key, ck[3], self._palette.changes_label(info))
-            table.update_cell(row_key, ck[4], info.last_updated or "—")
         except Exception:
-            logger.debug("Failed to update repo row %s", row_key, exc_info=True)
+            return
+        if self._sort_column != _DEFAULT_SORT_COLUMN:
+            # Sessions can move rows under these orders.
+            self._apply_filter_and_sort(update_status=False)
+            return
+        infos, loading = self._repo_row_infos()
+        by_path = {info.path: info for info in infos}
+        groups: dict[Path, RepoGroup] = {}
+        for path in changed:
+            info = by_path.get(path)
+            if info is None or str(path) not in table.rows:
+                continue
+            group = self._repo_group_containing(path)
+            if group is not None:
+                groups[group.path] = group
+            row = repo_row(
+                info,
+                self._repo_layout,
+                self._palette,
+                grouped=group is not None,
+                loading=path in loading,
+                sessions=sessions.get(path),
+            )
+            if not self._set_repo_row(table, str(path), row):
+                return
+        for group in groups.values():
+            self._update_group_row(table, group, infos, loading, sessions)
+
+    def _resolve_repo_layout(self, infos: list[RepositoryInfo], loading: set[Path]) -> RepoLayout:
+        grouped = {path for group in self._groups_entries for path in group.repositories}
+        names = (
+            name_width(info, grouped=info.path in grouped, loading=info.path in loading)
+            for info in infos
+        )
+        statuses = (
+            status_text(info, self._palette).cell_len for info in infos if info.path not in loading
+        )
+        # Mid-refresh a column narrowing and widening again reads as flicker.
+        floor = self._repo_layout.status if self._repos_refreshing else 0
+        return resolve_repo_layout(names, statuses, self.size.width, min_status=floor)
+
+    def _apply_repo_layout(self, table: DataTable, layout: RepoLayout) -> None:
+        self._repo_layout = layout
+        col_keys = getattr(self, "_col_keys", None)
+        if not col_keys:
+            return
+        column = table.columns[col_keys[0]]
+        column.auto_width = False
+        column.width = layout.cell_width
+        column.label = repo_header(layout)
+        table.refresh()
 
     def _show_no_repos(self) -> None:
         table = self.query_one("#repo-table", DataTable)
@@ -297,18 +502,20 @@ class ConsoleReposMixin:
         self._visible_group_count = 0
         self._update_status("No repositories linked")
 
-    def _sort_key_func(self):
+    def _sort_key_func(self, sessions: dict[Path, RepoSessions] | None = None):
         col = self._sort_column
+        sessions = sessions or {}
         if col == 1:
-            return lambda info: _STATUS_ORDER.get(info.status, 99)
+            return lambda info: (attention_rank(info, sessions.get(info.path)), info.name.lower())
         if col == 2:
             return lambda info: (info.branch or "").lower()
         if col == 3:
-            return _changes_sort_key
-        if col == 4:
             return lambda info: info.last_commit_timestamp or 0
-        if col == 5:
-            return lambda info: str(info.path).lower()
+        if col == 4:
+            return lambda info: (
+                -(sessions[info.path].count if info.path in sessions else 0),
+                info.name.lower(),
+            )
         return lambda info: info.name.lower()
 
     def _repo_matches_search(self, info: RepositoryInfo, query: str) -> bool:
@@ -351,71 +558,57 @@ class ConsoleReposMixin:
     def _repo_group_is_collapsed(self, group: RepoGroup) -> bool:
         return not self._search_query and str(group.path) in self._collapsed_groups
 
-    def _repo_group_label(self, group: RepoGroup) -> str:
-        marker = "▸" if self._repo_group_is_collapsed(group) else "▾"
-        return self._palette.group_label(f"{marker} {escape(group.name)}")
-
-    def _repo_group_count_label(self, group: RepoGroup) -> str:
-        repo_label = "repo" if group.repo_count == 1 else "repos"
-        return self._palette.group_label(f"\\[{group.repo_count} {repo_label}]")
-
-    def _add_repo_group_row(self, table: DataTable, group: RepoGroup) -> None:
-        table.add_row(
-            self._repo_group_label(group),
-            self._repo_group_count_label(group),
-            "",
-            "",
-            "",
-            str(group.path),
-            key=self._group_row_key(group.path),
-        )
-
-    def _add_placeholder_repo_row(self, table: DataTable, path: Path, *, grouped: bool) -> None:
-        table.add_row(
-            f"  {path.name}" if grouped else path.name,
-            _REPO_LOADING_CELL_VALUE,
-            _REPO_LOADING_CELL_VALUE,
-            _REPO_LOADING_CELL_VALUE,
-            _REPO_LOADING_CELL_VALUE,
-            str(path),
-            key=str(path),
-        )
-
-    def _add_repo_info_row(
+    def _repo_group_row(
         self,
-        table: DataTable,
-        info: RepositoryInfo,
+        group: RepoGroup,
+        infos: list[RepositoryInfo],
+        loading: set[Path],
+        sessions: dict[Path, RepoSessions],
         *,
-        grouped: bool,
-    ) -> None:
-        table.add_row(
-            f"  {info.name}" if grouped else info.name,
-            self._palette.sync_label(info.status, stale=info.sync_stale),
-            info.branch or "—",
-            self._palette.changes_label(info),
-            info.last_updated or "—",
-            str(info.path),
-            key=str(info.path),
+        lead: bool,
+    ):
+        return group_row(
+            group,
+            infos,
+            loading,
+            sessions,
+            self._repo_layout,
+            self._palette,
+            collapsed=self._repo_group_is_collapsed(group),
+            lead=lead,
         )
 
     def _sorted_repo_infos(
-        self, infos: list[RepositoryInfo], loading: set[Path]
+        self,
+        infos: list[RepositoryInfo],
+        loading: set[Path],
+        sessions: dict[Path, RepoSessions] | None = None,
     ) -> list[RepositoryInfo]:
         """Sort loaded repositories; ones still loading follow, by name."""
         loaded = [info for info in infos if info.path not in loading]
-        loaded.sort(key=self._sort_key_func(), reverse=self._sort_reverse)
+        loaded.sort(key=self._sort_key_func(sessions), reverse=self._sort_reverse)
         pending = sorted(
             (info for info in infos if info.path in loading), key=lambda info: info.name.lower()
         )
         return loaded + pending
 
-    def _add_repo_row(
-        self, table: DataTable, info: RepositoryInfo, loading: set[Path], *, grouped: bool
-    ) -> None:
-        if info.path in loading:
-            self._add_placeholder_repo_row(table, info.path, grouped=grouped)
-        else:
-            self._add_repo_info_row(table, info, grouped=grouped)
+    def _repo_row_entry(
+        self,
+        info: RepositoryInfo,
+        loading: set[Path],
+        sessions: dict[Path, RepoSessions],
+        *,
+        grouped: bool,
+    ) -> tuple[str, Text, int]:
+        row = repo_row(
+            info,
+            self._repo_layout,
+            self._palette,
+            grouped=grouped,
+            loading=info.path in loading,
+            sessions=sessions.get(info.path),
+        )
+        return str(info.path), row, row_height(row)
 
     def _render_repo_info_rows(
         self,
@@ -424,10 +617,19 @@ class ConsoleReposMixin:
         loading: set[Path] | None = None,
     ) -> None:
         loading = loading or set()
+        sessions = self._repo_sessions()
+        self._rendered_repo_sessions = sessions
         infos_by_path = {info.path: info for info in infos}
-        grouped_paths: set[Path] = set()
-        shown_repo_count = 0
+        grouped_paths = {path for group in self._groups_entries for path in group.repositories}
         shown_group_count = 0
+        rows: list[tuple[str, Text, int]] = []
+
+        # Standalone repositories come first: after a group they would read
+        # as part of it.
+        ungrouped_infos = [info for info in infos if info.path not in grouped_paths]
+        shown_repo_count = len(ungrouped_infos)
+        for info in self._sorted_repo_infos(ungrouped_infos, loading, sessions):
+            rows.append(self._repo_row_entry(info, loading, sessions, grouped=False))
 
         for group in self._groups_entries:
             group_infos = [
@@ -437,20 +639,37 @@ class ConsoleReposMixin:
                 continue
             shown_group_count += 1
             shown_repo_count += len(group_infos)
-            grouped_paths.update(info.path for info in group_infos)
-            self._add_repo_group_row(table, group)
+            # A blank line above every group but a first row keeps groups apart.
+            lead = bool(rows)
+            heading = self._repo_group_row(group, group_infos, loading, sessions, lead=lead)
+            rows.append((self._group_row_key(group.path), heading, 2 if lead else 1))
             if self._repo_group_is_collapsed(group):
                 continue
-            for info in self._sorted_repo_infos(group_infos, loading):
-                self._add_repo_row(table, info, loading, grouped=True)
+            for info in self._sorted_repo_infos(group_infos, loading, sessions):
+                rows.append(self._repo_row_entry(info, loading, sessions, grouped=True))
 
-        ungrouped_infos = [info for info in infos if info.path not in grouped_paths]
-        shown_repo_count += len(ungrouped_infos)
-        for info in self._sorted_repo_infos(ungrouped_infos, loading):
-            self._add_repo_row(table, info, loading, grouped=False)
-
+        self._show_repo_rows(table, rows)
         self._visible_repo_count = shown_repo_count
         self._visible_group_count = shown_group_count
+
+    def _show_repo_rows(self, table: DataTable, rows: list[tuple[str, Text, int]]) -> None:
+        """Put *rows* on screen without a flash.
+
+        When the same rows are there in the same order, only the lines that
+        changed are repainted, and cursor and scroll stay put. Anything else
+        is rebuilt inside one batch, so no half-built table is ever drawn.
+        """
+        shown = [(str(row.key.value), row.height) for row in table.ordered_rows]
+        if shown == [(key, height) for key, _, height in rows]:
+            for key, row, _ in rows:
+                if self._shown_repo_rows.get(key) != row:
+                    table.update_cell(key, self._col_keys[0], row)
+        else:
+            with self.batch_update():
+                table.clear()
+                for key, row, height in rows:
+                    table.add_row(row, key=key, height=height)
+        self._shown_repo_rows = {key: row for key, row, _ in rows}
 
     def _repo_row_infos(self) -> tuple[list[RepositoryInfo], set[Path]]:
         """Every configured repository's info, with a placeholder for each one
@@ -470,7 +689,6 @@ class ConsoleReposMixin:
     def _apply_filter_and_sort(self, *, update_status: bool = True) -> None:
         table = self.query_one("#repo-table", DataTable)
         no_msg = self.query_one("#no-repos-message", Static)
-        self._apply_repo_table_loading_widths(table)
         preserved_row_key = None
         preserved_row_index = None
         restore_focus = False
@@ -480,12 +698,13 @@ class ConsoleReposMixin:
             )
 
         infos, loading = self._repo_row_infos()
+        self._apply_repo_layout(table, self._resolve_repo_layout(infos, loading))
         total = len(infos)
         infos = self._filter_repo_infos_for_search(infos)
         is_empty = total == 0 and not self._search_query
         self._set_table_empty_state(table, no_msg, is_empty=is_empty)
-        table.clear()
         if is_empty:
+            self._show_repo_rows(table, [])
             self._visible_repo_count = 0
             self._visible_group_count = 0
         else:
@@ -502,21 +721,6 @@ class ConsoleReposMixin:
             )
         if update_status and self._active_tab == "repos":
             self._update_status(self._build_loaded_status(len(infos), total))
-
-    def _apply_repo_table_loading_widths(self, table: DataTable) -> None:
-        col_keys = getattr(self, "_col_keys", None)
-        if not col_keys:
-            return
-
-        width = len(_REPO_LOADING_CELL_VALUE)
-        for index in _REPO_LOADING_WIDTH_COLUMNS:
-            if len(col_keys) <= index:
-                continue
-            try:
-                column = table.columns[col_keys[index]]
-            except (KeyError, IndexError):
-                continue
-            column.content_width = max(column.content_width, width)
 
     def _build_loaded_status(self, shown: int, total: int) -> str:
         if total == 0 and not self._search_query:
@@ -592,4 +796,6 @@ class ConsoleReposMixin:
         elif self._active_tab == "panels":
             self._load_panels()
         else:
-            self._refresh_repos(show_loading=True)
+            # The last results stay up while fresh ones arrive; the footer
+            # shows the refresh.
+            self._refresh_repos()

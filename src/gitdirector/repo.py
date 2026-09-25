@@ -94,13 +94,13 @@ def _is_host_key_error(stderr: str) -> bool:
 
 def _classify_remote_error(stderr: str) -> str | None:
     if _is_network_error(stderr):
-        return "network error — could not reach remote"
+        return "network error: could not reach remote"
     if _is_host_key_error(stderr):
         return (
-            "host key rejected — the remote's SSH host key changed or is not in ~/.ssh/known_hosts"
+            "host key rejected: the remote's SSH host key changed or is not in ~/.ssh/known_hosts"
         )
     if _AUTH_ERROR_RE.search(stderr):
-        return "authentication failed — configure git credentials for this remote"
+        return "authentication failed: configure git credentials for this remote"
     return None
 
 
@@ -178,7 +178,7 @@ def _default_ssh_command() -> str:
     """The ``GIT_SSH_COMMAND`` used when the caller has not set one.
 
     Git runs without a terminal here, so ssh can never ask "are you sure you
-    want to continue connecting?" — an unknown host key used to fail every
+    want to continue connecting?": an unknown host key used to fail every
     fetch until the user connected once by hand. With ``accept-new`` (OpenSSH
     7.6+) a host is trusted on first contact and recorded in
     ``~/.ssh/known_hosts`` just as answering "yes" would, while a key that
@@ -311,6 +311,9 @@ class RepositoryInfo:
     #: True when the remote could not be fetched, so the sync status was
     #: computed from the refs already on disk and may be out of date.
     sync_stale: bool = False
+    #: Commits HEAD is ahead of and behind origin/<branch>.
+    ahead: int = 0
+    behind: int = 0
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -410,6 +413,8 @@ class Repository:
 
     def status_output(self) -> tuple[bool, str]:
         return self._read_only_output(
+            "-c",
+            "color.status=always",
             "status",
             empty_text="Working tree clean.",
             failure_text="git status failed",
@@ -434,6 +439,7 @@ class Repository:
         return self._read_only_output(
             "branch",
             "-a",
+            "--color=always",
             empty_text="No branches found.",
             failure_text="git branch -a failed",
         )
@@ -457,9 +463,10 @@ class Repository:
         code, _, err = self._run_git(*args)
         return code, err
 
-    def _get_origin_sync_status(self, branch: str | None) -> tuple[RepoStatus, str]:
+    def _origin_ahead_behind(self, branch: str | None) -> tuple[tuple[int, int] | None, str]:
+        """``(ahead, behind)`` against origin/<branch>, or None and the reason."""
         if branch is None:
-            return RepoStatus.UNKNOWN, "Detached HEAD"
+            return None, "Detached HEAD"
 
         remote_ref = self._origin_branch_ref(branch)
         code, out, err = self._run_git(
@@ -471,16 +478,14 @@ class Repository:
         if code != 0:
             ref_code, _, _ = self._run_git("show-ref", "--verify", "--quiet", remote_ref)
             if ref_code != 0:
-                return RepoStatus.UNKNOWN, f"No origin/{branch} branch"
-            return RepoStatus.UNKNOWN, err or f"Could not compare HEAD with origin/{branch}"
+                return None, f"No origin/{branch} branch"
+            return None, err or f"Could not compare HEAD with origin/{branch}"
 
         parts = out.split()
         try:
-            ahead = int(parts[0])
-            behind = int(parts[1])
+            return (int(parts[0]), int(parts[1])), ""
         except (IndexError, ValueError):
-            return RepoStatus.UNKNOWN, "Could not determine sync status"
-        return _sync_status_from_counts(ahead, behind)
+            return None, "Could not determine sync status"
 
     def get_last_commit_info(self) -> tuple[str | None, int | None]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd%n%ct", "--date=relative")
@@ -571,13 +576,17 @@ class Repository:
 
         if fetch and branch is not None and not fetch_error:
             # The counts parsed above predate the fetch.
-            status, msg = self._get_origin_sync_status(branch)
+            counts, msg = self._origin_ahead_behind(branch)
         elif branch is not None and upstream == f"origin/{branch}" and ahead_behind is not None:
             # git already compared HEAD with origin/<branch>: two fewer
             # git processes per repository.
-            status, msg = _sync_status_from_counts(*ahead_behind)
+            counts, msg = ahead_behind, ""
         else:
-            status, msg = self._get_origin_sync_status(branch)
+            counts, msg = self._origin_ahead_behind(branch)
+        if counts is None:
+            status = RepoStatus.UNKNOWN
+        else:
+            status, msg = _sync_status_from_counts(*counts)
 
         if fetch_error:
             # A remote that cannot be reached says nothing about how this
@@ -603,6 +612,7 @@ class Repository:
             last_commit_ts,
             size,
             bool(fetch_error),
+            *(counts or (0, 0)),
         )
 
     def pull(self, *, retries: int = 1) -> tuple[bool, str]:
