@@ -24,7 +24,7 @@ class TestGdSendCLIShape:
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1"])
 
         assert result.exit_code != 0
-        assert "TEXT or --key is required" in result.output
+        assert "pass TEXT or --key" in result.output
 
     def test_rejects_non_gd_session_name(self):
         runner = CliRunner()
@@ -38,14 +38,14 @@ class TestGdSendCLIShape:
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "hello", "--key", "C-c"])
 
         assert result.exit_code != 0
-        assert "TEXT cannot be used with --key" in result.output
+        assert "--key cannot be combined with TEXT or --enter" in result.output
 
     def test_rejects_enter_with_key(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "--key", "C-c", "--enter"])
 
         assert result.exit_code != 0
-        assert "--enter cannot be used with --key" in result.output
+        assert "--key cannot be combined with TEXT or --enter" in result.output
 
     def test_rejects_unsupported_key(self):
         runner = CliRunner()
@@ -58,7 +58,7 @@ class TestGdSendCLIShape:
 class TestGdSendCLIExecution:
     def test_sends_text_without_enter(self, monkeypatch):
         fake_send = MagicMock(return_value=True)
-        monkeypatch.setattr("gitdirector.commands.gd_send.send_text_to_session", fake_send)
+        monkeypatch.setattr("gitdirector.integrations.tmux.send_text_to_session", fake_send)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/opencode/1", "continue"])
@@ -69,7 +69,7 @@ class TestGdSendCLIExecution:
 
     def test_sends_text_with_enter(self, monkeypatch):
         fake_send = MagicMock(return_value=True)
-        monkeypatch.setattr("gitdirector.commands.gd_send.send_text_to_session", fake_send)
+        monkeypatch.setattr("gitdirector.integrations.tmux.send_text_to_session", fake_send)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "npm test", "--enter"])
@@ -80,7 +80,7 @@ class TestGdSendCLIExecution:
 
     def test_sends_key(self, monkeypatch):
         fake_send = MagicMock(return_value=True)
-        monkeypatch.setattr("gitdirector.commands.gd_send.send_key_to_session", fake_send)
+        monkeypatch.setattr("gitdirector.integrations.tmux.send_key_to_session", fake_send)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "--key", "C-c"])
@@ -91,7 +91,7 @@ class TestGdSendCLIExecution:
 
     def test_reports_missing_session(self, monkeypatch):
         fake_send = MagicMock(return_value=False)
-        monkeypatch.setattr("gitdirector.commands.gd_send.send_text_to_session", fake_send)
+        monkeypatch.setattr("gitdirector.integrations.tmux.send_text_to_session", fake_send)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-send", "gd/myrepo/shell/1", "hello"])

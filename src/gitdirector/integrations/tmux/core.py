@@ -10,6 +10,7 @@ import shutil
 import subprocess
 from base64 import b32encode
 from collections.abc import Collection
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -1140,6 +1141,55 @@ def capture_pane(
     # bottom is usually blank rows below the prompt.
     tail = result.stdout.rstrip("\n").splitlines()[-lines:]
     return "\n".join(tail) + "\n" if tail else ""
+
+
+@dataclass(frozen=True)
+class ScreenCapture:
+    """The visible screen of a pane: one line per row, with SGR colour escapes."""
+
+    lines: list[str]
+    width: int
+    height: int
+    #: ``(column, row)`` of the cursor, or None when the program hides it.
+    cursor: tuple[int, int] | None
+
+
+def capture_screen(session_name: str) -> ScreenCapture | None:
+    """The visible screen of *session_name*'s active pane, or None when it is gone."""
+    if not _session_exists(session_name):
+        return None
+    target = _active_pane_target(session_name)
+    # One invocation, so the cursor and the screen come from the same moment.
+    # -N keeps trailing spaces, which carry the background of coloured rows.
+    result = _run_tmux(
+        _chain_tmux_commands(
+            [
+                [
+                    "display-message",
+                    "-p",
+                    "-t",
+                    target,
+                    "#{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag}",
+                ],
+                ["capture-pane", "-p", "-e", "-N", "-t", target],
+            ]
+        ),
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    geometry, _, content = result.stdout.partition("\n")
+    try:
+        width, height, cursor_x, cursor_y, cursor_flag = map(int, geometry.split())
+    except ValueError:
+        return None
+    lines = content.split("\n")[:height]
+    return ScreenCapture(
+        lines=lines + [""] * (height - len(lines)),
+        width=width,
+        height=height,
+        cursor=(cursor_x, cursor_y) if cursor_flag else None,
+    )
 
 
 def send_key_to_session(session_name: str, key: str) -> bool:

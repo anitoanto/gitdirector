@@ -714,9 +714,8 @@ class TestInfoCommand:
 
         result = runner.invoke(cli, ["info", str(repo)])
         assert result.exit_code == 0
-        assert "Files" in result.output
-        assert "Lines" in result.output
-        assert "Tokens" in result.output
+        assert "1 file · 1 line · 1 token · depth 0" in result.output
+        assert "EXTENSION  FILES  LINES  TOKENS" in result.output
 
     def test_info_by_name(self, tmp_path, runner, monkeypatch):
         from gitdirector.cli import cli

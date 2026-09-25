@@ -16,12 +16,47 @@ uv run nox -s clean                  # delete caches, coverage, build artifacts
 `clean` removes caches, coverage output, and build artifacts everywhere in the
 project, and never touches `.git`, virtualenvs, or `node_modules`.
 
+## CLI conventions
+
+Every command in `src/gitdirector/commands/` follows the same rules, backed by
+the helpers in `commands/__init__.py`:
+
+- **Streams.** Results go to stdout. Errors, prompts, spinners, and the update
+  notice go to stderr, so `$(gitdirector ...)` captures only results.
+- **Errors.** Raise `CommandError` (exit 1, `Error: headline` plus unwrapped
+  detail lines) or `click.UsageError` (exit 2). Wrap tmux calls in
+  `tmux_errors()` so a failure reads as one sentence.
+- **Tables.** Use `print_rows`: borderless, fitted to the terminal (a path
+  column is cut from the left), never truncated when piped.
+- **Progress.** Use `run_concurrently`: a stderr spinner that only draws on a
+  terminal. Results come back in input order.
+- **Machine output.** `--json` on commands a script would read. Keep the keys
+  stable.
+- **Wording.** Repo status reads like the console's (`↑1 to push · 2 changed`,
+  from `status_parts`), and session statuses use its `●`/`○` marks.
+- **Startup.** Every Tab press in shell completion runs the CLI, so import
+  heavy modules (tmux, Textual, pathspec, urllib) inside the command.
+
+## Screenshots
+
+`gd-screenshot` takes one tmux call (`capture-pane -e -N` chained after a
+`display-message` for size and cursor, so both come from the same moment).
+`screenshot.py` parses the SGR escapes with rich into a cell grid and draws it
+with Pillow, one glyph per cell so the grid holds for any font. It uses Menlo
+or DejaVu Sans Mono (else `fc-match monospace`). A character that font lacks
+(it would draw the missing-glyph box) comes from `fc-match :charset=<hex>` or
+a short list of CJK and symbol fonts. Colours are VS Code's ANSI palette on
+the configured theme's background and foreground.
+
 ## Test suite
 
 `pytest` runs across all cores with coverage, in a **randomized order**
 (`pytest-randomly`) with a per-test timeout, so state leaking between tests
 shows up quickly. Replay a failure with the printed `--randomly-seed=<seed>`,
 or pin the order with `-p no:randomly`.
+
+`tests/conftest.py` drops `FORCE_COLOR` and similar variables before rich
+loads, so CLI output is asserted exactly as CI sees it.
 
 Two rules keep it stable (see `tests/_timeouts.py`):
 
@@ -203,8 +238,8 @@ tmux discards a pane it could not spawn. A panel rebuild also kills any
 **Launch directory.** A tmux server keeps the working directory of the
 client that forked it, and `tmux list-clients` leads from any session to the
 attached client and its parent. Every tmux client therefore runs from the
-home directory, and `console` and `cd` re-exec themselves there without
-`PWD`/`OLDPWD` (`launch_context.py`).
+home directory, and `console`, `cd`, and `panel` re-exec themselves there
+without `PWD`/`OLDPWD` (`launch_context.py`).
 
 ## Sessions tab status
 
@@ -288,8 +323,9 @@ idle itself. `opencode --pure` disables external plugins and therefore this
 reporting.
 
 A report whose pane is back at a shell prompt (the agent exited without
-saying so) is ignored. An agent started some other way (`gd-tmux repo
-claude`, or by hand) has no hooks and is classified like any other program.
+saying so) is ignored. Agents started from the console or with `--agent` (`cd`, `gd-tmux`)
+carry the hooks; one started as a plain command (`gd-tmux repo claude`, or by
+hand) has none and is classified like any other program.
 
 ### Heuristics for everything else
 

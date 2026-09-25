@@ -1056,6 +1056,15 @@ class TestClassifyRemoteError:
     def test_no_match(self):
         assert _classify_remote_error("fatal: some other error") is None
 
+    def test_missing_remote_is_not_an_auth_failure(self):
+        stderr = (
+            "fatal: 'origin' does not appear to be a git repository\n"
+            "fatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights"
+        )
+        assert _classify_remote_error(stderr) == "no remote named origin"
+        assert not _is_auth_error(stderr)
+
     @pytest.mark.parametrize(
         "stderr",
         [

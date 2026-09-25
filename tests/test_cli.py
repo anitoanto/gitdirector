@@ -1,3 +1,4 @@
+import json
 import runpy
 import warnings
 from pathlib import Path
@@ -5,10 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.utils import strip_ansi
-from rich.console import Console
 
 from gitdirector.cli import cli, main
-from gitdirector.commands import _changes_text, _format_size, _path_text, _status_text
+from gitdirector.commands import display_path, fit_left, format_size, status_text
+from gitdirector.commands.pull import summarize_pull
 from gitdirector.repo import RepositoryInfo, RepoStatus
 
 # ---------------------------------------------------------------------------
@@ -17,77 +18,78 @@ from gitdirector.repo import RepositoryInfo, RepoStatus
 
 
 class TestFormatSize:
-    def test_none(self):
-        assert _format_size(None).plain == "-"
+    @pytest.mark.parametrize(
+        "size,expected",
+        [(None, "-"), (500, "500 B"), (2048, "2.0 KB"), (2 << 20, "2.0 MB"), (2 << 30, "2.0 GB")],
+    )
+    def test_units(self, size, expected):
+        assert format_size(size).plain == expected
 
-    def test_bytes(self):
-        assert "B" in _format_size(500).plain
 
-    def test_kb(self):
-        assert "KB" in _format_size(2048).plain
-
-    def test_mb(self):
-        assert "MB" in _format_size(2 * 1024 * 1024).plain
-
-    def test_gb(self):
-        assert "GB" in _format_size(2 * 1024 * 1024 * 1024).plain
+def _info(status=RepoStatus.UP_TO_DATE, **kwargs):
+    return RepositoryInfo(Path("/r/repo"), "repo", status, "main", **kwargs)
 
 
 class TestStatusText:
+    """The CLI speaks the console's status language."""
+
     @pytest.mark.parametrize(
-        "status,expected",
+        "info,expected",
         [
-            (RepoStatus.UP_TO_DATE, "up to date"),
-            (RepoStatus.BEHIND, "behind"),
-            (RepoStatus.AHEAD, "ahead"),
-            (RepoStatus.DIVERGED, "diverged"),
-            (RepoStatus.UNKNOWN, "unknown"),
+            (_info(), "clean"),
+            (_info(RepoStatus.AHEAD, ahead=2), "↑2 to push"),
+            (_info(RepoStatus.BEHIND, behind=3), "↓3 to pull"),
+            (_info(RepoStatus.DIVERGED, ahead=1, behind=1), "↑1 to push · ↓1 to pull"),
+            (
+                _info(staged=True, staged_files=["a"], unstaged=True, unstaged_files=["b", "c"]),
+                "1 staged · 2 changed",
+            ),
+            (_info(RepoStatus.UNKNOWN, message="No origin/main branch"), "no remote branch"),
+            (_info(RepoStatus.UNKNOWN), "sync unknown"),
+            (_info(RepoStatus.BEHIND, behind=1, sync_stale=True), "↓1 to pull · offline"),
         ],
     )
-    def test_labels(self, status, expected):
-        assert _status_text(status).plain == expected
+    def test_labels(self, info, expected):
+        assert status_text(info).plain == expected
 
 
-class TestChangesText:
-    def test_none(self):
-        assert _changes_text(False, False).plain == "-"
+class TestFitLeft:
+    def test_short_text_is_unchanged(self):
+        assert fit_left("/a/b", 10) == "/a/b"
 
-    def test_staged(self):
-        assert "staged" in _changes_text(True, False).plain
+    def test_keeps_the_tail(self):
+        assert fit_left("/very/long/leading/dirs/myrepo", 12) == "…dirs/myrepo"
 
-    def test_unstaged(self):
-        assert "unstaged" in _changes_text(False, True).plain
-
-    def test_both(self):
-        text = _changes_text(True, True).plain
-        assert "staged" in text and "unstaged" in text
+    @pytest.mark.parametrize("width", [0, 1, 2])
+    def test_tiny_widths_do_not_crash(self, width):
+        assert len(fit_left("/Users/example/myrepo", width)) <= max(width, 0)
 
 
-class TestPathText:
-    def test_short_path(self):
-        text = _path_text("/a/b")
-        assert "/a/b" in text.plain
+class TestDisplayPath:
+    def test_home_is_shortened(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        assert display_path(tmp_path / "src" / "app") == "~/src/app"
+        assert display_path(tmp_path) == "~"
 
-    def test_long_path_truncated(self):
-        long = "/very/long/path/" + "x" * 200
-        text = _path_text(long)
-        assert text.plain.startswith("\u2026")
+    def test_other_paths_are_unchanged(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        assert display_path(tmp_path / "homework") == str(tmp_path / "homework")
 
-    def test_truncation_retains_path_tail(self):
-        console = Console(width=120, force_terminal=False)
-        path = "/very/long/leading/dirs/that/are/longer/than/the/column/myrepo"
-        with patch("gitdirector.commands.console", console):
-            text = _path_text(path).plain
 
-        assert len(text) <= max(10, console.width * 2 // 9 - 6)
-        assert text.startswith("\u2026")
-        assert text.endswith("myrepo")
+class TestSummarizePull:
+    def test_up_to_date(self):
+        assert summarize_pull(True, "Already up to date.") == "up to date"
 
-    @pytest.mark.parametrize("width", [0, 4, 10])
-    def test_narrow_console_does_not_crash(self, width):
-        console = Console(width=width, force_terminal=False)
-        with patch("gitdirector.commands.console", console):
-            _path_text("/Users/example/projects/myrepo")
+    def test_fast_forward(self):
+        output = (
+            "Updating a1b2c3d..e4f5a6b\nFast-forward\n x | 2 +-\n 1 file changed, 1 insertion(+)"
+        )
+        assert summarize_pull(True, output) == "a1b2c3d..e4f5a6b · 1 file changed, 1 insertion(+)"
+
+    def test_failure_shows_first_line(self):
+        assert summarize_pull(False, "fatal: Not possible to fast-forward\nhint") == (
+            "Not possible to fast-forward"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +132,7 @@ class TestLinkCommand:
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
         assert result.exit_code == 0
-        assert "Added 2" in result.output
+        assert "Tracking 2 new repositories" in result.output
 
     def test_link_discover_with_skipped(self, runner, tmp_path):
         """--discover with skipped repos prints skipped messages."""
@@ -141,7 +143,7 @@ class TestLinkCommand:
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
         assert result.exit_code == 0
-        assert "skipped" in result.output.lower()
+        assert "1 already tracked" in result.output
 
     def test_link_discover_none_found(self, runner, tmp_path):
         """--discover finds no repositories: should print message and succeed."""
@@ -149,10 +151,7 @@ class TestLinkCommand:
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path), "--discover"])
         assert result.exit_code == 0
-        assert (
-            "no git repositories" in result.output.lower()
-            or "nothing to do" in result.output.lower()
-        )
+        assert "No git repositories found" in result.output
 
 
 class TestUnlinkCommand:
@@ -202,16 +201,19 @@ class TestUnlinkCommand:
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", "my-repo"])
         assert result.exit_code == 1
-        assert "multiple" in result.output.lower()
+        assert "use the full path" in result.output
+        mgr.remove_repository.assert_not_called()
 
     def test_unlink_by_path_does_not_fall_back_to_name_lookup(self, runner, tmp_path):
         """A path that is not tracked must fail instead of being retried as a name."""
         mgr = _mock_manager(
             remove_repository=(False, "Repository not tracked: /some/path/repo", []),
         )
+        mgr.resolve_repository_target.return_value = (None, [], True)
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", str(tmp_path / "repo")])
         assert result.exit_code == 1
+        assert "No tracked repository at path" in result.output
         mgr.remove_repository.assert_not_called()
 
     @pytest.mark.parametrize("dot_target", [".", ".."])
@@ -220,6 +222,7 @@ class TestUnlinkCommand:
         mgr = _mock_manager(
             remove_repository=(False, f"Repository not tracked: {dot_target}", []),
         )
+        mgr.resolve_repository_target.return_value = (None, [], True)
         with patch("gitdirector.commands.unlink.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["unlink", dot_target])
         assert result.exit_code == 1
@@ -233,7 +236,7 @@ class TestListCommand:
         with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0
-        assert "No repositories linked" in result.output
+        assert "No repositories tracked" in result.output
 
     def test_with_repos(self, runner, fake_git_repo):
         info = RepositoryInfo(
@@ -272,15 +275,55 @@ class TestListCommand:
         # Check spinner/table summary for plural
         assert "2 repositories" in result.output or "2 repos" in result.output
 
+    def test_json(self, runner, tmp_path):
+        info = RepositoryInfo(
+            tmp_path / "repo",
+            "repo",
+            RepoStatus.DIVERGED,
+            "main",
+            ahead=1,
+            behind=2,
+            size=10,
+            last_updated="1 day ago",
+        )
+        mgr = _mock_manager(get_repository_status=info)
+        mgr.config.repositories = [info.path]
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["list", "--json"])
+        assert result.exit_code == 0
+        [repo] = json.loads(result.stdout)
+        assert repo["sync"] == "diverged"
+        assert (repo["ahead"], repo["behind"], repo["size"]) == (1, 2, 10)
+        assert repo["path"] == str(info.path)
+
+    def test_no_fetch_skips_the_network(self, runner, tmp_path):
+        mgr = _mock_manager()
+        mgr.config.repositories = [tmp_path / "repo"]
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            runner.invoke(cli, ["list", "--no-fetch"])
+        mgr.get_repository_status.assert_called_once_with(
+            tmp_path / "repo", fetch=False, include_size=True
+        )
+
+    def test_piped_table_is_never_truncated(self, runner, tmp_path):
+        path = tmp_path / ("very-long-directory-name-" * 8) / "repo"
+        info = RepositoryInfo(path, "repo", RepoStatus.UP_TO_DATE, "main")
+        mgr = _mock_manager(get_repository_status=info)
+        mgr.config.repositories = [path]
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["list"])
+        assert str(path) in result.stdout
+        assert all(line == line.rstrip() for line in result.stdout.splitlines())
+
 
 class TestStatusCommand:
     def test_empty(self, runner):
         mgr = _mock_manager()
         mgr.config.repositories = []
-        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
-        assert "No repositories linked" in result.output
+        assert "No repositories tracked" in result.output
 
     def test_all_clean(self, runner, fake_git_repo):
         info = RepositoryInfo(
@@ -291,7 +334,7 @@ class TestStatusCommand:
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
-        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
         assert "clean" in result.output.lower()
@@ -307,10 +350,26 @@ class TestStatusCommand:
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
-        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
-        assert "changed" in result.output.lower()
+        assert "staged   a.py" in result.output
+        assert "1 with changes" in result.output
+
+    def test_json_lists_only_dirty_repositories(self, runner, tmp_path):
+        clean = RepositoryInfo(tmp_path / "a", "a", RepoStatus.UP_TO_DATE, "main")
+        dirty = RepositoryInfo(
+            tmp_path / "b", "b", RepoStatus.UP_TO_DATE, "dev", unstaged=True, unstaged_files=["x"]
+        )
+        mgr = _mock_manager()
+        mgr.config.repositories = [clean.path, dirty.path]
+        mgr.get_repository_status = lambda path, **_: clean if path == clean.path else dirty
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert [repo["name"] for repo in data] == ["b"]
+        assert data[0]["unstaged"] == ["x"] and data[0]["branch"] == "dev"
 
     def test_dirty_with_unstaged(self, runner, fake_git_repo):
         info = RepositoryInfo(
@@ -323,7 +382,7 @@ class TestStatusCommand:
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [fake_git_repo]
-        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
         assert "changed" in result.output.lower()
@@ -344,9 +403,9 @@ class TestStatusCommand:
         )
         mgr = _mock_manager()
         mgr.config.repositories = [repo1, repo2]
-        mgr.get_repository_status = lambda path: info1 if path == repo1 else info2
+        mgr.get_repository_status = lambda path, **_: info1 if path == repo1 else info2
 
-        with patch("gitdirector.commands.status.RepositoryManager", return_value=mgr):
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["status"])
 
         assert result.exit_code == 0
@@ -360,7 +419,7 @@ class TestPullCommand:
         with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["pull"])
         assert result.exit_code == 0
-        assert "No repositories linked" in result.output
+        assert "No repositories tracked" in result.output
 
     def test_all_success(self, runner, fake_git_repo):
         mgr = _mock_manager()
@@ -398,7 +457,8 @@ class TestPullCommand:
         with patch("gitdirector.commands.pull.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["pull"], input="n\n")
         assert result.exit_code == 0
-        assert "Aborted" in result.output
+        assert "Pull 1 repository?" in result.output
+        assert "REPOSITORY" not in result.output
 
     def test_confirmed_multiple_repos_updates_progress(self, runner, tmp_path):
         repo1 = tmp_path / "alpha"
@@ -513,7 +573,7 @@ class TestHelpCommand:
         assert "Update available: v9.9.9" in result.stderr
         assert "Update available" not in result.stdout
         # Printed after the command's own output, not before it.
-        assert result.output.index("No repositories linked") < result.output.index(
+        assert result.output.index("No repositories tracked") < result.output.index(
             "Update available"
         )
 
@@ -522,7 +582,7 @@ class TestHelpCommand:
         with patch("gitdirector.commands.link.RepositoryManager", return_value=mgr):
             result = runner.invoke(cli, ["link", str(tmp_path)])
         assert result.exit_code == 1
-        assert "Error: Not a git repository: /x" in result.stderr
+        assert "Error: Not a git repository: /x" in strip_ansi(result.stderr)
         assert "Not a git repository" not in result.stdout
 
     def test_no_args_shows_help(self, runner):
@@ -706,38 +766,97 @@ class TestCdCommand:
         assert "".join(str(path_a).split()) in flattened
         assert "".join(str(path_b).split()) in flattened
 
-    def test_cd_success(self, runner, tmp_path):
+    def _fake_tmux(self):
         import sys
 
+        fake = MagicMock()
+        fake.create_tmux_session.return_value = "gd/my-repo_abcde/shell/1"
+        return patch.dict(sys.modules, {"gitdirector.integrations.tmux": fake}), fake
+
+    def test_cd_success(self, runner, tmp_path):
         repo = tmp_path / "my-repo"
         mgr = _mock_manager()
-        mgr.config.repositories = [repo]
         mgr.resolve_repository_target = MagicMock(return_value=(repo, [], False))
-        mock_tmux = MagicMock()
-        fake_tmux_module = MagicMock()
-        fake_tmux_module.open_in_tmux = mock_tmux
-        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
-            with patch.dict(sys.modules, {"gitdirector.integrations.tmux": fake_tmux_module}):
-                result = runner.invoke(cli, ["cd", "my-repo"])
-        mock_tmux.assert_called_once_with("my-repo", repo)
-        assert result.exit_code == 0
+        modules, fake = self._fake_tmux()
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr), modules:
+            result = runner.invoke(cli, ["cd", "my-repo"])
+        assert result.exit_code == 0, result.output
+        fake.create_tmux_session.assert_called_once_with(
+            "my-repo", repo, purpose="shell", description=None, shell=True
+        )
+        fake.launch_command_in_tmux_session.assert_not_called()
+        fake.attach_tmux_session.assert_called_once_with(
+            "gd/my-repo_abcde/shell/1", skip_config_sync=True
+        )
 
     def test_cd_accepts_a_path(self, runner, tmp_path):
         """A path is the documented way out of an ambiguous name."""
-        import sys
-
         repo = tmp_path / "work" / "my-repo"
         mgr = _mock_manager()
         mgr.resolve_repository_target = MagicMock(return_value=(repo, [], True))
-        mock_tmux = MagicMock()
-        fake_tmux_module = MagicMock()
-        fake_tmux_module.open_in_tmux = mock_tmux
-        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr):
-            with patch.dict(sys.modules, {"gitdirector.integrations.tmux": fake_tmux_module}):
-                result = runner.invoke(cli, ["cd", str(repo)])
+        modules, fake = self._fake_tmux()
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr), modules:
+            result = runner.invoke(cli, ["cd", str(repo)])
+        assert result.exit_code == 0, result.output
         mgr.resolve_repository_target.assert_called_once_with(str(repo))
-        mock_tmux.assert_called_once_with("my-repo", repo)
-        assert result.exit_code == 0
+        fake.attach_tmux_session.assert_called_once()
+
+    def test_cd_agent_launches_it_with_status_hooks(self, runner, tmp_path):
+        from gitdirector.agents import AGENTS_BY_KEY
+
+        repo = tmp_path / "my-repo"
+        mgr = _mock_manager()
+        mgr.resolve_repository_target = MagicMock(return_value=(repo, [], False))
+        modules, fake = self._fake_tmux()
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr), modules:
+            result = runner.invoke(cli, ["cd", "my-repo", "--agent", "claude", "-m", "bypass"])
+        assert result.exit_code == 0, result.output
+        claude = AGENTS_BY_KEY["claude"]
+        fake.create_tmux_session.assert_called_once_with(
+            "my-repo", repo, purpose="claude-bypass", description=None, shell=False
+        )
+        fake.launch_command_in_tmux_session.assert_called_once_with(
+            "gd/my-repo_abcde/shell/1", claude.launch_command_for("bypass")
+        )
+
+    def test_cd_kills_the_session_when_attaching_fails(self, runner, tmp_path):
+        repo = tmp_path / "my-repo"
+        mgr = _mock_manager()
+        mgr.resolve_repository_target = MagicMock(return_value=(repo, [], False))
+        modules, fake = self._fake_tmux()
+        fake.attach_tmux_session.side_effect = KeyboardInterrupt
+        with patch("gitdirector.commands.cd.RepositoryManager", return_value=mgr), modules:
+            result = runner.invoke(cli, ["cd", "my-repo"])
+        assert result.exit_code != 0
+        fake.kill_tmux_session.assert_called_once_with("gd/my-repo_abcde/shell/1")
+
+    def test_cd_session_name_rejoins_it(self, runner):
+        name = "gd/my-repo_abcde/claude-auto/2"
+        modules, fake = self._fake_tmux()
+        with (
+            modules,
+            patch("gitdirector.integrations.tmux.core._session_exists", return_value=True),
+        ):
+            result = runner.invoke(cli, ["cd", name])
+        assert result.exit_code == 0, result.output
+        fake.create_tmux_session.assert_not_called()
+        fake.attach_tmux_session.assert_called_once_with(name)
+
+    def test_cd_dead_session_is_an_error(self, runner):
+        with patch("gitdirector.integrations.tmux.core._session_exists", return_value=False):
+            result = runner.invoke(cli, ["cd", "gd/my-repo_abcde/shell/9"])
+        assert result.exit_code == 1
+        assert "is not running" in result.output
+
+    def test_cd_mode_needs_an_agent(self, runner):
+        result = runner.invoke(cli, ["cd", "my-repo", "--mode", "auto"])
+        assert result.exit_code == 2
+        assert "--mode needs --agent" in result.output
+
+    def test_cd_mode_must_suit_the_agent(self, runner):
+        result = runner.invoke(cli, ["cd", "my-repo", "--agent", "codex", "--mode", "auto"])
+        assert result.exit_code == 2
+        assert "not supported by Codex" in result.output
 
     def test_cd_untracked_path_reports_path_not_name(self, runner, tmp_path):
         repo = tmp_path / "work" / "my-repo"

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-
-from pathspec import GitIgnoreSpec
+from typing import TYPE_CHECKING
 
 from .config import Config
 from .repo import Repository, RepositoryInfo, RepoStatus, is_git_repository
 from .storage import normalize_repository_path
+
+if TYPE_CHECKING:
+    from pathspec import GitIgnoreSpec
 
 
 def _load_gitignore(directory: Path) -> GitIgnoreSpec | None:
@@ -16,6 +18,8 @@ def _load_gitignore(directory: Path) -> GitIgnoreSpec | None:
         if path.is_symlink() or not path.is_file():
             return None
         with path.open(encoding="utf-8", errors="surrogateescape") as file:
+            from pathspec import GitIgnoreSpec
+
             return GitIgnoreSpec.from_lines(file)
     except (OSError, ValueError):
         return None

@@ -1,34 +1,49 @@
-"""Shared console, formatting, and orchestration helpers for the CLI commands."""
+"""Shared output and orchestration helpers for the CLI commands.
+
+Conventions every command follows:
+
+* Results go to stdout, everything else (errors, prompts, progress, the update
+  notice) to stderr, so ``$(gitdirector ...)`` and pipes see only results.
+* Progress spinners only draw on a terminal.
+* Tables are fitted to the terminal; piped, they are never truncated.
+* ``--json`` prints a stable machine-readable document instead of a table.
+"""
 
 from __future__ import annotations
 
+import io
+import json
+import os
+import sys
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
-from rich import box
 from rich.console import Console, RenderableType
-from rich.live import Live
-from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
 from .. import version_check
-from ..integrations.tmux.core import _parse_gd_session_name
-from ..repo import RepoStatus
+from ..repo import RepositoryInfo, RepoStatus
+
+if TYPE_CHECKING:
+    from ..manager import RepositoryManager
 
 T = TypeVar("T")
 
-#: ``-h`` works everywhere, like most modern CLIs.
-CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
 
-#: Command output. Errors and notices go to :data:`error_console` so that
-#: ``SESSION=$(gitdirector gd-tmux ...)`` captures exactly what was asked for.
 console = Console(highlight=False)
-error_console = Console(highlight=False, stderr=True, style="red")
+error_console = Console(highlight=False, stderr=True)
+
+# Styles shared with the console's design language.
+ATTENTION = "bold yellow"
+SUCCESS = "bold green"
+DANGER = "bold red"
+MUTED = "dim"
 
 # How long a command waits at exit for a slow update check before giving up.
 _UPDATE_NOTICE_WAIT_SECS = 1.0
@@ -37,6 +52,25 @@ _UPDATE_NOTICE_FLAG = "update_notice_printed"
 
 def get_version() -> str:
     return version_check.get_installed_version()
+
+
+class CommandError(click.ClickException):
+    """A failure printed as ``Error: <headline>`` with unwrapped detail lines."""
+
+    def show(self, file=None) -> None:
+        print_error(self.message)
+
+
+def print_error(message: str) -> None:
+    """Print a failure to stderr: red ``Error:`` headline, detail lines as they are.
+
+    Detail lines are typically paths, printed without wrapping so they stay
+    copyable.
+    """
+    headline, _, details = message.partition("\n")
+    error_console.print(Text.assemble(("Error: ", DANGER), headline), soft_wrap=True)
+    if details:
+        error_console.print(details, soft_wrap=True, markup=False)
 
 
 def _claim_update_notice(ctx: click.Context | None) -> bool:
@@ -52,7 +86,7 @@ def _claim_update_notice(ctx: click.Context | None) -> bool:
 
 def _emit_update_notice(notice: str | None) -> None:
     if notice:
-        error_console.print(f"\n{notice}\n", style="yellow")
+        error_console.print(f"\n{notice}", style="yellow")
 
 
 def print_update_notice() -> None:
@@ -66,8 +100,7 @@ def schedule_update_notice(ctx: click.Context) -> None:
     """Run the release check alongside the command and print at exit.
 
     The check hits the network when its cache is cold, so it runs in a
-    thread while the command does its work and is only awaited briefly once
-    the command has finished.
+    thread while the command works and is only awaited briefly at the end.
     """
     if not _claim_update_notice(ctx):
         return
@@ -89,29 +122,41 @@ def schedule_update_notice(ctx: click.Context) -> None:
     ctx.call_on_close(finish)
 
 
-def print_error(message: str) -> None:
-    """Print a failure message to stderr: red headline, detail lines as they are.
-
-    Detail lines are typically paths. They are printed without wrapping so a
-    long path is never broken across lines and stays copyable.
-    """
-    headline, _, details = message.partition("\n")
-    error_console.print(f"Error: {headline}")
-    if details:
-        error_console.print(details, soft_wrap=True, style="none")
-
-
 def require_gd_session_name(name: str) -> str:
     """Validate a ``gd/<repo>/<purpose>/<N>`` session name for a CLI argument.
 
     Refusing anything else means a typo can never be routed to a different
     session through tmux's prefix matching.
     """
+    from ..integrations.tmux.core import _parse_gd_session_name
+
     if _parse_gd_session_name(name) is None:
-        raise click.ClickException(
-            f"expected a gd session name of the form gd/<repo>/<purpose>/<N>; got {name!r}"
+        raise CommandError(
+            f"expected a session name like gd/<repo>/<purpose>/<N>, got {name!r}\n"
+            "Run 'gitdirector sessions' to list live sessions."
         )
     return name
+
+
+def resolve_repository(target: str, manager: RepositoryManager | None = None) -> Path:
+    """The tracked repository *target* names (a path or a directory name)."""
+    from ..manager import RepositoryManager, describe_resolution_failure
+
+    manager = manager or RepositoryManager()
+    repo_path, matches, path_attempted = manager.resolve_repository_target(target)
+    if repo_path is None:
+        raise CommandError(describe_resolution_failure(target, matches, path_attempted))
+    return repo_path
+
+
+def tracked_repositories(targets: Sequence[str], manager: RepositoryManager) -> list[Path]:
+    """*targets* resolved, or every tracked repository; sorted by name."""
+    paths = (
+        {resolve_repository(target, manager) for target in targets}
+        if targets
+        else manager.config.repositories
+    )
+    return sorted(paths, key=lambda path: (path.name.lower(), str(path)))
 
 
 def run_concurrently(
@@ -121,132 +166,177 @@ def run_concurrently(
     max_workers: int,
     verb: str,
     on_error: Callable[[Path, Exception], T],
-    render: Callable[[list[T], int], RenderableType] | None = None,
-    transient: bool = True,
 ) -> list[T]:
-    """Run *task* over *paths* in a thread pool with a live progress display.
+    """Run *task* over *paths* in a thread pool behind a progress spinner.
 
-    *on_error* turns an exception raised by *task* into a result so one bad
-    repository never aborts the whole run. *render* may replace the default
-    spinner with a renderable built from the results so far and the number
-    of repositories still pending.
+    Results come back in the order of *paths*. *on_error* turns an exception
+    raised by *task* into a result, so one bad repository never aborts the run.
     """
     paths = list(paths)
-    results: list[T] = []
-
-    def default_render(done: list[T], remaining: int) -> RenderableType:
-        if not done:
-            text = f"  [dim]{verb} {remaining} repositories...[/dim]"
-        elif remaining:
-            text = f"  [dim]{len(done)} done, {remaining} remaining...[/dim]"
-        else:
-            text = "  [dim]done[/dim]"
-        return Spinner("dots", text=text)
-
-    render = render or default_render
-    with Live(
-        console=console,
-        refresh_per_second=12,
-        transient=transient,
-        vertical_overflow="visible",
-    ) as live:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(task, path): path for path in paths}
-            remaining = len(futures)
-            live.update(render(results, remaining))
-            for future in as_completed(futures):
-                remaining -= 1
-                path = futures[future]
+    results: list[T | None] = [None] * len(paths)
+    total = len(paths)
+    noun = count_noun(total, "repository", "repositories")
+    with error_console.status(f"{verb} {noun}…") as status:
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, total))) as executor:
+            futures = {executor.submit(task, path): index for index, path in enumerate(paths)}
+            for done, future in enumerate(as_completed(futures), start=1):
+                index = futures[future]
                 try:
-                    results.append(future.result())
+                    results[index] = future.result()
                 except Exception as exc:
-                    results.append(on_error(path, exc))
-                live.update(render(results, remaining))
-    return results
+                    results[index] = on_error(paths[index], exc)
+                status.update(f"{verb} {noun}… {done}/{total}")
+    return results  # type: ignore[return-value]
 
 
 def count_noun(count: int, noun: str, plural: str | None = None) -> str:
-    return f"{count} {noun if count == 1 else plural or noun + 's'}"
+    return f"{count:,} {noun if count == 1 else plural or noun + 's'}"
 
 
-_STATUS_COLOR = {
-    RepoStatus.UP_TO_DATE: "green",
-    RepoStatus.BEHIND: "yellow",
-    RepoStatus.AHEAD: "cyan",
-    RepoStatus.DIVERGED: "red",
-    RepoStatus.UNKNOWN: "bright_black",
-}
-
-_STATUS_LABEL = {
-    RepoStatus.UP_TO_DATE: "up to date",
-    RepoStatus.BEHIND: "behind",
-    RepoStatus.AHEAD: "ahead",
-    RepoStatus.DIVERGED: "diverged",
-    RepoStatus.UNKNOWN: "unknown",
-}
+def display_path(path: Path | str) -> str:
+    """*path* with the home directory shortened to ``~``."""
+    text = str(path)
+    home = str(Path.home())
+    if text == home or text.startswith(home + os.sep):
+        return "~" + text[len(home) :]
+    return text
 
 
-def _status_text(status: RepoStatus) -> Text:
-    color = _STATUS_COLOR.get(status, "white")
-    label = _STATUS_LABEL.get(status, status.value)
-    return Text(label, style=color)
+def print_json(data: Any) -> None:
+    click.echo(json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def _format_size(size: int | None) -> Text:
+def summary_line(*parts: tuple[str, str] | str) -> Text:
+    """``3 repositories · 1 behind · 2 changed``: plain parts or (text, style)."""
+    text = Text()
+    for part in parts:
+        if text:
+            text.append(" · ", style=MUTED)
+        text.append(*((part, "") if isinstance(part, str) else part))
+    return text
+
+
+def print_rows(
+    headers: Sequence[str],
+    rows: Iterable[Sequence[str | Text]],
+    *,
+    right: frozenset[int] = frozenset(),
+    fit_last: bool = False,
+) -> None:
+    """Print a borderless table with bold headers, like ``docker ps`` or ``gh``.
+
+    On a terminal, *fit_last* cuts the last column (a path) from the left
+    so each row stays on one line; piped output is never truncated.
+    """
+    rows = [[cell if isinstance(cell, Text) else Text(cell) for cell in row] for row in rows]
+    if fit_last and console.is_terminal and rows:
+        used = sum(
+            max(len(headers[i]), *(row[i].cell_len for row in rows)) + 2
+            for i in range(len(headers) - 1)
+        )
+        room = console.width - used
+        if room < 12:
+            headers = headers[:-1]
+            rows = [row[:-1] for row in rows]
+        else:
+            for row in rows:
+                row[-1] = Text(fit_left(row[-1].plain, room), style=row[-1].style)
+    table = Table(
+        box=None, show_edge=False, pad_edge=False, padding=(0, 2, 0, 0), header_style="bold"
+    )
+    for index, header in enumerate(headers):
+        table.add_column(header, no_wrap=True, justify="right" if index in right else "left")
+    for row in rows:
+        table.add_row(*row)
+    emit(table)
+
+
+def emit(renderable: RenderableType) -> None:
+    """Print a table-like *renderable* to stdout without trailing padding.
+
+    Piped, it is laid out as wide as it needs: a script never reads a cell
+    that was wrapped or cut to fit an imaginary 80-column screen.
+    """
+    target = console
+    if not console.is_terminal:
+        target = Console(file=io.StringIO(), width=100_000, highlight=False)
+    with target.capture() as capture:
+        target.print(renderable)
+    console.file.write("".join(line.rstrip() + "\n" for line in capture.get().splitlines()))
+
+
+def fit_left(text: str, width: int) -> str:
+    """Cut *text* from the left to *width* cells, keeping a path's informative tail."""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    return "…" + text[-(width - 1) :]
+
+
+def format_size(size: int | None) -> Text:
     if size is None:
-        return Text("-", style="bright_black")
+        return Text("-", style=MUTED)
     for unit, threshold in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
         if size >= threshold:
-            return Text(f"{size / threshold:.1f} {unit}", style="dim")
-    return Text(f"{size} B", style="dim")
+            return Text(f"{size / threshold:.1f} {unit}")
+    return Text(f"{size} B")
 
 
-def _changes_text(staged: bool, unstaged: bool) -> Text:
-    if staged and unstaged:
-        return Text("staged+unstaged", style="yellow")
-    if staged:
-        return Text("staged", style="cyan")
-    if unstaged:
-        return Text("unstaged", style="yellow")
-    return Text("-", style="bright_black")
+def _count(items: list[str] | None) -> str:
+    return f"{len(items)} " if items else ""
 
 
-def _path_text(path: str) -> Text:
-    col_width = max(10, console.width * 2 // 9 - 6)
-    if len(path) > col_width:
-        path = "…" + path[-(col_width - 1) :]
-    return Text(path, justify="right")
+def status_parts(info: RepositoryInfo) -> list[tuple[str, str]]:
+    """The console's status wording: ``↑1 to push · 2 staged · 5 changed``."""
+    parts: list[tuple[str, str]] = []
+    if info.status in (RepoStatus.AHEAD, RepoStatus.DIVERGED):
+        parts.append((f"↑{info.ahead or ''} to push", ATTENTION))
+    if info.status in (RepoStatus.BEHIND, RepoStatus.DIVERGED):
+        parts.append((f"↓{info.behind or ''} to pull", ATTENTION))
+    if info.staged:
+        parts.append((f"{_count(info.staged_files)}staged", SUCCESS))
+    if info.unstaged:
+        parts.append((f"{_count(info.unstaged_files)}changed", ATTENTION))
+    if info.status is RepoStatus.UNKNOWN:
+        label = "no remote branch" if info.message.startswith("No origin/") else "sync unknown"
+        parts.append((label, MUTED))
+    if info.sync_stale:
+        parts.append(("offline", MUTED))
+    return parts
 
 
-def _repo_table() -> Table:
-    table = Table(
-        box=box.SIMPLE_HEAD,
-        expand=True,
-        show_header=True,
-        header_style="bold",
-        show_edge=False,
-        padding=(0, 1),
-    )
-    table.add_column("REPOSITORY", ratio=2)
-    table.add_column("SYNC", no_wrap=True, ratio=1)
-    table.add_column("BRANCH", style="dim", no_wrap=True, ratio=1)
-    table.add_column("CHANGES", no_wrap=True, ratio=1)
-    table.add_column("LAST COMMIT", style="dim", no_wrap=True, ratio=1)
-    table.add_column("SIZE", style="dim", no_wrap=True, ratio=1, justify="right")
-    table.add_column("PATH", style="dim", ratio=2, no_wrap=True, justify="right")
-    return table
+def status_text(info: RepositoryInfo) -> Text:
+    return summary_line(*status_parts(info)) or Text("clean", style=MUTED)
 
 
-def _build_repo_table(results: list) -> Table:
-    table = _repo_table()
-    for info in sorted(results, key=lambda r: r.name.lower()):
-        table.add_row(
-            info.name,
-            _status_text(info.status),
-            info.branch or "-",
-            _changes_text(info.staged, info.unstaged),
-            info.last_updated or "-",
-            _format_size(info.size),
-            _path_text(str(info.path)),
-        )
-    return table
+def repository_json(info: RepositoryInfo) -> dict[str, Any]:
+    return {
+        "name": info.name,
+        "path": str(info.path),
+        "branch": info.branch,
+        "sync": info.status.value,
+        "ahead": info.ahead,
+        "behind": info.behind,
+        "offline": info.sync_stale,
+        "staged": info.staged_files or [],
+        "unstaged": info.unstaged_files or [],
+        "last_commit": info.last_updated,
+        "last_commit_timestamp": info.last_commit_timestamp,
+        "size": info.size,
+        "message": info.message,
+    }
+
+
+def failed_status(path: Path, exc: Exception) -> RepositoryInfo:
+    return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+
+
+def confirm(prompt: str, *, default: bool) -> bool:
+    """Ask on stderr; without a terminal to ask on, tell the user about ``--yes``."""
+    try:
+        return click.confirm(prompt, default=default, err=True)
+    except click.Abort:
+        if sys.stdin.isatty():
+            raise
+        raise CommandError("no answer to the confirmation prompt; pass --yes to skip it") from None

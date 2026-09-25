@@ -52,4 +52,4 @@ Read-only inspection (`status`, `diff`, `log`) needs no permission.
 
 - [README.md](README.md): overview, commands, configuration
 - [DEV.md](DEV.md): dev workflow, tests, how sessions and panels work, release
-- [SKILL.md](SKILL.md): driving GitDirector headlessly from a shell
+- [LLMS.md](LLMS.md): driving GitDirector from a shell, for AI agents

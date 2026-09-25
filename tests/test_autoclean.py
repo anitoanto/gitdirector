@@ -17,7 +17,7 @@ class TestAutocleanLinks:
         with patch("gitdirector.commands.autoclean.Config", return_value=config):
             result = runner.invoke(cli, ["autoclean"])
         assert result.exit_code == 0
-        assert "All links are valid" in result.output
+        assert "All tracked repositories exist" in result.output
 
     def test_broken_links_confirmed(self, runner, tmp_path):
         """When broken links exist and user confirms, they are removed."""
@@ -47,7 +47,7 @@ class TestAutocleanLinks:
         with patch("gitdirector.commands.autoclean.Config", return_value=config):
             result = runner.invoke(cli, ["autoclean"], input="n\n")
         assert result.exit_code == 0
-        assert "Cancelled" in result.output
+        assert "Removed" not in result.output
         config.remove_repository.assert_not_called()
 
     def test_broken_links_displays_paths(self, runner, tmp_path):

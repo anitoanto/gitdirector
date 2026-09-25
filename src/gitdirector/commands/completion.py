@@ -2,7 +2,6 @@ import click
 from click.shell_completion import CompletionItem, get_completion_class
 
 from ..config import Config
-from ..integrations.tmux import list_all_gd_sessions
 
 SUPPORTED_SHELLS = ("bash", "zsh", "fish")
 
@@ -87,6 +86,8 @@ def complete_session_names(
     _ctx: click.Context, _param: click.Parameter, incomplete: str
 ) -> list[CompletionItem]:
     """Complete live ``gd/<repo>/<purpose>/<N>`` session names."""
+    from ..integrations.tmux import list_all_gd_sessions
+
     try:
         entries = list_all_gd_sessions()
     except Exception:
@@ -103,7 +104,7 @@ def register(cli: click.Group):
     @cli.command()
     @click.argument("shell", type=click.Choice(SUPPORTED_SHELLS))
     def completion(shell: str):
-        """Print the shell completion script for bash, zsh, or fish
+        """Print the shell completion script
 
         \b
         Enable it with one of:

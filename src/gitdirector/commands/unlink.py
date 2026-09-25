@@ -1,39 +1,32 @@
 from pathlib import Path
 
 import click
+from rich.text import Text
 
-from ..manager import RepositoryManager, describe_resolution_failure
-from . import console, print_error
+from ..manager import RepositoryManager
+from . import ATTENTION, MUTED, CommandError, console, display_path, resolve_repository
 from .completion import complete_repository_names
 
 
 def register(cli: click.Group):
     @cli.command()
-    @click.argument(
-        "target",
-        metavar="PATH|NAME",
-        type=click.Path(exists=False),
-        shell_complete=complete_repository_names,
-    )
+    @click.argument("target", metavar="PATH|NAME", shell_complete=complete_repository_names)
     @click.option("--discover", is_flag=True, help="Stop tracking every repository under PATH")
     def unlink(target: str, discover: bool):
-        """Stop tracking a repository, or every repository under a directory"""
-        manager = RepositoryManager()
-        if discover:
-            success, message, repos = manager.remove_repository(Path(target), discover=True)
-        else:
-            repo_path, matches, path_attempted = manager.resolve_repository_target(target)
-            if repo_path is None:
-                success = False
-                message = describe_resolution_failure(target, matches, path_attempted)
-                repos = []
-            else:
-                success, message, repos = manager.remove_repository(repo_path)
+        """Stop tracking a repo, or all under a directory
 
+        Nothing on disk is touched; the repository is only removed from the
+        list GitDirector tracks.
+        """
+        manager = RepositoryManager()
+        path = Path(target) if discover else resolve_repository(target, manager)
+        success, message, removed = manager.remove_repository(path, discover=discover)
         if not success:
-            print_error(message)
-            raise SystemExit(1)
-        console.print()
-        for repo_path in repos:
-            console.print(f"  [yellow]-[/yellow] {repo_path}")
-        console.print()
+            raise CommandError(message)
+        for repo in removed:
+            console.print(
+                Text.assemble(
+                    ("- ", ATTENTION), (repo.name, "bold"), "  ", (display_path(repo), MUTED)
+                ),
+                soft_wrap=True,
+            )

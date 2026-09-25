@@ -7,10 +7,15 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-from click.testing import CliRunner
+# Output is asserted as CI sees it: a developer shell that forces colour would
+# otherwise change what rich prints. Popped before rich builds any console.
+for _name in ("FORCE_COLOR", "CLICOLOR_FORCE", "TTY_COMPATIBLE", "TTY_INTERACTIVE"):
+    os.environ.pop(_name, None)
 
-from gitdirector.config import Config
+import pytest  # noqa: E402
+from click.testing import CliRunner  # noqa: E402
+
+from gitdirector.config import Config  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -74,19 +74,19 @@ class TestGdCaptureCLIShape:
         runner = CliRunner()
         result = runner.invoke(cli, ["gd-capture", "gd/repo/c/1", "--lines", "0"])
         assert result.exit_code != 0
-        assert "positive integer" in result.output
+        assert "is not in the range x>=1" in result.output
 
     def test_rejects_negative_lines(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["gd-capture", "gd/repo/c/1", "--lines", "-3"])
         assert result.exit_code != 0
-        assert "positive integer" in result.output
+        assert "is not in the range x>=1" in result.output
 
 
 class TestGdCaptureCLIExecution:
     def test_prints_capture_output(self, monkeypatch):
         fake_capture = MagicMock(return_value="hello world\n")
-        monkeypatch.setattr("gitdirector.commands.capture.capture_pane", fake_capture)
+        monkeypatch.setattr("gitdirector.integrations.tmux.capture_pane", fake_capture)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-capture", "gd/myrepo/opencode/1"])
@@ -97,7 +97,7 @@ class TestGdCaptureCLIExecution:
 
     def test_passes_lines_override(self, monkeypatch):
         fake_capture = MagicMock(return_value="...")
-        monkeypatch.setattr("gitdirector.commands.capture.capture_pane", fake_capture)
+        monkeypatch.setattr("gitdirector.integrations.tmux.capture_pane", fake_capture)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-capture", "gd/myrepo/opencode/1", "--lines", "42"])
@@ -107,7 +107,7 @@ class TestGdCaptureCLIExecution:
 
     def test_passes_full_flag(self, monkeypatch):
         fake_capture = MagicMock(return_value="...")
-        monkeypatch.setattr("gitdirector.commands.capture.capture_pane", fake_capture)
+        monkeypatch.setattr("gitdirector.integrations.tmux.capture_pane", fake_capture)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-capture", "gd/myrepo/opencode/1", "--full"])
@@ -118,7 +118,7 @@ class TestGdCaptureCLIExecution:
     def test_reports_missing_session(self, monkeypatch):
         """A None return from capture_pane is surfaced as a friendly error."""
         fake_capture = MagicMock(return_value=None)
-        monkeypatch.setattr("gitdirector.commands.capture.capture_pane", fake_capture)
+        monkeypatch.setattr("gitdirector.integrations.tmux.capture_pane", fake_capture)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-capture", "gd/myrepo/opencode/1"])
@@ -127,8 +127,10 @@ class TestGdCaptureCLIExecution:
         assert "not running" in result.output.lower() or "failed" in result.output.lower()
 
     def test_reports_capture_exception(self, monkeypatch):
-        fake_capture = MagicMock(side_effect=RuntimeError("tmux is angry"))
-        monkeypatch.setattr("gitdirector.commands.capture.capture_pane", fake_capture)
+        from gitdirector.integrations.tmux import TmuxError
+
+        fake_capture = MagicMock(side_effect=TmuxError("tmux is angry"))
+        monkeypatch.setattr("gitdirector.integrations.tmux.capture_pane", fake_capture)
         runner = CliRunner()
 
         result = runner.invoke(cli, ["gd-capture", "gd/myrepo/opencode/1"])

@@ -34,8 +34,9 @@
 - **Panels.** Reusable tmux layouts that show several sessions side by side.
 - **Git without leaving the console.** Status, log, branches, remotes, pull,
   push, and a two-pane diff viewer that can stage, commit, and push.
-- **Headless CLI.** Start a session, read its scrollback, and send it input
-  from a script or from another agent.
+- **Scriptable CLI.** Everything you need from a shell or another agent:
+  start sessions and agents, read their output, send them input, check their
+  status, with `--json` where it helps.
 
 ## Install
 
@@ -50,8 +51,10 @@ all of it.
 ## Quick start
 
 ```bash
-gitdirector link ~/work --discover   # track every repo under a directory
-gitdirector console                  # open the dashboard
+gitdirector link ~/work --discover     # track every repo under a directory
+gitdirector console                    # open the dashboard
+gitdirector list                       # or stay in the shell: every repo at a glance
+gitdirector cd my-repo --agent claude  # Claude Code in a new session for my-repo
 ```
 
 > If GitDirector is useful to you, please star the repo: it needs stars to
@@ -77,40 +80,32 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 | `n` | Create a panel (Panels tab) |
 | `q` | Quit |
 
-**Repositories** shows sync state (`up to date`, `ahead`, `behind`,
-`diverged`), branch, changes, and the last commit; repos sharing a parent
-directory collapse into a group. `enter` opens the action menu: start a shell,
-open the repo or group in VS Code, launch an AI agent, attach to or remove a
-session. Claude Code's permission mode is picked on its row with Tab or `←`/`→`:
-`default` (your own settings), `auto` (preselected), or `bypass`
-(`--dangerously-skip-permissions`). `g` opens the git menu: status,
-timeline, branches, remotes, pull, push, and **Review Diff**, a two-pane view
-of uncommitted changes with real line numbers, where `g` stages everything and
-commits (optionally pushing).
+**Repositories** shows each repo's branch, status (`↑1 to push · 2 staged ·
+5 changed`, or nothing when clean and in step with origin), and last commit.
+Repos sharing a parent directory collapse into a group. `enter` opens the
+action menu: start a shell or an AI agent, open the repo in VS Code, or attach
+to or remove a session. Pick Claude Code's permission mode on its row with Tab
+or `←`/`→`: `default` (your settings), `auto` (preselected), or `bypass`
+(`--dangerously-skip-permissions`). `g` opens the git menu: status, timeline,
+branches, remotes, pull, push, and **Review Diff**, a two-pane diff of
+uncommitted changes where `g` stages everything and commits (and optionally
+pushes).
 
-**Sessions** lists every gitdirector tmux session by repo: the repo is named
-once, and a repo with several sessions holds them in one bracket, each with its status, purpose,
-and tmux session name, and its description on the line below (wrapped, never
-cut off). Statuses are `running` (the agent or program is working),
-`waiting` (it needs you: a permission prompt, a question, a bell), or `idle`
-(nothing is happening). Claude Code and OpenCode report their own status
-through hooks passed inline on the command GitDirector launches (your own
-settings are never touched); everything else is classified from its pane (see
-[DEV.md](DEV.md)).
+**Sessions** lists every session under its repo, with its status, purpose,
+name, and description. `running` means the program is working, `waiting` that
+it needs you (a permission prompt, a question, a bell), and `idle` that
+nothing is happening. Claude Code and OpenCode report their own status through
+hooks passed inline on their launch command (your settings are never
+touched); everything else is judged from its pane ([DEV.md](DEV.md)).
 
-**Panels** are reusable tmux layouts showing several sessions side by side,
-each under its own header with its slot number. `prefix 1`–`9` jumps to a
-slot, and proportions hold as the window resizes. The Panels tab draws each
-panel's map with numbered panes (lit when their session is live) beside what
-each pane holds. `n` builds one in three steps: name it, pick a layout (the
-preview follows the highlight), then fill the panes: `enter` on a pane picks
-its session and moves to the next, `a` fills empty panes with free sessions,
-`x` empties one, and `ctrl+o` or the last row creates and opens it. `enter` on
-a panel opens it, or edits its layout and sessions, renames, or deletes it.
+**Panels** are saved tmux layouts showing several sessions side by side, each
+under a header with its slot number; `prefix 1`–`9` jumps to a slot. `n`
+builds one: name it, pick a layout, then fill the panes (`enter` picks a
+session, `a` fills the empty ones with free sessions, `x` empties one,
+`ctrl+o` creates it). `enter` on a panel opens, edits, renames, or deletes it.
 
-Every session carries its own themed header and status line, so it looks the
-same attached directly, in a panel, or from a plain `tmux attach`. Sessions
-never learn which directory gitdirector was started from.
+Every session carries its own themed header and status line, however it is
+opened. Sessions never learn which directory gitdirector was started from.
 
 ### Session sidebar
 
@@ -146,38 +141,51 @@ pick another; when no sessions are left you are back in the console. Set
 | --- | --- |
 | `console` | Interactive dashboard |
 | `link PATH [--discover]` | Track a repo, or every repo under a directory |
-| `unlink PATH\|NAME [--discover]` | Stop tracking |
-| `list` | All tracked repos with their sync status |
-| `status` | Only repos with uncommitted changes |
-| `pull [--yes]` | Fast-forward pull every tracked repo, concurrently |
-| `cd PATH\|NAME` | Open or switch to a tmux session for a repo |
-| `info PATH\|NAME [--full]` | File, line, and token statistics |
-| `doctor` | Check tmux, config, shell completion, and agent CLIs |
-| `autoclean [--yes]` | Drop links whose paths no longer exist |
+| `unlink PATH\|NAME [--discover]` | Stop tracking (nothing on disk is touched) |
+| `list [--no-fetch] [--json]` | Every tracked repo: branch, sync state, changes, last commit, size |
+| `status [--json]` | Only repos with uncommitted changes, file by file |
+| `pull [PATH\|NAME...] [--yes]` | `git pull --ff-only`, concurrently; all repos by default |
+| `info PATH\|NAME [--full] [--json]` | File, line, and token counts per extension |
+| `autoclean [--yes]` | Stop tracking repos that no longer exist |
+| `cd PATH\|NAME\|SESSION [--agent A]` | Open a shell or an agent in a new session, or rejoin a live one |
+| `sessions [--json]` | Live sessions and their status: `running`, `waiting`, `idle` |
+| `panel [NAME]` | Open a saved panel, or list them |
+| `gd-tmux PATH\|NAME [CMD] [--agent A] [-d TEXT]` | Start a command or agent in a background session; prints its name |
+| `gd-capture SESSION [-n N\|--full]` | Print a live session's recent output |
+| `gd-screenshot SESSION PATH.png` | Save a live session's screen, colours and all, as a PNG |
+| `gd-send SESSION [TEXT] [--enter\|--key KEY]` | Type into a live session |
+| `gd-kill SESSION` | End a live session |
+| `doctor` | Check git, tmux, config, shell completion, and agent CLIs |
 | `reset [--yes]` | Kill every session and panel, wipe `~/.gitdirector` |
-| `gd-tmux PATH\|NAME "cmd" [-d TEXT]` | Run a command in a new background session |
-| `gd-capture SESSION [--lines N\|--full]` | Print a live session's last lines |
-| `gd-send SESSION [TEXT] [--enter\|--key KEY]` | Send input to a live session |
 | `completion {bash\|zsh\|fish}` | Print the shell completion script |
-| `help` | Overview of all commands |
 
-Repo arguments take a path or the directory name; when two tracked repos
-share a name, pass the path. Worktrees and submodules work like any checkout.
-`gitdirector COMMAND -h` shows a command's options. Errors and notices go to
-stderr, so command output is safe to capture.
+`gitdirector COMMAND -h` shows a command's options and examples.
+
+- **Repo arguments** take a path or a directory name. When two tracked repos
+  share a name, pass the path. Worktrees and submodules work like any other
+  checkout.
+- **Agents** for `--agent` are `claude`, `opencode`, `codex`, `copilot`, and
+  `pi`. Claude Code also takes `--mode default|auto|bypass`; `auto` is the
+  default.
+- **Output** goes to stdout: results only. Errors, prompts, and progress go
+  to stderr. Piped tables are never truncated, and `--json` gives a stable
+  document. Commands exit 1 on failure and 2 on bad arguments.
 
 ## Background sessions
 
 ```bash
-SESSION=$(gitdirector gd-tmux my-repo "npm run dev")   # start; prints the session name
-gitdirector gd-capture "$SESSION" --lines 50            # read its last lines
-gitdirector gd-send "$SESSION" --key C-c                # send it input
+SESSION=$(gitdirector gd-tmux my-repo "npm run dev" -d "Vite dev server")
+gitdirector gd-capture "$SESSION" -n 50           # read its last lines
+gitdirector gd-screenshot "$SESSION" /tmp/s.png   # or see its screen as an image
+gitdirector gd-send "$SESSION" --key C-c          # stop it
 ```
 
-The session ends when the command exits.
+A session ends when its program exits. Sessions started this way appear in
+the console like any other.
 
-**AI coding agents:** the rules for driving GitDirector headlessly live in
-[`SKILL.md`](SKILL.md). Point your agent at it before it runs these commands.
+**AI coding agents:** [`LLMS.md`](LLMS.md) explains how to drive GitDirector
+headlessly, including starting other agents and watching their status. Point
+your agent at it.
 
 ## Configuration
 

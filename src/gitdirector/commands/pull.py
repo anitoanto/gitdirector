@@ -1,41 +1,27 @@
+import re
 from pathlib import Path
 
 import click
-from rich import box
-from rich.table import Table
 from rich.text import Text
 
 from ..manager import RepositoryManager
 from ..repo import Repository, is_git_repository
-from . import console, count_noun, run_concurrently
+from . import (
+    DANGER,
+    MUTED,
+    SUCCESS,
+    confirm,
+    console,
+    count_noun,
+    print_rows,
+    run_concurrently,
+    summary_line,
+    tracked_repositories,
+)
+from .completion import complete_repository_names
 
-
-def _pull_table() -> Table:
-    table = Table(
-        box=box.SIMPLE_HEAD,
-        expand=True,
-        show_header=True,
-        header_style="bold",
-        show_edge=False,
-        padding=(0, 1),
-    )
-    table.add_column("REPOSITORY", ratio=3)
-    table.add_column("RESULT", ratio=6)
-    return table
-
-
-def _build_pull_table(results: list) -> tuple[Table, int, int]:
-    table = _pull_table()
-    success_count = 0
-    failed_count = 0
-    for name, ok, msg in sorted(results, key=lambda r: r[0].lower()):
-        if ok:
-            table.add_row(name, Text(msg, style="green"))
-            success_count += 1
-        else:
-            table.add_row(name, Text(msg, style="red"))
-            failed_count += 1
-    return table, success_count, failed_count
+_UPDATING_RE = re.compile(r"^Updating (\S+)", re.MULTILINE)
+_CHANGED_RE = re.compile(r"^\s*(\d+ files? changed.*)$", re.MULTILINE)
 
 
 def pull_repository(path: Path) -> tuple[str, bool, str]:
@@ -49,47 +35,71 @@ def pull_repository(path: Path) -> tuple[str, bool, str]:
     return name, ok, msg
 
 
+def summarize_pull(ok: bool, output: str) -> str:
+    """One line for a pull: ``up to date``, ``a1b2..c3d4 · 2 files changed``, or the error."""
+    if not ok:
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        return lines[0].removeprefix("fatal: ") if lines else "git pull failed"
+    updating = _UPDATING_RE.search(output)
+    if updating is None:
+        return "up to date"
+    changed = _CHANGED_RE.search(output)
+    return updating.group(1) + (f" · {changed.group(1)}" if changed else "")
+
+
 def register(cli: click.Group):
     @cli.command()
+    @click.argument(
+        "targets", metavar="[PATH|NAME]...", nargs=-1, shell_complete=complete_repository_names
+    )
     @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt")
-    def pull(yes):
-        """Fast-forward pull every tracked repository"""
+    def pull(targets: tuple[str, ...], yes: bool):
+        """Fast-forward pull repositories (all by default)
+
+        Runs git pull --ff-only on each repository's current branch,
+        concurrently. Never merges or rebases: a branch that has diverged is
+        reported and left alone. Asks first when pulling every repository.
+        Exits 1 if any pull failed.
+        """
         manager = RepositoryManager()
-        paths = sorted(manager.config.repositories, key=lambda p: p.name.lower())
-
-        console.print()
+        paths = tracked_repositories(targets, manager)
         if not paths:
-            console.print("  [dim]No repositories linked[/dim]\n")
+            console.print("No repositories tracked. Add one with: gitdirector link PATH")
             return
-
-        console.print("  [bold]Command:[/bold] git pull --ff-only")
-        console.print(f"  [bold]Repositories ({len(paths)}):[/bold]")
-        for p in paths:
-            console.print(f"    [dim]•[/dim] {p.name}")
-        console.print()
-
-        if not yes:
-            if not click.confirm("  Proceed?", default=True):
-                console.print("  [dim]Aborted[/dim]\n")
-                return
-            console.print()
+        noun = count_noun(len(paths), "repository", "repositories")
+        if not targets and not yes and not confirm(f"Pull {noun}?", default=True):
+            return
 
         results = run_concurrently(
             paths,
             pull_repository,
             max_workers=manager.config.max_workers,
-            verb="pulling",
+            verb="Pulling",
             on_error=lambda path, exc: (path.name, False, str(exc)),
         )
-
-        table, success_count, failed_count = _build_pull_table(results)
-        console.print(table)
-
-        console.print()
-        if failed_count:
-            failed = count_noun(failed_count, "repository", "repositories")
-            console.print(f" [red]{failed} failed[/red]\n")
-            raise SystemExit(1)
-        console.print(
-            f" [green]{count_noun(success_count, 'repository', 'repositories')}[/green]\n"
+        print_rows(
+            ("REPOSITORY", "RESULT"),
+            (
+                (
+                    Text(name, style="bold"),
+                    Text.assemble(
+                        ("✓ " if ok else "✗ ", SUCCESS if ok else DANGER),
+                        (summarize_pull(ok, message), "" if ok else DANGER),
+                    ),
+                )
+                for name, ok, message in results
+            ),
         )
+
+        failed = sum(not ok for _, ok, _ in results)
+        updated = sum(ok and _UPDATING_RE.search(message) is not None for _, ok, message in results)
+        console.print()
+        console.print(
+            summary_line(
+                noun,
+                (f"{updated} updated", SUCCESS if updated else MUTED),
+                *([(f"{failed} failed", DANGER)] if failed else []),
+            )
+        )
+        if failed:
+            raise SystemExit(1)

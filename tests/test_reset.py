@@ -105,7 +105,7 @@ class TestResetCommand:
         mock_recreate.assert_called_once_with()
         for name in killed_sessions:
             assert name in result.output
-        assert "Wiped and recreated" in result.output
+        assert "Reset " in result.output
 
     def test_reset_with_no_sessions_still_wipes(self, runner, isolated_home):
         """When no sessions are running, reset still wipes and recreates."""
@@ -120,8 +120,8 @@ class TestResetCommand:
                     result = runner.invoke(cli, ["reset", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert "No active gd tmux sessions" in result.output
-        assert "Wiped and recreated" in result.output
+        assert "No sessions to kill" in result.output
+        assert "Reset " in result.output
         mock_wipe.assert_called_once_with(isolated_home)
 
     def test_reset_cancelled_keeps_state(self, runner, isolated_home):
@@ -134,7 +134,7 @@ class TestResetCommand:
                     result = runner.invoke(cli, ["reset"], input="n\n")
 
         assert result.exit_code == 0
-        assert "Cancelled" in result.output
+        assert "Reset " not in result.output
         mock_kill.assert_not_called()
         mock_wipe.assert_not_called()
         mock_recreate.assert_not_called()
@@ -154,8 +154,8 @@ class TestResetCommand:
                     result = runner.invoke(cli, ["reset"], input="y\n")
 
         assert result.exit_code == 0
-        assert "Cancelled" not in result.output
-        assert "Wiped and recreated" in result.output
+        assert "[y/N]: y" in result.output
+        assert "Reset " in result.output
         mock_recreate.assert_called_once_with()
 
     def test_reset_does_not_run_the_update_check(self, runner, isolated_home):
@@ -189,7 +189,7 @@ class TestResetCommand:
                     result = runner.invoke(cli, ["reset", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert "Wiped and recreated" in result.output
+        assert "Reset " in result.output
         mock_wipe.assert_called_once_with(isolated_home)
 
 

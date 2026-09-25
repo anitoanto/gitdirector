@@ -92,7 +92,15 @@ def _is_host_key_error(stderr: str) -> bool:
     return _HOST_KEY_ERROR_RE.search(stderr) is not None
 
 
+# Git follows this with the same "could not read from remote repository" tail
+# as an auth failure, so it is checked first.
+_NO_REMOTE_RE = re.compile(r"'([^']+)' does not appear to be a git repository", re.IGNORECASE)
+
+
 def _classify_remote_error(stderr: str) -> str | None:
+    missing = _NO_REMOTE_RE.search(stderr)
+    if missing is not None:
+        return f"no remote named {missing.group(1)}"
     if _is_network_error(stderr):
         return "network error: could not reach remote"
     if _is_host_key_error(stderr):
@@ -111,7 +119,7 @@ def _is_no_commits_error(stderr: str) -> bool:
 def _is_auth_error(stderr: str) -> bool:
     # No credential fixes an untrusted host key, so retrying such a command
     # with a token would only double the wait before the same failure.
-    if _is_host_key_error(stderr):
+    if _is_host_key_error(stderr) or _NO_REMOTE_RE.search(stderr):
         return False
     return _AUTH_ERROR_RE.search(stderr) is not None
 

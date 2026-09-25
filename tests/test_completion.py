@@ -95,7 +95,7 @@ def test_complete_repository_names_filters_by_incomplete_prefix(config_dir, monk
 
 def test_complete_session_names_filters_live_sessions(monkeypatch):
     monkeypatch.setattr(
-        "gitdirector.commands.completion.list_all_gd_sessions",
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
         lambda: [
             {"session_name": "gd/alpha/shell/1", "repo": "alpha", "purpose": "shell"},
             {"session_name": "gd/beta/claude/2", "repo": "beta", "purpose": "claude"},
@@ -110,5 +110,5 @@ def test_complete_session_names_survives_tmux_failures(monkeypatch):
     def boom():
         raise RuntimeError("no tmux")
 
-    monkeypatch.setattr("gitdirector.commands.completion.list_all_gd_sessions", boom)
+    monkeypatch.setattr("gitdirector.integrations.tmux.list_all_gd_sessions", boom)
     assert complete_session_names(None, None, "") == []

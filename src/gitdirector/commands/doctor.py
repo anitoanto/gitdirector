@@ -1,28 +1,38 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import click
+from rich.table import Table
+from rich.text import Text
 
 from .. import version_check
 from ..agents import agent_tools
 from ..config import Config
 from ..storage import load_yaml_mapping
-from . import console
+from . import ATTENTION, DANGER, MUTED, SUCCESS, console, count_noun, display_path, emit
+
+OK, WARN, FAIL = "ok", "warn", "fail"
+
+# Oldest tmux sessions and panels are tested against.
+_MIN_TMUX = (3, 2, "a")
 
 
 @dataclass(frozen=True)
 class DoctorCheck:
     name: str
     status: str
-    classification: str
     summary: str
     details: tuple[str, ...] = ()
     fix: str | None = None
+    #: Only a failed critical check makes ``doctor`` exit non-zero.
+    critical: bool = False
 
 
 def _which(*names: str) -> str | None:
@@ -41,7 +51,7 @@ def _current_shell_name() -> str | None:
     return name if name in {"bash", "zsh", "fish"} else None
 
 
-def _completion_installed(shell_name: str, home: Path) -> tuple[bool, str, tuple[str, ...]]:
+def _completion_installed(shell_name: str, home: Path) -> tuple[bool, str]:
     if shell_name == "zsh":
         paths = [
             home / ".zsh/completions/_gitdirector",
@@ -58,13 +68,11 @@ def _completion_installed(shell_name: str, home: Path) -> tuple[bool, str, tuple
         paths = [home / ".config/fish/completions/gitdirector.fish"]
         rc_files = [home / ".config/fish/config.fish"]
     else:
-        return False, "current shell is not bash, zsh, or fish", ()
-
-    expected_paths = tuple(str(path) for path in paths)
+        return False, "current shell is not bash, zsh, or fish"
 
     for path in paths:
         if path.exists():
-            return True, f"detected {path}", expected_paths
+            return True, f"installed in {display_path(path)}"
 
     markers = ("gitdirector completion", "_GITDIRECTOR_COMPLETE", "_gitdirector")
     for rc_file in rc_files:
@@ -73,9 +81,9 @@ def _completion_installed(shell_name: str, home: Path) -> tuple[bool, str, tuple
         except OSError:
             continue
         if any(marker in content for marker in markers):
-            return True, f"detected setup in {rc_file}", expected_paths
+            return True, f"set up in {display_path(rc_file)}"
 
-    return False, f"not detected for {shell_name}", expected_paths
+    return False, f"not set up for {shell_name}"
 
 
 def _config_writable(config: Config) -> tuple[bool, str]:
@@ -171,250 +179,201 @@ def _validate_gitdirector_state(config: Config) -> tuple[bool, tuple[str, ...]]:
             corrupted_files.append(f"{path.relative_to(config_dir)}: {exc}")
 
     if corrupted_files:
-        return False, tuple(
-            ["~/.gitdirector folder corrupted"]
-            + [f"Corrupted: {entry}" for entry in corrupted_files]
+        return False, tuple(f"Corrupted: {entry}" for entry in corrupted_files)
+    return True, ()
+
+
+def _tool_version(executable: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [executable, "-V"], capture_output=True, text=True, timeout=5, check=False
         )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
 
-    return True, ("~/.gitdirector folder valid",)
+
+def _parse_tmux_version(text: str) -> tuple[int, int, str] | None:
+    match = re.search(r"(\d+)\.(\d+)([a-z]?)", text)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), match.group(3)
 
 
-def _gitdirector_version_check() -> DoctorCheck:
+def _gitdirector_check() -> DoctorCheck:
     status = version_check.get_update_status()
     if status is None:
-        return DoctorCheck(
-            "GitDirector",
-            "ok",
-            "optional",
-            "",
-            ("Version check unavailable",),
-        )
-
+        return DoctorCheck("GitDirector", OK, "version check unavailable")
     if status.update_available and status.latest_version is not None:
         return DoctorCheck(
-            f"GitDirector [{status.current_version}]",
-            "warn",
-            "optional",
-            "",
-            (f"GitDirector {status.latest_version} is available",),
-            "Update GitDirector.",
+            "GitDirector",
+            WARN,
+            f"{status.current_version}, {status.latest_version} is available",
+            fix="pip install -U gitdirector (or your installer's upgrade command)",
         )
-
-    return DoctorCheck(
-        f"GitDirector [{status.current_version}]",
-        "ok",
-        "optional",
-        "",
-        ("Up to date",),
-    )
+    return DoctorCheck("GitDirector", OK, f"{status.current_version}, up to date")
 
 
-def run_doctor_checks() -> list[DoctorCheck]:
-    checks: list[DoctorCheck] = [_gitdirector_version_check()]
+def _git_check() -> DoctorCheck:
+    git = _which("git")
+    if git is None:
+        return DoctorCheck("git", FAIL, "not installed", fix="Install git.", critical=True)
+    return DoctorCheck("git", OK, git, critical=True)
 
-    tmux_path = _which("tmux")
-    if tmux_path is None:
-        checks.append(
-            DoctorCheck(
-                "Tmux",
-                "fail",
-                "critical",
-                "tmux is not installed",
-                (
-                    "Needed for `gitdirector console`, `gitdirector cd`, `gitdirector gd-tmux`, `gitdirector gd-capture`, and `gitdirector gd-send`.",
-                    "Without tmux, the multi-session and agent-session workflow is unavailable.",
-                ),
-                "Install tmux.",
-            )
+
+def _tmux_check() -> DoctorCheck:
+    tmux = _which("tmux")
+    if tmux is None:
+        return DoctorCheck(
+            "tmux",
+            FAIL,
+            "not installed; sessions, panels, and the gd-* commands need it",
+            fix="Install tmux 3.2a or newer.",
+            critical=True,
         )
-    else:
-        checks.append(
-            DoctorCheck(
-                "Tmux",
-                "ok",
-                "critical",
-                "tmux is installed",
-                (f"Resolved executable: {tmux_path}",),
-            )
+    version_text = _tool_version(tmux)
+    version = _parse_tmux_version(version_text or "")
+    if version is not None and version < _MIN_TMUX:
+        return DoctorCheck(
+            "tmux",
+            FAIL,
+            f"{version_text} is too old ({tmux})",
+            fix="Install tmux 3.2a or newer.",
+            critical=True,
         )
+    label = version_text.removeprefix("tmux ") if version_text else "installed"
+    return DoctorCheck("tmux", OK, f"{label} ({tmux})", critical=True)
 
+
+def _config_check() -> DoctorCheck:
     try:
         config = Config()
     except (OSError, RuntimeError, ValueError) as exc:
-        checks.append(
-            DoctorCheck(
-                "Config",
-                "fail",
-                "critical",
-                "GitDirector config could not be loaded",
-                (str(exc),),
-                "Repair `~/.gitdirector/`.",
-            )
+        return DoctorCheck(
+            "Config",
+            FAIL,
+            "could not be loaded",
+            (str(exc),),
+            "Repair or remove the file named above.",
+            critical=True,
         )
-    else:
-        writable, detail = _config_writable(config)
-        if writable:
-            state_valid, state_details = _validate_gitdirector_state(config)
-            checks.append(
-                DoctorCheck(
-                    "Config",
-                    "ok" if state_valid else "fail",
-                    "critical",
-                    "GitDirector state files are valid"
-                    if state_valid
-                    else "corrupted GitDirector state files were found",
-                    state_details,
-                    None if state_valid else "Repair or remove corrupted files.",
-                )
-            )
-        else:
-            checks.append(
-                DoctorCheck(
-                    "Config",
-                    "fail",
-                    "critical",
-                    "GitDirector config directory is not writable",
-                    (detail,),
-                    "Fix permissions for `~/.gitdirector/`.",
-                )
-            )
+    location = display_path(config.config_dir)
+    writable, detail = _config_writable(config)
+    if not writable:
+        return DoctorCheck(
+            "Config",
+            FAIL,
+            f"{location} is not writable",
+            (detail,),
+            f"Fix the permissions of {location}.",
+            critical=True,
+        )
+    valid, details = _validate_gitdirector_state(config)
+    if not valid:
+        return DoctorCheck(
+            "Config",
+            FAIL,
+            f"corrupted files in {location}",
+            details,
+            "Repair or remove the corrupted files.",
+            critical=True,
+        )
+    return DoctorCheck(
+        "Config",
+        OK,
+        f"{location}, {count_noun(len(config.repositories), 'repository', 'repositories')}",
+        critical=True,
+    )
 
+
+_COMPLETION_SETUP = {
+    "bash": ('eval "$(gitdirector completion bash)"', "~/.bashrc"),
+    "zsh": ('eval "$(gitdirector completion zsh)"', "~/.zshrc"),
+    "fish": ("gitdirector completion fish | source", "~/.config/fish/config.fish"),
+}
+
+
+def _completion_check() -> DoctorCheck:
     shell_name = _current_shell_name()
     if shell_name is None:
-        checks.append(
-            DoctorCheck(
-                "Shell Completion",
-                "warn",
-                "optional",
-                "shell completion could not be checked",
-                ("`SHELL` is unset or not one of: bash, zsh, fish.",),
-                "Run `gitdirector completion <shell>`.",
-            )
+        return DoctorCheck("Completion", WARN, "$SHELL is not bash, zsh, or fish")
+    installed, detail = _completion_installed(shell_name, Path.home())
+    if installed:
+        return DoctorCheck("Completion", OK, f"{shell_name}, {detail}")
+    line, rc_file = _COMPLETION_SETUP[shell_name]
+    return DoctorCheck(
+        "Completion", WARN, f"not set up for {shell_name}", fix=f"Add to {rc_file}: {line}"
+    )
+
+
+def _agents_check() -> DoctorCheck:
+    found = [(label, _which(*names)) for label, names in agent_tools()]
+    installed = sum(path is not None for _, path in found)
+    details = tuple(f"{label}: {path or 'not installed'}" for label, path in found)
+    if not installed:
+        return DoctorCheck(
+            "Agent CLIs", WARN, "none installed", details, "Install the agents you use."
         )
-    else:
-        installed, detail, expected_paths = _completion_installed(shell_name, Path.home())
-        if installed:
-            checks.append(
-                DoctorCheck(
-                    "Shell Completion",
-                    "ok",
-                    "optional",
-                    f"shell completion is installed for {shell_name}",
-                    (detail,),
-                )
-            )
-        else:
-            checks.append(
-                DoctorCheck(
-                    "Shell Completion",
-                    "warn",
-                    "optional",
-                    f"shell completion was not detected for {shell_name}",
-                    (
-                        f"Looked for setup in shell rc files and completion paths: {', '.join(expected_paths)}",
-                    ),
-                    f"Run `gitdirector completion {shell_name}`.",
-                )
-            )
-
-    available_agents: list[tuple[str, str]] = []
-    missing_agents: list[str] = []
-    for label, names in agent_tools():
-        resolved = _which(*names)
-        if resolved is None:
-            missing_agents.append(label)
-        else:
-            available_agents.append((label, resolved))
-    if available_agents:
-        details = tuple(f"{label}: {resolved}" for label, resolved in available_agents)
-        if missing_agents:
-            details += tuple(f"{label}: not installed" for label in missing_agents)
-        checks.append(
-            DoctorCheck(
-                "Agent Tools",
-                "warn" if missing_agents else "ok",
-                "optional",
-                "one or more agent CLIs are installed",
-                details,
-                None if not missing_agents else "Install desired agent CLIs.",
-            )
-        )
-    else:
-        checks.append(
-            DoctorCheck(
-                "Agent Tools",
-                "warn",
-                "optional",
-                "no supported agent CLI was found",
-                tuple(f"{label}: not installed" for label, _names in agent_tools()),
-                "Install desired agent CLIs.",
-            )
-        )
-
-    return checks
+    return DoctorCheck("Agent CLIs", OK, f"{installed} of {len(found)} installed", details)
 
 
-def _status_label(status: str) -> str:
-    return {
-        "ok": "[green][✓][/green]",
-        "warn": "[yellow][!][/yellow]",
-        "fail": "[red][x][/red]",
-    }[status]
+def run_doctor_checks() -> list[DoctorCheck]:
+    return [
+        _gitdirector_check(),
+        _git_check(),
+        _tmux_check(),
+        _config_check(),
+        _completion_check(),
+        _agents_check(),
+    ]
 
 
-def _print_check(check: DoctorCheck) -> None:
-    # A few checks carry their state entirely in the name (the version
-    # check renders as "GitDirector [1.2.3]"), so the summary is optional.
-    summary = check.summary.strip()
-    heading = f"{_status_label(check.status)} [white]{check.name}[/white]"
-    if summary:
-        heading = f"{heading} [dim]· {summary}[/dim]"
-    console.print(heading)
-    for detail in check.details:
-        if detail.endswith(": not installed"):
-            console.print(f"  [yellow][!][/yellow] [dim]{detail}[/dim]")
-        elif check.name == "Agent Tools":
-            console.print(f"  [green][✓][/green] [dim]{detail}[/dim]")
-        else:
-            console.print(f"  [green]•[/green] [dim]{detail}[/dim]")
-    if check.fix is not None:
-        console.print(f"  [yellow]•[/yellow] [bold]Fix:[/bold] {check.fix}")
+_MARKS = {OK: ("✓", SUCCESS), WARN: ("!", ATTENTION), FAIL: ("✗", DANGER)}
+
+
+def _detail_text(detail: str) -> Text:
+    label, sep, value = detail.partition(": ")
+    if sep and value == "not installed":
+        return Text.assemble((f"{label}: ", MUTED), (value, ATTENTION))
+    return Text(detail, style=MUTED)
+
+
+def _print_checks(checks: list[DoctorCheck]) -> None:
+    table = Table.grid(padding=(0, 2, 0, 0))
+    table.add_column(no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column(overflow="fold")
+    for check in checks:
+        mark, style = _MARKS[check.status]
+        table.add_row(Text(mark, style=style), Text(check.name, style="bold"), check.summary)
+        for detail in check.details:
+            table.add_row("", "", _detail_text(detail))
+        if check.fix:
+            table.add_row("", "", Text.assemble(("fix: ", style), check.fix))
+    emit(table)
 
 
 def register(cli: click.Group):
     @cli.command()
     def doctor():
-        """Check tmux, config, shell completion, and agent CLIs"""
+        """Check git, tmux, config, completion, and agents
+
+        Exits 1 when a critical check (git, tmux, config) fails.
+        """
         checks = run_doctor_checks()
-        for check in checks:
-            _print_check(check)
+        _print_checks(checks)
 
-        warn_count = sum(check.status == "warn" for check in checks)
-        failures = [check for check in checks if check.status == "fail"]
-        critical_fail_count = sum(check.classification == "critical" for check in failures)
-        optional_fail_count = len(failures) - critical_fail_count
-
-        def _failure_phrase(count: int, label: str) -> str:
-            noun = "check failed" if count == 1 else "checks failed"
-            return f"{count} {label} {noun}"
-
-        lines: list[str] = []
-        if warn_count:
-            noun = "check needs" if warn_count == 1 else "checks need"
-            lines.append(f" [yellow][!][/yellow] {warn_count} optional {noun} attention")
-        # Reported separately: only a critical failure sets the exit code,
-        # so calling an optional failure "critical" would misrepresent it.
-        if critical_fail_count:
-            lines.append(f" [red][x][/red] {_failure_phrase(critical_fail_count, 'critical')}")
-        if optional_fail_count:
-            lines.append(f" [red][x][/red] {_failure_phrase(optional_fail_count, 'optional')}")
-
+        warnings = sum(check.status == WARN for check in checks)
+        failures = sum(check.status == FAIL for check in checks)
         console.print()
-        if not lines:
-            console.print(" [green][✓][/green] No issues found!\n")
-        else:
-            for line in lines:
-                console.print(line)
-            console.print()
-        if critical_fail_count:
+        if not warnings and not failures:
+            console.print(Text("No issues found.", style=SUCCESS))
+            return
+        parts = []
+        if failures:
+            parts.append(Text(count_noun(failures, "check") + " failed", style=DANGER))
+        if warnings:
+            parts.append(Text(count_noun(warnings, "warning"), style=ATTENTION))
+        console.print(Text(" · ", style=MUTED).join(parts))
+        if any(check.status == FAIL and check.critical for check in checks):
             raise SystemExit(1)

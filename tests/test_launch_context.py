@@ -92,7 +92,8 @@ class TestCommandsLeaveTheLaunchDirectory:
         with (
             patch("gitdirector.commands.cd.RepositoryManager", return_value=manager),
             patch("gitdirector.launch_context.leave_launch_directory") as leave,
-            patch("gitdirector.integrations.tmux.open_in_tmux"),
+            patch("gitdirector.commands.cd.start_session", return_value="gd/repo_abcde/shell/1"),
+            patch("gitdirector.integrations.tmux.attach_tmux_session"),
         ):
             result = CliRunner().invoke(cli, ["cd", "repo"])
         assert result.exit_code == 0, result.output

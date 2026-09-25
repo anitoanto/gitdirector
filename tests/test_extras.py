@@ -334,25 +334,3 @@ class TestPullRepository:
 # ---------------------------------------------------------------------------
 # status._build_dirty_display – unstaged files
 # ---------------------------------------------------------------------------
-
-
-class TestBuildDirtyDisplay:
-    """Direct tests for _build_dirty_display helper."""
-
-    def test_unstaged_files_rendered(self):
-        from pathlib import Path
-
-        from gitdirector.commands.status import _build_dirty_display
-        from gitdirector.repo import RepositoryInfo, RepoStatus
-
-        info = RepositoryInfo(
-            Path("/tmp/repo"),
-            "repo",
-            RepoStatus.UP_TO_DATE,
-            "main",
-            unstaged=True,
-            unstaged_files=["file.py"],
-        )
-        output = _build_dirty_display([info])
-        assert "unstaged:" in output.plain
-        assert "file.py" in output.plain

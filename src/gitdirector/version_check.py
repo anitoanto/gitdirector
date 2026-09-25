@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from urllib.request import urlopen
 
 from .storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
 
@@ -73,6 +72,8 @@ def _write_cache(checked_at: datetime, latest_version: str | None) -> None:
 
 
 def _fetch_latest_version() -> str | None:
+    from urllib.request import urlopen
+
     with urlopen(_PYPI_JSON_URL, timeout=_VERSION_CHECK_TIMEOUT_SECS) as response:
         payload = json.load(response)
     latest_version = payload.get("info", {}).get("version")
