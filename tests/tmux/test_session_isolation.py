@@ -31,7 +31,12 @@ from gitdirector.integrations.tmux import (
 )
 
 from .._timeouts import TMUX_CMD_TIMEOUT
-from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
+from ._shared import (
+    _cleanup_tmux_tmpdir,
+    _make_shell_home,
+    _make_short_tmux_tmpdir,
+    _tmux_integration_lock,
+)
 
 # Everything a `gd` started from inside an agent session would be holding.
 LEAKY_ENV = {
@@ -102,7 +107,7 @@ class TestSessionEnvironmentIsolation:
         """
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             launch_dir = tmp_path / "where-gd-was-launched"
             launch_dir.mkdir()
             tmux_dir = _make_short_tmux_tmpdir()
@@ -224,7 +229,7 @@ class TestSessionWorkingDirectory:
         """tmux would exit 0 and start in ``$HOME`` instead."""
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
@@ -241,7 +246,7 @@ class TestSessionWorkingDirectory:
     def test_file_instead_of_directory_is_refused(self, tmp_path, monkeypatch):
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))

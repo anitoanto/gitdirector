@@ -43,7 +43,7 @@ def register(cli: click.Group):
         session_name: str | None = None
         try:
             session_name = create_tmux_session(
-                repo_path.name, repo_path, purpose="shell", description=description
+                repo_path.name, repo_path, purpose="shell", description=description, shell=False
             )
             click.echo(session_name)
             launch_command_in_tmux_session(session_name, command)

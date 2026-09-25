@@ -52,7 +52,7 @@ def mock_tmux_integration(monkeypatch):
         value = re.sub(r"-+", "-", value).strip("-")
         return value or fallback
 
-    def fake_create(repo_name, path, purpose="shell", description=None):
+    def fake_create(repo_name, path, purpose="shell", description=None, shell=True):
         return f"gd/{clean_segment(repo_name, 'repo')}/{clean_segment(purpose, 'cmd')}/1"
 
     mocks = {
@@ -83,7 +83,7 @@ class TestGdTmuxByName:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="shell", description=None
+            "myapp", repo, purpose="shell", description=None, shell=False
         )
         mock_tmux_integration["launch_command_in_tmux_session"].assert_called_once_with(
             "gd/myapp/shell/1", "pytest -q"
@@ -103,7 +103,7 @@ class TestGdTmuxByName:
         # The command (with its quotes) is passed through verbatim to the
         # launch function while gd-tmux keeps the tmux session purpose as shell.
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "demo", repo, purpose="shell", description=None
+            "demo", repo, purpose="shell", description=None, shell=False
         )
         mock_tmux_integration["launch_command_in_tmux_session"].assert_called_once_with(
             "gd/demo/shell/1", 'echo "hello world"'
@@ -122,7 +122,7 @@ class TestGdTmuxByPath:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="shell", description=None
+            "myapp", repo, purpose="shell", description=None, shell=False
         )
 
     def test_path_with_separator_routes_through_path_branch(
@@ -165,7 +165,7 @@ class TestGdTmuxWithSpaceInName:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "My Repo", repo, purpose="shell", description=None
+            "My Repo", repo, purpose="shell", description=None, shell=False
         )
 
     def test_runs_command_for_absolute_path_with_space(
@@ -179,7 +179,7 @@ class TestGdTmuxWithSpaceInName:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "My Repo", repo, purpose="shell", description=None
+            "My Repo", repo, purpose="shell", description=None, shell=False
         )
 
     def test_repo_name_with_space_does_not_collapse_to_basename(
@@ -217,7 +217,7 @@ class TestGdTmuxDescriptionFlag:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="shell", description="ready to ship"
+            "myapp", repo, purpose="shell", description="ready to ship", shell=False
         )
 
     def test_description_short_flag_passes_value(
@@ -231,7 +231,7 @@ class TestGdTmuxDescriptionFlag:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="shell", description="wip feature"
+            "myapp", repo, purpose="shell", description="wip feature", shell=False
         )
 
     def test_description_defaults_to_none(
@@ -245,7 +245,7 @@ class TestGdTmuxDescriptionFlag:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="shell", description=None
+            "myapp", repo, purpose="shell", description=None, shell=False
         )
 
     def test_description_supports_spaces(
@@ -261,7 +261,7 @@ class TestGdTmuxDescriptionFlag:
 
         assert result.exit_code == 0, result.output
         mock_tmux_integration["create_tmux_session"].assert_called_once_with(
-            "myapp", repo, purpose="shell", description="ready to ship"
+            "myapp", repo, purpose="shell", description="ready to ship", shell=False
         )
 
 

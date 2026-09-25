@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -53,6 +54,7 @@ from .screens.repos import (
 )
 from .screens.sessions import EditSessionDescriptionScreen, RemoveSessionScreen
 from .terminal_caps import host_color_system, no_color_requested
+from .widgets import ConsoleTable
 
 _panel_row_height = _app_panels._panel_row_height
 _render_panel_preview = _app_panels._render_panel_preview
@@ -174,15 +176,21 @@ class GitDirectorConsole(
         padding: 0 1;
         scrollbar-size-horizontal: 0;
     }
+    /* A focused table keeps its background: the tint would cover only the
+       rows, leaving the space below them a different shade. The cursor row
+       still shows which table has focus. */
+    DataTable:focus {
+        background-tint: $foreground 0%;
+    }
+    /* Its rows are laid out to fit, so there is never anything to scroll to. */
+    #sessions-table {
+        overflow-x: hidden;
+    }
     /* Highlight rows and options with a translucent tint of the theme's
        primary colour instead of Textual's solid block cursor. A solid
        primary block forces a contrasting text colour over the cell, which
        erases status colours and turns dimmed text unreadable; a tint keeps
        the row's own colours legible in both dark and light themes. */
-    /* Its rows are laid out to fit, so there is never anything to scroll to. */
-    #sessions-table {
-        overflow-x: hidden;
-    }
     DataTable > .datatable--cursor,
     DataTable:focus > .datatable--cursor {
         background: $primary 30%;
@@ -298,6 +306,8 @@ class GitDirectorConsole(
         if not no_color_requested() and host_color_system() == "truecolor":
             os.environ["COLORTERM"] = "truecolor"
         super().__init__()
+        # One row per wheel notch (Textual's default is 2).
+        self.scroll_sensitivity_y = 1.0
         from ...integrations.tmux import TmuxMonitor
 
         self.manager = RepositoryManager()
@@ -340,6 +350,7 @@ class GitDirectorConsole(
         self._resume_selection_key: str | None = None
         self._resume_selection_row: int | None = None
         self._resume_new_panel_guard_until: float = 0.0
+        self._stale_input_before: float = 0.0
         self._panel_store = PanelStore()
         self._status_message = ""
         self._update_notice = version_check.get_cached_update_notice()
@@ -364,7 +375,7 @@ class GitDirectorConsole(
         with TabbedContent(id="tabs"):
             with TabPane("[1] Repositories", id="repos"):
                 yield Static("", id="repo-search-indicator", classes="search-indicator")
-                yield DataTable(
+                yield ConsoleTable(
                     id="repo-table", cursor_type="row", cursor_foreground_priority="renderable"
                 )
                 yield Static(
@@ -374,7 +385,7 @@ class GitDirectorConsole(
                 )
             with TabPane("[2] Sessions", id="sessions"):
                 yield Static("", id="sessions-search-indicator", classes="search-indicator")
-                yield DataTable(
+                yield ConsoleTable(
                     id="sessions-table",
                     cursor_type="row",
                     cursor_foreground_priority="renderable",
@@ -387,11 +398,12 @@ class GitDirectorConsole(
                 )
             with TabPane("[3] Panels", id="panels"):
                 yield Static("", id="panels-search-indicator", classes="search-indicator")
-                yield DataTable(
+                yield ConsoleTable(
                     id="panels-table", cursor_type="row", cursor_foreground_priority="renderable"
                 )
                 yield Static(
-                    "No panels created.  Press [bold]n[/bold] to create a new panel.",
+                    "No panels yet.  A panel shows several sessions side by side.\n\n"
+                    "Press [bold]n[/bold] to build one: name it, pick a layout, fill its panes.",
                     id="no-panels-message",
                 )
         with Horizontal(id="search-container"):
@@ -416,9 +428,7 @@ class GitDirectorConsole(
         self._sess_col_keys = sessions_table.add_columns("Sessions")
         self._apply_sessions_column_layout()
         panels_table = self.query_one("#panels-table", DataTable)
-        self._panels_col_keys = panels_table.add_columns(
-            "Map", "Name", "TMUX", "Layout", "Panes", "Status"
-        )
+        self._panels_col_keys = panels_table.add_columns("Map", "Panel", "Sessions", "Status")
         self._disable_tabs_widget_arrow_keybindings()
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
         self._sync_tmux_theme_config(self.theme)
@@ -428,6 +438,7 @@ class GitDirectorConsole(
         )
         self._sync_session_status_tracking()
         self.set_interval(0.25, self._advance_refresh_indicator)
+        self._prepare_attach_terminal()
         self._load_update_notice()
         self._load_repos_from_cache()
         self._refresh_repos()
@@ -560,6 +571,8 @@ class GitDirectorConsole(
         # scrollable area sees them. The keyboard still scrolls sideways.
         if _is_horizontal_mouse_scroll(event):
             return
+        if isinstance(event, events.InputEvent) and event.time < self._stale_input_before:
+            return
         await super().on_event(event)
 
     def action_select_row(self) -> None:
@@ -576,6 +589,8 @@ class GitDirectorConsole(
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "sessions-table":
+            if event.time < self._stale_input_before:
+                return
             session_name = str(event.row_key.value)
             self._suspend_and_attach(session_name)
         elif event.data_table.id == "panels-table":
@@ -607,7 +622,7 @@ class GitDirectorConsole(
         )
 
         purpose = purpose or agent_cmd or "shell"
-        session_kwargs = {"purpose": purpose, "description": description}
+        session_kwargs = {"purpose": purpose, "description": description, "shell": not agent_cmd}
         if self._active_tab == "repos" and self._selected_repo_row_is_group():
             repo_label = self._get_selected_group_session_repo_label()
             if repo_label:
@@ -719,6 +734,7 @@ class GitDirectorConsole(
 
         self._pause_session_status_tracking(wait=False)
         deck = self._prepare_attach(session_name)
+        frame = self._current_frame()
         attach_error: Exception | None = None
         try:
             try:
@@ -736,7 +752,9 @@ class GitDirectorConsole(
                         session_name,
                         skip_config_sync=skip_config_sync,
                         deck=deck,
+                        frame=frame,
                     )
+                    self._drop_input_from_before_attach()
             except Exception as exc:
                 # Suspending or resuming the driver itself failed, so no
                 # resume signal will come to clear the pending restore, and
@@ -753,8 +771,44 @@ class GitDirectorConsole(
 
         if attach_error is not None:
             self._update_status(f"tmux attach failed: {attach_error}")
+        self.call_after_refresh(self._release_held_frame)
 
         self._active_tab = restore_tab
+
+    @work(thread=True)
+    def _prepare_attach_terminal(self) -> None:
+        # Built once in the background, so the first attach does not wait on tic.
+        from ...integrations.tmux.core import attach_client_env
+
+        attach_client_env()
+
+    def _release_held_frame(self) -> None:
+        # Ends the synchronized output tmux's exit and the frame restore
+        # began, should the repaint not have ended it.
+        if self._driver is not None:
+            self._driver.write("\033[?2026l")
+            self._driver.flush()
+
+    def _current_frame(self) -> str | None:
+        """The console as it is on screen now, as terminal output."""
+        try:
+            update = self.screen._compositor.render_full_update()
+            return update.render_segments(self.console)
+        except Exception:
+            logger.debug("could not capture the console frame", exc_info=True)
+            return None
+
+    def _drop_input_from_before_attach(self) -> None:
+        # Input read while the attach was being set up (the second click of
+        # a double-click, a repeated Enter), and the row selections it
+        # already made, sit in the message queues past the tty flush and
+        # would open the session again on resume.
+        self._stale_input_before = time.monotonic()
+        # A press whose release went to tmux would otherwise pair with the
+        # MouseUp Textual synthesizes on the next motion and form a Click.
+        self._mouse_down_widget = None
+        # Likewise a capture (a scrollbar drag) would keep every mouse event.
+        self.capture_mouse(None)
 
     @staticmethod
     def _prepare_attach(session_name: str) -> str | None:
@@ -785,6 +839,7 @@ class GitDirectorConsole(
         *,
         skip_config_sync: bool,
         deck: str | None = None,
+        frame: str | None = None,
     ) -> Exception | None:
         """Run the blocking tmux attach with the TUI suspended.
 
@@ -819,13 +874,19 @@ class GitDirectorConsole(
             error = exc
         finally:
             if entered_manual_alt_screen:
-                if error is None:
-                    # tmux already left the alt screen on its way out.
+                if error is None and frame:
+                    # Cover whatever tmux left at once with the console as
+                    # it was, and hold the display (synchronized output)
+                    # until the resumed app, which clears the alt screen
+                    # again, has repainted it.
+                    write_terminal("\033[?2026h\033[?1049h\033[?25l" + frame)
+                elif error is None:
+                    # The resumed app repaints whichever screen tmux left.
                     write_terminal("\033[?25h")
                 else:
                     # tmux may never have drawn anything: leave the cleared
                     # alt screen ourselves or the terminal stays black.
-                    write_terminal("\033[?25h\033[?1049l")
+                    write_terminal("\033[?2026l\033[?25h\033[?1049l")
             try:
                 termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
             except (AttributeError, OSError, ValueError):
@@ -840,7 +901,6 @@ class GitDirectorConsole(
 
         from ...integrations.tmux.core import (
             _parse_gd_session_name,
-            _repo_label_from_segment,
             _repo_session_name_segment,
         )
 
@@ -858,24 +918,12 @@ class GitDirectorConsole(
             seen_paths.add(normalized_path)
             tracked_paths.append(normalized_path)
 
-        exact_matches = [
+        matches = [
             repo_path
             for repo_path in tracked_paths
             if _repo_session_name_segment(repo_path) == repo_segment
         ]
-        if len(exact_matches) == 1:
-            return exact_matches[0]
-
-        repo_label = _repo_label_from_segment(repo_segment)
-        label_matches = [
-            repo_path
-            for repo_path in tracked_paths
-            if _repo_label_from_segment(_repo_session_name_segment(repo_path)) == repo_label
-        ]
-        if len(label_matches) == 1:
-            return label_matches[0]
-
-        return None
+        return matches[0] if len(matches) == 1 else None
 
     @work(thread=True)
     def _refresh_repo_for_path(self, path: Path) -> None:

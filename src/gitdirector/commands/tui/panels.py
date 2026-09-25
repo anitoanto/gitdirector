@@ -358,13 +358,14 @@ def _preview_axis_sizes(
     return [base_size] * count
 
 
-def render_panel_layout_preview(
+def _layout_preview_grid(
     layout: PanelLayout,
-    labels: dict[int, str] | None = None,
-    *,
-    cell_width: int = 7,
-    cell_height: int = 1,
-) -> str:
+    labels: dict[int, str] | None,
+    cell_width: int,
+    cell_height: int,
+) -> tuple[list[str], dict[int, tuple[int, int, int]], dict[int, tuple[int, int, int, int]]]:
+    """The preview's lines, where each pane's label sits (``(y, x, length)``),
+    and each pane's inside (``(top, bottom, left, right)``, inclusive)."""
     col_widths = _preview_axis_sizes(layout.cols, cell_width, layout.col_ratios)
     row_heights = _preview_axis_sizes(layout.rows, cell_height, layout.row_ratios)
 
@@ -375,6 +376,8 @@ def render_panel_layout_preview(
     pane_labels = labels or {
         placement.pane_index: str(placement.pane_index) for placement in layout.placements
     }
+    spans: dict[int, tuple[int, int, int]] = {}
+    insides: dict[int, tuple[int, int, int, int]] = {}
 
     x_boundaries = [0]
     for col_width in col_widths:
@@ -405,10 +408,12 @@ def render_panel_layout_preview(
         label = pane_labels.get(placement.pane_index, "")
         inner_width = x1 - x0 - 1
         inner_height = y1 - y0 - 1
+        insides[placement.pane_index] = (y0 + 1, y1 - 1, x0 + 1, x1 - 1)
         if label and inner_width > 0 and inner_height > 0:
             visible_label = label[:inner_width]
             label_y = y0 + 1 + ((inner_height - 1) // 2)
             label_x = x0 + 1 + max(0, (inner_width - len(visible_label)) // 2)
+            spans[placement.pane_index] = (label_y, label_x, len(visible_label))
             for offset, char in enumerate(visible_label):
                 content[label_y][label_x + offset] = char
 
@@ -420,8 +425,56 @@ def render_panel_layout_preview(
                 chars.append(content[y][x])
             else:
                 chars.append(_BOX_CHARS.get(connections[y][x], " "))
-        lines.append("".join(chars).rstrip())
-    return "\n".join(lines)
+        lines.append("".join(chars))
+    return lines, spans, insides
+
+
+def render_panel_layout_preview(
+    layout: PanelLayout,
+    labels: dict[int, str] | None = None,
+    *,
+    cell_width: int = 7,
+    cell_height: int = 1,
+) -> str:
+    lines, _spans, _insides = _layout_preview_grid(layout, labels, cell_width, cell_height)
+    return "\n".join(line.rstrip() for line in lines)
+
+
+def render_panel_layout_text(
+    layout: PanelLayout,
+    labels: dict[int, str] | None = None,
+    styles: dict[int, str] | None = None,
+    *,
+    cell_width: int = 7,
+    cell_height: int = 1,
+    border_style: str = "",
+    fills: dict[int, str] | None = None,
+):
+    """The preview as Rich text, each pane's label in its own style.
+
+    *fills* styles a pane's whole inside, such as a background for the pane
+    being worked on.
+    """
+    from rich.text import Text
+
+    lines, spans, insides = _layout_preview_grid(layout, labels, cell_width, cell_height)
+    text = Text("\n".join(lines), style=border_style, no_wrap=True, overflow="ignore")
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    for pane_index, style in (fills or {}).items():
+        inside = insides.get(pane_index)
+        if inside is None or not style:
+            continue
+        top, bottom, left, right = inside
+        for y in range(top, bottom + 1):
+            text.stylize(style, offsets[y] + left, offsets[y] + right + 1)
+    for pane_index, style in (styles or {}).items():
+        span = spans.get(pane_index)
+        if span is not None and style:
+            y, x, length = span
+            text.stylize(style, offsets[y] + x, offsets[y] + x + length)
+    return text
 
 
 @dataclass

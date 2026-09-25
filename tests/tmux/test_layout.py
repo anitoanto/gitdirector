@@ -575,7 +575,7 @@ class TestRebuildPanelTmuxSession:
 
 
 class TestPanelPrefixBindings:
-    @patch("gitdirector.integrations.tmux.deck.ensure_deck_prefix_bindings")
+    @patch("gitdirector.integrations.tmux.deck.ensure_deck_bindings")
     @patch("subprocess.run")
     def test_panel_prefix_bindings_include_overlay_alias_and_slot_focus(
         self, mock_run, mock_deck_bindings

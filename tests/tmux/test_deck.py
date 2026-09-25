@@ -96,14 +96,10 @@ def _tmux_calls(mock_run: MagicMock) -> list[list[str]]:
     return commands
 
 
-def _binding(commands: list[list[str]], key: str) -> list[str]:
-    return next(c for c in commands if c[:1] == ["bind-key"] and c[c.index("prefix") + 1] == key)
-
-
-_WRAPPED_S = (
-    'bind-key    -T prefix s       if-shell -F "#{m:gd/deck/*,#{session_name}}" '
-    '"run-shell -C x" "choose-tree -Zs"\n'
-)
+def _binding(commands: list[list[str]], key: str, table: str = "prefix") -> list[str]:
+    return next(
+        c for c in commands if c[:1] == ["bind-key"] and table in c and c[c.index(table) + 1] == key
+    )
 
 
 def _run_with(list_keys: str, options: dict[str, str] | None = None) -> list[list[str]]:
@@ -118,7 +114,7 @@ def _run_with(list_keys: str, options: dict[str, str] | None = None) -> list[lis
 
     mock_run = MagicMock(side_effect=respond)
     with patch.object(D, "_run_tmux", mock_run):
-        D.ensure_deck_prefix_bindings()
+        D.ensure_deck_bindings()
     return _tmux_calls(mock_run)
 
 
@@ -146,14 +142,36 @@ class TestPrefixBindings:
         assert _binding(commands, "b")[-1] == "my-own-b"
         assert not any(c[:3] == ["set-option", "-g", "@gd_prefix_original_b"] for c in commands)
 
-    def test_prefix_s_is_given_back_its_original(self):
-        commands = _run_with(_WRAPPED_S, {"@gd_prefix_original_s": "choose-tree -Zs\n"})
-        assert ["bind-key", "-T", "prefix", "s", "choose-tree -Zs"] in commands
-        assert ["set-option", "-gu", "@gd_prefix_original_s"] in commands
+    def test_the_wheel_scrolls_copy_mode_a_line_at_a_time_in_gitdirector(self):
+        commands = _run_with(
+            "bind-key    -T copy-mode-vi WheelUpPane       "
+            "select-pane \\; send-keys -X -N 5 scroll-up\n"
+        )
+        up = _binding(commands, "WheelUpPane", "copy-mode-vi")
+        assert up[4:] == [
+            "if-shell",
+            "-F",
+            "#{m:gd/*,#{session_name}}",
+            "select-pane ; send-keys -X scroll-up",
+            # Elsewhere tmux's own binding, as a command string.
+            "select-pane ; send-keys -X -N 5 scroll-up",
+        ]
+        option = "@gd_original_copy_mode_vi_wheeluppane"
+        assert ["set-option", "-g", option, "select-pane \\; send-keys -X -N 5 scroll-up"] in (
+            commands
+        )
+        # Unbound in copy-mode here: GitDirector sessions only.
+        assert len(_binding(commands, "WheelDownPane", "copy-mode")) == 8
 
-    def test_prefix_s_without_a_stored_original_is_unbound(self):
-        commands = _run_with(_WRAPPED_S)
-        assert ["unbind-key", "-T", "prefix", "s"] in commands
+    def test_rewrapping_the_wheel_keeps_the_stored_original(self):
+        wrapped = (
+            'bind-key    -T copy-mode WheelUpPane       if-shell -F "#{m:gd/*,#{session_name}}" '
+            '"select-pane ; send-keys -X scroll-up" "x"\n'
+        )
+        option = "@gd_original_copy_mode_wheeluppane"
+        commands = _run_with(wrapped, {option: "my-wheel\n"})
+        assert _binding(commands, "WheelUpPane", "copy-mode")[-1] == "my-wheel"
+        assert not any(c[:3] == ["set-option", "-g", option] for c in commands)
 
     def test_an_unwrapped_prefix_s_is_left_alone(self):
         commands = _run_with("bind-key    -T prefix s       my-sessions\n")
@@ -299,9 +317,9 @@ def test_deck_lifecycle():
 
     state = _wait_for(lambda: (s := D.read_deck_state(deck)) and s.main_attached and s)
     assert state.target == first
-    assert _out("display-message", "-p", "-t", f"={deck}:", "#{@gd_badge} #{@gd_label}") == (
-        "CLAUDE alpha/claude/1"
-    )
+    # The deck's status line lists its keys, not the shown session's badge.
+    assert _out("display-message", "-p", "-t", f"={deck}:", "#{@gd_badge}#{@gd_label}") == ""
+    assert "#{prefix} d" in _out("show-options", "-v", "-t", f"={deck}:", "status-left")
     views = [s for s in _out("list-sessions", "-F", "#{session_name}").split() if "view" in s]
     assert len(views) == 1
 
@@ -389,24 +407,14 @@ def test_stale_unattached_decks_are_reaped(monkeypatch):
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 @pytest.mark.usefixtures("tmux_server")
-def test_prefix_s_wrapped_by_an_earlier_version_is_restored():
-    _run_tmux(["set-option", "-g", "@gd_prefix_original_s", "choose-tree -Zs"])
-    _run_tmux(
-        [
-            "bind-key",
-            "-T",
-            "prefix",
-            "s",
-            "if-shell",
-            "-F",
-            "#{m:gd/deck/*,#{session_name}}",
-            "display-message old",
-            "choose-tree -Zs",
-        ]
-    )
-    D.ensure_deck_prefix_bindings()
-    line = next(
-        line for line in _out("list-keys", "-T", "prefix").splitlines() if line.split()[3] == "s"
-    )
-    assert line.split(None, 4)[4] == "choose-tree -Zs"
-    assert D._global_option("@gd_prefix_original_s") == ""
+def test_the_wheel_wrap_keeps_tmux_own_binding_elsewhere():
+    D.ensure_deck_bindings()
+    D.ensure_deck_bindings()
+    for table in ("copy-mode", "copy-mode-vi"):
+        line = next(
+            line
+            for line in _out("list-keys", "-T", table).splitlines()
+            if line.split()[3] == "WheelUpPane"
+        )
+        assert '"select-pane ; send-keys -X scroll-up"' in line
+        assert line.endswith('"select-pane ; send-keys -X -N 5 scroll-up"')

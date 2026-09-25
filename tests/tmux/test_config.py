@@ -353,28 +353,59 @@ class TestDeckDivider:
 
 
 class TestDeckStatusHints:
-    def test_keys_sit_before_the_clock_with_the_live_prefix(self):
+    @staticmethod
+    def _status(config: str, option: str) -> str:
         import shlex
 
+        (line,) = [line for line in config.splitlines() if f" {option} " in line]
+        return shlex.split(line)[-1]
+
+    def test_keys_replace_the_badge_on_the_left_with_the_live_prefix(self):
         from gitdirector.integrations.tmux.core import _deck_tmux_config
 
         config = _deck_tmux_config("gd/deck/1-a")
-        # The deck's own status-right comes last and wins over the theme's.
-        line = [line for line in config.splitlines() if " status-right " in line][-1]
-        status_right = shlex.split(line)[-1]
-        hints, clock = status_right.split("%H:%M")[0], status_right
-        assert "#{prefix} b" in hints and "toggle" in hints
-        assert "#{prefix} d" in hints and "console" in hints
-        assert "⇥ / #{prefix} ⇥" in hints and "session ↔ sidebar" in hints
-        assert status_right.index("console") < clock.index("%H:%M")
-        assert "status-right-length 120" in config
+        status_left = self._status(config, "status-left")
+        assert "#{prefix} b" in status_left and "toggle" in status_left
+        assert "#{prefix} d" in status_left and "console" in status_left
+        assert "⇥ / #{prefix} ⇥" in status_left and "session ↔ sidebar" in status_left
+        assert "@gd_badge" not in config and "@gd_label" not in config
 
-    def test_narrow_clients_keep_only_the_clock(self):
-        from gitdirector.integrations.tmux.core import _DECK_HINTS_MIN_WIDTH, _deck_key_hints
-        from gitdirector.ui_theme import resolve_panel_theme
+    def test_the_clock_stays_alone_on_the_right(self):
+        from gitdirector.integrations.tmux.core import _deck_tmux_config
+
+        config = _deck_tmux_config("gd/deck/1-a")
+        status_right = self._status(config, "status-right")
+        assert "%H:%M" in status_right
+        assert "prefix" not in status_right and "console" not in status_right
+
+    @patch(
+        "gitdirector.integrations.tmux.core._current_window_target",
+        return_value="gd/my-repo/claude/1:0",
+    )
+    def test_other_sessions_keep_the_badge_and_label(self, _mock_target):
+        for config in (
+            _session_tmux_config("gd/my-repo/claude/1", "rose-pine"),
+            _panel_tmux_config("Main", "gd/panel/main", "rose-pine"),
+        ):
+            status_left = self._status(config, "status-left")
+            assert "@gd_badge" in status_left and "@gd_label" in status_left
+            assert "prefix" not in status_left
+            assert "prefix" not in self._status(config, "status-right")
+
+    def test_narrow_clients_get_a_shorter_form_then_none(self):
+        from gitdirector.integrations.tmux.core import (
+            _DECK_HINTS_COMPACT_MIN_WIDTH,
+            _DECK_HINTS_MIN_WIDTH,
+            _deck_key_hints,
+        )
 
         hints = _deck_key_hints(resolve_panel_theme(None))
-        assert hints.startswith(f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},")
-        # A comma inside the branch would end it early.
-        branch = hints[len(f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},") : -2]
-        assert "," not in branch
+        wide = f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},"
+        medium = f",#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_COMPACT_MIN_WIDTH}}},"
+        assert hints.startswith(wide) and hints.endswith(",}}")
+        full, compact = hints[len(wide) : -len(",}}")].split(medium)
+        # A comma inside a branch would end it early.
+        assert "," not in full and "," not in compact
+        assert "session ↔ sidebar" in full
+        assert "sidebar" in compact and "session ↔" not in compact
+        assert "#{prefix} b" in compact and "#{prefix} d" in compact

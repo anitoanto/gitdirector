@@ -53,5 +53,16 @@ def _make_short_tmux_tmpdir(prefix: str = "gd-tmux-") -> Path:
     return tmux_dir
 
 
+def _make_shell_home(home_dir: Path) -> Path:
+    """An empty HOME a login shell starts in without prompting.
+
+    zsh runs its interactive new-user wizard when HOME has no startup
+    files (Debian's does), which swallows whatever a test types.
+    """
+    home_dir.mkdir(parents=True, exist_ok=True)
+    (home_dir / ".zshrc").touch()
+    return home_dir
+
+
 def _cleanup_tmux_tmpdir(tmux_dir: Path) -> None:
     shutil.rmtree(tmux_dir, ignore_errors=True)

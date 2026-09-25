@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import resource
+import shutil
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,8 +15,11 @@ from gitdirector.integrations.tmux.core import (
     TMUX_COMMAND_TIMEOUT,
     TmuxError,
     _run_tmux,
+    respawn_pane,
     send_text_to_session,
 )
+
+from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 
 class TestTmuxCommandTimeout:
@@ -97,3 +104,67 @@ class TestSendTextBufferIsolation:
         assert len(buffers) == 2
         assert buffers[0] != buffers[1]
         assert all(name.startswith("gitdirector-send-") for name in buffers)
+
+
+def _user_process_count() -> int:
+    """What RLIMIT_NPROC counts for this user: processes, but threads on Linux."""
+    columns = ["-L", "-o", "lwp="] if sys.platform.startswith("linux") else ["-o", "pid="]
+    listing = subprocess.run(
+        ["ps", "-U", str(os.getuid()), *columns], capture_output=True, text=True, check=True
+    )
+    return len(listing.stdout.split())
+
+
+@pytest.mark.skipif(
+    shutil.which("tmux") is None or os.geteuid() == 0,
+    reason="needs tmux, and a user RLIMIT_NPROC applies to (not root)",
+)
+def test_a_pane_left_broken_by_a_failed_respawn_does_not_take_the_server_down(monkeypatch):
+    """tmux < 3.8 segfaults respawning a pane whose previous respawn could not fork.
+
+    The server here may only fork a few more processes, so its spawns fail
+    the way they do on a machine out of ptys.
+    """
+    with _tmux_integration_lock():
+        tmux_dir = _make_short_tmux_tmpdir()
+        monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+        monkeypatch.delenv("TMUX", raising=False)
+        session = "gd/probe_aaaaa/shell/1"
+        limit = _user_process_count() + 24
+        _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        try:
+            started = subprocess.run(
+                ["tmux", "-f", "/dev/null", "new-session", "-d", "-s", session, "sleep 600"],
+                capture_output=True,
+                timeout=TMUX_COMMAND_TIMEOUT,
+                preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_NPROC, (limit, hard)),
+            )
+            if started.returncode != 0:
+                pytest.skip("could not start a process-limited tmux server")
+            pane = f"={session}:^.0"
+            # Other processes of this user come and go, so fill up to the
+            # limit again until the respawn itself is the fork that fails.
+            for _ in range(20):
+                for _ in range(64):
+                    if _run_tmux(["new-window", "-d", "-t", f"={session}", "sleep 600"]).returncode:
+                        break
+                _run_tmux(["respawn-pane", "-k", "-t", pane, "sleep 600"])
+                probe = _run_tmux(["display-message", "-p", "-t", pane, "#{pane_pid}"], text=True)
+                if probe.stdout.strip() == "-1":
+                    break
+            else:
+                pytest.skip("the process limit never made a respawn fail")
+
+            with pytest.raises(TmuxError, match="broken"):
+                respawn_pane(pane, "sleep 600")
+
+            assert _run_tmux(["list-sessions"]).returncode == 0, "the tmux server died"
+            assert (
+                "-1"
+                not in _run_tmux(
+                    ["list-panes", "-a", "-F", "#{pane_pid}"], text=True
+                ).stdout.split()
+            )
+        finally:
+            _run_tmux(["kill-server"])
+            _cleanup_tmux_tmpdir(tmux_dir)

@@ -25,6 +25,11 @@ _ATTENTION_YELLOW = "#ffd75f"
 # Neon so it stands out at a glance, and fixed for the same reason as the
 # yellow: a theme's own success colour can be teal or olive.
 _LIVE_GREEN = "#39ff14"
+# The red for a mode that drops permission prompts. A saturated red is too
+# dark to reach 4.5:1 on a tinted row without washing out to pink, so it gets
+# the 3:1 floor for bold text instead.
+_DANGER_RED = "#ff2d2d"
+_DANGER_CONTRAST = 3.0
 
 
 def _variable_color(variables: Mapping[str, str], name: str, fallback: str) -> Color:
@@ -50,6 +55,7 @@ class TablePalette:
     yellow: str
     muted: str
     primary: str
+    danger: str = "red"
 
     def sync_label(self, status: RepoStatus, *, stale: bool = False) -> str:
         if status is RepoStatus.UP_TO_DATE:
@@ -113,6 +119,7 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
         success = "bright_green"
         yellow = "yellow"
         muted = "bright_black"
+        danger = "bright_red"
     else:
         success = _markup_color(
             readable_on(Color.parse(_LIVE_GREEN), *backgrounds, minimum=_MIN_CONTRAST), ""
@@ -124,12 +131,16 @@ def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
             readable_on(foreground.blend(surface, 0.45), *backgrounds, minimum=_MUTED_CONTRAST),
             "",
         )
+        danger = _markup_color(
+            readable_on(Color.parse(_DANGER_RED), *backgrounds, minimum=_DANGER_CONTRAST), ""
+        )
 
     return TablePalette(
         success=success,
         yellow=yellow,
         muted=muted,
         primary=readable("primary", "#5fd7ff"),
+        danger=danger,
     )
 
 

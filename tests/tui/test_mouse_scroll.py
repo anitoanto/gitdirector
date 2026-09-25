@@ -1,5 +1,7 @@
 """The console's mouse scrolls vertically only."""
 
+from pathlib import Path
+
 from textual import events
 from textual.widgets import DataTable
 
@@ -27,8 +29,6 @@ def test_sideways_and_modified_wheel_events_are_horizontal():
 async def test_a_wide_table_does_not_scroll_sideways_with_the_mouse():
     long_path = "/tmp/" + "very-long-directory-name/" * 12 + "repo"
     app = GitDirectorConsole()
-    from pathlib import Path
-
     app.manager = _mock_manager([_make_info("repo", Path(long_path))])
     async with app.run_test(size=(60, 20)) as pilot:
         await app.workers.wait_for_complete()
@@ -46,3 +46,17 @@ async def test_a_wide_table_does_not_scroll_sideways_with_the_mouse():
         table.scroll_right(animate=False)
         await pilot.pause()
         assert table.scroll_x > 0
+
+
+async def test_one_wheel_notch_scrolls_one_row():
+    app = GitDirectorConsole()
+    app.manager = _mock_manager([_make_info(f"repo{i}", Path(f"/tmp/r{i}")) for i in range(40)])
+    async with app.run_test(size=(100, 20)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        table = app.query_one("#repo-table", DataTable)
+        assert table.max_scroll_y > 1
+        widget, _ = app.screen.get_widget_at(*table.region.offset + (5, 3))
+        widget.post_message(_scroll(events.MouseScrollDown))
+        await pilot.pause()
+        assert table.scroll_y == 1

@@ -644,6 +644,7 @@ class TestGitDirectorConsoleActionRouting:
                 Path("/tmp/alpha"),
                 purpose="copilot",
                 description=None,
+                shell=False,
             )
             mock_launch_command.assert_called_once_with("gd/alpha/copilot/1", "copilot")
             app.push_screen.assert_called_once()
@@ -1417,7 +1418,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         assert status == "waiting"
 
-    def test_resolve_session_status_runs_without_tmux_info(self):
+    def test_an_unsampled_session_is_idle(self):
         app = GitDirectorConsole()
         app._monitor = MagicMock()
         app._monitor.get_bell_state.return_value = False
@@ -1427,7 +1428,8 @@ class TestGitDirectorConsoleDirectBranches:
             {"session_name": "gd/alpha/shell/1", "purpose": "shell"}
         )
 
-        assert status == "running"
+        # Nothing has been seen doing work yet.
+        assert status == "idle"
 
     def test_on_statuses_updated_refreshes_repo_status_bar_when_waiting_changes(self):
         app = GitDirectorConsole()
@@ -1659,23 +1661,6 @@ class TestGitDirectorConsoleDirectBranches:
 
         assert app._resolve_repo_refresh_path(session_name) == path
 
-    def test_resolve_repo_refresh_path_uses_legacy_single_match_fallback(self):
-        path = Path("/tmp/beta")
-        app = GitDirectorConsole()
-        app.manager = _mock_manager([_make_info("beta", path)])
-
-        assert app._resolve_repo_refresh_path("gd/beta/shell/1") == path
-
-    def test_resolve_repo_refresh_path_skips_ambiguous_legacy_matches(self):
-        repos = [
-            _make_info("beta", Path("/tmp/team-a/beta")),
-            _make_info("beta", Path("/tmp/team-b/beta")),
-        ]
-        app = GitDirectorConsole()
-        app.manager = _mock_manager(repos)
-
-        assert app._resolve_repo_refresh_path("gd/beta/shell/1") is None
-
     def test_action_select_row_noops_when_sessions_table_empty(self):
         app = GitDirectorConsole()
         app._active_tab = "sessions"
@@ -1710,6 +1695,7 @@ class TestGitDirectorConsoleDirectBranches:
         event = MagicMock()
         event.data_table.id = "sessions-table"
         event.row_key.value = "gd/alpha/copilot/1"
+        event.time = 1.0
 
         app.on_data_table_row_selected(event)
 
@@ -1744,7 +1730,7 @@ class TestGitDirectorConsoleDirectBranches:
         app.action_open_tmux()
 
         mock_create.assert_called_once_with(
-            "alpha", Path("/tmp/alpha"), purpose="shell", description=None
+            "alpha", Path("/tmp/alpha"), purpose="shell", description=None, shell=True
         )
 
         screen = app.push_screen.call_args.args[0]

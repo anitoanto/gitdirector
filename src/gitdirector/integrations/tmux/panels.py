@@ -4,9 +4,11 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +19,7 @@ from .core import (
     PANEL_SLOT_OPTION,
     TmuxError,
     _chain_tmux_commands,
+    _list_sessions,
     _panel_pane_title,
     _protect_session,
     _resolved_panel_theme_name,
@@ -28,6 +31,7 @@ from .core import (
     _tmux_server_is_gone,
     kill_tmux_session,
     make_panel_session_name,
+    respawn_pane,
     sync_panel_tmux_config,
 )
 
@@ -37,7 +41,11 @@ _TMUX_FORK_RETRY_ATTEMPTS = 5
 
 
 def _run_tmux_with_fork_retry(args: list[str]) -> subprocess.CompletedProcess[str]:
-    """Retry a tmux command that failed only because the server could not fork."""
+    """Retry a tmux command that failed only because the server could not fork.
+
+    Only for commands that create a pane: tmux discards a pane whose spawn
+    failed. Never for ``respawn-pane`` (see :func:`~.core.respawn_pane`).
+    """
     for attempt in range(_TMUX_FORK_RETRY_ATTEMPTS):
         result = _run_tmux(args, text=True)
         stderr = result.stderr if isinstance(result.stderr, str) else ""
@@ -68,7 +76,41 @@ def _raise_for_tmux_result(result: subprocess.CompletedProcess[str]) -> None:
 
 def _panel_build_session_name(panel_name: str) -> str:
     digest = hashlib.sha1(panel_name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-    return f"gd/build/{digest}-{os.getpid()}"
+    return f"gd/build/{digest}-{os.getpid()}-{secrets.token_hex(3)}"
+
+
+_PANEL_HELPER_OWNER = re.compile(
+    r"^gd/(?:build/[0-9a-f]+-(\d+)-[0-9a-f]+|panel/.+_orphaned-(\d+)-\d+)$"
+)
+# One rebuild at a time: each swaps sessions under the panel's final name.
+_REBUILD_LOCK = threading.Lock()
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def reap_stale_panel_helpers() -> list[str]:
+    """Kill panel build and orphaned sessions whose gitdirector process is gone.
+
+    A rebuild removes both when it finishes or fails; they outlive it only
+    when the process that started it died in between.
+    """
+    reaped: list[str] = []
+    for session_name in _list_sessions():
+        match = _PANEL_HELPER_OWNER.match(session_name)
+        if match is None:
+            continue
+        owner = int(match.group(1) or match.group(2))
+        if owner != os.getpid() and not _process_alive(owner) and kill_tmux_session(session_name):
+            reaped.append(session_name)
+    return reaped
 
 
 def kill_panel_tmux_session(panel_name: str) -> bool:
@@ -87,15 +129,6 @@ def _tmux_output(*args: str) -> str:
     result = _run_tmux_with_fork_retry(list(args))
     _raise_for_tmux_result(result)
     return result.stdout.strip()
-
-
-def _respawn_pane(pane_id: str, command: str, *, check: bool = True) -> subprocess.CompletedProcess:
-    result = _run_tmux_with_fork_retry(
-        ["respawn-pane", "-k", "-t", pane_id, _tmux_child_environment_command(command)]
-    )
-    if check:
-        _raise_for_tmux_result(result)
-    return result
 
 
 def _list_window_panes_row_major(session_name: str) -> list[str]:
@@ -338,7 +371,10 @@ def _equalize_panel_layout(
     dims = _tmux_output(
         "display-message", "-t", window_target, "-p", "#{window_width} #{window_height}"
     )
-    window_w, window_h = (int(v) for v in dims.split())
+    try:
+        window_w, window_h = (int(v) for v in dims.split())
+    except ValueError as exc:
+        raise TmuxError(f"could not read the size of {window_target}: {dims!r}") from exc
 
     sorted_placements = sorted(layout.placements, key=lambda p: (p.row, p.col))
     pane_id_map: dict[tuple[int, int], int] = {}
@@ -540,9 +576,9 @@ def _ensure_panel_prefix_bindings() -> None:
     )
     _run_tmux(_chain_tmux_commands(commands), check=True)
     # prefix b was just rebound without its deck meaning.
-    from .deck import ensure_deck_prefix_bindings
+    from .deck import ensure_deck_bindings
 
-    ensure_deck_prefix_bindings()
+    ensure_deck_bindings()
 
 
 def _configure_panel_window(
@@ -636,6 +672,21 @@ def rebuild_panel_tmux_session(
     layout_key: str | None = None,
     theme_name: str | None = None,
 ) -> str:
+    with _REBUILD_LOCK:
+        return _rebuild_panel_tmux_session(
+            panel_name, rows, cols, panes, closed_panes, layout_key, theme_name
+        )
+
+
+def _rebuild_panel_tmux_session(
+    panel_name: str,
+    rows: int,
+    cols: int,
+    panes: dict[int, str | None],
+    closed_panes: set[int] | None,
+    layout_key: str | None,
+    theme_name: str | None,
+) -> str:
     from ...commands.tui.panels import resolve_panel_layout
 
     session_name = make_panel_session_name(panel_name)
@@ -648,7 +699,7 @@ def rebuild_panel_tmux_session(
         if session and _session_exists(session):
             _protect_session(session)
 
-    kill_tmux_session(build_session_name)
+    reap_stale_panel_helpers()
 
     old_panel_exists = _session_exists(session_name)
     orphan_session_name = (
@@ -697,13 +748,15 @@ def rebuild_panel_tmux_session(
                     pane_session,
                 )
                 continue
-            _respawn_pane(
+            respawn_pane(
                 pane_id,
-                _panel_pane_command(
-                    panel_name,
-                    pane_index,
-                    pane_session,
-                    closed=pane_index in closed_panes,
+                _tmux_child_environment_command(
+                    _panel_pane_command(
+                        panel_name,
+                        pane_index,
+                        pane_session,
+                        closed=pane_index in closed_panes,
+                    )
                 ),
             )
 

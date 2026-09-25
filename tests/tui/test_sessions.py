@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from textual import events
 from textual.widgets import DataTable, Input, Static, TabbedContent, TextArea
 
 from gitdirector.commands.tui import GitDirectorConsole, SortMenuScreen
@@ -1186,6 +1187,32 @@ class TestSessionsRefreshOnReturn:
         assert "\033[?1049l" not in written
         app._update_status.assert_not_called()
 
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_the_console_frame_covers_the_way_back(self, fails):
+        """The display held by tmux's exit is covered by the console, then released."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        app._current_frame = MagicMock(return_value="<frame>")
+        app.call_after_refresh = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        app._update_status = MagicMock()
+        stdout = MagicMock()
+        attach = RuntimeError("tmux exploded") if fails else None
+        with patch("gitdirector.integrations.tmux.attach_tmux_session", side_effect=attach):
+            with patch("sys.stdout", stdout), patch.dict("os.environ", {}, clear=True):
+                app._suspend_and_attach("gd-test-session")
+        written = "".join(call.args[0] for call in stdout.write.call_args_list)
+        if fails:
+            assert "<frame>" not in written
+            assert written.endswith("\033[?2026l\033[?25h\033[?1049l")
+        else:
+            assert written.endswith("\033[?2026h\033[?1049h\033[?25l<frame>")
+        app.call_after_refresh.assert_called_once_with(app._release_held_frame)
+
     async def test_suspend_keeps_repository_cache_valid(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -1261,6 +1288,186 @@ class TestSessionsRefreshOnReturn:
         app.on_input_changed(event)
         assert app._search_query == "test"
         app._apply_filter_and_sort.assert_called_once()
+
+
+class TestNoReopenAfterReturn:
+    """Input that arrives while a session opens must not open it again on return."""
+
+    @staticmethod
+    def _mouse(event_cls, table: DataTable):
+        x, y = table.region.offset + (4, 1)
+        return event_cls(
+            widget=None,
+            x=x,
+            y=y,
+            delta_x=0,
+            delta_y=0,
+            button=1,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            screen_x=x,
+            screen_y=y,
+        )
+
+    async def _open_with_input_during_build(self, stale_input) -> MagicMock:
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            table.focus()
+            await pilot.pause()
+
+            pending = list(stale_input(table))
+
+            def prepare(_session_name):
+                # The driver keeps reading the terminal while the deck is built.
+                while pending:
+                    app.post_message(pending.pop(0))
+                return None
+
+            with (
+                patch("gitdirector.integrations.tmux.prepare_attach", side_effect=prepare),
+                patch("gitdirector.integrations.tmux.attach_tmux_session") as attach,
+                patch("sys.stdout"),
+                patch("termios.tcflush"),
+            ):
+                await pilot.press("enter")
+                for _ in range(5):
+                    await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+        return attach
+
+    @patch_sessions()
+    async def test_second_click_of_a_double_click(self, _mock_list):
+        attach = await self._open_with_input_during_build(
+            lambda table: [
+                self._mouse(events.MouseDown, table),
+                self._mouse(events.MouseUp, table),
+            ]
+        )
+        assert attach.call_count == 1
+
+    @patch_sessions()
+    async def test_repeated_enter(self, _mock_list):
+        attach = await self._open_with_input_during_build(
+            lambda _table: [events.Key("enter", "\r")]
+        )
+        assert attach.call_count == 1
+
+    @patch_sessions()
+    async def test_press_released_inside_the_session(self, _mock_list):
+        """Its release went to tmux; the next motion must not complete a click."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#sessions-table", DataTable)
+            app._mouse_down_widget = table
+            with (
+                patch("gitdirector.integrations.tmux.attach_tmux_session") as attach,
+                patch("sys.stdout"),
+                patch("termios.tcflush"),
+            ):
+                app._suspend_and_attach("gd/alpha/shell/1")
+                attach.reset_mock()
+                await pilot.pause()
+                # What Textual synthesizes on the first motion after return.
+                app.post_message(self._mouse(events.MouseUp, table))
+                for _ in range(3):
+                    await pilot.pause()
+            attach.assert_not_called()
+
+    @patch_sessions()
+    async def test_input_after_return_still_opens(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.query_one("#sessions-table", DataTable).focus()
+            await pilot.pause()
+            with (
+                patch("gitdirector.integrations.tmux.attach_tmux_session") as attach,
+                patch("sys.stdout"),
+                patch("termios.tcflush"),
+            ):
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+            assert attach.call_count == 2
+
+
+class TestMouseAfterReturn:
+    """The mouse must work on the console once a session is left."""
+
+    def test_resume_leaves_the_terminal_replies_to_textual(self):
+        # Textual has restarted input and queried the terminal by the time
+        # the resume hook runs; the in-band resize report that tells it mouse
+        # coordinates are in pixels may already be waiting.
+        import os
+        import tty
+
+        report = b"\x1b[48;40;150;640;1200t"
+        master, slave = os.openpty()
+        try:
+            tty.setraw(slave)
+            os.write(master, report)
+            app = GitDirectorConsole()
+            app._resume_target_tab = "sessions"
+            app.call_after_refresh = MagicMock()
+            with patch("sys.stdin", MagicMock(fileno=MagicMock(return_value=slave))):
+                app._handle_app_resume(app)
+            os.set_blocking(slave, False)
+            assert os.read(slave, 64) == report
+            app.call_after_refresh.assert_called_once()
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    @patch_sessions()
+    async def test_capture_left_by_a_press_released_inside_the_session(self, _mock_list):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.capture_mouse(app.query_one("#sessions-table", DataTable))
+            with (
+                patch("gitdirector.integrations.tmux.attach_tmux_session"),
+                patch("sys.stdout"),
+                patch("termios.tcflush"),
+            ):
+                app._suspend_and_attach("gd/alpha/shell/1")
+            app._handle_app_resume(app)
+            for _ in range(3):
+                await pilot.pause()
+            assert app.mouse_captured is None
+
+            await pilot.click("#--content-tab-repos")
+            await pilot.pause()
+            assert app._active_tab == "repos"
 
 
 class TestRemoveSessionUpdatesTable:
@@ -1652,9 +1859,9 @@ class TestRepoGroups:
             ("gd/gamma/shell/1", "gamma"),
         )
         assert list(guides.values()) == [
-            # The row above opens the bracket on its spacer line.
-            RowGuide(spacer="╭"),
-            RowGuide("│", "│"),
+            # The group's first row opens the bracket on a line of its own.
+            RowGuide(),
+            RowGuide("│", "│", lead="╭"),
             RowGuide("│", "│"),
             RowGuide("│", "│", "╰"),
             RowGuide(),
@@ -1675,8 +1882,19 @@ class TestRepoGroups:
         last = self._lines(RowGuide("│", "│", "╰"), position="last")
         assert "alpha" not in last[0][:30]
         assert last[-1].startswith(" ╰") and last[-2].startswith(" │")
-        above = self._lines(RowGuide(spacer="╭"))
-        assert above[-1].startswith(" ╭") and above[-2].strip() == ""
+        opening = self._lines(RowGuide("│", "│", lead="╭"), position="first")
+        assert opening[0].startswith(" ╭") and opening[0][2:].strip() == ""
+        assert opening[1].startswith(" │ alpha")
+        assert self._lines()[-1].strip() == ""
+
+    def test_the_opening_line_is_part_of_the_group(self):
+        guides = self._guides(
+            ("gd/alpha/shell/1", "alpha"),
+            ("gd/beta/shell/1", "beta"),
+            ("gd/beta/shell/2", "beta"),
+        )
+        # The row above a group ends on its usual single blank line.
+        assert len(self._lines(guides["gd/alpha/shell/1"])) == len(self._lines())
 
     def test_a_lone_session_has_no_bracket(self):
         only = self._lines()

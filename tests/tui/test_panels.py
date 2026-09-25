@@ -12,7 +12,6 @@ from textual.widgets import DataTable, Static
 from textual.widgets._footer import FooterKey
 
 from gitdirector.commands.tui import (
-    _PANELS_SORT_COLUMN_NAMES,
     ConfirmScreen,
     CreatePanelScreen,
     GitDirectorConsole,
@@ -611,7 +610,8 @@ class TestGitDirectorConsolePanels:
                     layout_key="duo_bottom_right_3x3",
                 )
             )
-            == 9
+            # Eight panes need eight lines in the sessions column.
+            == 10
         )
         assert (
             _panel_row_height(
@@ -808,9 +808,9 @@ class TestGitDirectorConsolePanels:
         screen = app.push_screen.call_args.args[0]
         assert isinstance(screen, CreatePanelScreen)
         assert screen._editing is True
-        assert screen._selected_layout_key == "wide_bottom"
-        assert screen._pane_assignments[1] == "gd/my-repo/shell/1"
-        assert screen._pane_assignments[3] == "gd/my-repo/copilot/1"
+        assert screen._layout_key == "wide_bottom"
+        assert screen._assignments[1] == "gd/my-repo/shell/1"
+        assert screen._assignments[3] == "gd/my-repo/copilot/1"
 
     def test_handle_reconfigure_panel_updates_store_and_opens_panel(self):
         app = GitDirectorConsole()
@@ -882,102 +882,48 @@ class TestGitDirectorConsolePanels:
             ]
         ),
     )
-    async def test_load_panels_renders_consistent_spacing_on_each_row(self, _mock_list):
+    async def test_load_panels_rows_show_map_title_sessions_and_status(self, _mock_list):
+        from gitdirector.commands.tui.panels import render_panel_layout_text
+
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
-        first_panel = Panel(
+        main = Panel(
             name="Main",
             rows=2,
             cols=2,
             panes={1: "gd/alpha/shell/1", 2: None, 3: None, 4: "gd/beta/copilot/1"},
         )
-        second_panel = Panel(
-            name="Ops",
-            rows=1,
-            cols=3,
-            panes={1: None, 2: "gd/ops/shell/1", 3: None},
-        )
-        third_panel = Panel(
-            name="Studio",
-            rows=3,
-            cols=3,
-            panes={
-                1: "gd/alpha/shell/1",
-                2: None,
-                3: "gd/beta/copilot/1",
-                4: None,
-                5: "gd/gamma/shell/1",
-                6: None,
-            },
-            layout_key="quad_top_left_3x3",
-        )
         app._panel_store = MagicMock()
-        app._panel_store.panels = [first_panel, second_panel, third_panel]
+        app._panel_store.panels = [main]
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
+            app._sessions_entries = _live_entries(["gd/alpha/shell/1", "gd/beta/copilot/1"])
             app._load_panels()
             table = app.query_one("#panels-table", DataTable)
+            keys = app._panels_col_keys
 
-            assert len(table.columns) == 6
-            assert table.row_count == 3
-            assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
-                [
-                    "",
-                    "┌─┬─┐",
-                    "│■│□│",
-                    "├─┼─┤",
-                    "│□│■│",
-                    "└─┴─┘",
-                ]
-            )
-            assert table.get_cell("Main", app._panels_col_keys[1]) == "\nMain"
-            assert table.get_cell("Main", app._panels_col_keys[2]) == "\ngd/panel/main"
-            assert table.get_cell("Main", app._panels_col_keys[3]) == "\n2×2"
-            assert table.get_cell("Main", app._panels_col_keys[4]) == "\n2/4"
-            assert table.get_cell(
-                "Main", app._panels_col_keys[5]
-            ) == "\n" + app._palette.panel_status_label("active")
+            assert [str(column.label) for column in table.columns.values()] == [
+                "Map",
+                "Panel",
+                "Sessions",
+                "Status",
+            ]
+            numbered = render_panel_layout_text(main.layout, cell_width=3).plain
+            assert table.get_cell("Main", keys[0]).plain == "\n" + numbered
+            assert table.get_cell("Main", keys[1]).plain == "\nMain\n2×2\ngd/panel/main"
+            assert table.get_cell("Main", keys[2]).plain.splitlines() == [
+                "",
+                "1 alpha  shell/1",
+                "2 empty",
+                "3 empty",
+                "4 beta   copilot/1",
+            ]
+            assert table.get_cell("Main", keys[3]).plain == "\n● 2/4 live"
             assert table.get_row_height("Main") == 7
-            assert table.get_cell("Ops", app._panels_col_keys[0]) == "\n".join(
-                [
-                    "",
-                    "┌─┬─┬─┐",
-                    "│□│■│□│",
-                    "└─┴─┴─┘",
-                ]
-            )
-            assert table.get_cell("Ops", app._panels_col_keys[1]) == "\nOps"
-            assert table.get_cell("Ops", app._panels_col_keys[2]) == "\ngd/panel/ops"
-            assert table.get_cell("Ops", app._panels_col_keys[3]) == "\n1×3"
-            assert table.get_cell("Ops", app._panels_col_keys[4]) == "\n1/3"
-            assert table.get_cell(
-                "Ops", app._panels_col_keys[5]
-            ) == "\n" + app._palette.panel_status_label("active")
-            assert table.get_row_height("Ops") == 5
-            assert table.get_cell("Studio", app._panels_col_keys[0]) == "\n".join(
-                [
-                    "",
-                    "┌───┬─┐",
-                    "│   │□│",
-                    "│ ■ ├─┤",
-                    "│   │■│",
-                    "├─┬─┼─┤",
-                    "│□│■│□│",
-                    "└─┴─┴─┘",
-                ]
-            )
-            assert table.get_cell("Studio", app._panels_col_keys[1]) == "\nStudio"
-            assert table.get_cell("Studio", app._panels_col_keys[2]) == "\ngd/panel/studio"
-            assert table.get_cell("Studio", app._panels_col_keys[3]) == "\n3×3 Top-left quad"
-            assert table.get_cell("Studio", app._panels_col_keys[4]) == "\n3/6"
-            assert table.get_cell(
-                "Studio", app._panels_col_keys[5]
-            ) == "\n" + app._palette.panel_status_label("active")
-            assert table.get_row_height("Studio") == 9
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_live_entries([]))
-    async def test_load_panels_counts_only_live_sessions_in_panes_column(self, _mock_list):
+    async def test_load_panels_counts_only_live_sessions(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
         panel = Panel(
@@ -994,16 +940,13 @@ class TestGitDirectorConsolePanels:
             app._load_panels()
             table = app.query_one("#panels-table", DataTable)
 
-            assert table.get_cell("Main", app._panels_col_keys[4]) == "\n0/3"
-            assert table.get_cell(
-                "Main", app._panels_col_keys[5]
-            ) == "\n" + app._palette.panel_status_label("empty")
+            assert table.get_cell("Main", app._panels_col_keys[3]).plain == "\n○ nothing live"
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
         return_value=_live_entries(["gd/alpha/shell/1"]),
     )
-    async def test_load_panels_renders_stale_sessions_as_open_squares(self, _mock_list):
+    async def test_load_panels_marks_closed_sessions(self, _mock_list):
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
         panel = Panel(
@@ -1017,21 +960,15 @@ class TestGitDirectorConsolePanels:
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
+            app._sessions_entries = _live_entries(["gd/alpha/shell/1"])
             app._load_panels()
             table = app.query_one("#panels-table", DataTable)
 
-            assert table.get_cell("Main", app._panels_col_keys[0]) == "\n".join(
-                [
-                    "",
-                    "┌─┬─┬─┐",
-                    "│■│□│□│",
-                    "└─┴─┴─┘",
-                ]
-            )
-            assert table.get_cell("Main", app._panels_col_keys[4]) == "\n1/3"
-            assert table.get_cell(
-                "Main", app._panels_col_keys[5]
-            ) == "\n" + app._palette.panel_status_label("active")
+            lines = table.get_cell("Main", app._panels_col_keys[2]).plain.splitlines()
+            assert lines[1] == "1 alpha  shell/1"
+            assert lines[2].startswith("2 stale  shell/1") and lines[2].endswith("closed")
+            assert lines[3] == "3 empty"
+            assert table.get_cell("Main", app._panels_col_keys[3]).plain == "\n● 1/3 live"
 
     @patch(
         "gitdirector.integrations.tmux.list_all_gd_sessions",
@@ -1080,18 +1017,6 @@ class TestGitDirectorConsolePanels:
             assert str(selected_before.value) == "Ops"
             assert str(selected_after.value) == "Ops"
             assert table.cursor_coordinate.row == 1
-
-    async def test_panels_table_uses_panel_tmux_column_label(self):
-        app = GitDirectorConsole()
-        app.manager = _mock_manager([])
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause()
-
-            table = app.query_one("#panels-table", DataTable)
-
-            assert str(table.columns[app._panels_col_keys[2]].label) == "TMUX"
-            assert _PANELS_SORT_COLUMN_NAMES[1] == "TMUX"
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     async def test_on_mount_syncs_tmux_theme_config(self, mock_sync):

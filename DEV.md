@@ -78,8 +78,9 @@ a view of the shown session, exactly like a panel slot. Showing another
 session creates a new view and runs `switch-client -c <main pane tty>`; the
 old view loses its client and tmux destroys it. The deck's session options
 record the panes and the shown session (`@gd_deck_main`, `@gd_deck_sidebar`,
-`@gd_deck_target`), and its status line shows the shown session's badge and,
-on clients at least 110 columns wide, the deck's keys with the live `#{prefix}`.
+`@gd_deck_target`). Its status line has no badge or label: the deck's keys sit
+on the left, drawn with the live `#{prefix}` (in full from 90 columns, a shorter
+form from 64, none below), and the clock on the right.
 On tmux 3.6+ the divider between sidebar and session is drawn as spaces on the
 terminal background, so it disappears; older tmux keeps a heavy line.
 
@@ -97,13 +98,20 @@ the console's being paused while it is attached.
 `if-shell -F '#{m:gd/deck/*,...}' <deck command> <original>`, so outside a
 deck they do whatever they did before; the original is kept in
 `@gd_prefix_original_<key>` so wrapping is
-idempotent (panel bindings rewrap after rebinding `b`); `prefix s`, which an
-earlier version wrapped, gets its original back. `prefix Tab` toggles
+idempotent (panel bindings rewrap after rebinding `b`). `prefix Tab` toggles
 focus, or splits a new sidebar in from `@gd_deck_respawn_sidebar` when it
 was closed; `prefix b` sends `b` to the sidebar, which flips the global
 `@gd_sidebar_collapsed` and resizes itself. The window's `window-resized`
 hook applies the width format (32 columns, a third of narrow windows, 5 when
 collapsed), and the sidebar renders as a rail of status dots under 14.
+
+The mouse wheel in copy mode (`WheelUpPane`/`WheelDownPane` in `copy-mode` and
+`copy-mode-vi`) is wrapped the same way, on `#{m:gd/*,#{session_name}}`: one
+line per notch in GitDirector sessions instead of tmux's five, the original
+kept in `@gd_original_<table>_<key>`. list-keys prints `\;` between commands,
+which a command string reads as an argument, so a kept original is turned
+back into ` ; ` before it is rebound. The console and the sidebar scroll one
+row per notch too (`scroll_sensitivity_y`).
 
 Opening is one frame change, from the console to the finished deck. The
 console builds the deck before it suspends (`prepare_attach`), at the
@@ -113,11 +121,34 @@ final width. tmux paints the sidebar pane in Textual's `$surface` before the
 app starts, and the app keeps its widgets hidden until the monitor's first
 sample is in, then shows them all at once.
 
+Coming back is one frame change too. The attach client runs with
+`TERM=<term>-gdscreen`, a copy of the terminal's entry compiled once into
+`~/.gitdirector/terminfo` (`attach_client_env`) without `smcup`/`rmcup`, so
+tmux never switches the terminal back to the shell's screen. Its `rmkx`, which
+tmux sends only on the way out and just before it clears the screen and prints
+`[detached ...]`, also starts synchronized output (`?2026h`): the deck's last
+frame stays up while the console writes its captured frame over it
+(`_attach_while_suspended`), and the hold ends after the first refresh
+(`_release_held_frame`). To check, record a pty's output across a detach:
+there must be no `?1049l` and nothing drawn between the `?2026h` and the frame.
+
 A deck gets `destroy-unattached` only once its client is on it, so it dies
 when the client detaches; `reap_stale_decks` removes any a crash left
 unattached. From inside tmux the client switches in, and closing the deck
 switches it back to `@gd_deck_return`: `detach-on-destroy previous` means
 the previous session alphabetically, not the one the client came from.
+
+**Respawning panes.** Every `respawn-pane` goes through `core.respawn_pane`.
+When a respawn cannot fork (no free pty, process limit), tmux before 3.8
+leaves the pane with `#{pane_pid}` `-1` and no input context, and the next
+`respawn-pane` on it segfaults the server, taking every session with it
+(`input_free < spawn_pane < cmd_respawn_pane_exec` in
+`~/Library/Logs/DiagnosticReports/tmux-*.ips`). So a failed respawn is never
+retried: its pane is killed, and a pane already at pid `-1` is killed instead
+of respawned. A killed deck main pane is recreated by the sidebar; a panel
+rebuild fails and keeps the old panel. Splits may retry a fork failure, since
+tmux discards a pane it could not spawn. A panel rebuild also kills any
+`gd/build/*-<pid>` or `*_orphaned-<pid>-*` session whose process is gone.
 
 **Launch directory.** A tmux server keeps the working directory of the
 client that forked it, and `tmux list-clients` leads from any session to the
@@ -224,11 +255,13 @@ all sessions, plus a `capture-pane` only for panes whose tmux activity stamp
 moved):
 
 ```text
-command      foreground program under the pane (process tree, shallowest
-             non-shell process in the tty's foreground process group)
+at prompt    the tty's foreground process group is led by an interactive
+             shell (a shell name followed only by options: no -c string,
+             no script), i.e. no job the user started holds the terminal
 changed      visible pane content differs from the last capture, ignoring
              a one-cell flip that restores the previous frame (a program
-             drawing its own blinking cursor)
+             drawing its own blinking cursor) and the redraw within 1.5 s
+             of the pane being resized (a client attaching at another size)
 cpu          the process tree burned >= 0.5 s of CPU within the last 3 s
              (a lone housekeeping burst from an idle agent does not count)
 bell         tmux's window bell flag rose (tmux only raises it while no
@@ -237,7 +270,7 @@ bell         tmux's window bell flag rose (tmux only raises it while no
 
 if pane is dead:                                        idle
 elif bell:                                              waiting
-elif command is a shell:   running if changed < 2 s ago, else idle
+elif at prompt:                                         idle
 elif changed < 4 s ago or cpu < 4 s ago:                running
 else:                                                   idle
 ```
@@ -245,9 +278,19 @@ else:                                                   idle
 - `waiting` needs a sign that a human is needed, and the bell is the only one
   every terminal program can give; a program that is merely quiet (an agent
   at its prompt, an editor, a dev server) is `idle`.
+- A shell at its prompt is idle whatever happens on screen: drawing the
+  prompt, typing, redraws, and the output of a command that already
+  finished are not work. With job control every command the user runs gets
+  a process group of its own and the terminal; what runs in the shell's own
+  group (profile scripts, prompt helpers such as oh-my-posh or a completion
+  script, command substitutions) is the shell preparing its prompt, and a
+  background job (gitstatusd, `cmd &`) never holds the terminal. A shell
+  script or an agent started through `sh -c` is not interactive, so it is
+  watched like any other program.
 - The first sample seeds the "last change" time from tmux's own
-  `window_activity` stamp, so a long-quiet session classifies correctly
-  immediately instead of after a settling period.
+  `window_activity` stamp, so a long-quiet program classifies correctly
+  immediately instead of after a settling period. It never makes a prompt
+  running: a new session's stamp is just the moment its prompt appeared.
 
 ## Token counting
 

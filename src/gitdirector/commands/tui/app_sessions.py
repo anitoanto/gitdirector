@@ -187,6 +187,8 @@ class RowGuide:
     side: str = " "
     #: An extra line after the row, holding this bracket mark (None: no line).
     spacer: str | None = None
+    #: An extra line before the row, holding this bracket mark (None: no line).
+    lead: str | None = None
 
 
 def _row_guides(entries: list[dict[str, str]], positions: dict[str, str]) -> dict[str, RowGuide]:
@@ -194,24 +196,25 @@ def _row_guides(entries: list[dict[str, str]], positions: dict[str, str]) -> dic
 
     A group of two or more stands apart: it opens with ``╭`` on the line
     above its repo name, runs ``│`` down every line of its sessions, and
-    closes with ``╰`` on a line after the last one. The opening line ends
-    the row above, so a highlighted row never carries a blank line on top.
+    closes with ``╰`` on a line after the last one. Both lines belong to the
+    group's rows. After another group's ``╰`` or at the top of the table the
+    bracket opens on the repo name itself.
     """
     names = [entry["session_name"] for entry in entries]
     guides: dict[str, RowGuide] = {}
-    opened = False
     for index, name in enumerate(names):
         position = positions.get(name, "only")
-        following = positions.get(names[index + 1]) if index + 1 < len(names) else None
+        previous = positions.get(names[index - 1]) if index else None
         if position == "only":
-            spacer = _BRACKET_OPEN if following == "first" else None
-            guides[name] = RowGuide(spacer=spacer)
+            guides[name] = RowGuide()
         elif position == "last":
             guides[name] = RowGuide(_BRACKET_SIDE, _BRACKET_SIDE, _BRACKET_CLOSE)
+        elif position == "middle":
+            guides[name] = RowGuide(_BRACKET_SIDE, _BRACKET_SIDE)
+        elif previous == "only":
+            guides[name] = RowGuide(_BRACKET_SIDE, _BRACKET_SIDE, lead=_BRACKET_OPEN)
         else:
-            top = _BRACKET_SIDE if position == "middle" or opened else _BRACKET_OPEN
-            guides[name] = RowGuide(top, _BRACKET_SIDE)
-        opened = guides[name].spacer == _BRACKET_OPEN
+            guides[name] = RowGuide(_BRACKET_OPEN, _BRACKET_SIDE)
     return guides
 
 
@@ -251,6 +254,11 @@ def _render_session_row(
         text.append(f"{mark} ", style=palette.muted)
         text.append(" " * (offset - _GUIDE_WIDTH))
 
+    if guide.lead is not None:
+        text.append(pad)
+        text.append(f"{guide.lead} ", style=palette.muted)
+        text.append(" " * (layout.cell_width - _SESSIONS_CELL_PADDING - _GUIDE_WIDTH))
+        text.append("\n")
     text.append(pad)
     text.append(f"{guide.top} ", style=palette.muted)
     repo = entry.get("repo", "") if position in ("only", "first") else ""
@@ -283,8 +291,8 @@ def _render_session_row(
     lower_line(layout.cell_width - _SESSIONS_CELL_PADDING)
     if guide.spacer is not None:
         lower_line(layout.cell_width - _SESSIONS_CELL_PADDING, guide.spacer)
-    blank_lines = 2 if guide.spacer is not None else 1
-    return text, len(session_lines) + len(description_lines) + blank_lines
+    extra_lines = (guide.spacer is not None) + (guide.lead is not None)
+    return text, len(session_lines) + len(description_lines) + 1 + extra_lines
 
 
 _ROW_STATE_KEYS = frozenset({"status"})
@@ -585,14 +593,14 @@ class ConsoleSessionsMixin:
         """The monitor's verdict for a session, or a neutral default.
 
         A session the monitor has not sampled yet (it was just created) is
-        shown as running until the next sample, unless a bell already
-        arrived for it.
+        shown as idle until the next sample, unless a bell already arrived
+        for it: nothing has been seen doing work.
         """
         session_name = entry["session_name"]
         status = self._session_statuses.get(session_name)
         if status is not None:
             return status
-        return "waiting" if self._monitor.get_bell_state(session_name) else "running"
+        return "waiting" if self._monitor.get_bell_state(session_name) else "idle"
 
     def _update_session_status_cells(self) -> None:
         try:

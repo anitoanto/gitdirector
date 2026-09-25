@@ -23,10 +23,7 @@ from gitdirector.integrations.tmux.core import (
     _make_session_name,
     _parse_gd_session_name,
     _repo_session_name_segment,
-    _session_badge_text,
     _session_exists,
-    _session_slug,
-    session_entry,
 )
 
 _TMUX_ENV_ARGS = [
@@ -257,10 +254,13 @@ class TestListRepoSessions:
     def test_returns_matching_sessions(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="gd/my-repo/shell/1\ngd/my-repo/claude/1\ngd/other/shell/1\n",
+            stdout=(
+                "gd/my-repo_abcd2/shell/1\ngd/my-repo_abcd2/claude/1\n"
+                "gd/other_abcd2/shell/1\ngd/my-repo/shell/2\n"
+            ),
         )
         result = list_repo_sessions("my-repo")
-        assert result == ["gd/my-repo/claude/1", "gd/my-repo/shell/1"]
+        assert result == ["gd/my-repo_abcd2/claude/1", "gd/my-repo_abcd2/shell/1"]
 
     @patch("subprocess.run")
     def test_no_sessions_running(self, mock_run):
@@ -276,12 +276,15 @@ class TestListRepoSessions:
     def test_skips_temp_panel_wrappers_for_matching_repo(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=("gd/my-repo/shell/1\ngd/temp/panel/my-repo/shell/1\ngd/my-repo/claude/1\n"),
+            stdout=(
+                "gd/my-repo_abcd2/shell/1\ngd/temp/panel/my-repo_abcd2/shell/1\n"
+                "gd/my-repo_abcd2/claude/1\n"
+            ),
         )
 
         result = list_repo_sessions("my-repo")
 
-        assert result == ["gd/my-repo/claude/1", "gd/my-repo/shell/1"]
+        assert result == ["gd/my-repo_abcd2/claude/1", "gd/my-repo_abcd2/shell/1"]
 
 
 class TestListAllGdSessions:
@@ -348,21 +351,6 @@ class TestSessionNamespaceHelpers:
 
     def test_parse_gd_session_name_rejects_zero_sequence(self):
         assert _parse_gd_session_name("gd/repo/shell/0") is None
-
-    def test_legacy_skip_permissions_sessions_read_as_claude_bypass(self):
-        legacy = "gd/repo/claude-dangerously-skip-permissions/2"
-        assert _parse_gd_session_name(legacy) == ("repo", "claude-bypass", "2")
-        entry = session_entry(legacy, "repo", "")
-        assert entry["purpose"] == "claude-bypass"
-        assert entry["session_name"] == legacy
-        assert _session_slug(legacy) == "repo/claude-bypass/2"
-        assert _session_badge_text(legacy) == "CLAUDE-BYPASS"
-
-    def test_new_bypass_sessions_number_after_legacy_ones(self):
-        name = _make_session_name(
-            "repo", "claude-bypass", sessions=["gd/repo/claude-dangerously-skip-permissions/1"]
-        )
-        assert name == "gd/repo/claude-bypass/2"
 
     def test_persistent_panel_match_requires_exact_panel_shape(self):
         assert _is_persistent_panel_session("gd/panel/main") is True
@@ -445,6 +433,22 @@ class TestCreateTmuxSession:
         assert "-r" in scrub
 
         assert ["tmux", "respawn-pane", "-k", "-t", f"={session_name}:"] in argv_calls
+
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("subprocess.run")
+    def test_agent_sessions_leave_the_shell_for_the_launch_to_replace(
+        self, mock_run, _mock_list, _mock_sync, tmp_path
+    ):
+        path = tmp_path / "agent-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
+
+        create_tmux_session("agent-repo", path, shell=False)
+
+        argv_calls = [list(call.args[0]) for call in mock_run.call_args_list]
+        assert any("set-environment" in argv for argv in argv_calls)
+        assert not any("respawn-pane" in argv for argv in argv_calls)
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])

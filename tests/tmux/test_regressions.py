@@ -15,14 +15,15 @@ from gitdirector.integrations.tmux import (
     launch_command_in_tmux_session,
 )
 from gitdirector.integrations.tmux.core import (
+    TmuxError,
     _current_window_target,
     _session_exists,
     _tmux_theme_config,
+    respawn_pane,
 )
 from gitdirector.integrations.tmux.monitor import _capture_pane_text
 from gitdirector.integrations.tmux.panels import (
     _panel_pane_command,
-    _respawn_pane,
     _tmux_output,
 )
 
@@ -231,32 +232,110 @@ class TestExactMatchPanelPaneCommand:
 
 
 class TestRespawnPane:
-    @patch("gitdirector.integrations.tmux.panels.time.sleep")
-    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
-    def test_retries_transient_fork_failure(self, mock_run, mock_sleep):
+    """A failed respawn is never retried: tmux < 3.8 segfaults on the second one."""
+
+    @staticmethod
+    def _tmux_calls(mock_run):
+        return [call.args[0][1:] for call in mock_run.call_args_list]
+
+    @patch("gitdirector.integrations.tmux.core.subprocess.run")
+    def test_respawns_a_healthy_pane_once(self, mock_run):
         mock_run.side_effect = [
-            MagicMock(
-                returncode=1, stderr="respawn pane failed: fork failed: Device not configured"
-            ),
-            MagicMock(returncode=0, stderr=""),
+            MagicMock(returncode=0, stdout="4242\n", stderr=""),
+            MagicMock(returncode=0, stdout="", stderr=""),
         ]
 
-        _respawn_pane("%1", "cat")
+        respawn_pane("%1", "cat")
 
-        assert mock_run.call_count == 2
-        mock_sleep.assert_called_once_with(0.05)
+        assert self._tmux_calls(mock_run) == [
+            ["display-message", "-p", "-t", "%1", "#{pane_pid}"],
+            ["respawn-pane", "-k", "-t", "%1", "cat"],
+        ]
 
-    @patch("gitdirector.integrations.tmux.panels.time.sleep")
-    @patch("gitdirector.integrations.tmux.panels.subprocess.run")
-    def test_does_not_retry_non_fork_failure(self, mock_run, mock_sleep):
-        mock_run.return_value = MagicMock(returncode=1, stderr="no such pane")
+    @patch("gitdirector.integrations.tmux.core.subprocess.run")
+    def test_fork_failure_kills_the_pane_instead_of_retrying(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="4242\n", stderr=""),
+            MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="respawn pane failed: fork failed: Device not configured",
+            ),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ]
 
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            _respawn_pane("%1", "cat")
+        with pytest.raises(TmuxError, match="fork failed"):
+            respawn_pane("%1", "cat")
 
-        assert exc_info.value.returncode == 1
-        assert mock_run.call_count == 1
-        mock_sleep.assert_not_called()
+        calls = self._tmux_calls(mock_run)
+        assert [call[0] for call in calls] == ["display-message", "respawn-pane", "kill-pane"]
+        assert calls[-1] == ["kill-pane", "-t", "%1"]
+
+    @patch("gitdirector.integrations.tmux.core.subprocess.run")
+    def test_pane_left_broken_is_killed_not_respawned(self, mock_run):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="-1\n", stderr=""),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ]
+
+        with pytest.raises(TmuxError, match="broken"):
+            respawn_pane("%1", "cat")
+
+        assert self._tmux_calls(mock_run) == [
+            ["display-message", "-p", "-t", "%1", "#{pane_pid}"],
+            ["kill-pane", "-t", "%1"],
+        ]
+
+    @patch("gitdirector.integrations.tmux.core.subprocess.run")
+    def test_no_command_reuses_the_panes_own(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="4242\n", stderr="")
+
+        respawn_pane("=gd/repo/shell/1:")
+
+        assert self._tmux_calls(mock_run)[-1] == ["respawn-pane", "-k", "-t", "=gd/repo/shell/1:"]
+
+    def test_nothing_else_respawns_panes(self):
+        import gitdirector.integrations.tmux.core as tmux_core
+        import gitdirector.integrations.tmux.deck as tmux_deck
+        import gitdirector.integrations.tmux.monitor as tmux_monitor
+
+        for module in (tmux_panels, tmux_deck, tmux_monitor):
+            assert '"respawn-pane"' not in inspect.getsource(module), module.__name__
+        assert inspect.getsource(tmux_core).count('"respawn-pane"') == 1
+
+
+class TestReapStalePanelHelpers:
+    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session", return_value=True)
+    @patch("gitdirector.integrations.tmux.panels._process_alive")
+    @patch("gitdirector.integrations.tmux.panels._list_sessions")
+    def test_kills_only_helpers_whose_process_is_gone(self, mock_list, mock_alive, mock_kill):
+        mock_list.return_value = [
+            "gd/build/0123abcd4567-111-a1b2c3",
+            "gd/build/0123abcd4567-222-a1b2c3",
+            "gd/panel/main_orphaned-111-1700000000000",
+            "gd/panel/main",
+            "gd/repo_abcd2/shell/1",
+            "gd/view/main-1-111",
+        ]
+        mock_alive.side_effect = lambda pid: pid == 222
+
+        reaped = tmux_panels.reap_stale_panel_helpers()
+
+        assert reaped == [
+            "gd/build/0123abcd4567-111-a1b2c3",
+            "gd/panel/main_orphaned-111-1700000000000",
+        ]
+        assert [call.args[0] for call in mock_kill.call_args_list] == reaped
+
+    @patch("gitdirector.integrations.tmux.panels.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.panels._list_sessions")
+    def test_never_reaps_its_own_process(self, mock_list, mock_kill):
+        import os
+
+        mock_list.return_value = [f"gd/build/0123abcd4567-{os.getpid()}-a1b2c3"]
+
+        assert tmux_panels.reap_stale_panel_helpers() == []
+        mock_kill.assert_not_called()
 
 
 class TestTmuxOutput:
@@ -459,15 +538,13 @@ class TestTmuxServerDeathIsReportedClearly:
 
     @patch("gitdirector.integrations.tmux.panels.time.sleep")
     @patch("gitdirector.integrations.tmux.panels.subprocess.run")
-    def test_respawn_pane_reports_a_dead_server(self, mock_run, _mock_sleep):
-        from gitdirector.integrations.tmux import TmuxError
-
+    def test_a_dead_server_is_reported_as_such(self, mock_run, _mock_sleep):
         mock_run.return_value = MagicMock(
             returncode=1, stdout="", stderr="server exited unexpectedly\n"
         )
 
         with pytest.raises(TmuxError, match="tmux server exited"):
-            _respawn_pane("%1", "cat")
+            _tmux_output("split-window", "cat")
 
     @patch("gitdirector.integrations.tmux.panels.time.sleep")
     @patch("gitdirector.integrations.tmux.panels.subprocess.run")
@@ -488,4 +565,4 @@ class TestTmuxServerDeathIsReportedClearly:
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no such pane")
 
         with pytest.raises(subprocess.CalledProcessError):
-            _respawn_pane("%1", "cat")
+            _tmux_output("select-pane", "-t", "%1")

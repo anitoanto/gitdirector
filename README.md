@@ -66,7 +66,7 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 | Key | Action |
 | --- | --- |
 | `j` / `k`, arrows | Move between rows (`h` / `l` scroll wide tables sideways) |
-| `enter` | Act on the row: action menu (repositories), attach (sessions), open (panels) |
+| `enter` | Act on the row: action menu (repositories), attach (sessions), panel menu (panels) |
 | `/` | Filter the table |
 | `s` | Sort (Repositories and Panels tabs) |
 | `r` | Refresh |
@@ -100,7 +100,13 @@ settings are never touched); everything else is classified from its pane (see
 
 **Panels** are reusable tmux layouts showing several sessions side by side,
 each under its own header with its slot number. `prefix 1`–`9` jumps to a
-slot, and proportions hold as the window resizes.
+slot, and proportions hold as the window resizes. The Panels tab draws each
+panel's map with numbered panes (lit when their session is live) beside what
+each pane holds. `n` builds one in three steps: name it, pick a layout (the
+preview follows the highlight), then fill the panes: `enter` on a pane picks
+its session and moves to the next, `a` fills empty panes with free sessions,
+`x` empties one, and `ctrl+o` or the last row creates and opens it. `enter` on
+a panel opens it, or edits its layout and sessions, renames, or deletes it.
 
 Every session carries its own themed header and status line, so it looks the
 same attached directly, in a panel, or from a plain `tmux attach`. Sessions
@@ -123,8 +129,8 @@ right; the session you leave keeps running.
 | `/` | In the sidebar: search by repo, agent, or session name (Enter keeps the filter, Esc clears it) |
 
 The `«` next to the sidebar's title goes back to the console, like `prefix d`, and `◧`
-collapses or expands it. The keys are listed on the status line beside the clock
-when the window is wide enough.
+collapses or expands it. The keys are listed on the left of the status line, in a
+shorter form on a narrow window.
 
 The usual tmux ways of moving between panes (`prefix ←`/`→`, `prefix o`, a
 click) work too. `prefix Tab` and `prefix b` only mean this inside the sidebar

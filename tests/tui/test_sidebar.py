@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+from textual import events
 from textual.widgets import OptionList, Static
 
 from gitdirector.commands.tui import sidebar as S
@@ -249,6 +250,48 @@ class TestSidebarApp:
             await pilot.press("b")
             await _until(pilot, lambda: not app.screen.has_class("-resizing"), timeout=2.0)
 
+    async def test_the_scrollbar_runs_the_full_height_of_the_list(self, deck_api):
+        raw = [_raw(f"gd/alpha_aaaaa/claude/{n}", "alpha") for n in range(1, 9)]
+        deck_api.read_deck_state.return_value = _state(
+            target=raw[0]["session_name"], live=[r["session_name"] for r in raw]
+        )
+        app = S.SessionSidebar(DECK, "%2")
+        with (
+            patch.object(S, "list_all_gd_sessions", return_value=raw),
+            patch.object(S.TmuxMonitor, "entries", return_value=raw),
+        ):
+            async with app.run_test(size=(32, 14)) as pilot:
+                option_list = app.query_one(OptionList)
+                await _until(pilot, lambda: option_list.option_count == 9)
+                await pilot.pause()
+                assert option_list.show_vertical_scrollbar
+                assert option_list.vertical_scrollbar.region.y == option_list.region.y
+                assert option_list.vertical_scrollbar.region.height == option_list.region.height
+                # The space above the first repository stays, as its first line.
+                assert option_list.get_option_at_index(0).prompt.plain == "\n alpha"
+
+    async def test_one_wheel_notch_scrolls_one_row(self, deck_api):
+        raw = [_raw(f"gd/alpha_aaaaa/claude/{n}", "alpha") for n in range(1, 9)]
+        deck_api.read_deck_state.return_value = _state(
+            target=raw[0]["session_name"], live=[r["session_name"] for r in raw]
+        )
+        app = S.SessionSidebar(DECK, "%2")
+        with (
+            patch.object(S, "list_all_gd_sessions", return_value=raw),
+            patch.object(S.TmuxMonitor, "entries", return_value=raw),
+        ):
+            async with app.run_test(size=(32, 14)) as pilot:
+                option_list = app.query_one(OptionList)
+                await _until(pilot, lambda: option_list.option_count == 9)
+                await pilot.pause()
+                assert option_list.max_scroll_y > 1
+                x, y = option_list.region.offset + (5, 3)
+                option_list.post_message(
+                    events.MouseScrollDown(None, x, y, 0, 0, 0, False, False, False)
+                )
+                await pilot.pause()
+                assert option_list.scroll_y == 1
+
     async def test_narrow_sidebar_is_a_rail(self, deck_api):
         app = S.SessionSidebar(DECK, "%2")
         async with app.run_test(size=(5, 30)) as pilot:
@@ -297,6 +340,29 @@ class TestSidebarApp:
         app = S.SessionSidebar(DECK, "%2")
         async with app.run_test(size=(32, 30)) as pilot:
             await _until(pilot, lambda: not app.is_running)
+
+
+class TestNoHover:
+    async def test_a_hovered_row_looks_like_any_other(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            sessions = app.query_one(OptionList)
+            plain = sessions.get_visual_style("option-list--option")
+            hovered = sessions.get_visual_style("option-list--option", "option-list--option-hover")
+            assert hovered.background == plain.background
+
+    @pytest.mark.parametrize("selector", ["#back", "#toggle"])
+    async def test_hovering_a_bar_button_changes_nothing(self, deck_api, selector):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            button = app.query_one(selector)
+            before = (button.styles.background, button.styles.color)
+            await pilot.hover(selector)
+            await pilot.pause()
+            assert button.mouse_hover
+            assert (button.styles.background, button.styles.color) == before
 
 
 class TestFirstFrame:

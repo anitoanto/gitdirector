@@ -117,6 +117,7 @@ def _run_tmux(
     text: bool = False,
     input: str | None = None,
     timeout: float | None = TMUX_COMMAND_TIMEOUT,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one tmux command. Every tmux invocation goes through here.
 
@@ -136,7 +137,7 @@ def _run_tmux(
     # environment, and that snapshot becomes the baseline for every pane
     # created afterwards. Sanitizing here keeps a gitdirector-started
     # server clean from birth.
-    kwargs["env"] = sanitized_environ()
+    kwargs["env"] = {**sanitized_environ(), **(extra_env or {})}
     # A server this client forks keeps the client's working directory for
     # its whole life, and it is readable from inside every session.
     kwargs["cwd"] = neutral_directory()
@@ -381,6 +382,36 @@ def _scrub_session_environment(session_name: str) -> tuple[str, ...]:
     return names
 
 
+# What ``#{pane_pid}`` reads for a pane whose last respawn could not fork.
+_BROKEN_PANE_PID = "-1"
+
+
+def respawn_pane(target: str, command: str | None = None) -> None:
+    """Replace *target*'s program with ``respawn-pane -k``, at most once.
+
+    A respawn that cannot fork (no free pty, process limit) leaves the pane
+    with no process and, in tmux before 3.8, no input context; the next
+    ``respawn-pane`` on it dereferences that NULL and the server segfaults,
+    taking every session with it. So a failed respawn is never retried and
+    its pane is killed, and a pane already left broken is killed rather
+    than respawned. Either way this raises :class:`TmuxError`.
+    """
+    probe = _run_tmux(["display-message", "-p", "-t", target, "#{pane_pid}"], text=True)
+    if probe.returncode == 0 and probe.stdout.strip() == _BROKEN_PANE_PID:
+        _run_tmux(["kill-pane", "-t", target])
+        raise TmuxError(f"pane {target} was left broken by a failed respawn; killed it")
+    args = ["respawn-pane", "-k", "-t", target, *([command] if command is not None else [])]
+    result = _run_tmux(args, text=True)
+    if isinstance(result.returncode, int) and result.returncode != 0:
+        _run_tmux(["kill-pane", "-t", target])
+        raise TmuxError(
+            "tmux respawn-pane failed",
+            args_list=["tmux", *args],
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
+
+
 def _respawn_session_shell(session_name: str) -> None:
     """Restart the session's first shell so it picks up the scrubbed environment.
 
@@ -392,14 +423,7 @@ def _respawn_session_shell(session_name: str) -> None:
     leak. Nothing has been typed into the pane at this point, so the
     restart is invisible.
     """
-    result = _run_tmux(["respawn-pane", "-k", "-t", _active_pane_target(session_name)])
-    if isinstance(result.returncode, int) and result.returncode != 0:
-        raise TmuxError(
-            "tmux respawn-pane failed while isolating the session environment",
-            args_list=["tmux", "respawn-pane", "-k", "-t", _active_pane_target(session_name)],
-            returncode=result.returncode,
-            stderr=result.stderr,
-        )
+    respawn_pane(_active_pane_target(session_name))
 
 
 def _session_pane_path(session_name: str) -> str | None:
@@ -466,21 +490,19 @@ def _tmux_terminal_capability_config(quoted_session: str) -> list[str]:
 
 
 def list_repo_sessions(repo_name: str | Path) -> list[str]:
-    """List all tmux sessions for a given repository."""
+    """List all tmux sessions for a given repository.
+
+    A path matches its own sessions only; a bare name matches the sessions
+    of every repository with that name.
+    """
     if isinstance(repo_name, Path):
-        clean = _sanitize_repo_name(repo_name.name)
-        prefixes = [f"gd/{_repo_session_name_segment(repo_name)}/", f"gd/{clean}/"]
+        prefix = f"gd/{_repo_session_name_segment(repo_name)}/"
     else:
-        clean = _sanitize_repo_name(repo_name)
-        prefixes = [f"gd/{clean}/", f"gd/{clean}_"]
-    sessions = _list_sessions()
+        prefix = f"gd/{_sanitize_repo_name(repo_name)}_"
     return sorted(
-        [
-            session_name
-            for session_name in sessions
-            if any(session_name.startswith(prefix) for prefix in prefixes)
-            and _parse_gd_session_name(session_name) is not None
-        ]
+        session_name
+        for session_name in _list_sessions()
+        if session_name.startswith(prefix) and _parse_gd_session_name(session_name) is not None
     )
 
 
@@ -549,6 +571,7 @@ def create_tmux_session(
     *,
     description: str | None = None,
     repo_label: str | None = None,
+    shell: bool = True,
 ) -> str:
     """Create a new detached tmux session with a unique name and return it.
 
@@ -561,6 +584,10 @@ def create_tmux_session(
     ``@gitdirector_description`` tmux option so it can be displayed in
     the TUI Sessions tab. A value of ``None`` or ``""`` leaves the option
     unset (the next read returns the default ``"-"`` placeholder).
+
+    Pass ``shell=False`` when the pane's program is replaced right after
+    (:func:`~.monitor.launch_command_in_tmux_session`): the first shell is
+    then left for that respawn to end instead of being respawned twice.
 
     Raises :class:`TmuxError` when *path* is not a directory. tmux itself
     would not: ``new-session -c`` on a missing directory exits 0 and
@@ -612,7 +639,8 @@ def create_tmux_session(
         # respawn the shell that new-session already started with the
         # unscrubbed environment.
         _scrub_session_environment(session_name)
-        _respawn_session_shell(session_name)
+        if shell:
+            _respawn_session_shell(session_name)
 
         pane_path = _session_pane_path(session_name)
         if pane_path is not None and not _same_directory(pane_path, path):
@@ -759,6 +787,92 @@ def prepare_attach(session_name: str) -> str | None:
     return open_deck(session_name)
 
 
+# Suffix of the terminal description a tmux attach client is given; see
+# attach_client_env.
+_SAME_SCREEN_SUFFIX = "-gdscreen"
+_same_screen_env: dict[str, str] | None = None
+
+
+# Synchronized output: the terminal keeps showing its last frame until the
+# console ends it.
+_HOLD_DISPLAY = b"\033[?2026h"
+
+
+def _terminfo_string(value: bytes) -> str:
+    out = []
+    for byte in value:
+        char = chr(byte)
+        if byte == 0x1B:
+            out.append("\\E")
+        elif char in ",:^\\" or not 0x20 < byte < 0x7F:
+            out.append(f"\\{byte:03o}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _terminfo_compiled(directory: Path, name: str) -> bool:
+    first = name[0]
+    return (directory / first / name).exists() or (directory / f"{ord(first):x}" / name).exists()
+
+
+def attach_client_env() -> dict[str, str]:
+    """Environment for a ``tmux attach`` that draws on the screen it is handed.
+
+    tmux switches the terminal to its alternate screen and back around a
+    client (the terminal's ``smcup``/``rmcup``), and the way back shows the
+    shell's own screen for an instant before the console redraws. A copy of
+    the terminal's description without those two strings, compiled once per
+    run into ``~/.gitdirector/terminfo``, lets the console hand its screen to
+    tmux and take it back directly.
+
+    On its way out tmux also clears the screen and prints ``[detached ...]``.
+    ``rmkx``, which tmux sends only then and just before the clear, also
+    starts synchronized output, so the deck's last frame stays up until the
+    console has drawn over it and ends the hold. Everything else is the
+    terminal's own entry (``use=``); when it cannot be built, the attach runs
+    as before.
+    """
+    global _same_screen_env
+    if _same_screen_env is not None:
+        return _same_screen_env
+    _same_screen_env = {}
+    base = os.environ.get("TERM", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", base) or base.endswith(_SAME_SCREEN_SUFFIX):
+        return _same_screen_env
+    name = base + _SAME_SCREEN_SUFFIX
+    directory = Path.home() / ".gitdirector" / "terminfo"
+    source = directory / f"{name}.src"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        leave_keypad = subprocess.run(
+            ["tput", "-T", base, "rmkx"], capture_output=True, timeout=10, check=False
+        ).stdout
+        source.write_text(
+            f"{name}|{base} drawing on the screen it is given (gitdirector),\n"
+            f"\tsmcup@, rmcup@, rmkx={_terminfo_string(leave_keypad + _HOLD_DISPLAY)},\n"
+            f"\tuse={base},\n"
+        )
+        result = subprocess.run(
+            ["tic", "-x", "-o", str(directory), str(source)],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("could not build the attach terminal description", exc_info=True)
+        return _same_screen_env
+    finally:
+        source.unlink(missing_ok=True)
+    if result.returncode != 0 or not _terminfo_compiled(directory, name):
+        logger.debug("tic failed for %s: %s", name, result.stderr)
+        return _same_screen_env
+    dirs = [str(directory), *(d for d in os.environ.get("TERMINFO_DIRS", "").split(":") if d)]
+    # An empty entry keeps ncurses' own default locations in the search.
+    _same_screen_env = {"TERM": name, "TERMINFO_DIRS": ":".join([*dirs, ""])}
+    return _same_screen_env
+
+
 def attach_tmux_session(
     session_name: str, *, skip_config_sync: bool = False, deck: str | None = None
 ) -> bool:
@@ -799,6 +913,7 @@ def attach_tmux_session(
         ["attach-session", "-t", f"={session_name}"],
         capture_output=False,
         timeout=None,
+        extra_env=attach_client_env(),
     )
     # A non-zero exit is not necessarily a failed attach. The client also
     # exits 1 after a perfectly normal interactive session when the server
@@ -865,10 +980,6 @@ def _session_slug(session_name: str | None) -> str | None:
     return session_name
 
 
-# Slugs of sessions launched before Claude Code's modes; drop once none are left.
-_LEGACY_PURPOSES = {"claude-dangerously-skip-permissions": "claude-bypass"}
-
-
 def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | None:
     if not session_name:
         return None
@@ -880,7 +991,7 @@ def _parse_gd_session_name(session_name: str | None) -> tuple[str, str, str] | N
         return None
     if not sequence.isdigit() or int(sequence) <= 0:
         return None
-    return repo, _LEGACY_PURPOSES.get(purpose, purpose), sequence
+    return repo, purpose, sequence
 
 
 def capture_pane(
@@ -1059,7 +1170,7 @@ def _tmux_design_config_path() -> Path:
 def _session_badge_text(session_name: str) -> str:
     parts = session_name.split("/")
     if len(parts) >= 4 and parts[0] == "gd" and parts[1] != "panel":
-        return _LEGACY_PURPOSES.get(parts[2], parts[2]).upper()
+        return parts[2].upper()
     return "SESSION"
 
 
@@ -1101,12 +1212,13 @@ def _tmux_theme_config(
     window_status_format: str = " #I:#W ",
     window_status_current_format: str = " #I:#W ",
     show_status: bool = True,
+    status_left: str | None = None,
 ) -> str:
     theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
     window_target = window_target or f"{session_name}:{_FIRST_WINDOW}"
     quoted_session = shlex.quote(_session_option_target(session_name))
     quoted_window = shlex.quote(f"={window_target}")
-    status_left = (
+    status_left = status_left or (
         f"#[bold fg={theme.badge_active_fg},bg={theme.badge_active_bg}]"
         f" #{{=/{_STATUS_BADGE_MAX}/…:{_STATUS_BADGE_OPTION}}} #[default]"
         f"#[fg={theme.label_active_fg},bg={theme.label_active_bg}]"
@@ -1128,7 +1240,6 @@ def _tmux_theme_config(
                 f"set-option -t {quoted_session} status-right {shlex.quote(status_right)}",
             ]
         )
-        # A deck sets its own, for whichever session it shows.
         if badge_text is not None:
             lines.append(
                 f"set-option -t {quoted_session} {_STATUS_BADGE_OPTION} {shlex.quote(badge_text)}"
@@ -1193,6 +1304,7 @@ def _panel_tmux_config(
 
 
 def _deck_tmux_config(session_name: str, theme_name: str | None = None) -> str:
+    theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
     config = _tmux_theme_config(
         None,
         None,
@@ -1204,6 +1316,7 @@ def _deck_tmux_config(session_name: str, theme_name: str | None = None) -> str:
         pane_border_lines="heavy",
         window_status_format="",
         window_status_current_format="",
+        status_left=_deck_key_hints(theme),
     )
     # The sidebar's own tint shows focus, so the divider can go: tmux 3.6+
     # draws borders as spaces, which take the pane background and vanish.
@@ -1216,20 +1329,12 @@ def _deck_tmux_config(session_name: str, theme_name: str | None = None) -> str:
             'pane-active-border-style "fg=default,bg=default"',
         )
     )
-    config += f"if-shell -F '#{{>=:#{{version}},3.6}}' {shlex.quote(hide)}\n"
-    theme = resolve_panel_theme(_resolved_panel_theme_name(theme_name))
-    session = shlex.quote(_session_option_target(session_name))
-    status_right = _deck_key_hints(theme) + (
-        f"#[fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}] %H:%M %d %b #[default]"
-    )
-    return config + (
-        f"set-option -t {session} status-right-length 120\n"
-        f"set-option -t {session} status-right {shlex.quote(status_right)}\n"
-    )
+    return config + f"if-shell -F '#{{>=:#{{version}},3.6}}' {shlex.quote(hide)}\n"
 
 
-# Below this client width the deck's status line keeps only the clock.
-_DECK_HINTS_MIN_WIDTH = 110
+# Below these client widths the deck's keys shrink, then go.
+_DECK_HINTS_MIN_WIDTH = 90
+_DECK_HINTS_COMPACT_MIN_WIDTH = 64
 
 
 def _blend_hex(color: str, other: str, amount: float) -> str:
@@ -1241,15 +1346,22 @@ def _blend_hex(color: str, other: str, amount: float) -> str:
 def _deck_key_hints(theme) -> str:
     """The deck's keys for the status line, drawn with the live prefix key."""
     muted = _blend_hex(theme.foreground, theme.panel, 0.45)
-    # No commas: this sits inside a #{?...} conditional.
+    # No commas: these sit inside #{?...} conditionals.
     key = f"#[fg={theme.primary}]#[bold]"
     label = f"#[nobold]#[fg={muted}]"
-    hints = (
-        f"{key}⇥ / #{{prefix}} ⇥{label} session ↔ sidebar   "
+    full = (
+        f" {key}⇥ / #{{prefix}} ⇥{label} session ↔ sidebar   "
         f"{key}#{{prefix}} b{label} toggle   "
-        f"{key}#{{prefix}} d{label} console   #[default]"
+        f"{key}#{{prefix}} d{label} console #[default]"
     )
-    return f"#{{?#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}},{hints},}}"
+    compact = (
+        f" {key}⇥{label} sidebar  "
+        f"{key}#{{prefix}} b{label} toggle  "
+        f"{key}#{{prefix}} d{label} console #[default]"
+    )
+    wide = f"#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}}"
+    medium = f"#{{e|>=:#{{client_width}},{_DECK_HINTS_COMPACT_MIN_WIDTH}}}"
+    return f"#{{?{wide},{full},#{{?{medium},{compact},}}}}"
 
 
 def _session_tmux_config(

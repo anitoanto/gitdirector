@@ -20,20 +20,21 @@ from gitdirector.integrations.tmux.monitor import (
     _APPROVED_TOOL_MIN_SECS,
     _BELL_GRACE_SECS,
     _PANE_LIST_NAMES,
-    _SHELL_ACTIVITY_GRACE_SECS,
-    _SHELL_COMMANDS,
+    _RESIZE_REDRAW_SECS,
     _SILENCE_THRESHOLD_SECS,
     PaneSample,
     ProcessSnapshot,
     _capture_pane_text,
     _get_process_snapshot,
     _is_cursor_blink,
+    _is_interactive_shell,
     _last_interrupt,
     _list_gd_panes,
     _make_agent_ready_marker,
     _normalize_process_command,
     _parse_agent_report,
     _parse_cpu_seconds,
+    _prompt_shell,
     _resolve_pane_command,
     _SessionActivity,
     _started_a_tool_since,
@@ -63,7 +64,8 @@ class TestLaunchCommandInTmuxSession:
         )
         expected_command = _tmux_child_environment_command(f"sh -c {shlex.quote(cleanup_script)}")
         assert ready_marker == Path("/tmp/gitdirector-agent.ready")
-        mock_run.assert_called_once_with(
+        assert mock_run.call_count == 2
+        mock_run.assert_called_with(
             [
                 "tmux",
                 "respawn-pane",
@@ -73,6 +75,7 @@ class TestLaunchCommandInTmuxSession:
                 expected_command,
             ],
             capture_output=True,
+            text=True,
             env=ANY,
             cwd=ANY,
             timeout=ANY,
@@ -325,10 +328,16 @@ class TestParseCpuSeconds:
 
 
 def _snapshot(
-    children=None, commands=None, pgid=None, tpgid=None, cpu=None, elapsed=None
+    children=None, commands=None, pgid=None, tpgid=None, cpu=None, elapsed=None, args=None
 ) -> ProcessSnapshot:
     return ProcessSnapshot(
-        children or {}, commands or {}, pgid or {}, tpgid or {}, cpu or {}, elapsed or {}
+        children or {},
+        commands or {},
+        pgid or {},
+        tpgid or {},
+        cpu or {},
+        elapsed or {},
+        args or {},
     )
 
 
@@ -361,6 +370,7 @@ class TestGetProcessSnapshot:
         assert snapshot.tpgid_by_pid == {101: 101, 102: 101}
         assert snapshot.cpu_seconds_by_pid == {101: 1.5, 102: 3.0}
         assert snapshot.elapsed_by_pid == {101: 3723.0, 102: 7.0}
+        assert snapshot.args_by_pid == {101: "-zsh", 102: "node app.js"}
 
 
 class TestResolvePaneCommand:
@@ -408,6 +418,75 @@ class TestResolvePaneCommand:
         assert _resolve_pane_command(1, "bash", snapshot) == "rg"
 
 
+class TestPromptShell:
+    @pytest.mark.parametrize(
+        "args", ["-zsh", "zsh", "/bin/bash", "bash --login", "zsh -il", "-fish", "sh -"]
+    )
+    def test_interactive_shells(self, args):
+        assert _is_interactive_shell(args) is True
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            "",
+            "sh -c clear; codex",
+            "bash -lc make",
+            "zsh -ic 'npm test'",
+            "bash ./build.sh",
+            "/bin/sh /usr/local/bin/tool --flag",
+            "node server.js",
+            "python -i",
+        ],
+    )
+    def test_commands_and_scripts_are_not_interactive(self, args):
+        assert _is_interactive_shell(args) is False
+
+    def test_shell_holding_the_terminal_owns_its_helpers(self):
+        """Profile scripts and prompt helpers run in the shell's own group."""
+        snapshot = _snapshot(
+            children={1: [2, 3]},
+            commands={1: "-zsh", 2: "oh-my-posh", 3: "gitstatusd"},
+            pgid={1: 1, 2: 1, 3: 3},
+            tpgid={1: 1},
+            args={1: "-zsh", 2: "oh-my-posh print primary", 3: "gitstatusd -s -1"},
+        )
+        assert _prompt_shell(1, snapshot) == "-zsh"
+
+    def test_a_job_holds_the_terminal(self):
+        snapshot = _snapshot(
+            children={1: [2]},
+            commands={1: "-zsh", 2: "bash"},
+            pgid={1: 1, 2: 2},
+            tpgid={1: 2},
+            args={1: "-zsh", 2: "bash ./build.sh"},
+        )
+        assert _prompt_shell(1, snapshot) is None
+
+    def test_a_nested_interactive_shell_is_a_prompt(self):
+        snapshot = _snapshot(
+            children={1: [2]},
+            commands={1: "-zsh", 2: "bash"},
+            pgid={1: 1, 2: 2},
+            tpgid={1: 2},
+            args={1: "-zsh", 2: "bash"},
+        )
+        assert _prompt_shell(1, snapshot) == "bash"
+
+    def test_a_command_run_by_a_non_interactive_shell_is_not_a_prompt(self):
+        """An agent launched through ``sh -c`` shares its launcher's group."""
+        snapshot = _snapshot(
+            children={1: [2]},
+            commands={1: "sh", 2: "codex"},
+            pgid={1: 1, 2: 1},
+            tpgid={1: 1},
+            args={1: "sh -c clear; sh -lc codex", 2: "codex"},
+        )
+        assert _prompt_shell(1, snapshot) is None
+
+    def test_unknown_foreground_is_not_a_prompt(self):
+        assert _prompt_shell(1, _snapshot()) is None
+
+
 class TestTreeCpuSeconds:
     def test_sums_pane_and_descendants(self):
         snapshot = _snapshot(
@@ -427,6 +506,7 @@ def _pane_line(
     active="1",
     tty="/dev/ttys001",
     activity="1700000000",
+    size="80x24",
     agent="",
     waiter="",
     transcript="",
@@ -447,6 +527,7 @@ def _pane_line(
         "pane_id": pane_id or f"%{pid}",
         "tty": tty,
         "activity": activity,
+        "size": size,
         "agent_state": agent,
         "agent_waiter": waiter,
         "agent_transcript": transcript,
@@ -511,6 +592,7 @@ class TestListGdPanes:
             False,
             "/dev/ttys001",
             1700000000,
+            "80x24",
         )
         beta = panes["gd/beta/claude/1"]
         assert beta.command == "node"
@@ -630,7 +712,7 @@ class TestResolvePaneStatus:
         kwargs = {
             "dead": False,
             "bell": False,
-            "command": "some-program",
+            "at_prompt": False,
             "change_age": 100.0,
             "cpu_age": 100.0,
         }
@@ -642,16 +724,11 @@ class TestResolvePaneStatus:
 
     def test_bell_returns_waiting_regardless_of_activity(self):
         assert self._status(bell=True, change_age=0.0) == "waiting"
-        assert self._status(bell=True, command="zsh") == "waiting"
+        assert self._status(bell=True, at_prompt=True) == "waiting"
 
-    def test_shell_prompt_is_idle(self):
-        for shell in _SHELL_COMMANDS:
-            assert self._status(command=shell) == "idle"
-            assert self._status(command=f"-{shell}") == "idle"
-
-    def test_shell_with_fresh_output_is_running(self):
-        assert self._status(command="zsh", change_age=_SHELL_ACTIVITY_GRACE_SECS - 0.5) == "running"
-        assert self._status(command="zsh", change_age=_SHELL_ACTIVITY_GRACE_SECS) == "idle"
+    def test_a_shell_prompt_is_idle_whatever_changes_on_screen(self):
+        assert self._status(at_prompt=True) == "idle"
+        assert self._status(at_prompt=True, change_age=0.0, cpu_age=0.0) == "idle"
 
     def test_recent_content_change_is_running(self):
         assert self._status(change_age=_SILENCE_THRESHOLD_SECS - 0.5) == "running"
@@ -668,12 +745,6 @@ class TestResolvePaneStatus:
             self._status(change_age=_SILENCE_THRESHOLD_SECS, cpu_age=_SILENCE_THRESHOLD_SECS)
             == "idle"
         )
-
-    def test_does_not_depend_on_program_name(self):
-        for command in ("claude", "opencode", "codex", "vim", "python", "node", "my-own-tool"):
-            assert self._status(command=command, change_age=1.0) == "running"
-            assert self._status(command=command) == "idle"
-            assert self._status(command=command, bell=True) == "waiting"
 
 
 class TestTmuxMonitor:
@@ -782,6 +853,7 @@ class _FakeTmux:
             "bell": False,
             "tty": "/dev/ttys001",
             "activity": int(self.now),
+            "size": "80x24",
             "agent_state": "",
             "agent_waiter": "",
             "agent_transcript": "",
@@ -807,6 +879,36 @@ class _FakeTmux:
             {pane.pane_pid: program},
             {pane.pane_pid: 0.0, program: cpu},
             {program: 3600.0, **{pid: child[1] for pid, child in kids.items()}},
+        )
+
+    def at_prompt(self, session_name, *, cpu=0.0, helpers=(), jobs=(), job_holds_terminal=False):
+        """Put the pane's interactive login shell under it.
+
+        *helpers* run in the shell's own process group (profile scripts,
+        prompt renderers); *jobs* are ``(command, args)`` in groups of their
+        own. The shell holds the terminal unless *job_holds_terminal*, when
+        the first job does.
+        """
+        shell = self.panes[session_name].pane_pid
+        kids = [shell + 1 + index for index in range(len(helpers) + len(jobs))]
+        commands = {shell: "-zsh"}
+        args = {shell: "-zsh"}
+        pgid = {shell: shell}
+        for pid, helper in zip(kids, helpers):
+            commands[pid] = args[pid] = helper
+            pgid[pid] = shell
+        job_pids = kids[len(helpers) :]
+        for pid, (command, job_args) in zip(job_pids, jobs):
+            commands[pid], args[pid] = command, job_args
+            pgid[pid] = pid
+        self.snapshot = ProcessSnapshot(
+            {shell: kids},
+            commands,
+            pgid,
+            {shell: job_pids[0] if job_holds_terminal else shell},
+            {shell: cpu},
+            {},
+            args,
         )
 
     def advance(self, seconds, session_name=None, content=None, output=True):
@@ -911,23 +1013,146 @@ class TestTmuxMonitorRefresh:
             assert monitor.status_for("gd/repo/shell/1") is None
 
     def test_first_sample_seeds_quiet_time_from_tmux_activity(self):
-        """A session that has been silent for a minute is idle immediately."""
+        """A program silent for a minute is idle immediately, a busy one running."""
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
-            world.pane("gd/repo/shell/1", command="zsh", activity=int(world.now) - 60)
-            world.content["gd/repo/shell/1"] = "$ "
+            world.pane("gd/repo/shell/1", activity=int(world.now) - 60)
+            world.content["gd/repo/shell/1"] = "listening on :5173"
+            world.run_program("gd/repo/shell/1", "node")
             assert monitor.refresh() == {"gd/repo/shell/1": "idle"}
 
-    def test_shell_prompt_goes_idle_after_grace(self):
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/shell/1")
+            assert monitor.refresh() == {"gd/repo/shell/1": "running"}
+
+    def test_fresh_shell_is_idle_from_its_first_sample(self):
+        """Regression: an untouched new shell showed running, then settled on idle.
+
+        tmux's activity stamp of a new session is the moment its prompt was
+        drawn, and while the profile loads its helpers (completion scripts,
+        prompt renderers) are the processes in the foreground, burning CPU.
+        None of that is a job the user started.
+        """
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
-            world.pane("gd/repo/shell/1", command="zsh")
-            world.content["gd/repo/shell/1"] = "$ "
-            assert monitor.refresh()["gd/repo/shell/1"] == "running"
-            world.advance(_SHELL_ACTIVITY_GRACE_SECS + 0.5)
-            assert monitor.refresh()["gd/repo/shell/1"] == "idle"
+            name = "gd/repo/shell/1"
+            world.pane(name, command="zsh")
+            world.content[name] = ""
+            world.at_prompt(name, cpu=0.1, helpers=("Python",))
+            assert monitor.refresh() == {name: "idle"}
+
+            world.advance(0.5)
+            world.at_prompt(name, cpu=0.9, helpers=("oh-my-posh",))
+            assert monitor.refresh() == {name: "idle"}
+
+            world.advance(0.5, name, "\u276f\u276f repo  00:45")
+            world.at_prompt(name, cpu=1.2)
+            assert monitor.refresh() == {name: "idle"}
+
+            for _ in range(5):
+                world.advance(1.0)
+                assert monitor.refresh() == {name: "idle"}
+
+    def test_the_prompt_itself_is_never_work(self):
+        """Typing, redrawing, finished output and background jobs at a prompt."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/shell/1"
+            world.pane(name, command="zsh")
+            world.content[name] = "$ "
+            world.at_prompt(name)
+            monitor.refresh()
+            for frame in ("$ l", "$ ls", "$ ls\nREADME.md\n$ ", "$ ls\nREADME.md\n$ \u2026"):
+                world.advance(0.5, name, frame)
+                assert monitor.refresh() == {name: "idle"}, frame
+
+            cpu = 0.0
+            for _ in range(4):
+                world.advance(1.0, name, f"$ sleep 100 &\n[1] {cpu}\n$ ")
+                cpu += 1.0
+                world.at_prompt(name, cpu=cpu, jobs=(("gitstatusd", "gitstatusd -s -1"),))
+                assert monitor.refresh() == {name: "idle"}
+
+    def test_a_command_run_at_the_prompt_is_running_until_it_returns(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/shell/1"
+            world.pane(name, command="zsh", activity=int(world.now) - 60)
+            world.content[name] = "$ "
+            world.at_prompt(name)
+            assert monitor.refresh() == {name: "idle"}
+
+            world.advance(1.0, name, "$ sleep 5; echo done")
+            world.at_prompt(name, jobs=(("sleep", "sleep 5"),), job_holds_terminal=True)
+            assert monitor.refresh() == {name: "running"}
+            world.advance(1.0)
+            assert monitor.refresh() == {name: "running"}
+
+            world.advance(3.0, name, "$ sleep 5; echo done\ndone\n$ ")
+            world.at_prompt(name)
+            assert monitor.refresh() == {name: "idle"}
+
+    def test_a_shell_script_job_is_a_program_not_a_prompt(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/shell/1"
+            world.pane(name, command="zsh", activity=int(world.now) - 60)
+            world.content[name] = "$ ./build.sh"
+            world.at_prompt(name, jobs=(("bash", "bash ./build.sh"),), job_holds_terminal=True)
+            monitor.refresh()
+            for step in range(3):
+                world.advance(1.0, name, f"$ ./build.sh\nstep {step}")
+                assert monitor.refresh() == {name: "running"}
+            world.advance(_SILENCE_THRESHOLD_SECS)
+            assert monitor.refresh() == {name: "idle"}
+
+    def test_agent_launched_through_sh_c_is_watched_like_any_program(self):
+        """The launcher is a non-interactive shell: its child is the program."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/codex/1"
+            world.pane(name, command="sh", activity=int(world.now) - 60)
+            world.content[name] = "working \u280b"
+            world.snapshot = _snapshot(
+                children={100: [101]},
+                commands={100: "sh", 101: "codex"},
+                pgid={100: 100, 101: 100},
+                tpgid={100: 100},
+                args={100: "sh -c clear; sh -lc codex", 101: "codex"},
+            )
+            monitor.refresh()
+            for frame in ("working \u2819", "working \u2839", "done.\n> "):
+                world.advance(1.0, name, frame)
+                assert monitor.refresh() == {name: "running"}
+            world.advance(_SILENCE_THRESHOLD_SECS)
+            assert monitor.refresh() == {name: "idle"}
+
+    def test_redraw_after_a_resize_is_not_work(self):
+        """A client attaching at another size makes the program redraw."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/agent/1"
+            world.pane(name, activity=int(world.now) - 60)
+            world.content[name] = "> "
+            world.run_program(name, "some-agent")
+            assert monitor.refresh() == {name: "idle"}
+
+            world.advance(0.5, name, "> \n\n")
+            world.panes[name] = replace(world.panes[name], size="120x40")
+            assert monitor.refresh() == {name: "idle"}
+            # The program may finish redrawing only after the sample saw the resize.
+            world.advance(1.0, name, ">   \n\n\n")
+            assert monitor.refresh() == {name: "idle"}
+
+            world.advance(_RESIZE_REDRAW_SECS, name, "working \u280b")
+            assert monitor.refresh() == {name: "running"}
 
     def test_program_running_then_idle(self):
         stack, world = self._world()
@@ -1066,8 +1291,7 @@ class TestTmuxMonitorRefresh:
             monitor = TmuxMonitor()
             world.pane("gd/repo/shell/1", command="zsh", agent_state="bogus")
             world.content["gd/repo/shell/1"] = "$ "
-            monitor.refresh()
-            world.advance(_SHELL_ACTIVITY_GRACE_SECS + 1)
+            world.at_prompt("gd/repo/shell/1")
             assert monitor.refresh()["gd/repo/shell/1"] == "idle"
 
     def test_reported_running_is_trusted_however_still_the_pane(self):

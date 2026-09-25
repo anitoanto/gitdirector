@@ -160,9 +160,9 @@ def render_rail_session(
     return _fit([text], width)
 
 
-def render_group(repo: str, palette: TablePalette, *, first: bool, width: int) -> Text:
+def render_group(repo: str, palette: TablePalette, *, width: int) -> Text:
     label = Text(f" {repo}", style=f"bold {palette.yellow}")
-    return _fit([Text(), label] if not first else [label], width)
+    return _fit([Text(), label], width)
 
 
 def render_rail_group(palette: TablePalette, width: int) -> Text:
@@ -195,7 +195,7 @@ def build_options(
             else:
                 options.append(
                     Option(
-                        render_group(entry.repo, palette, first=first, width=width),
+                        render_group(entry.repo, palette, width=width),
                         id=f"{_GROUP_PREFIX}{repo_slug}",
                         disabled=True,
                     )
@@ -286,10 +286,6 @@ class SessionSidebar(App):
         content-align: center middle;
         color: $text-muted;
     }
-    #toggle:hover {
-        background: $primary 30%;
-        color: $text;
-    }
     #back {
         width: 3;
         height: 100%;
@@ -297,17 +293,18 @@ class SessionSidebar(App):
         background: $panel-lighten-1;
         color: $text-muted;
     }
-    #back:hover {
-        background: $primary 30%;
-        color: $text;
-    }
+    /* The space above the first repository is its group's blank line, not
+       padding, so the scrollbar runs the full height of the list. */
     #sessions {
         height: 1fr;
         max-height: 100%;
         border: none;
-        padding: 1 0 0 0;
+        padding: 0;
         background: $surface;
         scrollbar-size-vertical: 1;
+    }
+    Screen.-rail #sessions {
+        padding: 1 0 0 0;
     }
     #sessions:focus {
         border: none;
@@ -321,8 +318,10 @@ class SessionSidebar(App):
         color: $text;
         text-style: none;
     }
+    /* No hover anywhere in the sidebar: tmux never tells a pane the pointer
+       left it, so a hover would stay lit after the pointer moved away. */
     #sessions > .option-list--option-hover {
-        background: $primary 12%;
+        background: transparent;
     }
     #sessions > .option-list--option-disabled {
         color: $text;
@@ -392,6 +391,8 @@ class SessionSidebar(App):
 
     def __init__(self, deck: str, pane_id: str | None) -> None:
         super().__init__()
+        # One row per wheel notch, like the console.
+        self.scroll_sensitivity_y = 1.0
         self.deck = deck
         self.pane_id = pane_id
         self._config = Config()

@@ -269,6 +269,7 @@ class TestRepositoryGroups:
             Path("/tmp/work"),
             purpose="shell",
             description=None,
+            shell=True,
             repo_label="group_work",
         )
         app.push_screen.assert_called_once()

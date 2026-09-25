@@ -8,7 +8,7 @@ Everything else is classified from signals every terminal program exposes,
 so the same rules apply to a shell, a build, a dev server, or any other
 agent:
 
-* the process tree under the pane (is a shell the foreground process?)
+* the process tree under the pane (is an interactive shell at its prompt?)
 * whether the visible pane content changed recently
 * whether the process tree consumed CPU recently
 * the terminal bell
@@ -50,6 +50,7 @@ from .core import (
     _tmux_child_environment_command,
     _tmux_server_is_gone,
     kill_tmux_session,
+    respawn_pane,
     session_entry,
 )
 
@@ -96,26 +97,17 @@ def launch_command_in_tmux_session(session_name: str, command: str) -> Path:
         f"rm -f {ready_marker_quoted} >/dev/null 2>&1 || true; "
         "exit $status"
     )
-    result = _run_tmux(
-        [
-            "respawn-pane",
-            "-k",
-            "-t",
+    try:
+        respawn_pane(
             pane_target,
             # Only the command's own shell is a login shell; a second one
             # would run the user's profile twice before every launch.
             _tmux_child_environment_command(f"sh -c {shlex.quote(cleanup_script)}"),
-        ],
-    )
-    if isinstance(result.returncode, int) and result.returncode != 0:
+        )
+    except TmuxError:
         kill_tmux_session(session_name)
         ready_marker.unlink(missing_ok=True)
-        raise TmuxError(
-            "tmux respawn-pane failed",
-            args_list=list(result.args) if isinstance(result.args, list) else None,
-            returncode=result.returncode,
-            stderr=result.stderr,
-        )
+        raise
     return ready_marker
 
 
@@ -127,12 +119,12 @@ STATUS_IDLE = "idle"
 
 # How often the monitor samples tmux.
 _POLL_SECS = 1.0
-# A non-shell program whose visible output and CPU use have both been quiet
-# for this long is no longer working.
+# A program whose visible output and CPU use have both been quiet for this
+# long is no longer working.
 _SILENCE_THRESHOLD_SECS = 4.0
-# A shell prompt counts as busy for this long after its last visible change,
-# which covers the output of a command that just finished.
-_SHELL_ACTIVITY_GRACE_SECS = 2.0
+# A program redraws itself after its pane is resized (a client attaching
+# at another size); changes seen this soon after a resize are that redraw.
+_RESIZE_REDRAW_SECS = 1.5
 # Output that arrives together with a bell (the final render of a result)
 # must not immediately cancel the bell.
 _BELL_GRACE_SECS = 1.0
@@ -172,6 +164,7 @@ _PANE_LIST_FIELDS = (
     ("pane_id", "#{pane_id}"),
     ("tty", "#{pane_tty}"),
     ("activity", "#{window_activity}"),
+    ("size", "#{pane_width}x#{pane_height}"),
     ("agent_state", f"#{{{AGENT_STATE_OPTION}}}"),
     ("agent_waiter", f"#{{{AGENT_WAITER_OPTION}}}"),
     ("agent_transcript", f"#{{{AGENT_TRANSCRIPT_OPTION}}}"),
@@ -194,6 +187,8 @@ class PaneSample:
     tty: str = ""
     #: Epoch seconds of the last output tmux saw in the window (0 if unknown).
     activity: int = 0
+    #: ``<width>x<height>`` of the pane.
+    size: str = ""
     #: Raw self-report from the agent's hooks: a status, optionally followed
     #: by the epoch it was made ("" when none).
     agent_state: str = ""
@@ -215,10 +210,12 @@ class ProcessSnapshot:
     cpu_seconds_by_pid: dict[int, float]
     #: Seconds since each process started.
     elapsed_by_pid: dict[int, float] = field(default_factory=dict)
+    #: Full command line of each process.
+    args_by_pid: dict[int, str] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> ProcessSnapshot:
-        return cls({}, {}, {}, {}, {}, {})
+        return cls({}, {}, {}, {}, {}, {}, {})
 
 
 def _normalize_process_command(raw_args: str) -> str:
@@ -275,6 +272,7 @@ def _get_process_snapshot() -> ProcessSnapshot:
         snapshot.cpu_seconds_by_pid[pid] = _parse_cpu_seconds(match.group(5))
         snapshot.elapsed_by_pid[pid] = _parse_cpu_seconds(match.group(6))
         snapshot.commands_by_pid[pid] = _normalize_process_command(match.group(7))
+        snapshot.args_by_pid[pid] = match.group(7).strip()
         snapshot.children_by_parent.setdefault(ppid, []).append(pid)
     return snapshot
 
@@ -299,6 +297,35 @@ def _descendants(pane_pid: int, snapshot: ProcessSnapshot) -> list[tuple[int, in
 
 def _is_shell(command: str) -> bool:
     return command.lstrip("-") in _SHELL_COMMANDS
+
+
+def _is_interactive_shell(args: str) -> bool:
+    """Whether *args* start a shell that reads commands from its terminal.
+
+    Only options may follow the shell's name: a ``-c`` string or a script
+    operand makes it a program like any other.
+    """
+    words = args.split()
+    if not words or not _is_shell(Path(words[0]).name):
+        return False
+    for word in words[1:]:
+        if not word.startswith("-") or (not word.startswith("--") and "c" in word[1:]):
+            return False
+    return True
+
+
+def _prompt_shell(pane_pid: int, snapshot: ProcessSnapshot) -> str | None:
+    """The interactive shell whose prompt holds the pane's terminal, if any.
+
+    Such a shell gives every command the user runs a process group of its
+    own and hands it the terminal. Whatever runs in the shell's own group
+    while it holds the terminal (profile scripts, prompt helpers, command
+    substitutions) is the shell preparing its prompt, not a job.
+    """
+    leader = snapshot.tpgid_by_pid.get(pane_pid, 0)
+    if leader <= 0 or not _is_interactive_shell(snapshot.args_by_pid.get(leader, "")):
+        return None
+    return snapshot.commands_by_pid.get(leader)
 
 
 def _resolve_pane_command(pane_pid: int, fallback_command: str, snapshot: ProcessSnapshot) -> str:
@@ -389,6 +416,7 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
             bell=row["bell"] == "1",
             tty=row["tty"],
             activity=_int_or_zero(row["activity"]),
+            size=row["size"],
             agent_state=row["agent_state"].strip(),
             agent_waiter=row["agent_waiter"].strip(),
             agent_transcript=row["agent_transcript"].strip(),
@@ -437,7 +465,7 @@ def resolve_pane_status(
     *,
     dead: bool,
     bell: bool,
-    command: str,
+    at_prompt: bool,
     change_age: float,
     cpu_age: float,
 ) -> str:
@@ -447,8 +475,9 @@ def resolve_pane_status(
     * ``bell``: a bell rang and nothing has happened since; the program
       asked for someone's attention, the one sign of waiting any terminal
       program can give.
-    * ``command``: the foreground program's name, used only to recognise a
-      shell prompt.
+    * ``at_prompt``: an interactive shell holds the terminal, so no job is
+      running; what changes on screen is the prompt itself (drawing it,
+      typing, redrawing it) or output of a command that already finished.
     * ``change_age`` / ``cpu_age``: seconds since the visible content last
       changed / the process tree last consumed CPU.
     """
@@ -456,8 +485,8 @@ def resolve_pane_status(
         return STATUS_IDLE
     if bell:
         return STATUS_WAITING
-    if _is_shell(command):
-        return STATUS_RUNNING if change_age < _SHELL_ACTIVITY_GRACE_SECS else STATUS_IDLE
+    if at_prompt:
+        return STATUS_IDLE
     if change_age < _SILENCE_THRESHOLD_SECS or cpu_age < _SILENCE_THRESHOLD_SECS:
         return STATUS_RUNNING
     return STATUS_IDLE
@@ -578,6 +607,8 @@ class _SessionActivity:
     previous_content: str | None = None
     last_change_time: float = 0.0
     last_activity: int = -1
+    size: str = ""
+    resize_time: float = float("-inf")
     #: Recent ``(time, cumulative cpu seconds)`` samples, oldest first.
     cpu_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=16))
     last_cpu_time: float = 0.0
@@ -707,11 +738,13 @@ class TmuxMonitor:
 
     def _sample_session(self, pane: PaneSample, snapshot: ProcessSnapshot, now: float) -> None:
         reported, stamp = _parse_agent_report(pane.agent_state) if not pane.dead else ("", None)
+        prompt_shell = None
         if pane.dead or pane.pane_pid <= 0:
             command = pane.command
             cpu_seconds = None
         else:
-            command = _resolve_pane_command(pane.pane_pid, pane.command, snapshot)
+            prompt_shell = _prompt_shell(pane.pane_pid, snapshot)
+            command = prompt_shell or _resolve_pane_command(pane.pane_pid, pane.command, snapshot)
             cpu_seconds = _tree_cpu_seconds(pane.pane_pid, snapshot)
         # A report outlives an agent that exited without saying so.
         if reported and _is_shell(command):
@@ -744,6 +777,10 @@ class TmuxMonitor:
             activity.last_change_time = seed
             activity.last_cpu_time = seed
 
+        if not first_sample and pane.size != activity.size:
+            activity.resize_time = now
+        activity.size = pane.size
+
         content_changed = False
         if first_sample or pane.activity != activity.last_activity:
             try:
@@ -751,7 +788,9 @@ class TmuxMonitor:
             except TmuxError:
                 text = None
             if text is not None:
-                content_changed = self._record_content(activity, text, now)
+                content_changed = self._record_content(
+                    activity, text, now, counts=now - activity.resize_time > _RESIZE_REDRAW_SECS
+                )
         activity.last_activity = pane.activity
 
         if cpu_seconds is not None and self._cpu_active(activity, cpu_seconds, now):
@@ -770,7 +809,7 @@ class TmuxMonitor:
             activity.status = resolve_pane_status(
                 dead=pane.dead,
                 bell=activity.bell_active,
-                command=command,
+                at_prompt=prompt_shell is not None,
                 change_age=now - activity.last_change_time,
                 cpu_age=now - activity.last_cpu_time,
             )
@@ -827,14 +866,16 @@ class TmuxMonitor:
         return baseline is not None and cpu_seconds - baseline >= _CPU_ACTIVE_MIN_SECS
 
     @staticmethod
-    def _record_content(activity: _SessionActivity, text: str, now: float) -> bool:
+    def _record_content(
+        activity: _SessionActivity, text: str, now: float, *, counts: bool = True
+    ) -> bool:
         """Store a capture; return whether it counts as a real visible change."""
         previous = activity.content
         if previous == text:
             return False
         before_previous = activity.previous_content
         activity.previous_content, activity.content = previous, text
-        if previous is None:
+        if previous is None or not counts:
             return False
         if _is_cursor_blink(previous, text, before_previous):
             return False

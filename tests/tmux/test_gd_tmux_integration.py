@@ -23,7 +23,12 @@ from gitdirector.integrations.tmux import (
 )
 
 from .._timeouts import POLL_TIMEOUT, TMUX_CMD_TIMEOUT
-from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
+from ._shared import (
+    _cleanup_tmux_tmpdir,
+    _make_shell_home,
+    _make_short_tmux_tmpdir,
+    _tmux_integration_lock,
+)
 
 
 def _run_tmux(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -61,7 +66,7 @@ class TestGdTmuxCommandRunsInSession:
         """
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
@@ -107,7 +112,7 @@ class TestGdTmuxCommandRunsInSession:
         """
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
@@ -147,7 +152,7 @@ class TestGdTmuxCommandRunsInSession:
         """
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
@@ -192,7 +197,7 @@ class TestGdTmuxCommandRunsInSession:
         """
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
@@ -239,7 +244,7 @@ class TestGdTmuxCommandRunsInSession:
         """
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
@@ -272,7 +277,7 @@ class TestGdTmuxCommandRunsInSession:
         """A shell comment in the user command must not comment out cleanup."""
         with _tmux_integration_lock():
             home_dir = tmp_path / "home"
-            home_dir.mkdir()
+            _make_shell_home(home_dir)
             tmux_dir = _make_short_tmux_tmpdir()
             monkeypatch.setenv("HOME", str(home_dir))
             monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))

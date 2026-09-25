@@ -129,15 +129,8 @@ class ConsoleUIHelpersMixin:
     def _handle_app_resume(self, _app: App) -> None:
         if self._resume_target_tab is None:
             return
-
-        import sys
-        import termios
-
-        try:
-            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-        except (AttributeError, OSError):
-            pass
-
+        # No tty flush here: input has restarted, and a flush can eat the in-band
+        # resize report, leaving pixel mouse coordinates read as cells.
         self.call_after_refresh(
             self._restore_after_resume,
             self._resume_target_tab,

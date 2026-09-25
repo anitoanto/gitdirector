@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Input, LoadingIndicator, OptionList, Static
@@ -27,7 +28,7 @@ from gitdirector.commands.tui import (
     SortMenuScreen,
 )
 from gitdirector.commands.tui.panels import get_create_panel_layouts
-from gitdirector.commands.tui.screens import PanelActionMenuScreen, _render_grid_preview
+from gitdirector.commands.tui.screens import PanelActionMenuScreen
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 
 from .conftest import _make_info, _mock_manager, _wait_for_animated_scroll
@@ -443,8 +444,25 @@ class TestGitOperationsMenuScreen:
 
 
 class TestPanelActionMenuScreen:
-    async def test_compose_shows_tmux_session_and_preview(self):
-        panel = Panel(name="Main", rows=2, cols=2, panes={1: None, 2: None, 3: None, 4: None})
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        return_value=[
+            {
+                "session_name": "gd/alpha_a/shell/1",
+                "repo": "alpha",
+                "repo_slug": "alpha_a",
+                "purpose": "shell",
+                "description": "-",
+            }
+        ],
+    )
+    async def test_shows_the_panel_its_map_and_what_each_pane_holds(self, _mock_sessions):
+        panel = Panel(
+            name="Main",
+            rows=2,
+            cols=2,
+            panes={1: "gd/alpha_a/shell/1", 2: None, 3: "gd/gone_b/codex/1", 4: None},
+        )
         screen = PanelActionMenuScreen(panel)
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -453,20 +471,32 @@ class TestPanelActionMenuScreen:
             app.push_screen(screen)
             await pilot.pause()
             title = app.screen.query_one("#menu-title", Static)
-            session_label = app.screen.query_one("#menu-branch", Static)
+            subtitle = app.screen.query_one("#menu-branch", Static)
             preview = app.screen.query_one("#panel-layout-preview", Static)
+            sessions = app.screen.query_one("#panel-sessions", Static)
             menu = app.screen.query_one("#action-menu", OptionList)
-            preview_pane = app.screen.query_one("#panel-preview-pane")
 
             assert "Main" in title.content
-            assert "gd/panel/main" in session_label.content
-            assert preview.content == _render_grid_preview(2, 2)
-            assert menu.option_count == 5
-            assert not list(app.screen.query("#panel-preview-title"))
-            assert preview_pane.region.x > menu.region.x
-            assert preview_pane.region.y == menu.region.y
+            assert "2×2" in subtitle.content and "gd/panel/main" in subtitle.content
+            for pane in "1234":
+                assert pane in preview.content.plain
+            lines = sessions.content.plain.splitlines()
+            # Repos line up: the closed session's repo is the widest.
+            assert lines[0].split() == ["1", "alpha", "shell/1"]
+            assert lines[1] == "2 empty"
+            assert lines[2].endswith("closed")
+            assert [option.id for option in menu.options if option.id] == [
+                "open",
+                "reconfigure",
+                "rename",
+                "delete",
+            ]
+            assert app.screen.query_one("#panel-preview-pane").region.x > menu.region.x
 
-    async def test_compose_shows_asymmetric_panel_preview(self):
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_asymmetric_layouts_draw_their_own_shape(self, _mock_sessions):
+        from gitdirector.commands.tui.panels import render_panel_layout_text
+
         panel = Panel(
             name="Focus",
             rows=2,
@@ -481,10 +511,9 @@ class TestPanelActionMenuScreen:
         async with app.run_test(size=(100, 30)) as pilot:
             app.push_screen(screen)
             await pilot.pause()
-
             preview = app.screen.query_one("#panel-layout-preview", Static)
-
-            assert preview.content == _render_grid_preview(2, 2, "wide_bottom")
+            expected = render_panel_layout_text(panel.layout, cell_width=5).plain
+            assert preview.content.plain == expected
 
 
 class TestPullResultScreen:
@@ -680,6 +709,24 @@ class TestPullLoadingScreen:
             assert loading is not None
 
 
+def _gd(name: str, repo: str) -> dict[str, str]:
+    return {
+        "session_name": name,
+        "repo": repo,
+        "repo_slug": name.split("/")[1],
+        "purpose": name.split("/")[2],
+        "description": "-",
+    }
+
+
+_FOUR_SESSIONS = [
+    _gd("gd/a_x/shell/1", "alpha"),
+    _gd("gd/b_x/claude-auto/1", "beta"),
+    _gd("gd/c_x/codex/1", "gamma"),
+    _gd("gd/d_x/shell/1", "delta"),
+]
+
+
 class TestCreatePanelScreen:
     def test_layout_registry_skips_single_pane_and_includes_asymmetric_presets(self):
         layout_keys = [layout.key for layout in get_create_panel_layouts()]
@@ -704,662 +751,294 @@ class TestCreatePanelScreen:
             "quad_bottom_right_3x3",
         }.issubset(layout_keys)
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_enter_from_name_focuses_layout_list_and_selects_first_option(
-        self, mock_sessions
-    ):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
+    async def _open(self, pilot, app, screen, results):
         app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            layout_menu = app.screen.query_one("#layout-menu", OptionList)
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert screen._selected_layout_key is None
-            assert layout_menu.highlighted is None
-            assert "Choose a layout to preview" in str(preview.content)
-            assert "▦ 1×2  Two columns" in str(layout_menu.get_option_at_index(0).prompt)
-
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            assert screen._step == 1
-            assert app.screen.focused is layout_menu
-            assert layout_menu.highlighted == 0
-            assert screen._selected_layout_key == get_create_panel_layouts()[0].key
-            assert preview.content == _render_grid_preview(1, 2, get_create_panel_layouts()[0].key)
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_tab_from_name_focuses_layout_list_and_selects_first_option(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            layout_menu = app.screen.query_one("#layout-menu", OptionList)
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert screen._selected_layout_key is None
-            assert layout_menu.highlighted is None
-
-            await pilot.press("tab")
-            await pilot.pause()
-
-            assert app.screen.focused is layout_menu
-            assert layout_menu.highlighted == 0
-            assert screen._selected_layout_key == get_create_panel_layouts()[0].key
-            assert preview.content == _render_grid_preview(1, 2, get_create_panel_layouts()[0].key)
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_modal_height_tracks_content_for_three_by_three_layout(self, mock_sessions):
-        mock_sessions.return_value = [
-            {
-                "session_name": f"gd/repo/shell/{index}",
-                "repo": "repo",
-                "purpose": f"shell{index}",
-            }
-            for index in range(1, 21)
-        ]
-
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout(3, 3)
-            await pilot.pause()
-
-            container = app.screen.query_one("#create-panel-container")
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert preview.content == _render_grid_preview(3, 3)
-            assert container.region.height < app.size.height
-
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            preview2 = app.screen.query_one("#grid-preview-2", Static)
-            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
-
-            assert preview2.content == _render_grid_preview(3, 3)
-            assert container.region.height < app.size.height
-            assert session_menu.region.height < session_menu.option_count
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_tall_left_layout_updates_preview_and_active_panes(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("tall_left")
-            await pilot.pause()
-
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert preview.content == _render_grid_preview(2, 2, "tall_left")
-            assert screen._active_pane_count() == 3
-            assert screen._pane_is_active(3) is True
-            assert screen._pane_is_active(4) is False
-
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            preview2 = app.screen.query_one("#grid-preview-2", Static)
-
-            assert preview2.content == _render_grid_preview(2, 2, "tall_left")
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_two_by_three_corner_duo_updates_preview_and_active_panes(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("duo_top_left_2x3")
-            await pilot.pause()
-
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert preview.content == _render_grid_preview(2, 3, "duo_top_left_2x3")
-            assert screen._active_pane_count() == 5
-            assert screen._pane_is_active(5) is True
-            assert screen._pane_is_active(6) is False
-
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Wall"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            preview2 = app.screen.query_one("#grid-preview-2", Static)
-
-            assert preview2.content == _render_grid_preview(2, 3, "duo_top_left_2x3")
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_three_by_three_corner_duo_updates_preview_and_active_panes(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("duo_bottom_right_3x3")
-            await pilot.pause()
-
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert preview.content == _render_grid_preview(3, 3, "duo_bottom_right_3x3")
-            assert screen._active_pane_count() == 8
-            assert screen._pane_is_active(8) is True
-            assert screen._pane_is_active(9) is False
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_three_by_three_corner_quad_updates_preview_and_active_panes(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("quad_top_left_3x3")
-            await pilot.pause()
-
-            preview = app.screen.query_one("#grid-preview", Static)
-
-            assert preview.content == _render_grid_preview(3, 3, "quad_top_left_3x3")
-            assert screen._active_pane_count() == 6
-            assert screen._pane_is_active(6) is True
-            assert screen._pane_is_active(7) is False
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_create_panel_hints_include_arrow_and_jk_navigation(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            hint = app.screen.query_one("#create-panel-hint", Static)
-            assert "↑↓/jk navigate" in str(hint.content)
-
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            hint = app.screen.query_one("#create-panel-hint", Static)
-            hint_text = str(hint.content)
-
-            assert "↑↓/jk navigate" in hint_text
-            assert "[tab] switch lists" in hint_text
-            assert "[ctrl+b] back" not in hint_text
-
-    def test_step_two_subtitle_markup_separates_name_and_layout(self):
-        assert CreatePanelScreen._step2_subtitle_markup("Ops", "1×2") == (
-            '[bold $text]"Ops"[/]    [dim]1×2[/dim]'
-        )
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_auto_slot_action_assigns_available_sessions_without_repetition(
-        self, mock_sessions
-    ):
-        mock_sessions.return_value = [
-            {
-                "session_name": f"gd/repo/shell/{index}",
-                "repo": "repo",
-                "purpose": f"shell{index}",
-            }
-            for index in range(1, 5)
-        ]
-
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("tall_left")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
-            assert "Auto" in str(slot_menu.get_option_at_index(0).prompt)
-            assert slot_menu.highlighted == 0
-
-            await pilot.press("enter")
-            await pilot.pause()
-
-            assert screen._pane_assignments[1] == "gd/repo/shell/1"
-            assert screen._pane_assignments[2] == "gd/repo/shell/2"
-            assert screen._pane_assignments[3] == "gd/repo/shell/3"
-            assert len({screen._pane_assignments[i] for i in range(1, 4)}) == 3
-            assert screen._pane_assignments[4] is None
-            assert slot_menu.highlighted == 1
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_ctrl_o_from_session_list_commits_highlighted_assignment(self, mock_sessions):
-        mock_sessions.return_value = [
-            {
-                "session_name": "gd/repo/shell/1",
-                "repo": "repo",
-                "purpose": "shell",
-            },
-            {
-                "session_name": "gd/repo/copilot/1",
-                "repo": "repo",
-                "purpose": "copilot",
-            },
-        ]
-
-        results: list[tuple[str, str, dict[int, str | None]] | None] = []
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen, callback=lambda result: results.append(result))
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
-
-            await pilot.press("tab")
-            await pilot.pause()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = None
+        app._panel_store.panels = []
+        app.push_screen(screen, callback=lambda result: results.append(result))
+        await pilot.pause()
+
+    async def _to_sessions(self, pilot, name: str = "Ops", layout_steps: int = 0):
+        await pilot.press(*name, "enter")
+        for _ in range(layout_steps):
             await pilot.press("down")
-            await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
 
-            assert app.screen.focused is session_menu
-            assert session_menu.highlighted == 1
-            assert screen._pane_assignments[1] is None
-
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_three_steps_lead_to_a_panel(self, _mock_sessions, _mock_exists):
+        results: list = []
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            # Naming: no preview yet, the tmux name is spelled out.
+            assert screen._step == 1
+            assert not app.screen.query_one("#create-panel-right").display
+            await pilot.press(*"Ops")
+            assert "gd/panel/ops" in str(app.screen.query_one("#panel-name-help").content)
+            await pilot.press("enter")
+            # Layout: the preview follows the highlight.
+            assert screen._step == 2
+            assert app.screen.query_one("#create-panel-right").display
+            await pilot.press("down", "down", "down")
+            assert screen._layout_key == "grid_2x2"
+            await pilot.press("enter")
+            # Sessions: choose one for pane 1, the cursor moves on to pane 2.
+            assert screen._step == 3
+            await pilot.press("enter")
+            assert screen._picking == 1
+            await pilot.press("down", "enter")
+            assert screen._assignments[1] == "gd/b_x/claude-auto/1"
+            assert screen._focused_pane() == 2
             await pilot.press("ctrl+o")
             await pilot.pause()
-
-            assert results == [("Ops", "grid_1x2", {1: "gd/repo/shell/1", 2: None})]
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_rapid_auto_then_ctrl_o_commits_auto_assignments(self, mock_sessions):
-        mock_sessions.return_value = [
-            {
-                "session_name": "gd/repo/shell/1",
-                "repo": "repo",
-                "purpose": "shell",
-            },
-            {
-                "session_name": "gd/repo/copilot/1",
-                "repo": "repo",
-                "purpose": "copilot",
-            },
-        ]
-
-        results: list[tuple[str, str, dict[int, str | None]] | None] = []
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen, callback=lambda result: results.append(result))
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
-            assert app.screen.focused is slot_menu
-            assert slot_menu.highlighted == 0
-
-            await pilot.press("enter", "ctrl+o")
-            await pilot.pause()
-
             assert results == [
-                (
-                    "Ops",
-                    "grid_1x2",
-                    {1: "gd/repo/shell/1", 2: "gd/repo/copilot/1"},
-                )
+                ("Ops", "grid_2x2", {1: "gd/b_x/claude-auto/1", 2: None, 3: None, 4: None})
             ]
 
     @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_duplicate_panel_name_submit_stays_open_and_shows_error(
-        self, _mock_sessions, _mock_session_exists
-    ):
-        results: list[tuple[str, str, dict[int, str | None]] | None] = []
-        existing_panel = MagicMock()
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_the_create_row_finishes_too(self, _mock_sessions, _mock_exists):
+        results: list = []
         screen = CreatePanelScreen()
         app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        app._panel_store = MagicMock()
-        app._panel_store.get.side_effect = [None, existing_panel]
-        app._panel_store.panels = []
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen, callback=lambda result: results.append(result))
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            await self._to_sessions(pilot)
+            await pilot.press("a", "end", "enter")
             await pilot.pause()
+            assert results == [
+                ("Ops", "grid_1x2", {1: "gd/a_x/shell/1", 2: "gd/b_x/claude-auto/1"})
+            ]
 
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_fill_takes_free_sessions_and_keeps_what_is_set(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await self._to_sessions(pilot, layout_steps=3)
+            # The picker opens on the first session; two down is the third.
+            await pilot.press("down", "enter", "down", "down", "enter")
+            assert screen._assignments[2] == "gd/c_x/codex/1"
+            await pilot.press("a")
+            assert [screen._assignments[pane] for pane in (1, 2, 3, 4)] == [
+                "gd/a_x/shell/1",
+                "gd/c_x/codex/1",
+                "gd/b_x/claude-auto/1",
+                "gd/d_x/shell/1",
+            ]
 
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_fill_without_sessions_leaves_panes_empty(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await self._to_sessions(pilot)
+            await pilot.press("a")
+            assert not any(screen._assignments.values())
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_clearing_a_pane_clears_only_that_pane(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await self._to_sessions(pilot, layout_steps=3)
+            await pilot.press("a", "home", "down", "x")
+            assert [screen._assignments[pane] for pane in (1, 2, 3, 4)] == [
+                "gd/a_x/shell/1",
+                None,
+                "gd/c_x/codex/1",
+                "gd/d_x/shell/1",
+            ]
+            # "leave empty" in the picker empties just its pane as well.
+            await pilot.press("down", "enter", "home", "enter")
+            assert [screen._assignments[pane] for pane in (1, 2, 3, 4)] == [
+                "gd/a_x/shell/1",
+                None,
+                None,
+                "gd/d_x/shell/1",
+            ]
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_browsing_layouts_keeps_every_assignment(self, _mock_sessions):
+        # Regression: passing a smaller layout emptied the panes it lacked.
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await self._to_sessions(pilot, layout_steps=3)
+            await pilot.press("a", "escape")
             assert screen._step == 2
+            await pilot.press("home", "end", "home")
+            await pilot.press("down", "down", "down", "enter")
+            assert screen._layout_key == "grid_2x2"
+            assert all(screen._assignments[pane] for pane in (1, 2, 3, 4))
 
-            await pilot.press("ctrl+o")
-            await pilot.pause()
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_choosing_a_session_again_moves_it(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await self._to_sessions(pilot)
+            await pilot.press("a")
+            assert screen._assignments == {1: "gd/a_x/shell/1", 2: "gd/b_x/claude-auto/1"}
+            await pilot.press("home", "down", "enter")
+            menu = app.screen.query_one("#session-menu", OptionList)
+            assert "pane 1" in str(menu.get_option("gd/a_x/shell/1").prompt)
+            menu.highlighted = [o.id for o in menu.options].index("gd/a_x/shell/1")
+            await pilot.press("enter")
+            assert screen._assignments == {1: None, 2: "gd/a_x/shell/1"}
 
-            hint = app.screen.query_one("#create-panel-hint", Static)
-
-            assert app.screen is screen
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_escape_steps_back_then_cancels(self, _mock_sessions):
+        results: list = []
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            await self._to_sessions(pilot)
+            await pilot.press("enter")
+            assert screen._picking == 1
+            await pilot.press("escape")
+            assert screen._picking is None and screen._step == 3
+            await pilot.press("escape")
+            assert screen._step == 2
+            await pilot.press("escape")
             assert screen._step == 1
-            assert results == []
-            assert "already exists" in str(hint.content)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [None]
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_single_letter_keys_type_into_the_name(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await pilot.press(*"jaxk")
+            assert app.screen.query_one("#panel-name-input", Input).value == "jaxk"
+            assert screen._step == 1
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_a_name_is_required(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await pilot.press("enter")
+            error = app.screen.query_one("#create-panel-error", Static)
+            assert screen._step == 1
+            assert "name" in str(error.content)
+            assert error.has_class("-shown")
 
     @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_slug_conflict_submit_stays_open_and_shows_error(
-        self, _mock_sessions, _mock_session_exists
-    ):
-        results: list[tuple[str, str, dict[int, str | None]] | None] = []
-        existing_panel = MagicMock()
-        existing_panel.name = "Ops"
+    async def test_an_empty_panel_is_not_created(self, _mock_sessions, _mock_exists):
+        results: list = []
         screen = CreatePanelScreen()
         app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        app._panel_store = MagicMock()
-        app._panel_store.get.return_value = None
-        app._panel_store.panels = []
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen, callback=lambda result: results.append(result))
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops!"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            assert screen._step == 2
-
-            app._panel_store.panels = [existing_panel]
-
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            await self._to_sessions(pilot)
             await pilot.press("ctrl+o")
             await pilot.pause()
-
-            hint = app.screen.query_one("#create-panel-hint", Static)
-
-            assert app.screen is screen
-            assert screen._step == 1
             assert results == []
-            assert "conflicts with tmux session name" in str(hint.content)
-            assert "gd/panel/ops" in str(hint.content)
+            assert "at least one pane" in str(
+                app.screen.query_one("#create-panel-error", Static).content
+            )
 
-    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_live_tmux_name_conflict_submit_stays_open_and_shows_error(
-        self, _mock_sessions, _mock_session_exists
+    @pytest.mark.parametrize(
+        ("existing", "panels", "session_exists", "message"),
+        [
+            (True, [], False, "already exists"),
+            (False, [Panel(name="OPS", rows=1, cols=2, panes={})], False, "conflicts with tmux"),
+            (False, [], True, "TMUX session 'gd/panel/ops' already exists"),
+        ],
+    )
+    async def test_name_conflicts_stay_on_the_name_step(
+        self, existing, panels, session_exists, message
     ):
-        results: list[tuple[str, str, dict[int, str | None]] | None] = []
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-        app._panel_store = MagicMock()
-        app._panel_store.get.return_value = None
-        app._panel_store.panels = []
+        results: list = []
+        screen = None
+        with (
+            patch(
+                "gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS
+            ),
+            patch(
+                "gitdirector.integrations.tmux.core._session_exists", return_value=session_exists
+            ),
+        ):
+            screen = CreatePanelScreen()
+            app = GitDirectorConsole()
+            async with app.run_test(size=(130, 36)) as pilot:
+                await self._open(pilot, app, screen, results)
+                app._panel_store.get.return_value = MagicMock() if existing else None
+                app._panel_store.panels = panels
+                await pilot.press(*"ops", "enter")
+                assert screen._step == 1
+                assert message in str(app.screen.query_one("#create-panel-error", Static).content)
+                assert results == []
 
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen, callback=lambda result: results.append(result))
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            assert screen._step == 2
-
-            _mock_session_exists.return_value = True
-
-            await pilot.press("ctrl+o")
-            await pilot.pause()
-
-            hint = app.screen.query_one("#create-panel-hint", Static)
-
-            assert app.screen is screen
-            assert screen._step == 1
-            assert results == []
-            assert "TMUX session 'gd/panel/ops' already exists" in str(hint.content)
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_auto_slot_action_leaves_panes_unassigned_without_sessions(self, mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            name_input = app.screen.query_one("#panel-name-input", Input)
-            name_input.value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
-
-            assert slot_menu.highlighted == 0
-
-            await pilot.press("enter")
-            await pilot.pause()
-
-            assert screen._pane_assignments[1] is None
-            assert screen._pane_assignments[2] is None
-            assert "unassigned" in str(slot_menu.get_option_at_index(1).prompt)
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_auto_slot_action_preserves_existing_assignments(self, mock_sessions):
-        mock_sessions.return_value = [
-            {
-                "session_name": "gd/repo/available/1",
-                "repo": "repo",
-                "purpose": "available",
-            },
-        ]
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            app.screen.query_one("#panel-name-input", Input).value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            screen._pane_assignments[1] = "gd/repo/kept/1"
-            screen._pane_assignments[2] = None
-
-            await pilot.press("enter")
-            await pilot.pause()
-
-            assert screen._pane_assignments[1] == "gd/repo/kept/1"
-            assert screen._pane_assignments[2] == "gd/repo/available/1"
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
-    async def test_auto_slot_action_preserves_assignment_without_sessions(self, _mock_sessions):
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            app.screen.query_one("#panel-name-input", Input).value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            screen._pane_assignments[1] = "gd/repo/kept/1"
-            await pilot.press("enter")
-            await pilot.pause()
-
-            assert screen._pane_assignments[1] == "gd/repo/kept/1"
-            assert screen._pane_assignments[2] is None
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_auto_slot_action_does_not_reuse_assigned_session(self, mock_sessions):
-        mock_sessions.return_value = [
-            {
-                "session_name": "gd/repo/only/1",
-                "repo": "repo",
-                "purpose": "only",
-            },
-        ]
-        screen = CreatePanelScreen()
-        app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            screen._apply_layout("grid_1x2")
-            app.screen.query_one("#panel-name-input", Input).value = "Ops"
-            screen._go_to_step_2()
-            await pilot.pause()
-
-            screen._pane_assignments[1] = "gd/repo/only/1"
-            await pilot.press("enter")
-            await pilot.pause()
-
-            assert screen._pane_assignments[1] == "gd/repo/only/1"
-            assert screen._pane_assignments[2] is None
-
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_edit_mode_prefills_panel_configuration_and_opens_on_step_two(
-        self, mock_sessions
-    ):
-        mock_sessions.return_value = [
-            {
-                "session_name": "gd/repo/shell/1",
-                "repo": "repo",
-                "purpose": "shell",
-            },
-            {
-                "session_name": "gd/repo/copilot/2",
-                "repo": "repo",
-                "purpose": "copilot",
-            },
-        ]
-
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_edit_starts_on_sessions_with_the_panel_as_it_is(self, _mock_sessions):
+        results: list = []
         screen = CreatePanelScreen(
-            panel_name="Ops",
-            initial_layout_key="wide_bottom",
-            initial_panes={1: "gd/repo/shell/1", 2: None, 3: "gd/repo/copilot/2"},
+            panel_name="Main",
+            initial_layout_key="grid_2x2",
+            initial_panes={
+                1: "gd/a_x/shell/1",
+                2: "gd/closed_z/shell/1",
+                3: None,
+                4: "gd/d_x/shell/1",
+            },
             editing=True,
         )
         app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await pilot.pause()
-
-            title = app.screen.query_one("#create-panel-title", Static)
-            subtitle = app.screen.query_one("#step-2-subtitle", Static)
-            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
-            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
-            preview = app.screen.query_one("#grid-preview-2", Static)
-
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            assert screen._step == 3
+            assert "Main" in str(app.screen.query_one("#create-panel-title", Static).content)
+            # A session that has since closed starts empty.
+            assert screen._assignments[2] is None
+            assert "✓ Name" in app.screen.query_one("#create-panel-steps", Static).content.plain
+            await pilot.press("escape")
             assert screen._step == 2
-            assert "Reconfigure Panel" in str(title.content)
-            assert "Ops" in str(subtitle.content)
-            assert "Wide bottom" in str(subtitle.content)
-            assert preview.content == _render_grid_preview(2, 2, "wide_bottom")
-            assert slot_menu.highlighted == 1
-            assert session_menu.highlighted == 1
-            assert screen._pane_assignments[1] == "gd/repo/shell/1"
-            assert screen._pane_assignments[3] == "gd/repo/copilot/2"
-            assert len(app.screen.query("#panel-name-input")) == 0
+            await pilot.press("enter", "ctrl+o")
+            await pilot.pause()
+            assert results == [
+                ("Main", "grid_2x2", {1: "gd/a_x/shell/1", 2: None, 3: None, 4: "gd/d_x/shell/1"})
+            ]
 
-    @patch("gitdirector.integrations.tmux.list_all_gd_sessions")
-    async def test_edit_mode_clears_stale_closed_sessions_from_slot_summary(self, mock_sessions):
-        mock_sessions.return_value = [
-            {
-                "session_name": "gd/repo/shell/1",
-                "repo": "repo",
-                "purpose": "shell",
-            }
-        ]
-
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_edit_escape_from_layout_cancels(self, _mock_sessions):
+        results: list = []
         screen = CreatePanelScreen(
-            panel_name="Ops",
-            initial_layout_key="wide_bottom",
-            initial_panes={1: "gd/repo/copilot/2", 2: None, 3: "gd/repo/shell/1"},
-            editing=True,
+            panel_name="Main", initial_layout_key="grid_1x2", initial_panes={}, editing=True
         )
         app = GitDirectorConsole()
-        app.manager = _mock_manager()
-
-        async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            await pilot.press("escape", "escape")
             await pilot.pause()
+            assert results == [None]
 
-            slot_menu = app.screen.query_one("#pane-slot-menu", OptionList)
-            session_menu = app.screen.query_one("#pane-session-menu", OptionList)
-
-            assert screen._pane_assignments[1] is None
-            assert screen._pane_assignments[3] == "gd/repo/shell/1"
-            assert "unassigned" in str(slot_menu.get_option_at_index(1).prompt)
-            assert "gd/repo/copilot/2" not in str(slot_menu.get_option_at_index(1).prompt)
-            assert session_menu.highlighted == 0
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_preview_names_each_panes_repo(self, _mock_sessions):
+        screen = CreatePanelScreen()
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, [])
+            await self._to_sessions(pilot)
+            await pilot.press("a")
+            preview = app.screen.query_one("#grid-preview", Static).content.plain
+            assert "1 alpha" in preview and "2 beta" in preview
 
 
 class TestSortMenuScreen:

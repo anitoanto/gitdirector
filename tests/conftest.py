@@ -33,6 +33,12 @@ def _fixed_default_terminal(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _plain_attach_terminal(monkeypatch):
+    """Tests never compile a terminal description into the real home."""
+    monkeypatch.setattr("gitdirector.integrations.tmux.core._same_screen_env", {})
+
+
+@pytest.fixture(autouse=True)
 def _isolate_version_check_cache(monkeypatch, tmp_path):
     cache_dir = tmp_path / ".gitdirector"
     monkeypatch.setattr(

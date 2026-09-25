@@ -32,8 +32,6 @@ from ...launch_context import neutral_directory
 from ...ui_theme import resolve_panel_theme, textual_surface
 from .core import (
     _FIRST_WINDOW,
-    _STATUS_BADGE_OPTION,
-    _STATUS_LABEL_OPTION,
     TmuxError,
     _chain_tmux_commands,
     _is_deck_session,
@@ -42,13 +40,13 @@ from .core import (
     _resolved_panel_theme_name,
     _run_tmux,
     _scrub_session_environment,
-    _session_badge_text,
     _session_exists,
     _session_option_target,
-    _session_slug,
     _tmux_child_environment_command,
     _tmux_new_session_environment_args,
+    attach_client_env,
     kill_tmux_session,
+    respawn_pane,
     sync_panel_tmux_config,
 )
 
@@ -98,8 +96,11 @@ _IN_DECK = f"#{{m:{DECK_PREFIX}*,#{{session_name}}}}"
 _DECK_BINDING_MARKER = f"m:{DECK_PREFIX}*"
 _SIDEBAR_CLOSED_MESSAGE = "display-message 'sidebar closed: prefix Tab brings it back'"
 _LIST_KEYS_LINE = re.compile(
-    r"^bind-key\s+(?P<repeat>-r\s+)?-T\s+prefix\s+(?P<key>\S+)\s+(?P<command>.*)$"
+    r"^bind-key\s+(?P<repeat>-r\s+)?-T\s+(?P<table>\S+)\s+(?P<key>\S+)\s+(?P<command>.*)$"
 )
+# Any GitDirector session: a deck's shown session is a gd/view/ one.
+_IN_GITDIRECTOR = "#{m:gd/*,#{session_name}}"
+_GITDIRECTOR_BINDING_MARKER = "m:gd/*"
 
 
 def sidebar_width(window_width: int, collapsed: bool) -> int:
@@ -204,20 +205,6 @@ def _placeholder_command(title: str, detail: str, hint: str) -> str:
         ]
     )
     return _tmux_child_environment_command(f"sh -c {shlex.quote(script)}")
-
-
-def _status_label_commands(deck: str, badge: str, label: str) -> list[list[str]]:
-    target = _deck_target(deck)
-    return [
-        ["set-option", "-t", target, _STATUS_BADGE_OPTION, badge],
-        ["set-option", "-t", target, _STATUS_LABEL_OPTION, label],
-    ]
-
-
-def _session_status_commands(deck: str, session_name: str) -> list[list[str]]:
-    return _status_label_commands(
-        deck, _session_badge_text(session_name), _session_slug(session_name) or session_name
-    )
 
 
 @dataclass(frozen=True)
@@ -409,7 +396,6 @@ def create_deck(session_name: str, *, return_to: str | None = None) -> str:
                     ["set-option", "-t", target, "detach-on-destroy", "on"],
                     ["set-window-option", "-t", window, "remain-on-exit", "off"],
                     ["set-hook", "-w", "-t", window, "window-resized", _RESIZE_SIDEBAR_HOOK],
-                    *_session_status_commands(deck, session_name),
                     ["select-pane", "-t", main],
                 ]
             ),
@@ -418,7 +404,7 @@ def create_deck(session_name: str, *, return_to: str | None = None) -> str:
         if return_to:
             _run_tmux(["set-option", "-t", target, DECK_RETURN_OPTION, return_to], check=True)
         sync_panel_tmux_config()
-        ensure_deck_prefix_bindings()
+        ensure_deck_bindings()
     except BaseException:
         kill_tmux_session(deck)
         raise
@@ -430,7 +416,8 @@ def show_session(deck: str, session_name: str, *, focus: bool = True) -> None:
 
     A client already in the pane is switched over to a new view; otherwise
     the pane is respawned with one. The old view is unattached either way,
-    and tmux destroys it.
+    and tmux destroys it. A pane whose respawn fails is killed, and the
+    sidebar puts a new one in its place.
     """
     state = read_deck_state(deck)
     if state is None:
@@ -449,20 +436,12 @@ def show_session(deck: str, session_name: str, *, focus: bool = True) -> None:
             ["set-option", "-t", view_target, "destroy-unattached", "on"],
         ]
     else:
-        commands = [
-            [
-                "respawn-pane",
-                "-k",
-                "-t",
-                state.main.pane_id,
-                _view_command(_socket_path(), session_name, view),
-            ]
-        ]
+        respawn_pane(state.main.pane_id, _view_command(_socket_path(), session_name, view))
+        commands = []
     commands.extend(
         [
             ["set-option", "-p", "-u", "-t", state.main.pane_id, DECK_PLACEHOLDER_OPTION],
             ["set-option", "-t", _deck_target(deck), DECK_TARGET_OPTION, session_name],
-            *_session_status_commands(deck, session_name),
         ]
     )
     if focus:
@@ -475,11 +454,10 @@ def show_placeholder(
 ) -> None:
     """Replace whatever the main pane shows with a message."""
     target = _deck_target(deck)
+    respawn_pane(main_pane, _placeholder_command(title, detail, hint))
     commands = [
-        ["respawn-pane", "-k", "-t", main_pane, _placeholder_command(title, detail, hint)],
         ["set-option", "-p", "-t", main_pane, DECK_PLACEHOLDER_OPTION, "1"],
         ["set-option", "-u", "-t", target, DECK_TARGET_OPTION],
-        *_status_label_commands(deck, "GITDIRECTOR", title),
     ]
     if focus_sidebar:
         commands.append(["run-shell", "-t", target, "-C", f"select-pane -t {_SIDEBAR}"])
@@ -625,15 +603,17 @@ _ORIGINAL_BINDING_OPTIONS = {
     "Tab": "@gd_prefix_original_tab",
     "b": "@gd_prefix_original_b",
 }
-# Keys an earlier version wrapped: given back their original binding.
-_RETIRED_BINDING_OPTIONS = {
-    "s": "@gd_prefix_original_s",
+# tmux scrolls copy mode 5 lines per wheel notch; one reads like the console.
+_WHEEL_COMMANDS = {
+    "WheelUpPane": "select-pane ; send-keys -X scroll-up",
+    "WheelDownPane": "select-pane ; send-keys -X scroll-down",
 }
+_WHEEL_TABLES = {"copy-mode": "copy_mode", "copy-mode-vi": "copy_mode_vi"}
 
 
-def _prefix_bindings() -> dict[str, tuple[bool, str]]:
-    result = _run_tmux(["list-keys", "-T", "prefix"], text=True)
-    bindings: dict[str, tuple[bool, str]] = {}
+def _key_bindings() -> dict[tuple[str, str], tuple[bool, str]]:
+    result = _run_tmux(["list-keys"], text=True)
+    bindings: dict[tuple[str, str], tuple[bool, str]] = {}
     if result.returncode != 0:
         return bindings
     for line in result.stdout.splitlines():
@@ -643,49 +623,80 @@ def _prefix_bindings() -> dict[str, tuple[bool, str]]:
         key = match["key"]
         if len(key) == 2 and key.startswith("\\"):
             key = key[1:]
-        bindings[key] = (match["repeat"] is not None, match["command"].strip())
+        bindings[(match["table"], key)] = (match["repeat"] is not None, match["command"].strip())
     return bindings
 
 
-def ensure_deck_prefix_bindings() -> None:
-    """Give ``prefix Tab`` and ``prefix b`` their deck meaning, inside decks only.
+def _as_command_string(listed: str) -> str:
+    # list-keys separates commands with "\;", which a command string reads as
+    # a literal ";" argument.
+    return re.sub(r"(?<=\s)\\;(?=\s|$)", ";", listed)
 
-    Each key is rebound to ``if-shell -F <in a deck> <deck command>
-    <original>``: outside a deck the user's own binding (or tmux's default)
-    still runs. The original is kept in a global option so re-wrapping is
-    idempotent, and a binding the user changed since is picked up again.
-    """
-    bindings = _prefix_bindings()
+
+def _wrap_binding(
+    bindings: dict[tuple[str, str], tuple[bool, str]],
+    table: str,
+    key: str,
+    option: str,
+    condition: str,
+    marker: str,
+    command: str,
+) -> list[list[str]]:
+    repeat, current = bindings.get((table, key), (False, ""))
     commands: list[list[str]] = []
-    for key, option in _RETIRED_BINDING_OPTIONS.items():
-        repeat, current = bindings.get(key, (False, ""))
-        if _DECK_BINDING_MARKER not in current:
-            continue
+    if marker in current:
         original = _global_option(option)
+    else:
+        original = current
         if original:
-            # A single argument is parsed as a command string, as list-keys printed it.
-            commands.append(
-                ["bind-key", *(["-r"] if repeat else []), "-T", "prefix", key, original]
-            )
+            commands.append(["set-option", "-g", option, original])
         else:
-            commands.append(["unbind-key", "-T", "prefix", key])
-        commands.append(["set-option", "-gu", option])
+            commands.append(["set-option", "-gu", option])
+    bind = ["bind-key", *(["-r"] if repeat else []), "-T", table, key]
+    bind.extend(["if-shell", "-F", condition, command])
+    if original:
+        bind.append(_as_command_string(original))
+    commands.append(bind)
+    return commands
+
+
+def ensure_deck_bindings() -> None:
+    """Give GitDirector's keys their meaning, inside its sessions only.
+
+    ``prefix Tab`` and ``prefix b`` work the deck, and the mouse wheel scrolls
+    copy mode a line at a time. Each key is rebound to ``if-shell -F
+    <condition> <our command> <original>``: elsewhere the user's own binding
+    (or tmux's default) still runs. The original is kept in a global option so
+    re-wrapping is idempotent, and a binding the user changed since is picked
+    up again.
+    """
+    bindings = _key_bindings()
+    commands: list[list[str]] = []
     for key, deck_command in _deck_key_commands().items():
-        repeat, current = bindings.get(key, (False, ""))
-        option = _ORIGINAL_BINDING_OPTIONS[key]
-        if _DECK_BINDING_MARKER in current:
-            original = _global_option(option)
-        else:
-            original = current
-            if original:
-                commands.append(["set-option", "-g", option, original])
-            else:
-                commands.append(["set-option", "-gu", option])
-        bind = ["bind-key", *(["-r"] if repeat else []), "-T", "prefix", key]
-        bind.extend(["if-shell", "-F", _IN_DECK, deck_command])
-        if original:
-            bind.append(original)
-        commands.append(bind)
+        commands.extend(
+            _wrap_binding(
+                bindings,
+                "prefix",
+                key,
+                _ORIGINAL_BINDING_OPTIONS[key],
+                _IN_DECK,
+                _DECK_BINDING_MARKER,
+                deck_command,
+            )
+        )
+    for table, slug in _WHEEL_TABLES.items():
+        for key, wheel_command in _WHEEL_COMMANDS.items():
+            commands.extend(
+                _wrap_binding(
+                    bindings,
+                    table,
+                    key,
+                    f"@gd_original_{slug}_{key.lower()}",
+                    _IN_GITDIRECTOR,
+                    _GITDIRECTOR_BINDING_MARKER,
+                    wheel_command,
+                )
+            )
     _run_tmux(_chain_tmux_commands(commands), check=True)
 
 
@@ -726,6 +737,7 @@ def attach_deck(session_name: str, deck: str | None = None) -> bool:
         _chain_tmux_commands([["attach-session", "-t", f"={deck}"], destroy_when_left]),
         capture_output=False,
         timeout=None,
+        extra_env=attach_client_env(),
     )
     deck_left_behind = kill_tmux_session(deck)
     if result.returncode != 0 and deck_left_behind:

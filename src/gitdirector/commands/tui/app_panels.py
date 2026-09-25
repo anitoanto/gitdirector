@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 
 from rich.markup import escape
+from rich.text import Text
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Static
 
 from .constants import _DEFAULT_PANELS_SORT_COLUMN, _PANELS_SORT_COLUMN_NAMES
-from .panels import Panel, render_panel_layout_preview
+from .panels import Panel, render_panel_layout_preview, render_panel_layout_text
 from .screens._shared import ConfirmScreen
 from .screens.panels import (
     CreatePanelScreen,
@@ -51,11 +52,70 @@ def _panel_row_height(
     *,
     preview: str | None = None,
 ) -> int:
-    return len((preview or _render_panel_preview(panel, live_sessions)).splitlines()) + 2
+    map_lines = len((preview or _render_panel_preview(panel, live_sessions)).splitlines())
+    # The sessions column lists one pane per line beside the map.
+    return max(map_lines, panel.total_panes) + 2
 
 
-def _panel_row_cell(value: str) -> str:
+def _panel_row_cell(value: str | Text) -> str | Text:
+    if isinstance(value, Text):
+        return Text("\n") + value
     return f"\n{value}"
+
+
+def _session_parts(session_name: str, labels: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    """``(purpose, repo)`` for a pane's session, from the session list or its name."""
+    from ...integrations.tmux.core import _parse_gd_session_name, _repo_label_from_segment
+
+    if session_name in labels:
+        return labels[session_name]
+    parsed = _parse_gd_session_name(session_name)
+    if parsed is None:
+        return session_name, ""
+    repo_slug, purpose, sequence = parsed
+    return f"{purpose}/{sequence}", _repo_label_from_segment(repo_slug)
+
+
+def panel_session_lines(
+    panel: Panel,
+    live_sessions: set[str],
+    labels: dict[str, tuple[str, str]],
+    palette,
+) -> Text:
+    """One line per pane, numbered like the map: its repo and session, or empty."""
+    rows = []
+    for placement in panel.pane_placements:
+        session_name = panel.panes.get(placement.pane_index)
+        purpose, repo = _session_parts(session_name, labels) if session_name else ("", "")
+        rows.append((placement.pane_index, session_name, purpose, repo))
+    repo_width = max((len(repo) for *_rest, repo in rows), default=0)
+    text = Text(no_wrap=True, overflow="ellipsis")
+    for index, (pane, session_name, purpose, repo) in enumerate(rows):
+        if index:
+            text.append("\n")
+        live = bool(session_name) and session_name in live_sessions
+        text.append(f"{pane} ", style=f"bold {palette.success}" if live else palette.muted)
+        if not session_name:
+            text.append("empty", style=f"italic {palette.muted}")
+            continue
+        text.append(repo.ljust(repo_width), style=palette.yellow if live else palette.muted)
+        text.append("  ")
+        text.append(purpose, style="bold" if live else palette.muted)
+        if not live:
+            text.append("  closed", style=f"italic {palette.muted}")
+    return text
+
+
+def panel_map_text(panel: Panel, live_sessions: set[str], palette, *, cell_width: int = 3):
+    """The panel's map with each pane numbered, live panes lit."""
+    styles = {}
+    for placement in panel.pane_placements:
+        session_name = panel.panes.get(placement.pane_index)
+        live = bool(session_name) and session_name in live_sessions
+        styles[placement.pane_index] = f"bold {palette.success}" if live else palette.muted
+    return render_panel_layout_text(
+        panel.layout, styles=styles, cell_width=cell_width, border_style=palette.muted
+    )
 
 
 class ConsolePanelsMixin:
@@ -162,22 +222,37 @@ class ConsolePanelsMixin:
 
         is_empty = not panels and total == 0 and not self._search_query
         self._set_table_empty_state(table, no_msg, is_empty=is_empty)
+        labels = {
+            entry["session_name"]: (
+                f"{entry['purpose']}/{entry['session_name'].rsplit('/', 1)[-1]}",
+                entry["repo"],
+            )
+            for entry in self._sessions_entries
+        }
         table.clear()
         if not is_empty:
             for panel in panels:
                 filled = self._live_panel_pane_count(panel, live_sessions)
                 total_panes = panel.total_panes
-                panes_label = f"{filled}/{total_panes}" if filled else f"0/{total_panes}"
-                status_state = self._panel_status_state(panel, live_sessions)
-                status_label = self._palette.panel_status_label(status_state)
                 preview = _render_panel_preview(panel, live_sessions)
+                title = Text.assemble(
+                    (panel.name, "bold"),
+                    "\n",
+                    (panel.layout_label, self._palette.muted),
+                    "\n",
+                    (make_panel_session_name(panel.name), self._palette.muted),
+                )
+                if filled:
+                    status = Text(f"● {filled}/{total_panes} live", style=self._palette.success)
+                else:
+                    status = Text("○ nothing live", style=self._palette.muted)
                 table.add_row(
-                    _panel_row_cell(preview),
-                    _panel_row_cell(panel.name),
-                    _panel_row_cell(make_panel_session_name(panel.name)),
-                    _panel_row_cell(panel.layout_label),
-                    _panel_row_cell(panes_label),
-                    _panel_row_cell(status_label),
+                    _panel_row_cell(panel_map_text(panel, live_sessions, self._palette)),
+                    _panel_row_cell(title),
+                    _panel_row_cell(
+                        panel_session_lines(panel, live_sessions, labels, self._palette)
+                    ),
+                    _panel_row_cell(status),
                     height=_panel_row_height(panel, live_sessions, preview=preview),
                     key=panel.name,
                 )

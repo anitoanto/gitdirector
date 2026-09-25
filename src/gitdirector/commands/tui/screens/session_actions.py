@@ -43,13 +43,14 @@ def _heading(label: str) -> Option:
     return Option(f"[dim]{label}[/dim]", disabled=True)
 
 
-def _mode_picker(agent: AgentSpec, selected: str | None, colors: dict[str, str]) -> Text:
+def _mode_picker(agent: AgentSpec, selected: str | None, success: str, danger: str) -> Text:
     picker = Text()
     for index, mode in enumerate(agent.modes):
         if index:
             picker.append("  ")
         if mode.key == selected:
-            color = colors.get("text-error" if mode.dangerous else "text-primary", "")
+            # The console's "live" green; red when it drops the permission prompts.
+            color = danger if mode.dangerous else success
             picker.append(f"● {mode.label}", style=f"bold {color}".strip())
         else:
             picker.append(f"○ {mode.label}", style="dim")
@@ -108,8 +109,13 @@ class SessionActionMenuScreen(ModalScreen[str]):
         label = f"◆ [bold]{escape(agent.label)}[/bold]"
         if not agent.modes:
             return _row(label)
-        colors = self.app.get_css_variables()
-        return _row(label, _mode_picker(agent, self._modes.get(agent.key), colors))
+        from ..constants import resolve_table_palette
+
+        palette = getattr(self.app, "_palette", None) or resolve_table_palette(
+            self.app.get_css_variables()
+        )
+        selected = self._modes.get(agent.key)
+        return _row(label, _mode_picker(agent, selected, palette.success, palette.danger))
 
     def _agent_options(self) -> list[Option]:
         items = [Option("", disabled=True), _heading("Agents")]

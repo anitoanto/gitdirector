@@ -7,19 +7,22 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Input, LoadingIndicator, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ..constants import _MODAL_BINDINGS, _MODAL_CSS
 from ..panels import (
+    DEFAULT_PANEL_LAYOUT_KEY,
     Panel,
     PanelStore,
     get_create_panel_layouts,
     render_panel_layout_preview,
+    render_panel_layout_text,
     resolve_panel_layout,
 )
 from ..terminal_caps import strip_unsupported_css as _safe_css
@@ -38,8 +41,31 @@ def _render_grid_preview(rows: int, cols: int, layout_key: str | None = None) ->
     return render_panel_layout_preview(layout, cell_width=7, cell_height=1)
 
 
+def _palette(app):
+    from ..constants import resolve_table_palette
+
+    palette = getattr(app, "_palette", None)
+    return palette if palette is not None else resolve_table_palette(app.get_css_variables())
+
+
+def _session_labels() -> dict[str, tuple[str, str]]:
+    from ....integrations.tmux import list_all_gd_sessions
+
+    try:
+        entries = list_all_gd_sessions()
+    except Exception:
+        return {}
+    return {
+        entry["session_name"]: (
+            f"{entry['purpose']}/{entry['session_name'].rsplit('/', 1)[-1]}",
+            entry["repo"],
+        )
+        for entry in entries
+    }
+
+
 class PanelActionMenuScreen(ModalScreen[str]):
-    """Modal popup with actions for the selected panel."""
+    """What a panel shows, and what can be done with it."""
 
     BINDINGS = _MODAL_BINDINGS
 
@@ -50,8 +76,8 @@ class PanelActionMenuScreen(ModalScreen[str]):
         + _MODAL_CSS
         + """
     PanelActionMenuScreen #menu-container {
-        width: 72;
-        padding: 1 1;
+        width: 84;
+        padding: 1 2;
     }
     PanelActionMenuScreen #menu-title {
         padding: 0 1 0 1;
@@ -61,30 +87,28 @@ class PanelActionMenuScreen(ModalScreen[str]):
     }
     #panel-action-layout {
         height: auto;
-        align: left top;
     }
     #panel-action-main {
-        width: 1fr;
+        width: 30;
         height: auto;
     }
     #panel-preview-pane {
-        width: 27;
+        width: 1fr;
         height: auto;
-        padding: 0 0 0 1;
-        align: center top;
+        padding: 0 0 0 2;
     }
     PanelActionMenuScreen #action-menu {
-        height: 8;
+        height: auto;
         padding: 0 1;
-        margin: 0 0 1 0;
-    }
-    PanelActionMenuScreen #menu-hint {
-        padding: 0 1 0 1;
+        margin: 0;
     }
     #panel-layout-preview {
         width: auto;
         height: auto;
-        color: $text;
+    }
+    #panel-sessions {
+        height: auto;
+        padding: 1 0 0 0;
     }
     """
     )
@@ -95,35 +119,38 @@ class PanelActionMenuScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         from ....integrations.tmux.core import make_panel_session_name
+        from ..app_panels import panel_map_text, panel_session_lines
 
+        palette = _palette(self.app)
+        labels = _session_labels()
+        live = set(labels)
         session_name = make_panel_session_name(self.panel.name)
-
         with Vertical(id="menu-container"):
             yield Static(f"[bold $text]{escape(self.panel.name)}[/]", id="menu-title")
-            yield Static(f"[dim]{escape(session_name)}[/dim]", id="menu-branch")
+            yield Static(
+                f"[dim]{escape(self.panel.layout_label)} · {escape(session_name)}[/dim]",
+                id="menu-branch",
+            )
             with Horizontal(id="panel-action-layout"):
                 with Vertical(id="panel-action-main"):
                     yield OptionList(
                         Option("[$text]▶[/] [bold]Open[/bold]", id="open"),
-                        Option("[$text]↺[/] [bold]Reconfigure[/bold]", id="reconfigure"),
-                        Option("[$text]✎[/] [bold]Rename[/bold]", id="rename"),
+                        Option("[$text]✎[/] [bold]Edit layout & sessions[/bold]", id="reconfigure"),
+                        Option("[$text]Aa[/] [bold]Rename[/bold]", id="rename"),
                         Option("", disabled=True),
                         Option("[$text-error]✕[/] [bold]Delete[/bold]", id="delete"),
                         id="action-menu",
                     )
-                    yield Static(
-                        "↑↓/jk select    \\[enter] confirm    \\[esc] close",
-                        id="menu-hint",
-                    )
                 with Vertical(id="panel-preview-pane"):
                     yield Static(
-                        _render_grid_preview(
-                            self.panel.rows,
-                            self.panel.cols,
-                            self.panel.layout_key,
-                        ),
+                        panel_map_text(self.panel, live, palette, cell_width=5),
                         id="panel-layout-preview",
                     )
+                    yield Static(
+                        panel_session_lines(self.panel, live, labels, palette),
+                        id="panel-sessions",
+                    )
+            yield Static("↑↓ select    \\[enter] choose    \\[esc] close", id="menu-hint")
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()
@@ -291,17 +318,34 @@ class AgentLoadingScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | None]):
-    """Two-step modal: 1) name + layout, 2) assign sessions with preview."""
+_STEPS = ("Name", "Layout", "Sessions")
+# Repo names beyond this are cut, so every list row stays on one line.
+_REPO_WIDTH = 18
 
-    AUTO_ASSIGN_OPTION_ID = "__auto_assign__"
-    LAYOUT_PREVIEW_PLACEHOLDER = "[dim]Choose a layout to preview[/dim]"
+
+def _fit(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text.ljust(width)
+    return text[: max(width - 1, 0)] + "…"
+
+
+_CREATE_ROW_ID = "__create__"
+_EMPTY_ID = "__empty__"
+
+
+class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | None]):
+    """Build a panel in three steps -- name, layout, sessions -- over a live preview.
+
+    The preview on the right always shows the panel as it will open: every
+    pane numbered, with the session it will show. Editing an existing panel
+    starts on the sessions step with the name fixed.
+    """
 
     BINDINGS = [
         *_MODAL_BINDINGS,
-        ("tab", "focus_next_field", "Tab next"),
-        ("shift+tab", "focus_prev_field", "Tab prev"),
-        ("ctrl+o", "submit", "Create panel"),
+        Binding("ctrl+o", "submit", "Create", show=False),
+        Binding("a", "fill_empty", "Fill empty panes", show=False),
+        Binding("x,delete,backspace", "clear_pane", "Clear pane", show=False),
     ]
 
     CSS = _safe_css(
@@ -310,107 +354,72 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         " }"
         """
     #create-panel-container {
-        width: 108;
+        width: 104;
         height: auto;
+        max-height: 100%;
         border: round $primary;
         background: $panel;
         padding: 1 2;
     }
     #create-panel-title {
         text-align: center;
-        padding: 1 1 0 1;
         color: $text;
     }
-    /* -- Step 1 -- */
-    #step-1 { height: auto; padding: 0; }
-    #panel-name-label {
-        padding: 1 0 0 1;
-        margin: 0 0 1 0;
-        color: $text-muted;
+    #create-panel-steps {
+        text-align: center;
+        padding: 0 0 1 0;
     }
-    #panel-name-input {
+    #create-panel-body {
+        height: auto;
+    }
+    #create-panel-left {
         width: 50;
-        height: 3;
-        margin: 0 0 1 1;
-    }
-    #panel-name-value {
-        padding: 0 0 1 1;
-        color: $text;
-    }
-    #step-1-columns {
         height: auto;
-        padding: 0;
     }
-    #step-1-left {
-        width: 56;
-        height: auto;
-        padding: 0 1 0 0;
-    }
-    #step-1-right {
+    #create-panel-right {
         width: 1fr;
         height: auto;
-        padding: 0 0 0 1;
+        padding: 0 0 0 2;
         align: center top;
     }
-    /* -- Step 2 -- */
-    #step-2 { height: auto; padding: 0; display: none; }
-    #step-2-subtitle {
-        text-align: center;
-        padding: 0 1 1 1;
+    .section-label {
         color: $text-muted;
-    }
-    #step-2-columns { height: auto; padding: 0; }
-    #step-2-left {
-        width: 34;
-        height: auto;
-        padding: 0 1 0 0;
-    }
-    #step-2-right {
-        width: 1fr;
-        height: auto;
         padding: 0 0 0 1;
     }
-    #grid-preview-2 {
-        padding: 0;
-        text-align: center;
-        color: $text-muted;
+    #panel-name-input {
+        width: 100%;
+        margin: 0 0 0 0;
     }
-    #pane-session-placeholder {
-        display: none;
-        height: auto;
-        padding: 1 1 0 0;
+    #panel-name-help {
         color: $text-muted;
-        content-align: center middle;
-    }
-    /* -- Shared -- */
-    .section-label {
-        padding: 0;
-        color: $text-muted;
+        padding: 0 0 0 1;
     }
     #layout-menu,
-    #pane-slot-menu,
-    #pane-session-menu {
-        width: 100%;
+    #pane-menu,
+    #session-menu {
         height: auto;
+        max-height: 16;
         border: none;
         padding: 0;
-        margin: 0;
-    }
-    #layout-menu { max-height: 12; }
-    #pane-slot-menu { max-height: 14; }
-    #pane-session-menu {
-        height: auto;
-        max-height: 14;
+        background: $panel;
     }
     #grid-preview {
-        padding: 0;
+        width: auto;
+        height: auto;
+    }
+    #create-panel-error {
+        color: $error;
         text-align: center;
-        color: $text;
+        padding: 1 0 0 0;
+        display: none;
+    }
+    #create-panel-error.-shown {
+        display: block;
     }
     #create-panel-hint {
         text-align: center;
-        padding: 1 1 0 1;
         color: $text-muted;
+        padding: 1 0 0 0;
     }
     """
     )
@@ -426,142 +435,275 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         super().__init__()
         from ....integrations.tmux import list_all_gd_sessions
 
-        self._step = 1
         self._editing = editing
         self._panel_name = (panel_name or "").strip()
         if self._editing and not self._panel_name:
             raise ValueError("Editing a panel requires a panel name")
         if self._editing and not initial_layout_key:
             raise ValueError("Editing a panel requires a layout key")
-        self._layout_highlight_enabled = False
-        self._selected_layout_key: str | None = initial_layout_key
-        self._selected_pane_index = 1
-        self._current_step2_field = "panes"
-        self._validation_message: str | None = None
+        self._step = 3 if editing else 1
+        self._layout_key = initial_layout_key or DEFAULT_PANEL_LAYOUT_KEY
         self._session_entries = list_all_gd_sessions()
-        self._session_option_ids = ["__clear__"] + [
-            entry["session_name"] for entry in self._session_entries
-        ]
-        self._pane_assignments: dict[int, str | None] = {i: None for i in range(1, 10)}
-        if initial_panes:
-            for pane_index, session_name in initial_panes.items():
-                if 1 <= pane_index <= 9:
-                    self._pane_assignments[pane_index] = session_name or None
-        self._clear_unavailable_assignments()
+        live = {entry["session_name"] for entry in self._session_entries}
+        self._assignments: dict[int, str | None] = {}
+        for pane_index, session_name in (initial_panes or {}).items():
+            # A session that has since closed cannot be shown: its pane starts empty.
+            self._assignments[pane_index] = session_name if session_name in live else None
+        #: The pane whose session is being chosen (None: the pane list is shown).
+        self._picking: int | None = None
+        self._error: str | None = None
 
-    def _clear_unavailable_assignments(self) -> None:
-        available_sessions = set(self._session_option_ids[1:])
-        for pane_index, session_name in self._pane_assignments.items():
-            if session_name and session_name not in available_sessions:
-                self._pane_assignments[pane_index] = None
+    # -- composition --------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         with Vertical(id="create-panel-container"):
-            yield Static(self._step_title_markup(), id="create-panel-title")
-            with Vertical(id="step-1"):
-                if self._editing:
-                    yield Static("[dim]Panel[/dim]", id="panel-name-label")
-                    yield Static(
-                        f"[bold $text]{escape(self._panel_name)}[/]", id="panel-name-value"
+            yield Static(self._title_markup(), id="create-panel-title")
+            yield Static(id="create-panel-steps")
+            with Horizontal(id="create-panel-body"):
+                with Vertical(id="create-panel-left"):
+                    yield Static(id="left-label", classes="section-label")
+                    yield Input(
+                        value=self._panel_name,
+                        placeholder="e.g. agents, review, frontend",
+                        id="panel-name-input",
                     )
-                else:
-                    yield Static("[dim]Name[/dim]", id="panel-name-label")
-                    yield Input(placeholder="panel name...", id="panel-name-input")
-                with Horizontal(id="step-1-columns"):
-                    with Vertical(id="step-1-left"):
-                        yield Static("[dim]Layout[/dim]", classes="section-label")
-                        items = []
-                        for layout in get_create_panel_layouts():
-                            marker = (
-                                "[$text-primary]● [/]"
-                                if layout.key == self._selected_layout_key
-                                else "  "
-                            )
-                            items.append(
-                                Option(
-                                    f"{marker}{layout.menu_display_label}",
-                                    id=f"layout:{layout.key}",
-                                )
-                            )
-                        yield OptionList(*items, id="layout-menu")
-                    with Vertical(id="step-1-right"):
-                        yield Static("[dim]Preview[/dim]", classes="section-label")
-                        yield Static(
-                            self._layout_preview_markup(self._selected_layout_key),
-                            id="grid-preview",
-                        )
-            with Vertical(id="step-2"):
-                yield Static("", id="step-2-subtitle")
-                with Horizontal(id="step-2-columns"):
-                    with Vertical(id="step-2-left"):
-                        yield Static("[dim]Pane slots[/dim]", classes="section-label")
-                        yield OptionList(*self._slot_options(), id="pane-slot-menu")
-                        yield Static(
-                            self._layout_preview_markup(self._selected_layout_key),
-                            id="grid-preview-2",
-                        )
-                    with Vertical(id="step-2-right"):
-                        yield Static(
-                            "[dim]Session for selected pane[/dim]",
-                            id="pane-sessions-label",
-                        )
-                        yield OptionList(*self._session_options(), id="pane-session-menu")
-                        yield Static(
-                            "[dim]Inactive pane[/dim]",
-                            id="pane-session-placeholder",
-                        )
-            yield Static("", id="create-panel-hint")
+                    yield Static(id="panel-name-help")
+                    yield OptionList(*self._layout_options(), id="layout-menu")
+                    yield OptionList(id="pane-menu")
+                    yield OptionList(id="session-menu")
+                with Vertical(id="create-panel-right"):
+                    yield Static("Preview", classes="section-label")
+                    yield Static(id="grid-preview")
+            yield Static(id="create-panel-error")
+            yield Static(id="create-panel-hint")
 
     def on_mount(self) -> None:
-        layout_menu = self.query_one("#layout-menu", OptionList)
-        if self._selected_layout_key:
-            layout_menu.highlighted = next(
-                index
-                for index, layout in enumerate(get_create_panel_layouts())
-                if layout.key == self._selected_layout_key
-            )
-        else:
-            layout_menu.highlighted = None
-        self.query_one("#pane-slot-menu", OptionList).highlighted = 0
-        self._sync_session_menu_highlight()
-        if self._editing:
-            self._show_step(2)
-            slot_menu = self.query_one("#pane-slot-menu", OptionList)
-            slot_menu.highlighted = 1 if self._active_pane_count() > 0 else 0
-            slot_menu.focus()
-        else:
-            self._show_step(1)
-            self.query_one("#panel-name-input", Input).focus()
-        self.call_after_refresh(self._enable_layout_highlight)
+        layouts = get_create_panel_layouts()
+        keys = [layout.key for layout in layouts]
+        menu = self.query_one("#layout-menu", OptionList)
+        menu.highlighted = keys.index(self._layout_key) if self._layout_key in keys else 0
+        self._render_pane_menu(highlight=0)
+        self._show_step(self._step)
 
-    def _enable_layout_highlight(self) -> None:
-        self._layout_highlight_enabled = True
+    # -- rendering ----------------------------------------------------------
 
-    def _current_panel_name(self) -> str:
+    def _title_markup(self) -> str:
         if self._editing:
-            return self._panel_name
-        return self.query_one("#panel-name-input", Input).value.strip()
+            return f"[bold $text]Edit panel[/]  [bold $text-primary]{escape(self._panel_name)}[/]"
+        return "[bold $text]New panel[/]"
 
-    def _step_title_markup(self) -> str:
-        if self._editing:
-            return "[bold $text]Reconfigure Panel[/]"
-        if self._step == 1:
-            return "[bold $text]Create Panel[/]"
-        return "[bold $text]Configure Panes[/]"
+    def _steps_text(self) -> Text:
+        palette = _palette(self.app)
+        text = Text()
+        for index, label in enumerate(_STEPS, start=1):
+            if index > 1:
+                text.append("   ›   ", style=palette.muted)
+            if index < self._step or (self._editing and index == 1):
+                text.append(f"✓ {label}", style=palette.success)
+            elif index == self._step:
+                text.append(f"{index} {label}", style=f"bold {palette.primary}")
+            else:
+                text.append(f"{index} {label}", style=palette.muted)
+        return text
 
-    def _step_1_hint(self) -> str:
-        if self._editing:
-            return "↑↓/jk navigate    \\[enter] next: adjust panes    \\[esc] cancel"
-        return (
-            "↑↓/jk navigate"
-            "    \\[tab] switch fields"
-            "    \\[enter] next: assign sessions"
-            "    \\[esc] cancel"
+    @property
+    def _layout(self):
+        return resolve_panel_layout(self._layout_key)
+
+    def _pane_indexes(self) -> list[int]:
+        return [placement.pane_index for placement in self._layout.placements]
+
+    def _label(self, session_name: str | None) -> tuple[str, str]:
+        if not session_name:
+            return "", ""
+        for entry in self._session_entries:
+            if entry["session_name"] == session_name:
+                sequence = session_name.rsplit("/", 1)[-1]
+                return f"{entry['purpose']}/{sequence}", entry["repo"]
+        return session_name, ""
+
+    def _preview(self) -> Text:
+        palette = _palette(self.app)
+        layout = self._layout
+        cell_width = max(7, min(16, 44 // layout.cols - 1))
+        focused_pane = self._focused_pane() if self._step == 3 else None
+        highlight = self.app.get_css_variables().get("primary-muted", "")
+        labels: dict[int, str] = {}
+        styles: dict[int, str] = {}
+        fills: dict[int, str] = {}
+        for pane in self._pane_indexes():
+            session_name = self._assignments.get(pane) if self._step == 3 else None
+            _purpose, repo = self._label(session_name)
+            labels[pane] = f"{pane} {repo}" if repo else str(pane)
+            if pane == focused_pane:
+                # The pane being filled stands out; the rest step back.
+                styles[pane] = f"bold {palette.primary}"
+                fills[pane] = f"on {highlight}" if highlight else "reverse"
+            elif focused_pane is None and self._step != 3:
+                styles[pane] = "bold"
+            else:
+                styles[pane] = palette.muted
+        return render_panel_layout_text(
+            layout,
+            labels,
+            styles,
+            cell_width=cell_width,
+            cell_height=1,
+            border_style=palette.muted,
+            fills=fills,
         )
 
-    def _step_2_hint(self) -> str:
-        verb = "save and open" if self._editing else "create and open"
-        return f"↑↓/jk navigate    \\[tab] switch lists    \\[ctrl+o] {verb}    \\[esc] back"
+    def _pane_prompt(self, pane: int, repo_width: int) -> Text:
+        palette = _palette(self.app)
+        text = Text(no_wrap=True, overflow="ellipsis")
+        session_name = self._assignments.get(pane)
+        text.append(f" {pane}  ", style=f"bold {palette.primary}")
+        if not session_name:
+            text.append("empty", style=f"italic {palette.muted}")
+            return text
+        purpose, repo = self._label(session_name)
+        text.append(_fit(repo, repo_width), style=palette.yellow)
+        text.append(f"  {purpose}", style="bold")
+        text.truncate(self._row_width(), overflow="ellipsis")
+        return text
+
+    def _row_width(self) -> int:
+        width = self.query_one("#create-panel-left").size.width
+        # Less the list's scrollbar.
+        return max(width - 1, 20) if width else 45
+
+    def _pane_options(self) -> list[Option]:
+        panes = self._pane_indexes()
+        width = min(
+            _REPO_WIDTH,
+            max((len(self._label(self._assignments.get(pane))[1]) for pane in panes), default=0),
+        )
+        options = [Option(self._pane_prompt(pane, width), id=f"pane:{pane}") for pane in panes]
+        verb = "Save and open" if self._editing else "Create and open"
+        options.append(Option("", disabled=True))
+        options.append(Option(f"[bold $text-success] ✓ {verb}[/]", id=_CREATE_ROW_ID))
+        return options
+
+    def _session_options(self, pane: int) -> list[Option]:
+        palette = _palette(self.app)
+        current = self._assignments.get(pane)
+        used = {
+            session_name: other
+            for other, session_name in self._assignments.items()
+            if session_name and other != pane and other in self._pane_indexes()
+        }
+        options = [Option(f"[italic {palette.muted}]   leave empty[/]", id=_EMPTY_ID)]
+        width = min(_REPO_WIDTH, max((len(e["repo"]) for e in self._session_entries), default=0))
+        for entry in self._session_entries:
+            session_name = entry["session_name"]
+            purpose, repo = self._label(session_name)
+            text = Text(no_wrap=True, overflow="ellipsis")
+            text.append(" ● " if session_name == current else "   ", style=palette.primary)
+            text.append(_fit(repo, width), style=palette.yellow)
+            text.append(f"  {purpose}", style="bold")
+            if session_name in used:
+                text.append(f"  pane {used[session_name]}", style=f"italic {palette.muted}")
+            # OptionList wraps long prompts; one line per session reads better.
+            text.truncate(self._row_width(), overflow="ellipsis")
+            options.append(Option(text, id=session_name))
+        if not self._session_entries:
+            options.append(
+                Option(f"[{palette.muted}]   no sessions are running yet[/]", disabled=True)
+            )
+        return options
+
+    @staticmethod
+    def _layout_options() -> list[Option]:
+        return [
+            Option(f" {layout.menu_display_label}", id=f"layout:{layout.key}")
+            for layout in get_create_panel_layouts()
+        ]
+
+    def _hint(self) -> str:
+        if self._step == 1:
+            return "type a name    \\[enter] next    \\[esc] cancel"
+        if self._step == 2:
+            back = "cancel" if self._editing else "back"
+            return f"↑↓ choose    \\[enter] next    \\[esc] {back}"
+        if self._picking is not None:
+            return f"↑↓ choose    \\[enter] put in pane {self._picking}    \\[esc] keep as is"
+        finish = "save" if self._editing else "create"
+        return f"↑↓ pane   \\[enter] choose   a fill empty   x clear   ^o {finish}   \\[esc] back"
+
+    def _refresh_view(self) -> None:
+        self.query_one("#create-panel-steps", Static).update(self._steps_text())
+        self.query_one("#grid-preview", Static).update(self._preview())
+        self.query_one("#create-panel-hint", Static).update(self._hint())
+        error = self.query_one("#create-panel-error", Static)
+        error.update(escape(self._error or ""))
+        error.set_class(bool(self._error), "-shown")
+
+    def _show_step(self, step: int) -> None:
+        self._step = step
+        name_input = self.query_one("#panel-name-input", Input)
+        layout_menu = self.query_one("#layout-menu", OptionList)
+        pane_menu = self.query_one("#pane-menu", OptionList)
+        session_menu = self.query_one("#session-menu", OptionList)
+        help_text = self.query_one("#panel-name-help", Static)
+        label = self.query_one("#left-label", Static)
+        name_input.display = step == 1
+        help_text.display = step == 1
+        # The layout step shows the preview; while naming it would only distract.
+        self.query_one("#create-panel-right").display = step != 1
+        layout_menu.display = step == 2
+        pane_menu.display = step == 3 and self._picking is None
+        session_menu.display = step == 3 and self._picking is not None
+        if step == 1:
+            label.update("Name")
+            help_text.update(self._name_help())
+            name_input.focus()
+        elif step == 2:
+            label.update("Layout")
+            layout_menu.focus()
+        elif self._picking is not None:
+            palette = _palette(self.app)
+            label.update(
+                Text.assemble(
+                    "Choose the session for ",
+                    (f" pane {self._picking} ", f"bold {palette.primary} reverse"),
+                )
+            )
+            session_menu.focus()
+        else:
+            label.update("Panes")
+            pane_menu.focus()
+        self._refresh_view()
+
+    def _name_help(self) -> str:
+        from ....integrations.tmux.core import make_panel_session_name
+
+        name = self.query_one("#panel-name-input", Input).value.strip()
+        if not name:
+            return "Name it after what it is for."
+        return f"Opens as [bold]{escape(make_panel_session_name(name))}[/bold]"
+
+    def _render_pane_menu(self, highlight: int | None = None) -> None:
+        menu = self.query_one("#pane-menu", OptionList)
+        previous = menu.highlighted
+        menu.clear_options()
+        menu.add_options(self._pane_options())
+        if highlight is not None:
+            menu.highlighted = highlight
+        elif previous is not None and previous < menu.option_count:
+            menu.highlighted = previous
+        else:
+            menu.highlighted = 0
+
+    def _focused_pane(self) -> int | None:
+        if self._picking is not None:
+            return self._picking
+        menu = self.query_one("#pane-menu", OptionList)
+        option = menu.highlighted_option
+        if option is None or not (option.id or "").startswith("pane:"):
+            return None
+        return int(option.id.split(":", 1)[1])
+
+    # -- validation ---------------------------------------------------------
 
     @staticmethod
     def validate_new_panel_name(
@@ -589,7 +731,15 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
 
         return None
 
-    def _validate_current_panel_name(self, name: str) -> str | None:
+    def _current_panel_name(self) -> str:
+        if self._editing:
+            return self._panel_name
+        return self.query_one("#panel-name-input", Input).value.strip()
+
+    def _name_problem(self) -> str | None:
+        name = self._current_panel_name()
+        if not name:
+            return "Give the panel a name first"
         if self._editing:
             return None
         panel_store = getattr(self.app, "_panel_store", None)
@@ -597,489 +747,157 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             return None
         return self.validate_new_panel_name(panel_store, name)
 
-    def _hint_markup(self, hint: str) -> str:
-        if not self._validation_message:
-            return hint
-        return f"[$text-error]{escape(self._validation_message)}[/]\n{hint}"
-
-    def _update_hint(self) -> None:
-        hint = self._step_1_hint() if self._step == 1 else self._step_2_hint()
-        self.query_one("#create-panel-hint", Static).update(self._hint_markup(hint))
-
-    def _set_validation_message(self, message: str) -> None:
-        self._validation_message = message
-        self._update_hint()
-
-    def _clear_validation_message(self) -> None:
-        if not self._validation_message:
-            return
-        self._validation_message = None
-        self._update_hint()
-
-    def _show_step(self, step: int) -> None:
-        self._step = step
-        self.query_one("#step-1").display = step == 1
-        self.query_one("#step-2").display = step == 2
-        if step != 1:
-            name = self._current_panel_name() or "unnamed"
-            layout = resolve_panel_layout(self._selected_layout_key)
-            self.query_one("#step-2-subtitle", Static).update(
-                self._step2_subtitle_markup(name, layout.layout_label)
-            )
-            self._update_step2_preview()
-            self._update_slot_markers()
-            self._update_session_markers()
-            self._update_session_visibility()
-        self.query_one("#create-panel-title", Static).update(self._step_title_markup())
-        self._update_hint()
-
-    def _go_to_step_2(self) -> None:
-        name = self._current_panel_name()
-        if not name:
-            if not self._editing:
-                self.query_one("#panel-name-input", Input).focus()
-            return
-        validation_message = self._validate_current_panel_name(name)
-        if validation_message:
-            self._set_validation_message(validation_message)
-            if not self._editing:
-                self.query_one("#panel-name-input", Input).focus()
-            return
-        self._clear_validation_message()
-        if not self._selected_layout_key:
-            self._focus_layout_menu()
-            return
-        self._selected_pane_index = 1
-        self._current_step2_field = "panes"
-        self._show_step(2)
-        slot_menu = self.query_one("#pane-slot-menu", OptionList)
-        slot_menu.highlighted = 1 if self._editing else 0
-        slot_menu.focus()
-
-    def _focus_layout_menu(self) -> None:
-        layout_menu = self.query_one("#layout-menu", OptionList)
-        layout_menu.focus()
-        if not self._selected_layout_key:
-            self._apply_layout(get_create_panel_layouts()[0].key)
-        highlighted = next(
-            index
-            for index, layout in enumerate(get_create_panel_layouts())
-            if layout.key == self._selected_layout_key
-        )
-        layout_menu.highlighted = highlighted
-
-    def _active_pane_count(self) -> int:
-        if not self._selected_layout_key:
-            return 0
-        return resolve_panel_layout(self._selected_layout_key).total_panes
-
-    def _pane_is_active(self, pane_index: int | None = None) -> bool:
-        idx = self._selected_pane_index if pane_index is None else pane_index
-        return idx <= self._active_pane_count()
-
-    def _step2_fields(self) -> list[str]:
-        fields = ["panes"]
-        if self._pane_is_active():
-            fields.append("sessions")
-        return fields
-
-    def _select_pane(self, pane_index: int) -> None:
-        self._selected_pane_index = pane_index
-        self._update_slot_markers()
-        self._update_session_markers()
-        self._sync_session_menu_highlight()
-        self._update_session_visibility()
-
-    @staticmethod
-    def _step2_subtitle_markup(name: str, layout_label: str) -> str:
-        return f'[bold $text]"{escape(name)}"[/]    [dim]{escape(layout_label)}[/dim]'
-
-    @classmethod
-    def _layout_preview_markup(cls, layout_key: str | None) -> str:
-        if not layout_key:
-            return cls.LAYOUT_PREVIEW_PLACEHOLDER
-        layout = resolve_panel_layout(layout_key)
-        return _render_grid_preview(layout.rows, layout.cols, layout.key)
-
-    def _available_session_names(self) -> list[str]:
-        available_sessions: list[str] = []
-        seen: set[str] = set()
-        for entry in self._session_entries:
-            session_name = entry["session_name"]
-            if session_name in seen:
-                continue
-            seen.add(session_name)
-            available_sessions.append(session_name)
-        return available_sessions
-
-    def _auto_assign_panes(self) -> None:
-        active = self._active_pane_count()
-        available_sessions = [
-            session_name
-            for session_name in self._available_session_names()
-            if session_name not in {self._pane_assignments[i] for i in range(1, active + 1)}
-        ]
-        for pane_index in range(1, 10):
-            if pane_index > active:
-                self._pane_assignments[pane_index] = None
-                continue
-            if self._pane_assignments[pane_index] is not None:
-                continue
-            if available_sessions:
-                self._pane_assignments[pane_index] = available_sessions.pop(0)
-            else:
-                self._pane_assignments[pane_index] = None
-        self._selected_pane_index = 1
-        self._current_step2_field = "panes"
-        self._update_slot_markers()
-        self._update_session_markers()
-        self._sync_session_menu_highlight()
-        self._update_session_visibility()
-        slot_menu = self.query_one("#pane-slot-menu", OptionList)
-        slot_menu.highlighted = 1
-        self._focus_step2_field()
-
-    def _session_summary(self, session_name: str | None) -> str:
-        if not session_name:
-            return "[dim]unassigned[/dim]"
-        parts = session_name.split("/")
-        if len(parts) >= 4:
-            return f"[bold]{parts[2]}[/bold] [dim]{parts[1]}[/dim]"
-        return session_name
-
-    def _slot_options(self) -> list[Option]:
-        options: list[Option] = [
-            Option(
-                "[bold]Auto[/bold]  [dim]assign available sessions[/dim]",
-                id=self.AUTO_ASSIGN_OPTION_ID,
-            )
-        ]
-        active = self._active_pane_count()
-        for pane_index in range(1, 10):
-            marker = "[$text-primary]● [/]" if pane_index == self._selected_pane_index else "  "
-            if pane_index <= active:
-                prompt = (
-                    f"{marker}[bold]{pane_index}[/bold]  "
-                    f"{self._session_summary(self._pane_assignments[pane_index])}"
-                )
-            else:
-                prompt = f"{marker}[dim]{pane_index} inactive[/dim]"
-            options.append(Option(prompt, id=f"pane:{pane_index}"))
-        return options
-
-    def _session_options(self) -> list[Option]:
-        current = self._pane_assignments.get(self._selected_pane_index)
-        options = [
-            Option(
-                ("[$text-primary]● [/]" if current is None else "  ") + "[dim]Unassigned[/dim]",
-                id="__clear__",
-            )
-        ]
-        if not self._session_entries:
-            options.append(
-                Option(
-                    "[dim]No active sessions[/dim]",
-                    id="__empty__",
-                    disabled=True,
-                )
-            )
-            return options
-        for entry in self._session_entries:
-            sn = entry["session_name"]
-            marker = "[$text-primary]● [/]" if sn == current else "  "
-            options.append(
-                Option(
-                    f"{marker}[bold]{escape(entry['purpose'])}[/bold] [dim]{escape(entry['repo'])}[/dim]  {escape(sn)}",
-                    id=sn,
-                )
-            )
-        return options
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "panel-name-input":
-            self._go_to_step_2()
+    # -- events ---------------------------------------------------------------
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "panel-name-input":
-            self._clear_validation_message()
+            self._error = None
+            self.query_one("#panel-name-help", Static).update(self._name_help())
+            self._refresh_view()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "panel-name-input":
+            self._advance_from_name()
+
+    def _advance_from_name(self) -> None:
+        self._error = self._name_problem()
+        if self._error:
+            self._refresh_view()
+            return
+        self._show_step(2)
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if event.option_list.id == "layout-menu":
-            if not self._layout_highlight_enabled:
-                return
-            if self.focused is not event.option_list:
-                return
-            self._apply_layout(event.option.id.split(":", 1)[1])
-        elif event.option_list.id == "pane-slot-menu":
-            if event.option.id == self.AUTO_ASSIGN_OPTION_ID:
-                return
-            pane_index = int(event.option.id.split(":", 1)[1])
-            self._select_pane(pane_index)
+        if event.option_list.id == "layout-menu" and event.option.id:
+            self._set_layout(event.option.id.split(":", 1)[1])
+        elif event.option_list.id in ("pane-menu", "session-menu"):
+            self.query_one("#grid-preview", Static).update(self._preview())
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option.id or ""
         if event.option_list.id == "layout-menu":
-            self._apply_layout(event.option.id.split(":", 1)[1])
-            self._go_to_step_2()
+            self._set_layout(option_id.split(":", 1)[1])
+            self._render_pane_menu(highlight=0)
+            self._show_step(3)
+        elif event.option_list.id == "pane-menu":
+            if option_id == _CREATE_ROW_ID:
+                self.action_submit()
+            elif option_id.startswith("pane:"):
+                self._start_picking(int(option_id.split(":", 1)[1]))
+        elif event.option_list.id == "session-menu":
+            self._finish_picking(None if option_id == _EMPTY_ID else option_id)
+
+    def _set_layout(self, layout_key: str) -> None:
+        if layout_key == self._layout_key:
             return
+        # Every assignment is kept: browsing through a smaller layout must not
+        # empty the panes it lacks. Only the chosen layout's panes are used.
+        self._layout_key = layout_key
+        self._refresh_view()
 
-        if event.option_list.id == "pane-slot-menu":
-            if event.option.id == self.AUTO_ASSIGN_OPTION_ID:
-                self._auto_assign_panes()
-                return
-            pane_index = int(event.option.id.split(":", 1)[1])
-            self._select_pane(pane_index)
-            if self._pane_is_active():
-                self._current_step2_field = "sessions"
-                self._focus_step2_field()
+    def _start_picking(self, pane: int) -> None:
+        self._picking = pane
+        menu = self.query_one("#session-menu", OptionList)
+        menu.clear_options()
+        menu.add_options(self._session_options(pane))
+        ids = [option.id for option in menu.options]
+        current = self._assignments.get(pane)
+        menu.highlighted = ids.index(current) if current in ids else (1 if len(ids) > 1 else 0)
+        self._show_step(3)
+
+    def _finish_picking(self, session_name: str | None) -> None:
+        pane = self._picking
+        self._picking = None
+        if pane is None:
             return
+        if session_name:
+            # A session shows in one pane: choosing it again moves it here.
+            for other, assigned in self._assignments.items():
+                if assigned == session_name and other != pane:
+                    self._assignments[other] = None
+        self._assignments[pane] = session_name
+        panes = self._pane_indexes()
+        # On to the next pane, or to "create" after the last one.
+        position = panes.index(pane) + 1 if pane in panes else 0
+        self._render_pane_menu(highlight=position if position < len(panes) else len(panes) + 1)
+        self._show_step(3)
 
-        if event.option_list.id == "pane-session-menu":
-            if self._selected_pane_index > self._active_pane_count():
-                return
-            self._pane_assignments[self._selected_pane_index] = (
-                None if event.option.id == "__clear__" else event.option.id
-            )
-            self._update_slot_markers()
-            self._update_session_markers()
-            self._current_step2_field = "panes"
-            self._focus_step2_field()
+    # -- actions ------------------------------------------------------------
 
-    def _apply_layout(self, layout_key: str | int, cols: int | None = None) -> None:
-        if isinstance(layout_key, int):
-            layout = resolve_panel_layout(rows=layout_key, cols=cols)
-        else:
-            layout = resolve_panel_layout(layout_key)
-        self._selected_layout_key = layout.key
-        active = self._active_pane_count()
-        for pane_index in range(active + 1, 10):
-            self._pane_assignments[pane_index] = None
-        if self._selected_pane_index > active:
-            self._selected_pane_index = active
-        self._update_preview()
-        self._update_layout_markers()
-
-    def _update_preview(self) -> None:
-        self.query_one("#grid-preview", Static).update(
-            self._layout_preview_markup(self._selected_layout_key)
-        )
-
-    def _update_step2_preview(self) -> None:
-        self.query_one("#grid-preview-2", Static).update(
-            self._layout_preview_markup(self._selected_layout_key)
-        )
-
-    def _update_layout_markers(self) -> None:
-        menu = self.query_one("#layout-menu", OptionList)
-        for layout in get_create_panel_layouts():
-            oid = f"layout:{layout.key}"
-            if layout.key == self._selected_layout_key:
-                menu.replace_option_prompt(oid, f"[$text-primary]● [/]{layout.menu_display_label}")
-            else:
-                menu.replace_option_prompt(oid, f"  {layout.menu_display_label}")
-
-    def _update_slot_markers(self) -> None:
-        menu = self.query_one("#pane-slot-menu", OptionList)
-        active = self._active_pane_count()
-        for pane_index in range(1, 10):
-            marker = "[$text-primary]● [/]" if pane_index == self._selected_pane_index else "  "
-            if pane_index <= active:
-                prompt = (
-                    f"{marker}[bold]{pane_index}[/bold]  "
-                    f"{self._session_summary(self._pane_assignments[pane_index])}"
-                )
-            else:
-                prompt = f"{marker}[dim]{pane_index} inactive[/dim]"
-            menu.replace_option_prompt(f"pane:{pane_index}", prompt)
-
-    def _update_session_markers(self) -> None:
-        try:
-            menu = self.query_one("#pane-session-menu", OptionList)
-        except NoMatches:
+    def action_fill_empty(self) -> None:
+        if self._step != 3 or self._picking is not None:
             return
-        current = self._pane_assignments.get(self._selected_pane_index)
-        clear_prompt = (
-            "[$text-primary]● [/]" if current is None else "  "
-        ) + "[dim]Unassigned[/dim]"
-        menu.replace_option_prompt("__clear__", clear_prompt)
-        for entry in self._session_entries:
-            sn = entry["session_name"]
-            marker = "[$text-primary]● [/]" if sn == current else "  "
-            menu.replace_option_prompt(
-                sn,
-                f"{marker}[bold]{escape(entry['purpose'])}[/bold] [dim]{escape(entry['repo'])}[/dim]  {escape(sn)}",
-            )
+        panes = self._pane_indexes()
+        used = {self._assignments.get(pane) for pane in panes}
+        free = [e["session_name"] for e in self._session_entries if e["session_name"] not in used]
+        for pane in panes:
+            if not self._assignments.get(pane) and free:
+                self._assignments[pane] = free.pop(0)
+        self._render_pane_menu()
+        self._refresh_view()
 
-    def _update_session_visibility(self) -> None:
-        is_active = self._pane_is_active()
-        self.query_one("#pane-sessions-label", Static).display = is_active
-        self.query_one("#pane-session-menu", OptionList).display = is_active
-        placeholder = self.query_one("#pane-session-placeholder", Static)
-        placeholder.display = not is_active
-        if not is_active:
-            placeholder.update(
-                "[dim]This pane is inactive for the current layout.[/dim]\n\n"
-                "[dim]Choose one of the highlighted pane slots"
-                " to assign a session.[/dim]"
-            )
-
-    def _sync_session_menu_highlight(self) -> None:
-        current = self._pane_assignments.get(self._selected_pane_index)
-        oid = current if current in self._session_option_ids else "__clear__"
-        self.query_one(
-            "#pane-session-menu", OptionList
-        ).highlighted = self._session_option_ids.index(oid)
-
-    def _commit_highlighted_slot_selection(self) -> None:
-        focused = self.focused
-        slot_menu_focused = focused is not None and focused.id == "pane-slot-menu"
-        if self._current_step2_field != "panes" and not slot_menu_focused:
+    def action_clear_pane(self) -> None:
+        if self._step != 3 or self._picking is not None:
             return
-
-        menu = self.query_one("#pane-slot-menu", OptionList)
-        highlighted = menu.highlighted
-        if highlighted is None:
-            return
-
-        option = menu.get_option_at_index(highlighted)
-        if option.id == self.AUTO_ASSIGN_OPTION_ID:
-            self._auto_assign_panes()
-
-    def _commit_highlighted_session_selection(self) -> None:
-        focused = self.focused
-        session_menu_focused = focused is not None and focused.id == "pane-session-menu"
-        if not self._pane_is_active() or (
-            self._current_step2_field != "sessions" and not session_menu_focused
-        ):
-            return
-
-        menu = self.query_one("#pane-session-menu", OptionList)
-        highlighted = menu.highlighted
-        if highlighted is None:
-            return
-
-        option = menu.get_option_at_index(highlighted)
-        if option.id == "__empty__":
-            return
-
-        self._pane_assignments[self._selected_pane_index] = (
-            None if option.id == "__clear__" else option.id
-        )
-        self._update_slot_markers()
-        self._update_session_markers()
-
-    def _focus_step2_field(self) -> None:
-        field = self._current_step2_field
-        if field == "panes":
-            self.query_one("#pane-slot-menu", OptionList).focus()
-        elif field == "sessions" and self._pane_is_active():
-            self.query_one("#pane-session-menu", OptionList).focus()
-        else:
-            self._current_step2_field = "panes"
-            self.query_one("#pane-slot-menu", OptionList).focus()
-
-    def action_focus_next_field(self) -> None:
-        if self._step == 1:
-            if self._editing:
-                self._focus_layout_menu()
-                return
-            focused = self.focused
-            if focused and focused.id == "panel-name-input":
-                self._focus_layout_menu()
-            else:
-                self.query_one("#panel-name-input", Input).focus()
-        else:
-            fields = self._step2_fields()
-            idx = (
-                fields.index(self._current_step2_field)
-                if self._current_step2_field in fields
-                else -1
-            )
-            self._current_step2_field = fields[(idx + 1) % len(fields)]
-            self._focus_step2_field()
-
-    def action_focus_prev_field(self) -> None:
-        if self._step == 1:
-            if self._editing:
-                self._focus_layout_menu()
-                return
-            self.action_focus_next_field()
-        else:
-            fields = self._step2_fields()
-            idx = (
-                fields.index(self._current_step2_field)
-                if self._current_step2_field in fields
-                else 0
-            )
-            self._current_step2_field = fields[(idx - 1) % len(fields)]
-            self._focus_step2_field()
-
-    def action_go_back(self) -> None:
-        if self._step == 2:
-            self._show_step(1)
-            self._focus_layout_menu()
+        pane = self._focused_pane()
+        if pane is not None:
+            self._assignments[pane] = None
+            self._render_pane_menu()
+            self._refresh_view()
 
     def action_submit(self) -> None:
         if self._step == 1:
-            self._go_to_step_2()
+            self._advance_from_name()
             return
-        self._do_submit()
-
-    def _do_submit(self) -> None:
-        name = self._current_panel_name()
-        if not name:
+        if self._step == 2:
+            self._render_pane_menu(highlight=0)
+            self._show_step(3)
+            return
+        if self._picking is not None:
+            menu = self.query_one("#session-menu", OptionList)
+            option = menu.highlighted_option
+            if option is not None and not option.disabled:
+                self._finish_picking(None if option.id == _EMPTY_ID else option.id)
+        self._error = self._name_problem()
+        if self._error:
             self._show_step(1)
-            if not self._editing:
-                self.query_one("#panel-name-input", Input).focus()
             return
-        layout_key = self._selected_layout_key
-        if not layout_key:
-            self._show_step(1)
-            self.query_one("#layout-menu", OptionList).focus()
+        panes = {pane: self._assignments.get(pane) for pane in self._pane_indexes()}
+        if not any(panes.values()):
+            self._error = "Put a session in at least one pane"
+            self._refresh_view()
             return
-        validation_message = self._validate_current_panel_name(name)
-        if validation_message:
-            self._show_step(1)
-            self._set_validation_message(validation_message)
-            if not self._editing:
-                self.query_one("#panel-name-input", Input).focus()
-            return
-        self._clear_validation_message()
-        self._commit_highlighted_slot_selection()
-        self._commit_highlighted_session_selection()
-        total_panes = self._active_pane_count()
-        panes = {
-            pane_index: self._pane_assignments[pane_index]
-            for pane_index in range(1, total_panes + 1)
-        }
-        self.dismiss((name, layout_key, panes))
+        self.dismiss((self._current_panel_name(), self._layout_key, panes))
 
     def action_cancel(self) -> None:
-        if self._step == 2:
+        self._error = None
+        if self._picking is not None:
+            self._picking = None
+            self._show_step(3)
+        elif self._step == 3:
+            self._show_step(2)
+        elif self._step == 2 and not self._editing:
             self._show_step(1)
-            self._focus_layout_menu()
-            return
-        self.dismiss(None)
+        else:
+            self.dismiss(None)
+
+    def _active_menu(self) -> OptionList | None:
+        focused = self.focused
+        return focused if isinstance(focused, OptionList) else None
 
     def action_cursor_down(self) -> None:
-        if self._step == 1:
-            try:
-                self.query_one("#layout-menu", OptionList).action_cursor_down()
-            except NoMatches:
-                pass
-        else:
-            if self._current_step2_field == "panes":
-                self.query_one("#pane-slot-menu", OptionList).action_cursor_down()
-            elif self._current_step2_field == "sessions":
-                self.query_one("#pane-session-menu", OptionList).action_cursor_down()
+        menu = self._active_menu()
+        if menu is not None:
+            menu.action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        if self._step == 1:
-            try:
-                self.query_one("#layout-menu", OptionList).action_cursor_up()
-            except NoMatches:
-                pass
-        else:
-            if self._current_step2_field == "panes":
-                self.query_one("#pane-slot-menu", OptionList).action_cursor_up()
-            elif self._current_step2_field == "sessions":
-                self.query_one("#pane-session-menu", OptionList).action_cursor_up()
+        menu = self._active_menu()
+        if menu is not None:
+            menu.action_cursor_up()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Typing a name must not trigger single-letter keys.
+        if action in ("fill_empty", "clear_pane", "cursor_down", "cursor_up") and isinstance(
+            self.focused, Input
+        ):
+            return False
+        return super().check_action(action, parameters)
