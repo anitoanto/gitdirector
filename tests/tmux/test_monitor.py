@@ -1,6 +1,7 @@
 """Monitoring and pane-status tests for tmux integration."""
 
 import json
+import os
 import shlex
 import subprocess
 import threading
@@ -19,12 +20,14 @@ from gitdirector.integrations.tmux.core import TmuxError, _tmux_child_environmen
 from gitdirector.integrations.tmux.monitor import (
     _APPROVED_TOOL_MIN_SECS,
     _BELL_GRACE_SECS,
+    _CPU_WINDOW_SECS,
     _PANE_LIST_NAMES,
     _RESIZE_REDRAW_SECS,
     _SILENCE_THRESHOLD_SECS,
     PaneSample,
     ProcessSnapshot,
     _capture_pane_text,
+    _consume_bell,
     _get_process_snapshot,
     _is_cursor_blink,
     _is_interactive_shell,
@@ -281,10 +284,13 @@ class TestCommandQuotingInCleanupScript:
 
 
 class TestMakeAgentReadyMarker:
-    def test_returns_missing_marker_path(self):
+    def test_returns_missing_marker_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GITDIRECTOR_HOME", str(tmp_path))
         marker = _make_agent_ready_marker()
 
-        assert marker.name.startswith("gitdirector-agent-")
+        # Inside GitDirector's own folder, not the system temp directory.
+        assert marker.parent == tmp_path / "cache" / "temp"
+        assert marker.name.startswith("agent-")
         assert marker.suffix == ".ready"
         assert marker.exists() is False
 
@@ -514,6 +520,8 @@ def _pane_line(
     description="",
     window_active="1",
     pane_id=None,
+    bell_mark="",
+    helpers="",
 ) -> str:
     """One ``list-panes`` row, in the monitor's field order."""
     values = {
@@ -531,6 +539,8 @@ def _pane_line(
         "agent_state": agent,
         "agent_waiter": waiter,
         "agent_transcript": transcript,
+        "agent_helpers": helpers,
+        "bell_mark": bell_mark,
         "repo_label": label,
         "description": description,
     }
@@ -684,6 +694,9 @@ class TestParseAgentReport:
     def test_stamped_state(self):
         assert _parse_agent_report("waiting 1700000005") == ("waiting", 1700000005.0)
 
+    def test_an_approval_suffix_keeps_the_stamp(self):
+        assert _parse_agent_report("waiting 1700000005 approval") == ("waiting", 1700000005.0)
+
     def test_unknown_state_is_no_report(self):
         assert _parse_agent_report("bogus 1700000005") == ("", None)
         assert _parse_agent_report("") == ("", None)
@@ -822,6 +835,7 @@ class _FakeTmux:
         self.snapshot = ProcessSnapshot.empty()
         self.content: dict[str, str | None] = {}
         self.captures: list[str] = []
+        self.consumed: list[str] = []
         self.now = 1_700_000_000.0
 
     def install(self, stack):
@@ -839,6 +853,15 @@ class _FakeTmux:
         stack.enter_context(
             patch("gitdirector.integrations.tmux.monitor.time.time", lambda: self.now)
         )
+        stack.enter_context(
+            patch("gitdirector.integrations.tmux.monitor._consume_bell", self._consume_bell)
+        )
+
+    def _consume_bell(self, session_name, now):
+        self.consumed.append(session_name)
+        mark = f"{now:.3f}"
+        self.panes[session_name] = replace(self.panes[session_name], bell=False, bell_mark=mark)
+        return mark
 
     def _capture(self, session_name):
         self.captures.append(session_name)
@@ -857,6 +880,8 @@ class _FakeTmux:
             "agent_state": "",
             "agent_waiter": "",
             "agent_transcript": "",
+            "agent_helpers": "",
+            "bell_mark": "",
             "repo_label": "",
             "description": "",
         }
@@ -987,6 +1012,41 @@ class TestTmuxMonitorRefresh:
                 monitor.start()
                 assert monitor.entries() is None
                 monitor.stop()
+
+    def test_a_restart_forgets_what_was_on_screen_before_the_pause(self):
+        """The console pauses its monitor while a session is attached."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "before"
+            world.run_program("gd/repo/agent/1", "some-agent", cpu=1.0)
+            monitor.refresh()
+            with (
+                patch.object(TmuxMonitor, "start", _REAL_START),
+                patch.object(monitor, "_sync_sessions"),
+            ):
+                monitor.start()
+                monitor.stop()
+            # A minute of work while paused, all of it long over.
+            world.advance(60.0, "gd/repo/agent/1", "after")
+            world.pane("gd/repo/agent/1", activity=int(world.now) - 30)
+            world.run_program("gd/repo/agent/1", "some-agent", cpu=40.0)
+            with (
+                patch.object(TmuxMonitor, "start", _REAL_START),
+                patch.object(monitor, "_sync_sessions"),
+            ):
+                monitor.start()
+                assert monitor.refresh()["gd/repo/agent/1"] == "idle"
+                monitor.stop()
+
+    def test_a_stale_cpu_sample_is_no_baseline(self):
+        activity = _SessionActivity()
+        now = 1_000.0
+        assert not TmuxMonitor._cpu_active(activity, 1.0, now)
+        later = now + 2 * _CPU_WINDOW_SECS + 1
+        assert not TmuxMonitor._cpu_active(activity, 30.0, later)
+        assert TmuxMonitor._cpu_active(activity, 31.0, later + 1)
 
     def test_entries_come_from_the_same_sample(self):
         stack, world = self._world()
@@ -1321,6 +1381,58 @@ class TestTmuxMonitorRefresh:
             world.advance(_BELL_GRACE_SECS, "gd/repo/agent/1", "working again \u2819")
             assert monitor.refresh()["gd/repo/agent/1"] == "running"
 
+    def test_a_bell_is_taken_off_the_session_once(self):
+        """tmux never clears the flag of a session seen only through a view."""
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1")
+            world.content["gd/repo/agent/1"] = "done"
+            world.run_program("gd/repo/agent/1", "some-agent")
+            monitor.refresh()
+            world.pane("gd/repo/agent/1", bell=True)
+            world.advance(1.0)
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+            assert world.consumed == ["gd/repo/agent/1"]
+            assert world.panes["gd/repo/agent/1"].bell is False
+
+            world.advance(_BELL_GRACE_SECS, "gd/repo/agent/1", "working again \u2819")
+            assert monitor.refresh()["gd/repo/agent/1"] == "running"
+            # The next bell rises again.
+            world.pane("gd/repo/agent/1", bell=True, activity=int(world.now))
+            world.advance(1.0)
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+            assert world.consumed == ["gd/repo/agent/1"] * 2
+
+    def test_a_bell_another_monitor_took_still_makes_waiting(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            world.pane("gd/repo/agent/1", activity=int(world.now) - 60)
+            world.content["gd/repo/agent/1"] = "Allow? (y/n)"
+            world.run_program("gd/repo/agent/1", "some-agent")
+            monitor.refresh()
+            world.advance(1.0)
+            world.pane("gd/repo/agent/1", activity=int(world.now) - 61, bell_mark=f"{world.now}")
+            assert monitor.refresh()["gd/repo/agent/1"] == "waiting"
+            assert world.consumed == []
+
+    def test_a_fresh_monitor_reads_a_bell_mark_by_the_output_since(self):
+        stack, world = self._world()
+        with stack:
+            world.pane(
+                "gd/repo/agent/1", activity=int(world.now) - 60, bell_mark=f"{world.now - 30}"
+            )
+            world.content["gd/repo/agent/1"] = "Allow? (y/n)"
+            world.run_program("gd/repo/agent/1", "some-agent")
+            assert TmuxMonitor().refresh()["gd/repo/agent/1"] == "waiting"
+
+            # Output after the mark: the prompt was answered.
+            world.pane(
+                "gd/repo/agent/1", activity=int(world.now) - 10, bell_mark=f"{world.now - 30}"
+            )
+            assert TmuxMonitor().refresh()["gd/repo/agent/1"] == "idle"
+
     def test_a_shell_session_is_never_waiting(self):
         stack, world = self._world()
         with stack:
@@ -1467,6 +1579,15 @@ class TestStartedAToolSince:
         young = _APPROVED_TOOL_MIN_SECS / 2
         assert not _started_a_tool_since(1, self._snapshot(("sh", young)), 100.0, 110.0)
 
+    def test_a_background_task_spawning_processes_does_not_count(self):
+        # A background shell started before the prompt keeps starting jobs.
+        snapshot = _snapshot(
+            children={1: [10], 10: [11], 11: [12]},
+            commands={10: "claude", 11: "zsh", 12: "sleep"},
+            elapsed={10: 600.0, 11: 60.0, 12: 3.0},
+        )
+        assert not _started_a_tool_since(1, snapshot, 100.0, 110.0)
+
 
 class TestResolveAgentStatus:
     def _status(self, **overrides):
@@ -1550,12 +1671,166 @@ class TestAgentRefresh:
         with stack:
             monitor = TmuxMonitor()
             name = "gd/repo/claude-default/1"
-            world.pane(name, agent_state=f"waiting {world.now}")
+            world.pane(name, agent_state=f"waiting {world.now} approval")
             world.run_program(name, "claude", children=[("caffeinate", 30.0)])
             assert monitor.refresh()[name] == "waiting"
             world.advance(5)
             world.run_program(name, "claude", children=[("caffeinate", 35.0), ("zsh", 3.0)])
             assert monitor.refresh()[name] == "running"
+
+    def test_a_question_stays_waiting_while_other_processes_start(self):
+        # Answering fires PostToolUse; a process starting says nothing about it.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"waiting {world.now}")
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "waiting"
+            world.advance(5)
+            world.run_program(name, "claude", children=[("zsh", 3.0)])
+            assert monitor.refresh()[name] == "waiting"
+
+    def _subagent_transcript(self, tmp_path, world, agent, quiet, entries=()):
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text("")
+        subagent = tmp_path / "session" / "subagents" / f"agent-{agent}.jsonl"
+        subagent.parent.mkdir(parents=True, exist_ok=True)
+        subagent.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        os.utime(subagent, (world.now - quiet, world.now - quiet))
+        return str(transcript)
+
+    # Entries as Claude Code 2.1.282 writes them to a subagent's transcript.
+    _TOOL_CALL = {
+        "type": "assistant",
+        "message": {"stop_reason": None, "content": [{"type": "tool_use", "name": "Bash"}]},
+    }
+    _TOOL_RESULT = {"type": "user", "message": {"content": [{"type": "tool_result"}]}}
+    _LAST_WORD = {
+        "type": "assistant",
+        "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Done."}]},
+    }
+    _NOTIFICATION = {
+        "type": "user",
+        "message": {"content": "[SYSTEM NOTIFICATION - NOT USER INPUT]"},
+    }
+
+    def test_an_idle_agent_with_a_working_subagent_is_pending(self, tmp_path):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            transcript = self._subagent_transcript(tmp_path, world, "a1", quiet=60)
+            world.pane(
+                name,
+                agent_state=f"idle {world.now}",
+                agent_helpers="a1",
+                agent_transcript=transcript,
+            )
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "pending"
+            world.pane(name, agent_state=f"idle {world.now}", agent_transcript=transcript)
+            assert monitor.refresh()[name] == "idle"
+
+    def test_opencode_reports_pending_itself(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/opencode/1"
+            world.pane(name, agent_state="pending")
+            world.run_program(name, "opencode")
+            assert monitor.refresh()[name] == "pending"
+
+    def test_running_and_waiting_outrank_pending(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"running {world.now}", agent_helpers="a1")
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "running"
+            world.pane(name, agent_state=f"waiting {world.now}", agent_helpers="a1")
+            assert monitor.refresh()[name] == "waiting"
+
+    def test_a_subagent_quiet_for_long_is_taken_as_gone(self, tmp_path):
+        # A killed subagent never sends its SubagentStop; a working one writes
+        # its transcript at every tool call.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            entries = (self._TOOL_CALL, self._TOOL_RESULT, self._TOOL_CALL)
+            transcript = self._subagent_transcript(tmp_path, world, "a1", 90, entries)
+            world.pane(
+                name,
+                agent_state=f"idle {world.now}",
+                agent_helpers="a1",
+                agent_transcript=transcript,
+            )
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "pending"
+            world.advance(31)
+            assert monitor.refresh()[name] == "idle"
+
+    def test_a_subagent_that_ended_its_turn_is_gone_at_once(self, tmp_path):
+        # Seen live: a hand-back landed, the SubagentStop hook never took
+        # effect, and the session stayed pending. The transcript's last
+        # message says the turn is over.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            entries = (self._TOOL_CALL, self._TOOL_RESULT, self._LAST_WORD)
+            transcript = self._subagent_transcript(tmp_path, world, "a1", 1, entries)
+            pane = dict(agent_state=f"idle {world.now}", agent_helpers="a1")
+            world.pane(name, agent_transcript=transcript, **pane)
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "idle"
+            # A notification appended after the end changes nothing.
+            entries += (self._NOTIFICATION,)
+            self._subagent_transcript(tmp_path, world, "a1", 0, entries)
+            world.advance(1)
+            assert monitor.refresh()[name] == "idle"
+            # Sent a new message, the subagent works again.
+            entries += (self._TOOL_CALL,)
+            self._subagent_transcript(tmp_path, world, "a1", 0, entries)
+            world.advance(1)
+            assert monitor.refresh()[name] == "pending"
+
+    def test_one_working_subagent_among_finished_ones_keeps_it_pending(self, tmp_path):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            self._subagent_transcript(tmp_path, world, "a1", 1, (self._LAST_WORD,))
+            transcript = self._subagent_transcript(tmp_path, world, "a2", 1, (self._TOOL_CALL,))
+            world.pane(
+                name,
+                agent_state=f"idle {world.now}",
+                agent_helpers="a1 a2 a3",
+                agent_transcript=transcript,
+            )
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "pending"
+
+    def test_a_listed_subagent_without_a_transcript_is_gone(self, tmp_path):
+        # The list comes from best-effort hooks; nothing to wait for is idle,
+        # never pending for good.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            transcript = str(tmp_path / "session.jsonl")
+            world.pane(
+                name,
+                agent_state=f"idle {world.now}",
+                agent_helpers="a1",
+                agent_transcript=transcript,
+            )
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "idle"
+            world.pane(name, agent_state=f"idle {world.now}", agent_helpers="a1")
+            assert monitor.refresh()[name] == "idle"
 
     def test_a_background_subagent_asking_makes_it_wait(self):
         stack, world = self._world()
@@ -1607,6 +1882,30 @@ class TestSyncLoop:
             monitor._sync_sessions(stop_event)
 
         assert len(calls) == 2
+
+
+class TestConsumeBell:
+    @patch("gitdirector.integrations.tmux.monitor._run_tmux")
+    def test_clears_alerts_and_leaves_a_mark_without_killing(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
+        assert _consume_bell("gd/repo/agent/1", 1234.5) == "1234.500"
+        assert mock_run.call_args.args[0] == [
+            "set-option",
+            "-t",
+            "=gd/repo/agent/1:",
+            "@gd_bell_at",
+            "1234.500",
+            ";",
+            "kill-session",
+            "-C",
+            "-t",
+            "=gd/repo/agent/1",
+        ]
+
+    @patch("gitdirector.integrations.tmux.monitor._run_tmux")
+    def test_failure_leaves_no_mark(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess([], 1, "", "no session")
+        assert _consume_bell("gd/repo/agent/1", 1234.5) is None
 
 
 class TestCapturePaneText:

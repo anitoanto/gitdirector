@@ -35,7 +35,9 @@ class TestAttachClientEnv:
     def test_the_client_keeps_the_screen_it_is_given(self, monkeypatch, tmp_path):
         env = self._build(monkeypatch, tmp_path)
         assert env["TERM"] == "xterm-256color-gdscreen"
-        assert env["TERMINFO_DIRS"].startswith(str(tmp_path / ".gitdirector" / "terminfo"))
+        assert env["TERMINFO_DIRS"].startswith(
+            str(tmp_path / ".gitdirector" / "cache" / "terminfo")
+        )
         assert self._capability(env, "smcup").returncode != 0
         assert self._capability(env, "rmcup").returncode != 0
         # Everything else comes from the terminal's own entry.

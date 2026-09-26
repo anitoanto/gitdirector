@@ -1,5 +1,6 @@
 """Tests for TUI helper functions, constants, and the table palette."""
 
+import pytest
 from textual.app import App
 from textual.color import Color
 from textual.theme import BUILTIN_THEMES
@@ -10,7 +11,7 @@ from gitdirector.commands.tui import (
     resolve_table_palette,
 )
 from gitdirector.commands.tui.constants import _CURSOR_TINT
-from gitdirector.ui_theme import contrast_ratio, readable_on
+from gitdirector.ui_theme import contrast_ratio, readable_on, resolve_panel_theme
 
 PALETTE = TablePalette(success="#00aa00", yellow="#ffaa00", muted="#888888", primary="#6699ff")
 
@@ -20,6 +21,7 @@ class TestTablePaletteLabels:
         assert PALETTE.session_status("waiting") == ("● waiting", "bold #ffaa00")
         assert PALETTE.session_status("running") == ("● running", "#00aa00")
         assert PALETTE.session_status("idle") == ("○ idle", "#888888")
+        assert PALETTE.session_status("pending") == ("◐ pending", PALETTE.pending)
         assert PALETTE.session_status("anything-else") == ("● running", "#00aa00")
 
     def test_panel_status_labels(self):
@@ -56,6 +58,14 @@ class TestReadableOn:
         result = readable_on(Color(78, 190, 99), surface, highlight)
         assert contrast_ratio(result, surface) >= 4.5
         assert contrast_ratio(result, highlight) >= 4.5
+
+
+class TestResolvePanelTheme:
+    @pytest.mark.parametrize("name", ["ansi-dark", "ansi-light"])
+    def test_ansi_default_colours_fall_back_to_distinct_rgb(self, name):
+        theme = resolve_panel_theme(name)
+        assert (theme.background, theme.foreground) != ("#000000", "#000000")
+        assert theme.foreground != theme.background
 
 
 class TestResolveTablePalette:
@@ -122,3 +132,20 @@ class TestSortConstants:
             "Last commit",
             "Sessions",
         ]
+
+
+def test_pending_shares_the_running_green():
+    from gitdirector.commands.tui.constants import _SESSION_STATUS_ORDER, resolve_table_palette
+
+    palette = resolve_table_palette(
+        {"surface": "#1e1e2e", "primary": "#89b4fa", "foreground": "#cdd6f4"}
+    )
+    assert palette.pending == palette.success
+    assert PALETTE.pending == PALETTE.success
+    # Busy first: waiting, running, pending, idle.
+    assert sorted(_SESSION_STATUS_ORDER, key=_SESSION_STATUS_ORDER.get) == [
+        "waiting",
+        "running",
+        "pending",
+        "idle",
+    ]

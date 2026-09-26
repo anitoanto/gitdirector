@@ -23,7 +23,7 @@ from gitdirector.commands.tui.app import RefreshFooter, _run_console
 from gitdirector.commands.tui.app_groups import RepoGroup
 from gitdirector.commands.tui.constants import _REPO_CACHE_TTL_SECS
 from gitdirector.info import FileTypeInfo, RepoInfoResult
-from gitdirector.integrations.tmux.core import _repo_session_name_segment
+from gitdirector.integrations.tmux.core import TmuxError, _repo_session_name_segment
 from gitdirector.repo import Repository, RepoStatus
 from gitdirector.storage import load_yaml_mapping
 
@@ -1859,13 +1859,14 @@ class TestGitDirectorConsoleDirectBranches:
         app._sync_session_status_tracking = MagicMock()
         app._reload_config_if_changed = MagicMock(return_value=False)
         app._repo_cache_expired = MagicMock(return_value=True)
+        app._apply_filter_and_sort = MagicMock()
         app._refresh_repos = MagicMock()
         event = MagicMock()
         event.pane.id = "repos"
 
         app.on_tabbed_content_tab_activated(event)
 
-        app._refresh_repos.assert_called_once_with()
+        app._refresh_repos.assert_called_once_with(config_changed=False)
 
     def test_repo_tab_activation_refreshes_when_config_changed(self):
         app = GitDirectorConsole()
@@ -1873,13 +1874,26 @@ class TestGitDirectorConsoleDirectBranches:
         app._sync_session_status_tracking = MagicMock()
         app._reload_config_if_changed = MagicMock(return_value=True)
         app._repo_cache_expired = MagicMock(return_value=False)
+        app._apply_filter_and_sort = MagicMock()
         app._refresh_repos = MagicMock()
         event = MagicMock()
         event.pane.id = "repos"
 
         app.on_tabbed_content_tab_activated(event)
 
-        app._refresh_repos.assert_called_once_with()
+        # The change flag is one-shot, so it has to be handed on.
+        app._refresh_repos.assert_called_once_with(config_changed=True)
+
+    def test_config_change_seen_by_the_caller_queues_a_rerun_of_a_running_refresh(self):
+        app = GitDirectorConsole()
+        app._reload_config_if_changed = MagicMock(return_value=False)
+        app._load_repos = MagicMock()
+        app._repos_refreshing = True
+
+        app._refresh_repos(config_changed=True)
+
+        assert app._repos_refresh_pending is True
+        app._load_repos.assert_not_called()
 
     @patch("gitdirector.commands.tui.app.GitDirectorConsole")
     def test_run_console_shuts_down_background_work_when_run_raises(self, mock_console_cls):
@@ -1980,6 +1994,46 @@ class TestTUIEdgeCases:
             assert app._sessions_entries == []
             assert app._sessions_loaded is False
             assert app._refresh_operations == 0
+
+    @patch(
+        "gitdirector.integrations.tmux.list_all_gd_sessions",
+        side_effect=TmuxError("No such file or directory: 'tmux'"),
+    )
+    @patch(
+        "gitdirector.integrations.tmux.sync_panel_tmux_config",
+        side_effect=TmuxError("No such file or directory: 'tmux'"),
+    )
+    async def test_console_runs_without_tmux_installed(self, mock_sync, _mock_sessions):
+        repos = [_make_info("alpha", Path("/tmp/alpha"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            mock_sync.assert_called()
+            assert app.query_one("#repo-table", DataTable).row_count == 1
+
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # Not left blank under the Repos tab's status line.
+            assert app.query_one("#no-sessions-message", Static).display
+            assert "No active sessions" in str(app.query_one("#status-bar", Static).content)
+            assert app._sessions_loaded is False
+
+    @patch(
+        "gitdirector.commands.tui.app.version_check.get_update_status",
+        side_effect=RuntimeError("boom"),
+    )
+    async def test_update_check_failure_does_not_exit_the_console(self, mock_status):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            mock_status.assert_called_once_with()
+            assert app.is_running
+            assert app._update_notice is None
 
     def test_sort_key_func_all_columns(self):
         app = GitDirectorConsole()

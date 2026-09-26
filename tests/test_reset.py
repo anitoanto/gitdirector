@@ -101,7 +101,7 @@ class TestResetCommand:
 
         assert result.exit_code == 0, result.output
         mock_kill.assert_called_once_with()
-        mock_wipe.assert_called_once_with(isolated_home)
+        mock_wipe.assert_called_once_with()
         mock_recreate.assert_called_once_with()
         for name in killed_sessions:
             assert name in result.output
@@ -122,7 +122,7 @@ class TestResetCommand:
         assert result.exit_code == 0, result.output
         assert "No sessions to kill" in result.output
         assert "Reset " in result.output
-        mock_wipe.assert_called_once_with(isolated_home)
+        mock_wipe.assert_called_once_with()
 
     def test_reset_cancelled_keeps_state(self, runner, isolated_home):
         """Declining the confirmation prompt cancels the reset entirely."""
@@ -190,7 +190,7 @@ class TestResetCommand:
 
         assert result.exit_code == 0, result.output
         assert "Reset " in result.output
-        mock_wipe.assert_called_once_with(isolated_home)
+        mock_wipe.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -242,34 +242,53 @@ class TestKillAllSessionsHelper:
 
 
 class TestWipeConfigDirHelper:
-    def test_removes_existing_directory(self, tmp_path):
+    def test_removes_existing_directory(self, tmp_path, monkeypatch):
         from gitdirector.commands.reset import _wipe_config_dir
 
+        target = tmp_path / ".gitdirector"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _seed_config_dir(target)
+        (target / "cache").mkdir()
+        (target / "cache" / "repos.yaml").write_text("{}\n")
+        (target / "state").mkdir()
+        (target / "state" / "config.lock").write_text("")
+
+        _wipe_config_dir()
+        assert not target.exists()
+
+    def test_noop_when_missing(self, tmp_path, monkeypatch):
+        from gitdirector.commands.reset import _wipe_config_dir
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        target = tmp_path / ".gitdirector"
+
+        _wipe_config_dir()
+        assert not target.exists()
+
+    def test_an_overridden_folder_keeps_what_is_not_gitdirectors(self, tmp_path, monkeypatch):
+        from gitdirector.commands.reset import _wipe_config_dir
+
+        target = tmp_path / "shared"
+        monkeypatch.setenv("GITDIRECTOR_HOME", str(target))
+        _seed_config_dir(target)
+        (target / "notes.txt").write_text("mine\n")
+
+        _wipe_config_dir()
+        # Old-layout names never lived in an overridden folder: not ours either.
+        assert sorted(p.name for p in target.iterdir()) == [
+            "config.lock",
+            "notes.txt",
+            "tmux_design.conf",
+        ]
+
+    def test_raises_runtime_error_on_failure(self, tmp_path, monkeypatch):
+        from gitdirector.commands.reset import _wipe_config_dir
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
         target = tmp_path / ".gitdirector"
         _seed_config_dir(target)
-        assert target.exists()
+        (target / "cache").mkdir()
 
-        _wipe_config_dir(target)
-        assert not target.exists()
-
-    def test_noop_when_missing(self, tmp_path):
-        from gitdirector.commands.reset import _wipe_config_dir
-
-        target = tmp_path / ".gitdirector"
-        assert not target.exists()
-
-        _wipe_config_dir(target)
-        assert not target.exists()
-
-    def test_raises_runtime_error_on_failure(self, tmp_path):
-        from gitdirector.commands.reset import _wipe_config_dir
-
-        target = tmp_path / ".gitdirector"
-        _seed_config_dir(target)
-
-        with patch(
-            "gitdirector.commands.reset.shutil.rmtree",
-            side_effect=OSError("denied"),
-        ):
+        with patch("gitdirector.paths.shutil.rmtree", side_effect=OSError("denied")):
             with pytest.raises(RuntimeError, match="denied"):
-                _wipe_config_dir(target)
+                _wipe_config_dir()

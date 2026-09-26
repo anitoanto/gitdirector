@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import Config
-from .repo import Repository, RepositoryInfo, RepoStatus, is_git_repository
+from .repo import (
+    MISSING_REPOSITORY_MESSAGE,
+    Repository,
+    RepositoryInfo,
+    RepoStatus,
+    is_git_repository,
+)
 from .storage import normalize_repository_path
 
 if TYPE_CHECKING:
@@ -77,22 +83,24 @@ class RepositoryManager:
         treated as a filesystem path rather than a name.
         """
         candidate = Path(target).expanduser()
-        path_like = (
+        explicit_path = (
             "/" in target
             or "\\" in target
             or target in (".", "..")
             or candidate.is_absolute()
             or target.startswith("~")
-            or candidate.exists()
         )
 
-        if not names_only and path_like:
+        if not names_only and (explicit_path or candidate.exists()):
             path = normalize_repository_path(candidate)
             if allow_untracked_git_path and is_git_repository(path):
                 return path, [], True
             if self.config.has_repository(path):
                 return path, [], True
-            return None, [], True
+            if explicit_path:
+                return None, [], True
+            # A bare name that happens to match something in the cwd may
+            # still name a tracked repository.
 
         target_lower = target.lower()
         matches = [
@@ -165,14 +173,14 @@ class RepositoryManager:
             gitignore = _load_gitignore(current_path)
             if gitignore is not None:
                 ignore_specs[current_path] = gitignore
+            # Checked before filtering: a ".*" ignore rule would hide .git itself.
+            is_repo = ".git" in dirs or ".git" in files
             dirs[:] = [
                 directory
                 for directory in dirs
-                if not _is_ignored(current_path / directory, ignore_specs)
+                if directory != ".git" and not _is_ignored(current_path / directory, ignore_specs)
             ]
-            if ".git" in dirs:
-                dirs.remove(".git")
-            elif ".git" not in files:
+            if not is_repo:
                 continue
             repo_path = normalize_repository_path(current_path)
             if self.config.has_repository(repo_path):
@@ -247,5 +255,5 @@ class RepositoryManager:
             path.name,
             RepoStatus.UNKNOWN,
             None,
-            "Repository path not found or invalid",
+            MISSING_REPOSITORY_MESSAGE,
         )

@@ -27,7 +27,8 @@ def _list_panels(store) -> None:
     if not store.panels:
         console.print("No panels yet. Create one in the console: gitdirector console, tab 3")
         return
-    live = set(_list_sessions())
+    with tmux_errors("Couldn't list panels"):
+        live = set(_list_sessions())
     rows = []
     for panel in sorted(store.panels, key=lambda p: p.name.lower()):
         sessions = [name for name in panel.panes.values() if name]

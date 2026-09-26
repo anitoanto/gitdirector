@@ -9,10 +9,23 @@ exits 0, so a reporting problem can never disturb the agent.
 
 Everything lives in pane options, which go away with the pane:
 
-* ``@gitdirector_agent_state``: the main thread's ``<status> <epoch>``.
+* ``@gitdirector_agent_state``: the main thread's ``<status> <epoch>``, with
+  a trailing ``approval`` while a tool waits for permission.
 * ``@gitdirector_agent_waiter``: ``<agent id> <epoch>`` of the subagent
-  blocked on the user, if any. Subagent events run alongside the main
-  thread, often after its turn is over, so this is all they report.
+  blocked on the user, if any, with the same ``approval`` suffix. Subagent
+  events run alongside the main thread, often after its turn is over, so
+  this is all they report.
+
+Approving a tool fires no hook until the tool finishes, so the monitor
+infers it from the tool's process; ``approval`` tells it to. Answering a
+question (``AskUserQuestion``, ``ExitPlanMode``, an MCP elicitation) fires
+``PostToolUse`` or ``ElicitationResult`` at once and needs no guessing.
+* ``@gitdirector_agent_helpers``: `` <id> <id>`` of the subagents still
+  working, so a main thread at its prompt reads as pending. A subagent is
+  listed from its first tool call (no hook marks its start) until its
+  hand-back or its ``SubagentStop``; Claude Code's own helper stops without
+  ever starting. Hooks are best-effort, so the monitor checks the listed
+  subagents' transcripts before it trusts the list.
 * ``@gitdirector_agent_transcript``: the transcript, where the monitor sees
   an interrupt, the one transition no hook reports.
 
@@ -30,6 +43,7 @@ import time
 
 STATE_OPTION = "@gitdirector_agent_state"
 WAITER_OPTION = "@gitdirector_agent_waiter"
+HELPERS_OPTION = "@gitdirector_agent_helpers"
 TRANSCRIPT_OPTION = "@gitdirector_agent_transcript"
 
 _RUNNING = "running"
@@ -56,6 +70,19 @@ _ASKS = frozenset({"PermissionRequest", "Elicitation"})
 _ANSWERS = frozenset({"PostToolUse", "PostToolUseFailure", "PermissionDenied", "ElicitationResult"})
 # A new prompt means nothing is left waiting on the user.
 _FRESH = frozenset({"SessionStart", "UserPromptSubmit"})
+# Tools whose permission prompt is a question to the user, not an approval.
+_QUESTION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
+# A subagent's final tool call: it delivers the report and then stops.
+_HANDBACK_TOOL = "SubagentHandback"
+APPROVAL = "approval"
+
+
+def _stamp(payload: dict, event: str, now: float) -> str:
+    """``<epoch>``, plus ``approval`` when *event* asks to approve a tool."""
+    stamp = f"{now:.3f}"
+    if event == "PermissionRequest" and payload.get("tool_name") not in _QUESTION_TOOLS:
+        stamp += f" {APPROVAL}"
+    return stamp
 
 
 def main_status(event: str, payload: dict) -> str | None:
@@ -66,33 +93,68 @@ def main_status(event: str, payload: dict) -> str | None:
     return _MAIN_STATUS.get(event)
 
 
+def _helper_commands(event: str, payload: dict, agent: str, pane: str) -> list[list[str]]:
+    """Keep *agent* in the helpers list while it works, decided inside tmux."""
+    remove = [
+        "set-option",
+        "-p",
+        "-F",
+        "-t",
+        pane,
+        HELPERS_OPTION,
+        f"#{{s/ {agent}//:{HELPERS_OPTION}}}",
+    ]
+    if event == "SubagentStop":
+        waiter = f"#{{m:{agent} *,#{{{WAITER_OPTION}}}}}"
+        return [
+            remove,
+            # A subagent stopped while it asked is no longer asking.
+            ["if-shell", "-F", "-t", pane, waiter, f"set-option -p -u -t {pane} {WAITER_OPTION}"],
+        ]
+    # The hand-back is a subagent's last tool call: its result is in, whether
+    # or not the SubagentStop that follows gets through.
+    if event == "PostToolUse" and payload.get("tool_name") == _HANDBACK_TOOL:
+        return [remove]
+    # PreToolUse only: Claude waits for it, so it lands before the SubagentStop.
+    if event == "PreToolUse" and payload.get("agent_type"):
+        listed = f"#{{m:* {agent} *, #{{{HELPERS_OPTION}}} }}"
+        add = f"set-option -p -a -t {pane} {HELPERS_OPTION} ' {agent}'"
+        return [["if-shell", "-F", "-t", pane, listed, "", add]]
+    return []
+
+
 def tmux_commands(payload: dict, pane: str, now: float) -> list[list[str]]:
     """The tmux commands that record *payload*'s event on *pane*."""
     event = payload.get("hook_event_name") or ""
     if event == "SessionEnd":
         return [
             ["set-option", "-p", "-u", "-t", pane, option]
-            for option in (STATE_OPTION, WAITER_OPTION, TRANSCRIPT_OPTION)
+            for option in (STATE_OPTION, WAITER_OPTION, HELPERS_OPTION, TRANSCRIPT_OPTION)
         ]
     agent = payload.get("agent_id")
     if agent:
         agent = str(agent)
         if not agent.replace("-", "").isalnum():
             return []
+        commands = _helper_commands(event, payload, agent, pane)
         if event in _ASKS:
-            return [["set-option", "-p", "-t", pane, WAITER_OPTION, f"{agent} {now:.3f}"]]
-        if event in _ANSWERS:
+            waiter = f"{agent} {_stamp(payload, event, now)}"
+            commands.append(["set-option", "-p", "-t", pane, WAITER_OPTION, waiter])
+        elif event in _ANSWERS:
             # Only the subagent that asked can clear it, decided inside tmux.
             waiter = f"#{{m:{agent} *,#{{{WAITER_OPTION}}}}}"
             clear = f"set-option -p -u -t {pane} {WAITER_OPTION}"
-            return [["if-shell", "-F", "-t", pane, waiter, clear]]
-        return []
+            commands.append(["if-shell", "-F", "-t", pane, waiter, clear])
+        return commands
     status = main_status(event, payload)
     if status is None:
         return []
-    commands = [["set-option", "-p", "-t", pane, STATE_OPTION, f"{status} {now:.3f}"]]
+    state = f"{status} {_stamp(payload, event, now)}"
+    commands = [["set-option", "-p", "-t", pane, STATE_OPTION, state]]
     if event in _FRESH:
         commands.append(["set-option", "-p", "-u", "-t", pane, WAITER_OPTION])
+    if event == "SessionStart":
+        commands.append(["set-option", "-p", "-u", "-t", pane, HELPERS_OPTION])
     transcript = payload.get("transcript_path")
     if isinstance(transcript, str) and transcript:
         commands.append(["set-option", "-p", "-t", pane, TRANSCRIPT_OPTION, transcript])

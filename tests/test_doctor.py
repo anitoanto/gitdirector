@@ -25,6 +25,7 @@ def doctor_env(config, monkeypatch):
     home = config.config_dir.parent
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.delenv("ZDOTDIR", raising=False)
     monkeypatch.setattr(doctor_module, "_tool_version", lambda _path: "tmux 3.7c")
     return home
 
@@ -70,7 +71,7 @@ def test_doctor_fails_without_git_or_tmux(doctor_env, monkeypatch):
 
     assert result.exit_code == 1, result.output
     assert "✗  git          not installed" in result.output
-    assert "fix: Install tmux 3.2a or newer." in result.output
+    assert "fix: Install tmux 3.7 or newer." in result.output
     assert 'fix: Add to ~/.zshrc: eval "$(gitdirector completion zsh)"' in result.output
     assert "none installed" in result.output
     assert result.output.splitlines()[-1] == "2 checks failed · 2 warnings"
@@ -78,12 +79,12 @@ def test_doctor_fails_without_git_or_tmux(doctor_env, monkeypatch):
 
 def test_doctor_fails_on_old_tmux(doctor_env, monkeypatch):
     _tools(monkeypatch, git="/usr/bin/git", tmux="/usr/bin/tmux")
-    monkeypatch.setattr(doctor_module, "_tool_version", lambda _path: "tmux 3.1c")
+    monkeypatch.setattr(doctor_module, "_tool_version", lambda _path: "tmux 3.6b")
 
     result = _doctor()
 
     assert result.exit_code == 1, result.output
-    assert "tmux 3.1c is too old" in result.output
+    assert "tmux 3.6b is too old" in result.output
 
 
 @pytest.mark.parametrize(
@@ -110,6 +111,37 @@ def test_doctor_fails_when_config_is_not_writable(doctor_env, monkeypatch):
     assert result.exit_code == 1, result.output
     assert "~/.gitdirector is not writable" in result.output
     assert "permission denied" in result.output
+
+
+def test_config_writable_reports_permission_error(config, monkeypatch):
+    def deny(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(doctor_module.tempfile, "mkstemp", deny)
+
+    ok, detail = doctor_module._config_writable(config)
+
+    assert ok is False
+    assert "denied" in detail
+
+
+def test_zsh_completion_is_read_from_zdotdir(doctor_env, monkeypatch):
+    zdotdir = doctor_env / ".config/zsh"
+    zdotdir.mkdir(parents=True)
+    monkeypatch.setenv("ZDOTDIR", str(zdotdir))
+    (doctor_env / ".zshrc").write_text('eval "$(gitdirector completion zsh)"\n')
+
+    assert doctor_module._completion_installed("zsh", doctor_env)[0] is False
+    _tools(monkeypatch, git="/usr/bin/git", tmux="/usr/bin/tmux")
+    assert 'fix: Add to ~/.config/zsh/.zshrc: eval "$(gitdirector completion zsh)"' in (
+        _doctor().output
+    )
+
+    (zdotdir / ".zshrc").write_text('eval "$(gitdirector completion zsh)"\n')
+    assert doctor_module._completion_installed("zsh", doctor_env) == (
+        True,
+        "set up in ~/.config/zsh/.zshrc",
+    )
 
 
 def test_doctor_reports_corrupted_gitdirector_file(doctor_env, config, monkeypatch):

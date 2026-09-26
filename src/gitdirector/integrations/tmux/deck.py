@@ -32,6 +32,7 @@ from ...launch_context import neutral_directory
 from ...ui_theme import resolve_panel_theme, textual_surface
 from .core import (
     _FIRST_WINDOW,
+    TMUX_CLIENT_FEATURES,
     TmuxError,
     _chain_tmux_commands,
     _is_deck_session,
@@ -48,7 +49,7 @@ from .core import (
     guard_session_window,
     kill_tmux_session,
     respawn_pane,
-    sync_panel_tmux_config,
+    try_sync_panel_tmux_config,
     view_attach_command,
 )
 
@@ -96,6 +97,8 @@ _RESIZE_SIDEBAR_HOOK = f'if-shell -F "{_SIDEBAR_EXISTS}" "run-shell -C \'{_RESIZ
 
 _IN_DECK = f"#{{m:{DECK_PREFIX}*,#{{session_name}}}}"
 _DECK_BINDING_MARKER = f"m:{DECK_PREFIX}*"
+_IN_PANEL = "#{m:gd/panel/*,#{session_name}}"
+_PANEL_BINDING_MARKER = "m:gd/panel/*"
 _SIDEBAR_CLOSED_MESSAGE = "display-message 'sidebar closed: prefix Tab brings it back'"
 _LIST_KEYS_LINE = re.compile(
     r"^bind-key\s+(?P<repeat>-r\s+)?-T\s+(?P<table>\S+)\s+(?P<key>\S+)\s+(?P<command>.*)$"
@@ -103,6 +106,7 @@ _LIST_KEYS_LINE = re.compile(
 # Any GitDirector session: a deck's shown session is a gd/view/ one.
 _IN_GITDIRECTOR = "#{m:gd/*,#{session_name}}"
 _GITDIRECTOR_BINDING_MARKER = "m:gd/*"
+_OWN_BINDING_MARKERS = (_DECK_BINDING_MARKER, _PANEL_BINDING_MARKER, _GITDIRECTOR_BINDING_MARKER)
 
 
 def sidebar_width(window_width: int, collapsed: bool) -> int:
@@ -403,7 +407,7 @@ def create_deck(session_name: str, *, return_to: str | None = None) -> str:
         )
         if return_to:
             _run_tmux(["set-option", "-t", target, DECK_RETURN_OPTION, return_to], check=True)
-        sync_panel_tmux_config()
+        try_sync_panel_tmux_config()
         ensure_deck_bindings()
     except BaseException:
         kill_tmux_session(deck)
@@ -579,32 +583,36 @@ def reap_stale_decks() -> list[str]:
     return reaped
 
 
-def _deck_key_commands() -> dict[str, str]:
-    """What each wrapped prefix key does inside a deck."""
-
-    def to_sidebar(key: str) -> str:
-        return (
-            f'run-shell -C "#{{?{_SIDEBAR_EXISTS},send-keys -t {_SIDEBAR} {key},'
-            f'{_SIDEBAR_CLOSED_MESSAGE}}}"'
-        )
-
+def _deck_key_commands() -> dict[str, tuple[str, str]]:
+    """Where each wrapped prefix key is GitDirector's, and what it does there."""
     toggle_focus = (
         f"#{{?#{{==:#{{pane_id}},{_SIDEBAR}}},select-pane -t {_MAIN},select-pane -t {_SIDEBAR}}}"
     )
+    to_sidebar = f"#{{?{_SIDEBAR_EXISTS},send-keys -t {_SIDEBAR} b,{_SIDEBAR_CLOSED_MESSAGE}}}"
     return {
         # Unbound by default in tmux.
         "Tab": (
+            _IN_DECK,
             f'run-shell -C "#{{?{_SIDEBAR_EXISTS},{toggle_focus},'
-            f'#{{{DECK_RESPAWN_SIDEBAR_OPTION}}}}}"'
+            f'#{{{DECK_RESPAWN_SIDEBAR_OPTION}}}}}"',
         ),
-        "b": to_sidebar("b"),
+        # One binding for decks and panels, so the user's own is kept once.
+        "b": (
+            f"#{{?{_IN_DECK},1,{_IN_PANEL}}}",
+            f'run-shell -C "#{{?{_IN_PANEL},display-panes,{to_sidebar}}}"',
+        ),
     }
 
 
 _ORIGINAL_BINDING_OPTIONS = {
     "Tab": "@gd_prefix_original_tab",
     "b": "@gd_prefix_original_b",
+    **{str(slot): f"@gd_prefix_original_{slot}" for slot in range(1, 10)},
 }
+# tmux's own binding for a key: what runs when no original was kept.
+_TMUX_DEFAULT_BINDINGS = {str(slot): f"select-window -t :={slot}" for slot in range(1, 10)}
+# Kept when the user unbound a key tmux binds by default, so it stays unbound.
+_NO_ORIGINAL = "none"
 # tmux scrolls copy mode 5 lines per wheel notch; one reads like the console.
 _WHEEL_COMMANDS = {
     "WheelUpPane": "select-pane ; send-keys -X scroll-up",
@@ -635,23 +643,38 @@ def _as_command_string(listed: str) -> str:
     return re.sub(r"(?<=\s)\\;(?=\s|$)", ";", listed)
 
 
+def _is_own_binding(command: str) -> bool:
+    return any(marker in command for marker in _OWN_BINDING_MARKERS)
+
+
 def _wrap_binding(
     bindings: dict[tuple[str, str], tuple[bool, str]],
     table: str,
     key: str,
     option: str,
     condition: str,
-    marker: str,
     command: str,
 ) -> list[list[str]]:
     repeat, current = bindings.get((table, key), (False, ""))
+    default = _TMUX_DEFAULT_BINDINGS.get(key, "") if table == "prefix" else ""
     commands: list[list[str]] = []
-    if marker in current:
+    if _is_own_binding(current):
         original = _global_option(option)
+        if _is_own_binding(original):
+            # An older gitdirector kept its own panel binding as the original.
+            original = ""
+            commands.append(["set-option", "-gu", option])
+        if original == _NO_ORIGINAL:
+            original = ""
+        elif not original:
+            # An older gitdirector rebound this key without keeping the original.
+            original = default
     else:
         original = current
         if original:
             commands.append(["set-option", "-g", option, original])
+        elif default:
+            commands.append(["set-option", "-g", option, _NO_ORIGINAL])
         else:
             commands.append(["set-option", "-gu", option])
     bind = ["bind-key", *(["-r"] if repeat else []), "-T", table, key]
@@ -665,25 +688,26 @@ def _wrap_binding(
 def ensure_deck_bindings() -> None:
     """Give GitDirector's keys their meaning, inside its sessions only.
 
-    ``prefix Tab`` and ``prefix b`` work the deck, and the mouse wheel scrolls
-    copy mode a line at a time. Each key is rebound to ``if-shell -F
-    <condition> <our command> <original>``: elsewhere the user's own binding
+    ``prefix Tab`` and ``prefix b`` work the deck (``prefix b`` shows pane
+    numbers in a panel), ``prefix 1``..``9`` pick a panel's slot, and the
+    mouse wheel scrolls copy mode a line at a time. Each key is rebound to ``if-shell -F <condition> <our command>
+    <original>``: elsewhere the user's own binding
     (or tmux's default) still runs. The original is kept in a global option so
     re-wrapping is idempotent, and a binding the user changed since is picked
     up again.
     """
+    from .panels import _panel_slot_key_commands
+
     bindings = _key_bindings()
     commands: list[list[str]] = []
-    for key, deck_command in _deck_key_commands().items():
+    keys = {
+        **_deck_key_commands(),
+        **{key: (_IN_PANEL, command) for key, command in _panel_slot_key_commands().items()},
+    }
+    for key, (condition, deck_command) in keys.items():
         commands.extend(
             _wrap_binding(
-                bindings,
-                "prefix",
-                key,
-                _ORIGINAL_BINDING_OPTIONS[key],
-                _IN_DECK,
-                _DECK_BINDING_MARKER,
-                deck_command,
+                bindings, "prefix", key, _ORIGINAL_BINDING_OPTIONS[key], condition, deck_command
             )
         )
     for table, slug in _WHEEL_TABLES.items():
@@ -695,7 +719,6 @@ def ensure_deck_bindings() -> None:
                     key,
                     f"@gd_original_{slug}_{key.lower()}",
                     _IN_GITDIRECTOR,
-                    _GITDIRECTOR_BINDING_MARKER,
                     wheel_command,
                 )
             )
@@ -736,7 +759,10 @@ def attach_deck(session_name: str, deck: str | None = None) -> bool:
     # Blocks for the whole visit; see attach_tmux_session for why there is
     # no timeout and why a non-zero exit is not necessarily a failure.
     result = _run_tmux(
-        _chain_tmux_commands([["attach-session", "-t", f"={deck}"], destroy_when_left]),
+        [
+            *TMUX_CLIENT_FEATURES,
+            *_chain_tmux_commands([["attach-session", "-t", f"={deck}"], destroy_when_left]),
+        ],
         capture_output=False,
         timeout=None,
         extra_env=attach_client_env(),

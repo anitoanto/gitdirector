@@ -2,6 +2,7 @@ import subprocess
 
 import click
 
+from . import paths
 from .commands import (
     CONTEXT_SETTINGS,
     CommandError,
@@ -93,6 +94,7 @@ for module in (
 
 
 def main(prog_name: str | None = None):
+    paths.remove_legacy_files()
     try:
         cli(prog_name=prog_name)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

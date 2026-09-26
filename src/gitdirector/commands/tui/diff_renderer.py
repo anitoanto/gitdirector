@@ -427,6 +427,15 @@ def detect_language(path: str) -> str | None:
         return None
 
 
+def _split_lines(text: str) -> list[str]:
+    """Split on ``\n`` only: ``str.splitlines`` also breaks on form feeds,
+    ``\x1c``-``\x1e``, ``\x85`` and Unicode separators inside a line."""
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def parse_diff_files(diff_text: str) -> list[ChangedFile]:
     """Walk a unified ``git diff`` payload and return one ``ChangedFile`` per file."""
     files: list[ChangedFile] = []
@@ -448,13 +457,13 @@ def parse_diff_files(diff_text: str) -> list[ChangedFile]:
                 is_image=is_image_file(current["path"]),
                 is_rename=is_rename,
                 old_path=old_path if is_rename else None,
-                diff_text="\n".join(lines).rstrip("\n"),
+                diff_text="".join(f"{line}\n" for line in lines),
                 first_new_line=current["first_new"],
                 last_new_line=current["last_new"],
             )
         )
 
-    for raw_line in diff_text.splitlines():
+    for raw_line in _split_lines(diff_text):
         if raw_line.startswith("diff --git "):
             flush()
             old_name, new_name = _parse_diff_git_paths(raw_line)
@@ -497,7 +506,8 @@ def parse_diff_files(diff_text: str) -> list[ChangedFile]:
             elif marker == "-":
                 current["deletions"] += 1
                 current["old_running"] += 1
-            elif marker == " ":
+            elif marker in (" ", ""):
+                # diff.suppressBlankEmpty writes blank context lines as "".
                 current["last_new"] = current["new_running"]
                 current["new_running"] += 1
                 current["old_running"] += 1
@@ -537,13 +547,27 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
     truncated = False
     body, marker, _ = diff_text.rpartition(f"\n{DIFF_TRUNCATED_MARKER}\n")
     if marker:
-        diff_text, truncated = body + "\n", True
+        diff_text = body if body.endswith("\n") else body + "\n"
+        truncated = True
     files = parse_diff_files(diff_text)
     for rel_path in untracked_paths:
         text = untracked_lookup(rel_path)
         if text is None:
-            text = "[binary or unreadable file]\n"
-        body_lines = text.splitlines()
+            files.append(
+                ChangedFile(
+                    path=rel_path,
+                    status="?",
+                    is_binary=True,
+                    is_image=is_image_file(rel_path),
+                    diff_text=(
+                        f"diff --git a/{rel_path} b/{rel_path}\n"
+                        f"new file mode 100644\n"
+                        f"Binary files /dev/null and b/{rel_path} differ"
+                    ),
+                )
+            )
+            continue
+        body_lines = _split_lines(text)
         line_count = len(body_lines)
         # The synthetic diff MUST include a ``@@`` hunk header, otherwise
         # ``_split_diff_for_render`` can't tell where the meta block ends
@@ -606,7 +630,7 @@ def _split_diff_hunks(diff_text: str) -> tuple[list[str], list[tuple[str, list[s
     """Split a file's diff into its pre-hunk metadata and ``(header, lines)`` hunks."""
     meta_lines: list[str] = []
     hunks: list[tuple[str, list[str]]] = []
-    for raw_line in diff_text.splitlines():
+    for raw_line in _split_lines(diff_text):
         if _HUNK_HEADER_RE.match(raw_line):
             hunks.append((raw_line, []))
         elif not hunks:
@@ -632,15 +656,26 @@ def diff_gutter_width(file: ChangedFile) -> int:
     return 2 * _hunk_number_width(hunks) + 4
 
 
-def _file_lexer(path: str) -> Lexer | None:
-    name = detect_language(path)
-    if not name:
-        return None
+@lru_cache(maxsize=64)
+def _lexer_for_language(name: str) -> Lexer | None:
+    # Looking a lexer up costs ~15 ms; the instances are reusable.
     try:
         # stripnl would drop leading blank lines and misalign every row.
         return get_lexer_by_name(name, stripnl=False, ensurenl=True)
     except ClassNotFound:
         return None
+
+
+def _file_lexer(path: str) -> Lexer | None:
+    name = detect_language(path)
+    return _lexer_for_language(name) if name else None
+
+
+def warm_lexers(files: list[ChangedFile]) -> None:
+    """Look up every language's lexer now, off the UI thread."""
+    for name in {detect_language(file.path) for file in files}:
+        if name:
+            _lexer_for_language(name)
 
 
 _SYNTAX_THEME = PygmentsSyntaxTheme(GithubDarkStyle)
@@ -674,6 +709,51 @@ def _line_spans(lines: list[str], lexer: Lexer | None) -> list[list[Span]]:
 
 _LINE_BACKGROUND = {"+": GITHUB_DARK_ADDED_BG, "-": GITHUB_DARK_REMOVED_BG}
 _MARKER_STYLE = {"+": "bold #3fb950", "-": "bold #f85149"}
+_GUTTER_STYLE = RichStyle(color=GITHUB_DARK_GUTTER)
+_HUNK_HEADER_STYLE = f"bold {GITHUB_DARK_HEADING} on #1f2d44"
+_CAPTION_BACKGROUND = "on #161b22"
+
+
+def _hunk_header_row(header: str) -> RichText:
+    return RichText(f" {header} ", style=_HUNK_HEADER_STYLE)
+
+
+def _hunk_prefixes(header: str, lines: list[str], number_width: int) -> list[tuple[str, str]]:
+    """``(marker, gutter text)`` per line: the old and new line numbers."""
+    match = _HUNK_HEADER_RE.match(header)
+    old_no, new_no = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+    blank = " " * number_width
+    prefixes: list[tuple[str, str]] = []
+    for line in lines:
+        marker = line[:1] if line[:1] in ("+", "-") else " "
+        old_label = new_label = blank
+        if marker != "+":
+            old_label = f"{old_no:>{number_width}}"
+            old_no += 1
+        if marker != "-":
+            new_label = f"{new_no:>{number_width}}"
+            new_no += 1
+        prefixes.append((marker, f"{old_label} {new_label} {marker} "))
+    return prefixes
+
+
+def _code_row(
+    marker: str,
+    prefix: str,
+    content: str,
+    spans: list[Span],
+    gutter_width: int,
+    pad_to: int | None,
+) -> RichText:
+    background = _LINE_BACKGROUND.get(marker)
+    plain = prefix + content
+    if background and pad_to:
+        plain = plain.ljust(pad_to)
+    row_spans = [Span(0, gutter_width - 2, _GUTTER_STYLE)]
+    if marker in _MARKER_STYLE:
+        row_spans.append(Span(gutter_width - 2, gutter_width - 1, _MARKER_STYLE[marker]))
+    row_spans += [span.move(gutter_width) for span in spans]
+    return RichText(plain, style=f"on {background}" if background else "", spans=row_spans)
 
 
 def _render_hunks(
@@ -682,36 +762,118 @@ def _render_hunks(
     """Render hunks with a gutter of real old/new line numbers."""
     number_width = _hunk_number_width(hunks)
     gutter_width = 2 * number_width + 4
-    blank = " " * number_width
-    gutter_style = RichStyle(color=GITHUB_DARK_GUTTER)
     rows: list[RichText] = []
     for header, lines in hunks:
-        match = _HUNK_HEADER_RE.match(header)
-        old_no, new_no = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
-        rows.append(RichText(f" {header} ", style=f"bold {GITHUB_DARK_HEADING} on #1f2d44"))
+        rows.append(_hunk_header_row(header))
         code = [line[1:].expandtabs(4) for line in lines]
-        for line, content, spans in zip(lines, code, _line_spans(code, lexer)):
-            marker = line[:1] if line[:1] in "+-" else " "
-            old_label = new_label = blank
-            if marker != "+":
-                old_label = f"{old_no:>{number_width}}"
-                old_no += 1
-            if marker != "-":
-                new_label = f"{new_no:>{number_width}}"
-                new_no += 1
-            prefix = f"{old_label} {new_label} {marker} "
-            background = _LINE_BACKGROUND.get(marker)
-            plain = prefix + content
-            if background and width:
-                plain = plain.ljust(width + gutter_width)
-            row_spans = [Span(0, gutter_width - 2, gutter_style)]
-            if marker in _MARKER_STYLE:
-                row_spans.append(Span(gutter_width - 2, gutter_width - 1, _MARKER_STYLE[marker]))
-            row_spans += [span.move(gutter_width) for span in spans]
-            rows.append(
-                RichText(plain, style=f"on {background}" if background else "", spans=row_spans)
-            )
+        prefixes = _hunk_prefixes(header, lines, number_width)
+        for (marker, prefix), content, spans in zip(prefixes, code, _line_spans(code, lexer)):
+            pad_to = width + gutter_width if width else None
+            rows.append(_code_row(marker, prefix, content, spans, gutter_width, pad_to))
     return RichText("\n", no_wrap=True, overflow="crop").join(rows)
+
+
+@dataclass
+class _Hunk:
+    header: str
+    lines: list[str]
+    code: list[str]
+    prefixes: list[tuple[str, str]]
+    spans: list[list[Span]] | None = None
+
+
+class DiffDocument:
+    """A file's diff as lines drawn on demand: the viewer shows a screenful
+    at a time, so a hunk is syntax-highlighted only once a line of it is
+    looked at, and a file of any size opens at once.
+
+    *width* is the widest line in cells (the gutter included), which is
+    also the width every line is padded to.
+    """
+
+    def __init__(self, file: ChangedFile, *, code_width: int) -> None:
+        self.file = file
+        self._lexer: Lexer | None = None
+        self._hunks: list[_Hunk] = []
+        self._cache: dict[int, RichText] = {}
+        # ("text", RichText) for a fixed line, ("row", hunk, index) for code.
+        self._entries: list[tuple] = [("text", _file_header_row(file))]
+        self.gutter_width = 0
+        if file.is_image:
+            self.width = code_width
+            return
+        if file.is_binary:
+            for line in (
+                "",
+                "  Binary file differs from HEAD.",
+                "  Diff is not shown for binary files.",
+                "",
+            ):
+                self._entries.append(
+                    ("text", RichText(f"  {line}" if line else "", style="italic dim"))
+                )
+            self.width = code_width
+            return
+        meta_lines, hunks = _split_diff_hunks(file.diff_text)
+        self._entries.extend(("text", row) for row in _meta_rows(meta_lines))
+        number_width = _hunk_number_width(hunks)
+        self.gutter_width = 2 * number_width + 4
+        self._lexer = _file_lexer(file.path)
+        for header, lines in hunks:
+            hunk = _Hunk(
+                header,
+                lines,
+                [line[1:].expandtabs(4) for line in lines],
+                _hunk_prefixes(header, lines, number_width),
+            )
+            self._entries.append(("text", _hunk_header_row(header)))
+            self._entries.extend(("row", hunk, index) for index in range(len(lines)))
+            self._hunks.append(hunk)
+        self.width = code_width + self.gutter_width
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def line(self, index: int) -> RichText:
+        cached = self._cache.get(index)
+        if cached is not None:
+            return cached
+        entry = self._entries[index]
+        if entry[0] == "text":
+            row = entry[1]
+        else:
+            _, hunk, row_index = entry
+            if hunk.spans is None:
+                hunk.spans = _line_spans(hunk.code, self._lexer)
+            marker, prefix = hunk.prefixes[row_index]
+            row = _code_row(
+                marker, prefix, hunk.code[row_index], hunk.spans[row_index], self.gutter_width, None
+            )
+        self._cache[index] = row
+        return row
+
+
+def build_diff_document(file: ChangedFile, *, code_width: int) -> DiffDocument:
+    return DiffDocument(file, code_width=code_width)
+
+
+def _meta_rows(lines: list[str]) -> list[RichText]:
+    rows = []
+    for line in lines:
+        row = RichText("    ", style=_CAPTION_BACKGROUND)
+        row.stylize("dim", 2, 4)
+        if line.startswith("diff --git "):
+            row.append(line, style=f"bold {GITHUB_DARK_HEADING}")
+        else:
+            row.append(line, style=f"italic {GITHUB_DARK_MUTED}")
+        rows.append(row)
+    return rows
+
+
+def _file_header_row(file: ChangedFile) -> RichText:
+    row = RichText("  ", style=_CAPTION_BACKGROUND)
+    row.append_text(_file_header_text(file))
+    return row
 
 
 def _render_diff_meta_lines(lines: list[str]) -> RenderableType:
@@ -730,6 +892,10 @@ def _render_diff_meta_lines(lines: list[str]) -> RenderableType:
 
 def _render_file_header(file: ChangedFile) -> RenderableType:
     """The file's header line: status letter, path, lines shown and counts."""
+    return Padding(_file_header_text(file), (0, 2), style="on #161b22")
+
+
+def _file_header_text(file: ChangedFile) -> RichText:
     text = RichText()
     text.append_text(status_letter(file.status))
     text.append("  ")
@@ -756,7 +922,7 @@ def _render_file_header(file: ChangedFile) -> RenderableType:
     elif file.status == "?":
         text.append("  ")
         text.append("untracked", style="bold #d2a8ff")
-    return Padding(text, (0, 2), style="on #161b22")
+    return text
 
 
 def render_empty_state(repo_name: str, branch: str | None) -> RichText:

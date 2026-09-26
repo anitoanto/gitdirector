@@ -5,12 +5,15 @@
 // It listens to OpenCode's event bus and stamps the session's status on the
 // tmux pane it runs in, using the same option Claude Code's hooks use:
 //
-//   @gitdirector_agent_state = running | waiting | idle
+//   @gitdirector_agent_state = running | waiting | pending | idle
 //
 // OpenCode can hold several sessions in one process, so the report is the
 // most urgent state across all of them: waiting if any session is blocked
-// on the user, running if any is busy, idle otherwise. OpenCode reports an
-// interrupted turn as idle itself, so the report is trusted as is. The
+// on the user, running if a top-level session is busy, pending if only
+// subagents are (a subagent is a child session, and with background
+// subagents its parent can be back at its prompt), idle otherwise. OpenCode
+// reports an interrupted turn as idle itself, so the report is trusted as
+// is. The
 // plugin comes in only through OPENCODE_CONFIG_CONTENT on the command
 // GitDirector launches; it writes nothing but the pane option.
 
@@ -22,6 +25,7 @@ export const GitDirectorStatus = async ({ $ }) => {
 
   const OPTION = "@gitdirector_agent_state";
   const busy = new Set(); // session IDs with a turn in progress
+  const children = new Set(); // session IDs of subagents (they have a parent)
   const waiting = new Map(); // request ID -> session ID blocked on the user
   let reported = null;
   // Events can overlap; running the writes one at a time, and deciding the
@@ -30,7 +34,14 @@ export const GitDirectorStatus = async ({ $ }) => {
 
   const report = () => {
     chain = chain.then(async () => {
-      const state = waiting.size > 0 ? "waiting" : busy.size > 0 ? "running" : "idle";
+      let state = "idle";
+      if (waiting.size > 0) {
+        state = "waiting";
+      } else if ([...busy].some((id) => !children.has(id))) {
+        state = "running";
+      } else if (busy.size > 0) {
+        state = "pending";
+      }
       if (state === reported) {
         return;
       }
@@ -61,6 +72,12 @@ export const GitDirectorStatus = async ({ $ }) => {
     event: async ({ event }) => {
       const props = event.properties ?? {};
       switch (event.type) {
+        case "session.created":
+        case "session.updated":
+          if (props.info?.parentID) {
+            children.add(props.info.id);
+          }
+          break;
         case "session.status":
           // "retry" is a turn waiting to retry a failed model call: still working.
           if (props.status?.type === "idle") {
@@ -75,6 +92,7 @@ export const GitDirectorStatus = async ({ $ }) => {
           break;
         case "session.deleted":
           forget(props.sessionID ?? props.info?.id);
+          children.delete(props.sessionID ?? props.info?.id);
           break;
         case "permission.asked":
         case "question.asked":

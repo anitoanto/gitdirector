@@ -377,7 +377,9 @@ class ConsolePanelsMixin:
         if validation_message:
             self._update_status(validation_message)
             return
-        self._panel_store.rename(old_name, new_name)
+        if not self._panel_store.rename(old_name, new_name):
+            self._update_status(f"Could not rename panel '{old_name}'")
+            return
         self._load_panels()
 
     def _open_panel(self, panel_name: str) -> None:
@@ -393,9 +395,15 @@ class ConsolePanelsMixin:
             return
 
         session_name = make_panel_session_name(panel_name)
+        protected = False
         if _session_exists(session_name):
-            _protect_session(session_name)
-        else:
+            try:
+                _protect_session(session_name)
+                protected = True
+            except Exception:
+                # It died after the existence check; rebuild it instead.
+                logger.debug("panel %s vanished before attach", panel_name, exc_info=True)
+        if not protected:
             # Building a panel drives a long sequence of tmux commands, any
             # of which can fail (up to and including the server dying under
             # us). Letting that escape would take the whole TUI down instead

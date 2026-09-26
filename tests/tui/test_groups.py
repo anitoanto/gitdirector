@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,8 @@ from textual.widgets._footer import FooterKey
 
 from gitdirector.commands.tui import AgentLoadingScreen, GitDirectorConsole, GroupActionMenuScreen
 from gitdirector.commands.tui.app_groups import detect_repo_groups, group_row_key
+from gitdirector.integrations.tmux.core import _repo_session_name_segment
+from gitdirector.repo import RepoStatus
 
 from .conftest import _make_info, _mock_manager, repo_row_text
 
@@ -312,6 +315,144 @@ class TestRepositoryGroups:
             cell = table.get_cell(row_key, app._sess_col_keys[0]).plain
             assert "group_work" in cell
             assert row_key in cell
+
+
+def _work_repos():
+    return [
+        _make_info("alpha", Path("/tmp/work/alpha")),
+        _make_info("beta", Path("/tmp/work/beta")),
+    ]
+
+
+async def _folded_work_group(app, pilot) -> DataTable:
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+    table = app.query_one("#repo-table", DataTable)
+    table.move_cursor(row=0)
+    app.action_toggle_group()
+    await pilot.pause()
+    assert table.row_count == 1
+    return table
+
+
+class TestFoldedGroupHeading:
+    async def test_repaints_when_a_hidden_repo_gains_a_session(self):
+        repos = _work_repos()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        group_key = group_row_key(Path("/tmp/work"))
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _folded_work_group(app, pilot)
+            assert "waiting" not in repo_row_text(app, group_key)
+
+            slug = _repo_session_name_segment(repos[0].path)
+            app._sessions_entries = [
+                {
+                    "session_name": f"gd/{slug}/claude/1",
+                    "repo_slug": slug,
+                    "purpose": "claude",
+                    "status": "waiting",
+                }
+            ]
+            app._refresh_repo_session_cells()
+            await pilot.pause()
+
+            assert "● 1 waiting" in repo_row_text(app, group_key)
+
+    async def test_repaints_when_a_hidden_repo_result_lands(self):
+        repos = _work_repos()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        group_key = group_row_key(Path("/tmp/work"))
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _folded_work_group(app, pilot)
+            assert "attention" not in repo_row_text(app, group_key)
+            app._apply_filter_and_sort = MagicMock(wraps=app._apply_filter_and_sort)
+
+            dirty = replace(repos[0], unstaged=True, unstaged_files=["x"])
+            app._results[str(dirty.path)] = dirty
+            app._update_row(dirty)
+            await pilot.pause()
+
+            app._apply_filter_and_sort.assert_not_called()
+            assert "1 needs attention" in repo_row_text(app, group_key)
+
+
+class TestGroupToggleEdges:
+    async def test_collapse_all_moves_cursor_from_child_to_its_group(self):
+        repos = [
+            _make_info("solo", Path("/tmp/other/solo")),
+            _make_info("gamma", Path("/tmp/play/gamma")),
+            _make_info("delta", Path("/tmp/play/delta")),
+            *_work_repos(),
+        ]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            keys = [str(key.value) for key in table.rows]
+            table.move_cursor(row=keys.index("/tmp/play/gamma"))
+
+            await pilot.press("shift+space")
+            await pilot.pause()
+
+            assert table.row_count == 3
+            assert app._get_selected_group().path == Path("/tmp/play")
+
+    async def test_toggles_are_inert_while_searching(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(_work_repos())
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app._search_query = "work"
+            app._apply_filter_and_sort()
+            await pilot.pause()
+            table = app.query_one("#repo-table", DataTable)
+            table.move_cursor(row=0)
+
+            app.action_toggle_group()
+            app.action_toggle_all_groups()
+            await pilot.pause()
+
+            assert app._collapsed_groups == set()
+            assert table.row_count == 3
+            assert "[space] toggle" not in app.query_one("#status-bar", Static).content
+
+
+class TestRefreshLayout:
+    async def test_status_column_narrows_once_a_refresh_completes(self):
+        dirty = replace(
+            _make_info("alpha", Path("/tmp/alpha"), status=RepoStatus.DIVERGED),
+            ahead=3,
+            behind=4,
+            staged=True,
+            staged_files=["a", "b"],
+            unstaged=True,
+            unstaged_files=["c"],
+        )
+        repos = [dirty]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            wide = app._repo_layout.status
+
+            repos[0] = _make_info("alpha", Path("/tmp/alpha"))
+            app._refresh_repos()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert app._repos_refreshing is False
+            assert app._repo_layout.status < wide
 
 
 class TestGroupActionMenuScreen:

@@ -30,10 +30,17 @@ from gitdirector.commands.tui import (
     GitOperationsMenuScreen,
 )
 from gitdirector.commands.tui.screens.commit import CommitMessageScreen
+from gitdirector.commands.tui.screens.diff import DiffContentView
 from gitdirector.commands.tui.screens.diff_files import FileTileList
 
 from .._timeouts import SYNC_TIMEOUT
-from .conftest import _make_info, _mock_manager, _wait_for_deferred_scroll, _wait_for_refresh
+from .conftest import (
+    _make_info,
+    _mock_manager,
+    _open_diff_screen,
+    _wait_for_deferred_scroll,
+    _wait_for_refresh,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +151,7 @@ class TestDiffReviewScreenCompose:
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             assert files_list is not None
 
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             assert content is not None
 
             hint = app.screen.query_one("#diff-hint", Static)
@@ -155,6 +162,45 @@ class TestDiffReviewScreenCompose:
             assert "file" in hint_text
             assert "brackets" not in hint_text
             assert "n/p" not in hint_text
+
+    async def test_horizontal_scrollbar_is_a_thin_line(self):
+        from gitdirector.commands.tui.screens.diff import _ThinHorizontalScrollBarRender
+
+        screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            scroll = app.screen.query_one("#diff-content-scroll")
+            assert scroll.styles.scrollbar_size_horizontal == 1
+            assert scroll.styles.scrollbar_size_vertical == 1
+            assert scroll.horizontal_scrollbar.renderer is _ThinHorizontalScrollBarRender
+            assert scroll.vertical_scrollbar.renderer is not _ThinHorizontalScrollBarRender
+
+    def test_thin_horizontal_bar_draws_half_blocks(self):
+        from rich.color import Color
+
+        from gitdirector.commands.tui.screens.diff import _ThinHorizontalScrollBarRender
+
+        back, bar = Color.parse("#111111"), Color.parse("#aa88ff")
+        segments = _ThinHorizontalScrollBarRender.render_bar(
+            size=20,
+            virtual_size=100,
+            window_size=20,
+            position=40,
+            vertical=False,
+            back_color=back,
+            bar_color=bar,
+        ).segments
+        cells = [s for s in segments if s.text != "\n"]
+        assert len(cells) == 20
+        assert {s.text for s in cells} == {"▄"}
+        # Upper half keeps the pane's background.
+        assert all(s.style.bgcolor is None for s in cells)
+        handle = [i for i, s in enumerate(cells) if s.style.color == bar]
+        assert handle == [8, 9, 10, 11]
+        assert all(cells[i].style.color == back for i in range(20) if i not in handle)
 
     async def test_loading_indicator_shown_while_diff_loads(self, mocker):
         from gitdirector import repo as repo_mod
@@ -194,8 +240,7 @@ class TestDiffReviewScreenLoading:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             assert len(files_list._specs) == 2
@@ -213,8 +258,7 @@ class TestDiffReviewScreenLoading:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             assert len(files_list._specs) == 2
@@ -225,8 +269,7 @@ class TestDiffReviewScreenLoading:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             empty = app.screen.query_one("#diff-empty", Static)
             assert empty.display is True
@@ -246,8 +289,7 @@ class TestDiffReviewScreenLoading:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             empty = app.screen.query_one("#diff-empty", Static)
             assert empty.display is True
@@ -266,8 +308,7 @@ class TestDiffReviewScreenLoading:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             empty = app.screen.query_one("#diff-empty", Static)
             assert empty.display is True
@@ -278,8 +319,7 @@ class TestDiffReviewScreenNavigation:
     async def _setup_with_diff(self, app, mocker, pilot):
         _patch_repo_methods(mocker, diff_text=SAMPLE_DIFF, untracked=[])
         screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-        app.push_screen(screen)
-        await app.workers.wait_for_complete()
+        await _open_diff_screen(app, screen)
         files_list = app.screen.query_one("#diff-files-list", FileTileList)
         await _wait_for_deferred_scroll(files_list)
         assert files_list.index is not None, "diff file list did not initialise"
@@ -394,8 +434,7 @@ class TestDiffReviewScreenFocus:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
@@ -408,6 +447,36 @@ class TestDiffReviewScreenFocus:
             await pilot.press("tab")
             focused_id = app.screen.focused.id if app.screen.focused else None
             assert focused_id == "diff-files-list"
+
+    async def test_clicked_diff_pane_takes_arrow_keys(self, mocker):
+        _patch_repo_methods(mocker, diff_text=SAMPLE_DIFF, untracked=[])
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+            await _open_diff_screen(app, screen)
+            files_list = app.screen.query_one("#diff-files-list", FileTileList)
+            await _wait_for_deferred_scroll(files_list)
+            await pilot.pause()
+            assert app.screen.focused is files_list
+
+            await pilot.click("#diff-content-scroll")
+            await pilot.pause()
+            assert app.screen.focused.id == "diff-content-scroll"
+            assert app.screen.query_one("#diff-content-pane-label").has_class("--focused")
+            assert not app.screen.query_one("#diff-files-pane-label").has_class("--focused")
+            for key in ("down", "j", "page_down"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert files_list.index == 0, key
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.screen.focused is files_list
+            assert app.screen.query_one("#diff-files-pane-label").has_class("--focused")
+            await pilot.press("j")
+            await pilot.pause()
+            assert files_list.index == 1
 
 
 class TestDiffReviewScreenClose:
@@ -472,8 +541,7 @@ class TestDiffReviewScreenRefresh:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             assert len(files_list._specs) == 2
@@ -500,19 +568,18 @@ class TestDiffReviewScreenContentRendering:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.index = 0
             screen._render_selected_file()
             await pilot.pause()
-            first = content.content
+            first = content.document
             files_list.index = 1
             screen._render_selected_file()
             await pilot.pause()
-            second = content.content
+            second = content.document
             assert first is not second
 
 
@@ -531,8 +598,7 @@ class TestContentPanelTone:
             lambda self, **_kw: (True, diff_text, []),
         )
         screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-        app.push_screen(screen)
-        await app.workers.wait_for_complete()
+        await _open_diff_screen(app, screen)
         await pilot.pause()
         return screen
 
@@ -551,10 +617,8 @@ class TestContentPanelTone:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = await self._setup_with_diff(app, pilot, mocker, new_file_diff)
-            content = screen.query_one("#diff-content", Static)
             scroll = screen.query_one("#diff-content-scroll")
-            assert content.has_class("--added"), "new file should tint content green"
-            assert scroll.has_class("--added"), "new file should tint scroll green"
+            assert scroll.has_class("--added"), "new file should tint the diff green"
 
     async def test_deleted_file_tints_content_red(self, mocker):
         deleted_diff = (
@@ -571,10 +635,8 @@ class TestContentPanelTone:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = await self._setup_with_diff(app, pilot, mocker, deleted_diff)
-            content = screen.query_one("#diff-content", Static)
             scroll = screen.query_one("#diff-content-scroll")
-            assert content.has_class("--deleted"), "deleted file should tint content red"
-            assert scroll.has_class("--deleted"), "deleted file should tint scroll red"
+            assert scroll.has_class("--deleted"), "deleted file should tint the diff red"
 
     async def test_modified_file_keeps_base_dark_tone(self, mocker):
         modified_diff = (
@@ -590,7 +652,7 @@ class TestContentPanelTone:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = await self._setup_with_diff(app, pilot, mocker, modified_diff)
-            content = screen.query_one("#diff-content", Static)
+            content = screen.query_one("#diff-content-scroll", DiffContentView)
             scroll = screen.query_one("#diff-content-scroll")
             assert not content.has_class("--added")
             assert not content.has_class("--deleted")
@@ -629,10 +691,9 @@ class TestContentPanelTone:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
-            content = screen.query_one("#diff-content", Static)
+            content = screen.query_one("#diff-content-scroll", DiffContentView)
             files_list = screen.query_one("#diff-files-list", FileTileList)
             assert len(files_list._specs) == 2
             # File 0 is the new file → content should be green-tinted.
@@ -672,8 +733,7 @@ class TestContentPanelTone:
         app.manager = _mock_manager()
         async with app.run_test(size=(80, 24)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             screen = app.screen
             scroll = screen.query_one("#diff-content-scroll")
@@ -689,8 +749,6 @@ class TestContentPanelTone:
             await _wait_for_refresh(scroll)
             assert scroll.scroll_x == 0, "h should scroll the content back to the start"
 
-            await pilot.press("tab")
-            await pilot.pause()
             assert screen.focused is scroll
             await pilot.press("right")
             await _wait_for_refresh(scroll)
@@ -815,8 +873,7 @@ class TestDiffReviewScreenCommitFlow:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             from gitdirector.commands.tui.screens.commit import StageFilesConfirmScreen
 
@@ -834,6 +891,24 @@ class TestDiffReviewScreenCommitFlow:
             # when there are no files in the diff.
             assert all(not isinstance(arg, StageFilesConfirmScreen) for arg in pushed)
 
+    async def test_g_ignored_while_refreshing(self, mocker):
+        self._patch_repo_with_diff(mocker)
+        from gitdirector.commands.tui.screens.commit import StageFilesConfirmScreen
+
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+            await _open_diff_screen(app, screen)
+            await pilot.pause()
+            assert screen._files
+            screen._show_loading()
+
+            await pilot.press("g")
+            await pilot.pause()
+
+            assert not isinstance(app.screen, StageFilesConfirmScreen)
+
     async def test_g_opens_stage_confirm_with_aggregated_stats(self, mocker):
         self._patch_repo_with_diff(mocker)
         from gitdirector.commands.tui.screens.commit import StageFilesConfirmScreen
@@ -842,8 +917,7 @@ class TestDiffReviewScreenCommitFlow:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
 
             await pilot.press("g")
@@ -865,8 +939,7 @@ class TestDiffReviewScreenCommitFlow:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             await pilot.press("g")
             await pilot.pause()
@@ -886,8 +959,7 @@ class TestDiffReviewScreenCommitFlow:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
 
             await pilot.press("g")
@@ -932,8 +1004,7 @@ class TestDiffReviewScreenCommitFlow:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             await pilot.press("g")
             await pilot.pause()
@@ -983,8 +1054,7 @@ class TestDiffReviewScreenCommitFlow:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             await pilot.press("g")
             await pilot.pause()
@@ -1022,6 +1092,29 @@ class TestCommitMessageScreenFocus:
             await pilot.pause()
             msg = app.screen.query_one("#commit-message-input")
             assert app.focused is msg
+
+    async def test_empty_message_shows_error_and_refocuses_message(self):
+        results: list = []
+        screen = self._make_screen()
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(screen, callback=results.append)
+            await pilot.pause()
+            error = app.screen.query_one("#commit-message-error", Static)
+            assert not error.has_class("-shown")
+
+            await pilot.press("tab", "enter")
+            await pilot.pause()
+            assert app.screen is screen
+            assert results == []
+            assert error.has_class("-shown")
+            assert "commit message" in str(error.content)
+            assert app.focused is app.screen.query_one("#commit-message-input")
+
+            await pilot.press("x")
+            await pilot.pause()
+            assert not error.has_class("-shown")
 
     async def test_tab_toggles_focus_to_action_list_and_back(self):
         screen = self._make_screen()

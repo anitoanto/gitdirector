@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ from ..agents import AGENTS, AGENTS_BY_KEY, CLAUDE_MODES, AgentSpec
 from . import (
     ATTENTION,
     MUTED,
+    PENDING,
     SUCCESS,
     CommandError,
     console,
@@ -25,9 +27,12 @@ from . import (
 )
 from .completion import complete_session_names
 
+_SECOND_SAMPLE_SECS = 1.0
+
 _STATUS_STYLE = {
     "waiting": ("● waiting", ATTENTION),
     "running": ("● running", "green"),
+    "pending": ("◐ pending", PENDING),
     "idle": ("○ idle", MUTED),
 }
 
@@ -106,13 +111,18 @@ def start_session(
 def live_sessions() -> list[dict[str, Any]]:
     """Every live ``gd/*`` session with its status, as the Sessions tab shows it.
 
-    One monitor sample: agents that report their own status are exact;
-    anything else is judged from the pane as of this moment.
+    Agents that report their own status are exact; anything else is judged
+    from its pane and CPU use over a second.
     """
     from ..integrations.tmux import TmuxMonitor
 
     monitor = TmuxMonitor()
     statuses = monitor.refresh()
+    if "idle" in statuses.values():
+        # CPU use and output changes need a baseline: one sample reads a
+        # busy but quiet program as idle.
+        time.sleep(_SECOND_SAMPLE_SECS)
+        statuses = monitor.refresh()
     sessions = []
     for entry in monitor.entries() or []:
         name = entry["session_name"]
@@ -156,7 +166,11 @@ def _print_sessions(sessions: list[dict[str, Any]]) -> None:
             count_noun(len(sessions), "session"),
             *(
                 (f"{counts[status]} {status}", style)
-                for status, style in (("waiting", ATTENTION), ("running", SUCCESS))
+                for status, style in (
+                    ("waiting", ATTENTION),
+                    ("running", SUCCESS),
+                    ("pending", PENDING),
+                )
                 if counts[status]
             ),
         )
@@ -170,7 +184,8 @@ def register(cli: click.Group):
         """List live sessions and their status
 
         waiting: the program needs you (a permission prompt, a question, a
-        bell). running: it is working. idle: nothing is happening.
+        bell). running: it is working. pending: the agent is at its prompt
+        while subagents it started still work. idle: nothing is happening.
         """
         entries = live_sessions()
         if as_json:

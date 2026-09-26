@@ -47,7 +47,12 @@ def _resolve_theme(theme_name: str | None) -> Theme:
 def _parse_color(value: str | None, fallback: str) -> Color:
     from textual.color import Color
 
-    return Color.parse(value or fallback)
+    color = Color.parse(value or fallback)
+    # "ansi_default" means "the terminal's own colour" and parses as black.
+    if color.ansi == -1:
+        color = Color.parse(fallback)
+    # ANSI colours don't blend; keep only their RGB approximation.
+    return Color(color.r, color.g, color.b, color.a)
 
 
 def _hex(color: Color) -> str:

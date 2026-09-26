@@ -299,6 +299,26 @@ class TestParseDiffEdgeCases:
         files = parse_diff_files("diff --git a/f b/f\n@@ -10,4 +10,4 @@\n a\n b\n c\n-d\n+e\n")
         assert (files[0].first_new_line, files[0].last_new_line) == (10, 13)
 
+    def test_unicode_line_separators_stay_inside_their_line(self):
+        files = parse_diff_files(
+            "diff --git a/f b/f\n@@ -1,2 +1,2 @@\n a\x0cb\u2028c\x1d\n-d\x85e\n+f\x0bg\n"
+        )
+        f = files[0]
+        assert (f.additions, f.deletions) == (1, 1)
+        assert (f.first_new_line, f.last_new_line) == (1, 2)
+        assert "+f\x0bg" in f.diff_text
+
+    def test_blank_context_line_from_suppress_blank_empty(self):
+        files = parse_diff_files("diff --git a/f b/f\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n")
+        f = files[0]
+        assert (f.additions, f.deletions) == (1, 1)
+        assert (f.first_new_line, f.last_new_line) == (1, 3)
+
+    def test_crlf_diff_lines_are_split_cleanly(self):
+        files = parse_diff_files("diff --git a/f b/f\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n")
+        assert files[0].path == "f"
+        assert (files[0].additions, files[0].deletions) == (1, 1)
+
     def test_rename_between_plain_and_quoted_name(self):
         files = parse_diff_files(
             'diff --git a/old.txt "b/\\303\\274.txt"\n'
@@ -763,6 +783,27 @@ class TestHunkGutter:
         assert lines[2].endswith('x = """doc')
         assert lines[4].endswith('more"""')
 
+    def test_blank_context_line_keeps_gutter_aligned(self):
+        lines = self._gutter("diff --git a/foo.txt b/foo.txt\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n")
+        assert lines[2] == "2 2   "
+        assert lines[3].split() == ["3", "-", "b"]
+        assert lines[4].split() == ["3", "+", "c"]
+
+    def test_trailing_blank_context_line_is_rendered(self):
+        files = parse_diff_files("diff --git a/f b/f\n@@ -1,2 +1,2 @@\n-a\n+b\n\n")
+        rows = _body_text(render_file_diff(files[0])).plain.split("\n")
+        assert rows[-1].split() == ["2", "2"]
+
+    def test_form_feed_does_not_split_a_row(self):
+        f = ChangedFile(
+            path="foo.txt",
+            status="M",
+            diff_text="diff --git a/foo.txt b/foo.txt\n@@ -1,2 +1,2 @@\n a\x0cb\n c\n",
+        )
+        rows = _body_text(render_file_diff(f)).plain.split("\n")
+        assert len(rows) == 3
+        assert rows[2].split() == ["2", "2", "c"]
+
     def test_gutter_width_matches_rendered_rows(self):
         from gitdirector.commands.tui.diff_renderer import diff_gutter_width
 
@@ -915,14 +956,31 @@ class TestBuildDiffBundle:
         assert "@@" in f.diff_text
         assert "+" not in f.diff_text or "@@ -0,0" in f.diff_text
 
-    def test_untracked_binary_lookup_returns_none_marks_unreadable(self):
+    def test_untracked_binary_lookup_returns_none_marks_binary(self):
         def lookup(p):
             return None
 
         bundle = build_diff_bundle("", ["weird.bin"], lookup)
         f = bundle.files[0]
         assert f.status == "?"
-        assert "binary" in f.diff_text.lower() or "unreadable" in f.diff_text.lower()
+        assert f.is_binary is True
+        assert (f.additions, f.deletions) == (0, 0)
+        assert "@@" not in f.diff_text
+        assert "Binary file" in str(render_file_diff(f).renderables[-1].renderable)
+
+    def test_untracked_lines_split_on_newline_only(self):
+        bundle = build_diff_bundle("", ["doc.txt"], lambda p: "a\x0cb\u2028c\r\nd\n")
+        f = bundle.files[0]
+        assert f.additions == 2
+        assert "@@ -0,0 +1,2 @@" in f.diff_text
+        assert "+a\x0cb\u2028c\n+d" in f.diff_text
+
+    def test_truncation_at_line_boundary_adds_no_blank_line(self):
+        from gitdirector.repo import DIFF_TRUNCATED_MARKER
+
+        diff = f"diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-x\n+y\n\n{DIFF_TRUNCATED_MARKER}\n"
+        f = build_diff_bundle(diff, [], lambda p: None).files[0]
+        assert (f.first_new_line, f.last_new_line) == (1, 1)
 
     def test_truncation_marker_is_stripped_and_flagged(self):
         from gitdirector.repo import DIFF_TRUNCATED_MARKER

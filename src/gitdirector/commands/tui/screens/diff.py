@@ -13,22 +13,30 @@ import logging
 from pathlib import Path
 
 from rich.cells import cell_len
+from rich.color import Color
 from rich.markup import escape
+from rich.segment import Segment, Segments
+from rich.style import Style
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.geometry import Size
 from textual.screen import ModalScreen
-from textual.widgets import LoadingIndicator, Static
+from textual.scroll_view import ScrollView
+from textual.scrollbar import ScrollBarRender
+from textual.strip import Strip
+from textual.widgets import LoadingIndicator, OptionList, Static
 
 from ..diff_renderer import (
     ChangedFile,
     DiffBundle,
+    DiffDocument,
     build_diff_bundle,
-    diff_gutter_width,
+    build_diff_document,
     render_empty_state,
     render_error,
-    render_file_diff,
+    warm_lexers,
 )
 from .card import key_hints
 from .commit import (
@@ -45,13 +53,107 @@ _FOCUS_FILES = "files"
 _FOCUS_DIFF = "diff"
 
 
-class _DiffContentScroll(Vertical, can_focus=True):
-    """Bidirectional scroll container for the diff panel.
+class _ThinHorizontalScrollBarRender(ScrollBarRender):
+    """Draws the horizontal bar as a half-height line.
 
-    ``VerticalScroll`` only scrolls vertically, so long diff lines
-    (``word_wrap=False``) get clipped on the right. This container
-    scrolls in both directions so the user can pan to see overflow.
+    A cell is about twice as tall as it is wide, so a 1-row bar reads twice
+    as thick as the 1-column vertical one; a lower half block evens them out.
     """
+
+    GLYPH = "\u2584"
+
+    @classmethod
+    def render_bar(
+        cls,
+        size: int = 25,
+        virtual_size: float = 50,
+        window_size: float = 20,
+        position: float = 0,
+        thickness: int = 1,
+        vertical: bool = True,
+        back_color: Color = Color.parse("#555555"),
+        bar_color: Color = Color.parse("bright_magenta"),
+    ) -> Segments:
+        if vertical:
+            return super().render_bar(
+                size=size,
+                virtual_size=virtual_size,
+                window_size=window_size,
+                position=position,
+                thickness=thickness,
+                vertical=vertical,
+                back_color=back_color,
+                bar_color=bar_color,
+            )
+        size = int(size)
+        start = thumb = 0
+        if window_size and size and virtual_size > window_size and size != virtual_size:
+            thumb = min(size, max(1, round(window_size * size / virtual_size)))
+            start = round((size - thumb) * position / (virtual_size - window_size))
+            start = min(max(0, start), size - thumb)
+        # No bgcolor: the upper half shows the pane's own background.
+        before = Segment(cls.GLYPH, Style(color=back_color, meta={"@mouse.down": "scroll_up"}))
+        handle = Segment(cls.GLYPH, Style(color=bar_color, meta={"@mouse.down": "grab"}))
+        after = Segment(cls.GLYPH, Style(color=back_color, meta={"@mouse.down": "scroll_down"}))
+        line = [before] * start + [handle] * thumb + [after] * (size - start - thumb)
+        return Segments((line + [Segment.line()]) * thickness, new_lines=False)
+
+
+class DiffContentView(ScrollView, can_focus=True):
+    """The diff panel: draws only the lines on screen, in both directions.
+
+    A ``Static`` holding the whole diff rendered every line of the file on
+    each switch; here a line is rendered the first time it scrolls into
+    view, so a file of any size opens at once.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._document: DiffDocument | None = None
+        self._strips: dict[tuple[int, Style], Strip] = {}
+
+    def on_mount(self) -> None:
+        self.horizontal_scrollbar.renderer = _ThinHorizontalScrollBarRender
+
+    @property
+    def document(self) -> DiffDocument | None:
+        return self._document
+
+    def set_document(self, document: DiffDocument | None) -> None:
+        self._document = document
+        self._strips.clear()
+        lines = len(document) if document is not None else 0
+        width = document.width if document is not None else 0
+        self.virtual_size = Size(width, lines)
+        self.scroll_to(0, 0, animate=False, force=True)
+        self.refresh()
+
+    def _line_strip(self, index: int, base: Style) -> Strip:
+        key = (index, base)
+        strip = self._strips.get(key)
+        if strip is None:
+            document = self._document
+            assert document is not None
+            text = document.line(index)
+            console = self.app.console
+            # Text.render leaves a span-free line's own style off: apply it here.
+            line_style = base + console.get_style(text.style) if text.style else base
+            segments = Segment.apply_style(text.render(console, end=""), line_style)
+            strip = Strip(segments).extend_cell_length(document.width, line_style)
+            self._strips[key] = strip
+        return strip
+
+    def render_line(self, y: int) -> Strip:
+        base = self.rich_style
+        width = self.scrollable_content_region.width
+        scroll_x, scroll_y = self.scroll_offset
+        index = y + scroll_y
+        document = self._document
+        if document is None or index >= len(document):
+            return Strip.blank(width, base)
+        strip = self._line_strip(index, base)
+        fill = strip._segments[-1].style if strip._segments else base
+        return strip.crop(scroll_x, scroll_x + width).extend_cell_length(width, fill or base)
 
 
 class DiffReviewScreen(ModalScreen[None]):
@@ -141,22 +243,19 @@ class DiffReviewScreen(ModalScreen[None]):
         width: 1fr;
         height: 1fr;
         border: none;
+        color: #c9d1d9;
         background: #0d1117;
         overflow-x: auto;
         overflow-y: auto;
     }
-    #diff-content {
-        width: auto;
-        height: auto;
-        color: #c9d1d9;
-        background: #0d1117;
+    #diff-content-scroll:focus {
+        border: none;
+        background-tint: $foreground 0%;
     }
-    #diff-content-scroll.--added,
-    #diff-content.--added {
+    #diff-content-scroll.--added {
         background: #0a1f12;
     }
-    #diff-content-scroll.--deleted,
-    #diff-content.--deleted {
+    #diff-content-scroll.--deleted {
         background: #1f0a0d;
     }
     #diff-loading {
@@ -201,7 +300,7 @@ class DiffReviewScreen(ModalScreen[None]):
         # Bumped per load so a slower, superseded worker cannot apply its
         # result over a newer one: a thread worker cannot be interrupted.
         self._load_generation = 0
-        self._diff_renders: dict[tuple[int, int], object] = {}
+        self._diff_renders: dict[tuple[int, int], DiffDocument] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="diff-container"):
@@ -217,8 +316,7 @@ class DiffReviewScreen(ModalScreen[None]):
                     yield FileTileList(id="diff-files-list")
                 with Vertical(id="diff-content-pane"):
                     yield Static("DIFF", id="diff-content-pane-label", classes="diff-pane-label")
-                    with _DiffContentScroll(id="diff-content-scroll"):
-                        yield Static(id="diff-content")
+                    yield DiffContentView(id="diff-content-scroll")
                     with Vertical(id="diff-loading"):
                         yield LoadingIndicator()
                         yield Static("Loading diff\u2026", id="diff-loading-text")
@@ -304,6 +402,7 @@ class DiffReviewScreen(ModalScreen[None]):
                     return None
 
             bundle = build_diff_bundle(diff_text, untracked, _lookup)
+            warm_lexers(bundle.files)
         except Exception as exc:
             _post(self._apply_error, str(exc))
             return
@@ -394,18 +493,14 @@ class DiffReviewScreen(ModalScreen[None]):
             index = 0
         file = self._files[index]
         try:
-            content = self.query_one("#diff-content", Static)
+            view = self.query_one("#diff-content-scroll", DiffContentView)
             code_width = self._diff_code_width(file)
             key = (index, code_width)
-            renderable = self._diff_renders.get(key)
-            if renderable is None:
-                renderable = render_file_diff(file, width=code_width)
-                self._diff_renders[key] = renderable
-            content.update(renderable)
-            # A Rich ``Group`` reports no natural width, so without an
-            # explicit one the Static collapses to the container's width
-            # and long lines are clipped instead of scrolling horizontally.
-            content.styles.width = code_width + diff_gutter_width(file)
+            document = self._diff_renders.get(key)
+            if document is None:
+                document = build_diff_document(file, code_width=code_width)
+                self._diff_renders[key] = document
+            view.set_document(document)
             self._apply_content_tone(file)
         except Exception:
             logger.debug("Failed to render diff content", exc_info=True)
@@ -419,21 +514,11 @@ class DiffReviewScreen(ModalScreen[None]):
         """
         try:
             scroll = self.query_one("#diff-content-scroll")
-            content = self.query_one("#diff-content")
         except Exception:
             return
-        # Reset the previous-file classes first so the new file's
-        # status is the only thing that drives the colour.
-        scroll.set_class(False, "--added")
-        scroll.set_class(False, "--deleted")
-        content.set_class(False, "--added")
-        content.set_class(False, "--deleted")
-        if file.status in ("A", "?"):
-            scroll.set_class(True, "--added")
-            content.set_class(True, "--added")
-        elif file.status == "D":
-            scroll.set_class(True, "--deleted")
-            content.set_class(True, "--deleted")
+        # The file's status alone drives the colour.
+        scroll.set_class(file.status in ("A", "?"), "--added")
+        scroll.set_class(file.status == "D", "--deleted")
 
     def _content_width(self) -> int:
         try:
@@ -445,7 +530,8 @@ class DiffReviewScreen(ModalScreen[None]):
 
     def _diff_code_width(self, file: ChangedFile) -> int:
         longest_line = 0
-        for line in file.diff_text.splitlines() or [file.display_path]:
+        lines = file.diff_text.split("\n") if file.diff_text else [file.display_path]
+        for line in lines:
             longest_line = max(longest_line, cell_len(line.expandtabs(4)))
         return max(self._content_width(), longest_line)
 
@@ -464,33 +550,46 @@ class DiffReviewScreen(ModalScreen[None]):
         if not self._files:
             target = _FOCUS_FILES
         try:
-            files_pane = self.query_one("#diff-files-pane")
-            content_pane = self.query_one("#diff-content-pane")
-            files_label = self.query_one("#diff-files-pane-label")
-            content_label = self.query_one("#diff-content-pane-label")
-            files_pane.set_class(False, "--files-focused")
-            files_pane.set_class(False, "--diff-focused")
-            content_pane.set_class(False, "--files-focused")
-            content_pane.set_class(False, "--diff-focused")
-            files_label.set_class(target == _FOCUS_FILES, "--focused")
-            content_label.set_class(target == _FOCUS_DIFF, "--focused")
+            self._mark_focus(target)
             if target == _FOCUS_DIFF:
-                content_pane.set_class(True, "--diff-focused")
-                files_pane.set_class(True, "--diff-focused")
                 self.query_one("#diff-content-scroll").focus()
             else:
-                files_pane.set_class(True, "--files-focused")
-                content_pane.set_class(True, "--files-focused")
                 self.query_one("#diff-files-list").focus()
         except Exception:
             logger.debug("Failed to apply focus", exc_info=True)
 
+    def _mark_focus(self, target: str) -> None:
+        files_pane = self.query_one("#diff-files-pane")
+        content_pane = self.query_one("#diff-content-pane")
+        for pane in (files_pane, content_pane):
+            pane.set_class(target == _FOCUS_FILES, "--files-focused")
+            pane.set_class(target == _FOCUS_DIFF, "--diff-focused")
+        self.query_one("#diff-files-pane-label").set_class(target == _FOCUS_FILES, "--focused")
+        self.query_one("#diff-content-pane-label").set_class(target == _FOCUS_DIFF, "--focused")
+
+    def on_descendant_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        # A mouse click moves focus without going through Tab/Enter.
+        widget_id = getattr(event.widget, "id", None)
+        if widget_id == "diff-content-scroll":
+            target = _FOCUS_DIFF
+        elif widget_id == "diff-files-list":
+            target = _FOCUS_FILES
+        else:
+            return
+        self._focus_target = target
+        try:
+            self._mark_focus(target)
+        except Exception:
+            logger.debug("Failed to mark focus", exc_info=True)
+
     def on_file_tile_list_file_selected(self, event: FileTileList.FileSelected) -> None:
         self._render_selected_file()
 
-    def on_list_view_selected(self, event) -> None:  # type: ignore[no-untyped-def]
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # Enter or a click on a file: read its diff.
         if event.control is not self.query_one("#diff-files-list"):
             return
+        event.stop()
         self._focus_target = _FOCUS_DIFF
         self._apply_focus()
 
@@ -597,7 +696,7 @@ class DiffReviewScreen(ModalScreen[None]):
                   CommitLoadingScreen (worker) ->
                   CommitResultScreen (success/failure).
         """
-        if not self._files or self._load_failed:
+        if self._loading or not self._files or self._load_failed:
             return
         additions = sum(f.additions for f in self._files)
         deletions = sum(f.deletions for f in self._files)

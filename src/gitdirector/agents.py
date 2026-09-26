@@ -26,19 +26,27 @@ from pathlib import Path
 #: second, grouped session, and a session option set through ``$TMUX_PANE``
 #: lands on whichever of the two tmux picks. The value is one of
 #: :data:`AGENT_STATES`, optionally followed by a space and the epoch of the
-#: report (``"running 1788714352.120"``); unset means "no report".
+#: report (``"running 1788714352.120"``); unset means "no report". A
+#: trailing :data:`AGENT_APPROVAL` marks a tool waiting for permission.
 AGENT_STATE_OPTION = "@gitdirector_agent_state"
 #: ``<agent id> <epoch>`` of a Claude Code subagent blocked on the user.
 AGENT_WAITER_OPTION = "@gitdirector_agent_waiter"
+#: `` <id> <id>`` of the Claude Code subagents still working (see ``claude_status``).
+AGENT_HELPERS_OPTION = "@gitdirector_agent_helpers"
 #: Claude Code's transcript, where an interrupt (which fires no hook) shows.
 AGENT_TRANSCRIPT_OPTION = "@gitdirector_agent_transcript"
 
 AGENT_STATE_WAITING = "waiting"
 AGENT_STATE_RUNNING = "running"
+#: At its prompt while subagents it started still work (OpenCode reports it;
+#: for Claude Code the monitor derives it).
+AGENT_STATE_PENDING = "pending"
 AGENT_STATE_IDLE = "idle"
 AGENT_STATES: frozenset[str] = frozenset(
-    {AGENT_STATE_WAITING, AGENT_STATE_RUNNING, AGENT_STATE_IDLE}
+    {AGENT_STATE_WAITING, AGENT_STATE_RUNNING, AGENT_STATE_PENDING, AGENT_STATE_IDLE}
 )
+#: Its answer fires no hook, so the monitor infers it from the tool's process.
+AGENT_APPROVAL = "approval"
 
 #: Claude Code events the status hook listens to (see ``claude_status.py``).
 #: ``Notification`` is left out: most of its types (``agent_completed``,
@@ -60,6 +68,7 @@ CLAUDE_STATUS_EVENTS: tuple[str, ...] = (
     "PostCompact",
     "Stop",
     "StopFailure",
+    "SubagentStop",
     "SessionEnd",
 )
 # Hooks run synchronously; a hung tmux must never hold Claude up for long.
@@ -217,9 +226,12 @@ def agent_tools() -> tuple[tuple[str, tuple[str, ...]], ...]:
 __all__ = [
     "AGENTS",
     "AGENTS_BY_KEY",
+    "AGENT_APPROVAL",
+    "AGENT_HELPERS_OPTION",
     "AGENT_STATES",
     "AGENT_STATE_IDLE",
     "AGENT_STATE_OPTION",
+    "AGENT_STATE_PENDING",
     "AGENT_STATE_RUNNING",
     "AGENT_STATE_WAITING",
     "AGENT_TRANSCRIPT_OPTION",

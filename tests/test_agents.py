@@ -55,10 +55,10 @@ class TestClaudeLaunchCommand:
         assert claude_status_hook_path().is_file()
 
     def test_noisy_events_are_left_out(self):
-        # Most notification types are not about the user being needed, and
-        # SubagentStop fires for Claude's own helpers after a turn.
+        # Most notification types are not about the user being needed.
         assert "Notification" not in CLAUDE_STATUS_EVENTS
-        assert "SubagentStop" not in CLAUDE_STATUS_EVENTS
+        # It ends a subagent's run, the only thing pending needs to know.
+        assert "SubagentStop" in CLAUDE_STATUS_EVENTS
 
     def test_other_agents_launch_unchanged(self):
         for agent in AGENTS:

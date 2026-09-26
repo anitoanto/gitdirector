@@ -1,6 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from click.testing import CliRunner
+
 from gitdirector import version_check
+from gitdirector.cli import cli
 
 
 class TestFormatUpdateNotice:
@@ -92,3 +96,29 @@ class TestMissingPackageMetadata:
             assert version_check.get_update_status() is None
             assert version_check.get_cached_update_status() is None
             assert version_check.get_update_notice() is None
+
+
+class TestBrokenCache:
+    def _corrupt_cache(self):
+        cache_path, _ = version_check._cache_paths()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text("- a\n")
+
+    def test_corrupt_cache_reads_as_empty(self):
+        self._corrupt_cache()
+        assert version_check._read_cache() == (None, None)
+
+    def test_write_errors_are_swallowed(self, monkeypatch):
+        def fail(*_args, **_kwargs):
+            raise PermissionError("read-only home")
+
+        monkeypatch.setattr(version_check, "write_yaml_atomic", fail)
+        version_check._write_cache(datetime.now(timezone.utc), "1.5.0")
+
+    @pytest.mark.parametrize("args", [[], ["--help"]])
+    def test_help_survives_a_corrupt_cache(self, monkeypatch, args):
+        monkeypatch.setattr(version_check, "get_installed_version", lambda: "1.4.2")
+        self._corrupt_cache()
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 0, result.output
+        assert "GITDIRECTOR" in result.output

@@ -26,7 +26,7 @@ from .card import (
 )
 
 # One key per launcher line; j/k/h/l stay free for moving and picking modes.
-_AGENT_KEYS = {"claude": "c", "opencode": "o", "codex": "x", "copilot": "p", "pi": "i"}
+_AGENT_KEYS = {"claude": "c", "opencode": "o", "codex": "x", "copilot": "g", "pi": "p"}
 _SHELL_KEY = "s"
 _EDITOR_KEY = "v"
 _SESSION_KEYS = "123456789"
@@ -131,6 +131,7 @@ class SessionActionMenuScreen(ShortcutKeys, ModalScreen[str]):
         styles = {
             "waiting": ("●", f"bold {palette.yellow}"),
             "running": ("●", palette.success),
+            "pending": ("◐", palette.pending),
             "idle": ("○", palette.muted),
         }
         statuses = self._session_statuses()

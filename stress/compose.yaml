@@ -14,10 +14,15 @@ services:
       STRESS_PHASES: "${STRESS_PHASES:-normal ptystarve nproc chaos}"
       SKIP_PYTEST: "${SKIP_PYTEST:-0}"
       STRESS_TMUX_LOG: "${STRESS_TMUX_LOG:-0}"
+      BENCH_FILES: "${BENCH_FILES:-800}"
+      BENCH_ADDS: "${BENCH_ADDS:-30000}"
+      BENCH_DELS: "${BENCH_DELS:-12000}"
     volumes:
       - "..:/src:ro"
       - ./stress.py:/stress/stress.py:ro
       - ./run.sh:/stress/run.sh:ro
       - ./crash.sh:/stress/crash.sh:ro
+      - ./bench.sh:/stress/bench.sh:ro
+      - ./bench_diff.py:/stress/bench_diff.py:ro
       - ./out:/out
     command: ["bash", "/stress/run.sh"]

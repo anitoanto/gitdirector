@@ -255,6 +255,17 @@ class TestGetNonIgnoredFiles:
         for f in files:
             assert not f.startswith("ignored_dir/")
 
+    def test_unmerged_path_listed_once(self, tmp_path):
+        with patch("gitdirector.info.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=b"a.py\0conflict.py\0conflict.py\0b.py\0", stderr=b""
+            )
+            assert _get_non_ignored_files(tmp_path) == ["a.py", "conflict.py", "b.py"]
+
+    def test_missing_directory_raises_clear_error(self, tmp_path):
+        with pytest.raises(RuntimeError, match="Repository path not found"):
+            _get_non_ignored_files(tmp_path / "gone")
+
 
 # ---------------------------------------------------------------------------
 # gather_repo_info — integration tests

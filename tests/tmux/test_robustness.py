@@ -223,3 +223,83 @@ class TestGroupedSessionEnd:
                     ["tmux", "kill-server"], capture_output=True, check=False, timeout=10
                 )
                 _cleanup_tmux_tmpdir(tmux_dir)
+
+    def test_a_split_pane_exiting_leaves_the_session(self, tmp_path, monkeypatch):
+        """The guard is per window: a split the user closes must not end the session."""
+        from pathlib import Path
+
+        from gitdirector.integrations.tmux.core import create_tmux_session
+
+        from ._shared import _make_shell_home
+
+        with _tmux_integration_lock():
+            monkeypatch.setenv("HOME", str(_make_shell_home(tmp_path / "home")))
+            tmux_dir = _make_short_tmux_tmpdir()
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+            monkeypatch.delenv("TMUX", raising=False)
+            try:
+                _run_tmux(["new-session", "-d", "-s", "keepalive", "sleep 100000"], check=True)
+                session = create_tmux_session("alpha", Path(tmp_path))
+                _run_tmux(["new-session", "-d", "-t", f"={session}", "-s", "gd/view/deck-1"])
+                window = f"={session}:^"
+
+                def panes() -> list[str]:
+                    return _run_tmux(
+                        ["list-panes", "-t", window, "-F", "#{pane_dead}"], text=True
+                    ).stdout.split()
+
+                def sessions() -> list[str]:
+                    return _run_tmux(
+                        ["list-sessions", "-F", "#{session_name}"], text=True
+                    ).stdout.split()
+
+                _run_tmux(["split-window", "-t", window, "sleep 0.3"], check=True)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and len(panes()) > 1:
+                    time.sleep(0.1)
+                assert panes() == ["0"]
+                assert set(sessions()) == {"gd/view/deck-1", session, "keepalive"}
+
+                _run_tmux(["send-keys", "-t", f"={session}:", "exit", "Enter"], check=True)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and len(sessions()) > 1:
+                    time.sleep(0.1)
+                assert sessions() == ["keepalive"]
+            finally:
+                subprocess.run(
+                    ["tmux", "kill-server"], capture_output=True, check=False, timeout=10
+                )
+                _cleanup_tmux_tmpdir(tmux_dir)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
+def test_a_consumed_bell_leaves_the_session_and_clears_its_flag(tmp_path, monkeypatch):
+    from gitdirector.integrations.tmux.monitor import _consume_bell
+
+    with _tmux_integration_lock():
+        tmux_dir = _make_short_tmux_tmpdir()
+        monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+        monkeypatch.delenv("TMUX", raising=False)
+        session = "gd/bell_abcde/agent/1"
+        try:
+            _run_tmux(["new-session", "-d", "-s", session, "printf '\\a'; sleep 100000"])
+
+            def flag() -> str:
+                return _run_tmux(
+                    ["display-message", "-p", "-t", f"={session}:", "#{window_bell_flag}"],
+                    text=True,
+                ).stdout.strip()
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and flag() != "1":
+                time.sleep(0.05)
+            assert flag() == "1"
+            assert _consume_bell(session, 1234.5) == "1234.500"
+            assert flag() == "0"
+            mark = _run_tmux(
+                ["show-options", "-v", "-t", f"={session}:", "@gd_bell_at"], text=True
+            ).stdout.strip()
+            assert mark == "1234.500"
+        finally:
+            subprocess.run(["tmux", "kill-server"], capture_output=True, check=False, timeout=10)
+            _cleanup_tmux_tmpdir(tmux_dir)

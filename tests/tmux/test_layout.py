@@ -14,8 +14,6 @@ from gitdirector.integrations.tmux.panels import (
     _span_size,
 )
 
-from ._shared import split_chained_tmux
-
 
 class TestSanitizeRepoName:
     def test_lowercases(self):
@@ -57,6 +55,7 @@ class TestBuildPanelLayout:
         assert pane_ids == ["%0", "%1", "%2"]
         assert mock_tmux_output.call_args_list[0].args == (
             "split-window",
+            "-d",
             "-h",
             "-l",
             "50%",
@@ -69,6 +68,7 @@ class TestBuildPanelLayout:
         )
         assert mock_tmux_output.call_args_list[1].args == (
             "split-window",
+            "-d",
             "-v",
             "-l",
             "50%",
@@ -95,6 +95,7 @@ class TestBuildPanelLayout:
         assert [call.args for call in mock_tmux_output.call_args_list] == [
             (
                 "split-window",
+                "-d",
                 "-v",
                 "-l",
                 "50%",
@@ -107,6 +108,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -119,6 +121,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -145,6 +148,7 @@ class TestBuildPanelLayout:
         assert pane_ids == ["%0", "%1", "%2"]
         assert mock_tmux_output.call_args_list[0].args == (
             "split-window",
+            "-d",
             "-v",
             "-l",
             "50%",
@@ -157,6 +161,7 @@ class TestBuildPanelLayout:
         )
         assert mock_tmux_output.call_args_list[1].args == (
             "split-window",
+            "-d",
             "-h",
             "-l",
             "50%",
@@ -183,6 +188,7 @@ class TestBuildPanelLayout:
         assert [call.args for call in mock_tmux_output.call_args_list] == [
             (
                 "split-window",
+                "-d",
                 "-v",
                 "-l",
                 "50%",
@@ -195,6 +201,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "33%",
@@ -207,6 +214,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "67%",
@@ -219,6 +227,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -246,6 +255,7 @@ class TestBuildPanelLayout:
         assert len(mock_tmux_output.call_args_list) == 7
         assert mock_tmux_output.call_args_list[0].args == (
             "split-window",
+            "-d",
             "-v",
             "-l",
             "67%",
@@ -258,6 +268,7 @@ class TestBuildPanelLayout:
         )
         assert mock_tmux_output.call_args_list[1].args == (
             "split-window",
+            "-d",
             "-h",
             "-l",
             "33%",
@@ -270,6 +281,7 @@ class TestBuildPanelLayout:
         )
         assert mock_tmux_output.call_args_list[2].args == (
             "split-window",
+            "-d",
             "-v",
             "-l",
             "50%",
@@ -296,6 +308,7 @@ class TestBuildPanelLayout:
         assert [call.args for call in mock_tmux_output.call_args_list] == [
             (
                 "split-window",
+                "-d",
                 "-v",
                 "-l",
                 "67%",
@@ -308,6 +321,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "67%",
@@ -320,6 +334,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -332,6 +347,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-v",
                 "-l",
                 "50%",
@@ -344,6 +360,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "67%",
@@ -356,6 +373,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -368,6 +386,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "67%",
@@ -380,6 +399,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -407,6 +427,7 @@ class TestBuildPanelLayout:
         assert [call.args for call in mock_tmux_output.call_args_list] == [
             (
                 "split-window",
+                "-d",
                 "-v",
                 "-l",
                 "33%",
@@ -419,6 +440,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "33%",
@@ -431,6 +453,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-v",
                 "-l",
                 "50%",
@@ -443,6 +466,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "67%",
@@ -455,6 +479,7 @@ class TestBuildPanelLayout:
             ),
             (
                 "split-window",
+                "-d",
                 "-h",
                 "-l",
                 "50%",
@@ -577,39 +602,11 @@ class TestRebuildPanelTmuxSession:
 class TestPanelPrefixBindings:
     @patch("gitdirector.integrations.tmux.deck.ensure_deck_bindings")
     @patch("subprocess.run")
-    def test_panel_prefix_bindings_include_overlay_alias_and_slot_focus(
-        self, mock_run, mock_deck_bindings
-    ):
+    def test_panel_keys_are_bound_through_the_deck_wrapper(self, mock_run, mock_deck_bindings):
+        # The wrapper keeps the user's own prefix 1..9 outside panels.
         _ensure_panel_prefix_bindings()
 
-        mock_run.assert_called_once()
-        commands = split_chained_tmux(mock_run.call_args.args[0])
-
-        assert commands[0] == [
-            "tmux",
-            "bind-key",
-            "-T",
-            "prefix",
-            "b",
-            "if-shell",
-            "-F",
-            "#{m:gd/panel/*,#{session_name}}",
-            "display-panes",
-        ]
-        assert commands[3] == [
-            "tmux",
-            "bind-key",
-            "-T",
-            "prefix",
-            "3",
-            "if-shell",
-            "-F",
-            "#{m:gd/panel/*,#{session_name}}",
-            "run-shell -C \"select-pane -t '#{P:#{?#{==:#{@gd_slot},3},#{pane_id},}}'\"",
-            "select-window -t :=3",
-        ]
-        assert len(commands) == 10
-        # prefix b loses its deck meaning above; the deck wraps it again.
+        mock_run.assert_not_called()
         mock_deck_bindings.assert_called_once_with()
 
 

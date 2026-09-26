@@ -11,6 +11,7 @@ from . import (
     display_path,
     failed_status,
     format_size,
+    is_missing,
     print_json,
     print_rows,
     repository_json,
@@ -40,7 +41,10 @@ def _summary(results: list[RepositoryInfo]) -> Text:
     behind = sum(info.status in (RepoStatus.BEHIND, RepoStatus.DIVERGED) for info in results)
     ahead = sum(info.status in (RepoStatus.AHEAD, RepoStatus.DIVERGED) for info in results)
     changed = sum(info.staged or info.unstaged for info in results)
+    missing = sum(is_missing(info) for info in results)
     parts: list[tuple[str, str] | str] = [count_noun(len(results), "repository", "repositories")]
+    if missing:
+        parts.append((f"{missing} missing", ATTENTION))
     if behind:
         parts.append((f"{behind} to pull", ATTENTION))
     if ahead:

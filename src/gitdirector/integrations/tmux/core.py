@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from ... import paths
 from ...config import Config
 from ...launch_context import neutral_directory
 from ...storage import atomic_write_text, normalize_repository_path
@@ -26,9 +27,11 @@ _REPO_ID_LENGTH = 5
 _SESSION_LIST_SEPARATOR = "\t"
 _TMUX_TERMINAL_NAME = "tmux-256color"
 _TMUX_TERMINAL_FALLBACK = "screen-256color"
-_TMUX_TRUECOLOR_FEATURES = "*:RGB"
-_TMUX_TRUECOLOR_OVERRIDES = "*:Tc"
-_TMUX_TRUECOLOR_OPTION_INDEX = 90
+# 24-bit colour for the tmux clients gitdirector starts, and only those:
+# terminal-features would claim it server-wide, for the user's sessions too.
+TMUX_CLIENT_FEATURES = ("-T", "RGB")
+# Server-wide entries older versions set; removed only while still ours.
+_LEGACY_SERVER_OPTIONS = {"terminal-features[90]": "*:RGB", "terminal-overrides[90]": "*:Tc"}
 # Colour-policy opt-out gitdirector overrides on purpose. The rest of
 # what gets stripped from a pane is the leak policy in
 # :mod:`.session_env`; see :func:`_tmux_child_unset_names`.
@@ -48,7 +51,6 @@ _TMUX_AGENT_TRUECOLOR_OPT_OUTS = {
     "CLAUDE_CODE_TMUX_TRUECOLOR": "1",  # anthropics/claude-code#36785
 }
 _TMUX_COLOR_ENV = {**_TMUX_STANDARD_COLOR_ENV, **_TMUX_AGENT_TRUECOLOR_OPT_OUTS}
-_TMUX_CHILD_ENV = {"TERM": _TMUX_TERMINAL_NAME, **_TMUX_COLOR_ENV}
 
 # Wall-clock cap for a single tmux/ps invocation.
 #
@@ -369,7 +371,8 @@ def view_attach_command(tmux: str, session_name: str, view: str, *options: str) 
             f"set-option -t {target} destroy-unattached on",
         ]
     )
-    return f'{tmux} {chain} || {tmux} kill-session -t "={view}" >/dev/null 2>&1'
+    client = f"{tmux} {shlex.join(TMUX_CLIENT_FEATURES)}"
+    return f'{client} {chain} || {tmux} kill-session -t "={view}" >/dev/null 2>&1'
 
 
 def guard_session_window(session_name: str) -> None:
@@ -384,14 +387,22 @@ def guard_session_window(session_name: str) -> None:
     and its views with ``kill-session -g``, a path that is safe. The hook
     names its session: a bare ``kill-session`` in a hook acts on whichever
     session tmux calls current, which can be a panel's.
+
+    Both options are per window, so a pane the user split off dies the same
+    way: while other panes are left, the hook only removes the dead one,
+    which never closes the window.
     """
     window = f"={session_name}:{_FIRST_WINDOW}"
     kill_group = shlex.join(_kill_session_args(session_name))
+    hook = (
+        f"if-shell -F '#{{==:#{{window_panes}},1}}' '{kill_group}' "
+        """'run-shell -C "kill-pane -t #{hook_pane}"'"""
+    )
     _run_tmux(
         _chain_tmux_commands(
             [
                 ["set-window-option", "-t", window, "remain-on-exit", "on"],
-                ["set-hook", "-w", "-t", window, "pane-died", kill_group],
+                ["set-hook", "-w", "-t", window, "pane-died", hook],
             ]
         ),
         check=True,
@@ -429,9 +440,19 @@ def _tmux_child_unset_names() -> tuple[str, ...]:
     return tuple(dict.fromkeys((*_TMUX_CHILD_ENV_UNSET, *child_unset_names())))
 
 
+def _tmux_child_env() -> dict[str, str]:
+    """What every pane gitdirector spawns a command in is given."""
+    env = {"TERM": _default_terminal(), **_TMUX_COLOR_ENV}
+    override = paths.home_override()
+    if override:
+        # gitdirector run inside a session must find the same folder.
+        env[paths.HOME_ENV_VAR] = str(paths.home_dir())
+    return env
+
+
 def _tmux_child_environment_prefix() -> str:
     unset_args = " ".join(f"-u {shlex.quote(name)}" for name in _tmux_child_unset_names())
-    set_args = " ".join(f"{name}={shlex.quote(value)}" for name, value in _TMUX_CHILD_ENV.items())
+    set_args = " ".join(f"{name}={shlex.quote(value)}" for name, value in _tmux_child_env().items())
     return f"{unset_args} {set_args}".strip()
 
 
@@ -441,7 +462,7 @@ def _tmux_child_environment_command(command: str) -> str:
 
 def _tmux_new_session_environment_args() -> list[str]:
     args: list[str] = []
-    for name, value in _TMUX_CHILD_ENV.items():
+    for name, value in _tmux_child_env().items():
         args.extend(["-e", f"{name}={value}"])
     return args
 
@@ -557,6 +578,12 @@ def _session_pane_path(session_name: str) -> str | None:
 
 
 def _same_directory(left: str | Path, right: str | Path) -> bool:
+    # By identity: on a case-insensitive file system tmux reports the case
+    # on disk, which need not be the case the path was registered with.
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        pass
     try:
         return os.path.realpath(str(left)) == os.path.realpath(str(right))
     except OSError:
@@ -592,14 +619,11 @@ def _default_terminal() -> str:
 
 
 def _tmux_terminal_capability_config(quoted_session: str) -> list[str]:
-    term = shlex.quote(_default_terminal())
-    return [
-        f"set-option -t {quoted_session} default-terminal {term}",
-        f"set-environment -t {quoted_session} TERM {term}",
-        f"set-option -gq {shlex.quote(f'terminal-features[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_FEATURES)}",
-        f"set-option -gq {shlex.quote(f'terminal-overrides[{_TMUX_TRUECOLOR_OPTION_INDEX}]')} {shlex.quote(_TMUX_TRUECOLOR_OVERRIDES)}",
-        *_tmux_color_environment_config(quoted_session),
+    legacy_cleanup = [
+        f"if-shell -F '#{{==:#{{{option}}},{value}}}' \"set-option -gu '{option}'\""
+        for option, value in _LEGACY_SERVER_OPTIONS.items()
     ]
+    return [*legacy_cleanup, *_tmux_color_environment_config(quoted_session)]
 
 
 def list_repo_sessions(repo_name: str | Path) -> list[str]:
@@ -766,7 +790,7 @@ def create_tmux_session(
             _set_session_repo_label(session_name, repo_label)
         if description is not None and description.strip():
             _set_session_description(session_name, description)
-        sync_panel_tmux_config()
+        try_sync_panel_tmux_config()
         return session_name
     except Exception:
         kill_tmux_session(session_name)
@@ -955,7 +979,7 @@ def attach_client_env() -> dict[str, str]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", base) or base.endswith(_SAME_SCREEN_SUFFIX):
         return _same_screen_env
     name = base + _SAME_SCREEN_SUFFIX
-    directory = Path.home() / ".gitdirector" / "terminfo"
+    directory = paths.cache_dir() / "terminfo"
     source = directory / f"{name}.src"
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -1010,7 +1034,7 @@ def attach_tmux_session(
 
         return attach_deck(session_name, deck)
     if not skip_config_sync and session_name.startswith("gd/"):
-        sync_panel_tmux_config()
+        try_sync_panel_tmux_config()
     if _is_persistent_panel_session(session_name):
         from .panels import _ensure_panel_prefix_bindings
 
@@ -1024,7 +1048,7 @@ def attach_tmux_session(
     # SIGKILLs the tmux client mid-session, which the user experiences as a
     # random detach with the terminal left in tmux's alternate screen.
     result = _run_tmux(
-        ["attach-session", "-t", f"={session_name}"],
+        [*TMUX_CLIENT_FEATURES, "attach-session", "-t", f"={session_name}"],
         capture_output=False,
         timeout=None,
         extra_env=attach_client_env(),
@@ -1202,6 +1226,9 @@ def send_key_to_session(session_name: str, key: str) -> bool:
 def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -> bool:
     if not _session_exists(session_name):
         return False
+    if not text:
+        # tmux refuses to load an empty buffer.
+        return send_key_to_session(session_name, "Enter") if enter else True
 
     # The buffer is a server-wide named slot, so a pid-only name collides
     # whenever two sends overlap -- the second load overwrites the first, and
@@ -1212,8 +1239,10 @@ def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -
     if load_result.returncode != 0:
         return False
 
+    # -p: bracketed paste, so a program that asks for it (agents, shells)
+    # gets multi-line text as one paste instead of an Enter per line.
     paste_result = _run_tmux(
-        ["paste-buffer", "-b", buffer_name, "-t", _active_pane_target(session_name)],
+        ["paste-buffer", "-p", "-b", buffer_name, "-t", _active_pane_target(session_name)],
         text=True,
     )
     _run_tmux(["delete-buffer", "-b", buffer_name], text=True)
@@ -1327,7 +1356,7 @@ def _panel_window_status_format() -> str:
 
 
 def _tmux_design_config_path() -> Path:
-    return Path.home() / ".gitdirector" / "tmux_design.conf"
+    return paths.cache_dir() / "tmux_design.conf"
 
 
 def _session_badge_text(session_name: str) -> str:
@@ -1418,7 +1447,6 @@ def _tmux_theme_config(
         [
             *_tmux_terminal_capability_config(quoted_session),
             f"set-option -t {quoted_session} mouse on",
-            f"set-option -t {quoted_session} set-clipboard on",
             f'set-option -t {quoted_session} message-style "fg={theme.badge_active_fg},bg={theme.badge_active_bg}"',
             f'set-option -t {quoted_session} message-command-style "fg={theme.label_active_fg},bg={theme.label_active_bg}"',
             f'set-window-option -t {quoted_window} window-status-style "fg={theme.label_inactive_fg},bg={theme.label_inactive_bg}"',
@@ -1573,20 +1601,29 @@ def _live_session_windows() -> dict[str, str]:
     return windows
 
 
-def _live_panel_sessions(live_sessions: Collection[str]) -> list[tuple[str, str]]:
+def _stored_panels() -> list:
+    """The saved panels; none when the panels file cannot be read."""
     from ...commands.tui.panels import PanelStore
 
+    try:
+        return PanelStore().panels
+    except (OSError, ValueError):
+        logger.debug("could not read the saved panels", exc_info=True)
+        return []
+
+
+def _live_panel_sessions(live_sessions: Collection[str]) -> list[tuple[str, str]]:
+    if not any(_is_persistent_panel_session(name) for name in live_sessions):
+        return []
     return [
         (panel.name, session_name)
-        for panel in PanelStore().panels
+        for panel in _stored_panels()
         if (session_name := make_panel_session_name(panel.name)) in live_sessions
     ]
 
 
 def _panel_for_session(session_name: str):
-    from ...commands.tui.panels import PanelStore
-
-    for panel in PanelStore().panels:
+    for panel in _stored_panels():
         if make_panel_session_name(panel.name) == session_name:
             return panel
     return None
@@ -1654,6 +1691,14 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
             return config_path
 
     return config_path
+
+
+def try_sync_panel_tmux_config() -> None:
+    """:func:`sync_panel_tmux_config` where a failure costs only the theme."""
+    try:
+        sync_panel_tmux_config()
+    except Exception:
+        logger.debug("could not apply the tmux theme", exc_info=True)
 
 
 __all__ = [

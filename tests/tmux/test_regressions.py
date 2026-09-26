@@ -186,8 +186,9 @@ class TestExactMatchAttachTmuxSession:
         mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {}, clear=True):
             attach_tmux_session("gd/panel/dev")
-        target = mock_run.call_args[0][0][3]
-        assert target == "=gd/panel/dev"
+        argv = mock_run.call_args[0][0]
+        assert argv[1:4] == ["-T", "RGB", "attach-session"]
+        assert argv[5] == "=gd/panel/dev"
         mock_prefix_bindings.assert_called_once_with()
         mock_reflow.assert_called_once_with("gd/panel/dev")
 
@@ -214,6 +215,14 @@ class TestExactMatchPanelPaneCommand:
             f"set-option -t {view} destroy-unattached on"
         )
         assert '|| env -u TMUX tmux kill-session -t "=gd/view/dev-2-$$"' in script
+
+    def test_a_pane_reaches_the_panels_own_server(self):
+        script = shlex.split(
+            _panel_pane_command("Dev", 2, "gd/repo/shell/1", socket="/tmp/a b/sock")
+        )[2]
+        assert "if tmux -S '/tmp/a b/sock' has-session -t" in script
+        assert "env -u TMUX tmux -S '/tmp/a b/sock' -T RGB new-session -d" in script
+        assert "|| env -u TMUX tmux -S '/tmp/a b/sock' kill-session" in script
 
     def test_unassigned_pane_has_no_tmux_target(self):
         cmd = _panel_pane_command("Dev", 1, None)

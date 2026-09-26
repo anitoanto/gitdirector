@@ -10,7 +10,7 @@ from click.utils import strip_ansi
 from gitdirector.cli import cli, main
 from gitdirector.commands import display_path, fit_left, format_size, status_text
 from gitdirector.commands.pull import summarize_pull
-from gitdirector.repo import RepositoryInfo, RepoStatus
+from gitdirector.repo import MISSING_REPOSITORY_MESSAGE, RepositoryInfo, RepoStatus
 
 # ---------------------------------------------------------------------------
 # Pure helper functions
@@ -47,6 +47,7 @@ class TestStatusText:
             (_info(RepoStatus.UNKNOWN, message="No origin/main branch"), "no remote branch"),
             (_info(RepoStatus.UNKNOWN), "sync unknown"),
             (_info(RepoStatus.BEHIND, behind=1, sync_stale=True), "↓1 to pull · offline"),
+            (_info(RepoStatus.UNKNOWN, message=MISSING_REPOSITORY_MESSAGE), "missing"),
         ],
     )
     def test_labels(self, info, expected):
@@ -89,6 +90,27 @@ class TestSummarizePull:
     def test_failure_shows_first_line(self):
         assert summarize_pull(False, "fatal: Not possible to fast-forward\nhint") == (
             "Not possible to fast-forward"
+        )
+
+    def test_failure_skips_fetch_banner_and_hints(self):
+        output = (
+            "From github.com:me/repo\n"
+            " * branch            main       -> FETCH_HEAD\n"
+            "hint: Diverging branches can't be fast-forwarded.\n"
+            "fatal: Not possible to fast-forward, aborting."
+        )
+        assert summarize_pull(False, output) == "Not possible to fast-forward, aborting."
+
+    def test_failure_prefers_error_line(self):
+        output = (
+            "From github.com:me/repo\n"
+            " * branch            main       -> FETCH_HEAD\n"
+            "error: Your local changes to the following files would be overwritten by merge:\n"
+            "\tREADME.md\n"
+            "Aborting"
+        )
+        assert summarize_pull(False, output) == (
+            "Your local changes to the following files would be overwritten by merge:"
         )
 
 
@@ -275,6 +297,18 @@ class TestListCommand:
         # Check spinner/table summary for plural
         assert "2 repositories" in result.output or "2 repos" in result.output
 
+    def test_missing_repository_is_counted_not_clean(self, runner, tmp_path):
+        info = RepositoryInfo(
+            tmp_path / "gone", "gone", RepoStatus.UNKNOWN, None, MISSING_REPOSITORY_MESSAGE
+        )
+        mgr = _mock_manager(get_repository_status=info)
+        mgr.config.repositories = [info.path]
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["list", "--no-fetch"])
+        summary = strip_ansi(result.output).splitlines()[-1]
+        assert "1 missing" in summary
+        assert "all clean and in sync" not in summary
+
     def test_json(self, runner, tmp_path):
         info = RepositoryInfo(
             tmp_path / "repo",
@@ -338,6 +372,21 @@ class TestStatusCommand:
             result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
         assert "clean" in result.output.lower()
+
+    def test_missing_repository_is_not_clean(self, runner, tmp_path):
+        clean = RepositoryInfo(tmp_path / "a", "a", RepoStatus.UP_TO_DATE, "main")
+        gone = RepositoryInfo(
+            tmp_path / "gone", "gone", RepoStatus.UNKNOWN, None, MISSING_REPOSITORY_MESSAGE
+        )
+        mgr = _mock_manager()
+        mgr.config.repositories = [clean.path, gone.path]
+        mgr.get_repository_status = lambda path, **_: clean if path == clean.path else gone
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["status"])
+        assert result.exit_code == 0
+        summary = strip_ansi(result.output).splitlines()[-1]
+        assert "1 clean" in summary
+        assert "1 missing" in summary
 
     def test_dirty(self, runner, fake_git_repo):
         info = RepositoryInfo(

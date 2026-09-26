@@ -125,7 +125,11 @@ class TestPrefixBindings:
             "bind-key -r -T prefix Left    select-pane -L\n"
         )
         bind_b = _binding(commands, "b")
-        assert bind_b[4:7] == ["if-shell", "-F", "#{m:gd/deck/*,#{session_name}}"]
+        assert bind_b[4:7] == [
+            "if-shell",
+            "-F",
+            "#{?#{m:gd/deck/*,#{session_name}},1,#{m:gd/panel/*,#{session_name}}}",
+        ]
         assert bind_b[-1] == "display-panes"
         assert ["set-option", "-g", "@gd_prefix_original_b", "display-panes"] in commands
         # Nothing was bound to Tab: outside a deck it stays unbound in effect.
@@ -141,6 +145,28 @@ class TestPrefixBindings:
         commands = _run_with(wrapped_b, {"@gd_prefix_original_b": "my-own-b\n"})
         assert _binding(commands, "b")[-1] == "my-own-b"
         assert not any(c[:3] == ["set-option", "-g", "@gd_prefix_original_b"] for c in commands)
+
+    def test_prefix_b_shows_pane_numbers_in_a_panel(self):
+        commands = _run_with("")
+        assert _binding(commands, "b")[7].startswith(
+            'run-shell -C "#{?#{m:gd/panel/*,#{session_name}},display-panes,'
+        )
+
+    def test_an_old_panel_binding_is_never_kept_as_the_users_own(self):
+        # Older versions bound prefix b in panels with no fallback, and the
+        # deck then kept that binding as the user's original.
+        panel_b = (
+            'bind-key    -T prefix b       if-shell -F "#{m:gd/panel/*,#{session_name}}" '
+            "display-panes\n"
+        )
+        commands = _run_with(panel_b, {"@gd_prefix_original_b": "my-own-b\n"})
+        assert _binding(commands, "b")[-1] == "my-own-b"
+        assert not any(c[:3] == ["set-option", "-g", "@gd_prefix_original_b"] for c in commands)
+
+        stored_panel_b = 'if-shell -F "#{m:gd/panel/*,#{session_name}}" display-panes'
+        commands = _run_with(panel_b, {"@gd_prefix_original_b": stored_panel_b})
+        assert len(_binding(commands, "b")) == 8
+        assert ["set-option", "-gu", "@gd_prefix_original_b"] in commands
 
     def test_the_wheel_scrolls_copy_mode_a_line_at_a_time_in_gitdirector(self):
         commands = _run_with(
@@ -172,6 +198,36 @@ class TestPrefixBindings:
         commands = _run_with(wrapped, {option: "my-wheel\n"})
         assert _binding(commands, "WheelUpPane", "copy-mode")[-1] == "my-wheel"
         assert not any(c[:3] == ["set-option", "-g", option] for c in commands)
+
+    def test_panel_slot_keys_keep_the_users_own_binding(self):
+        commands = _run_with("bind-key    -T prefix 3       my-own-3\n")
+        bind_3 = _binding(commands, "3")
+        assert bind_3[4:7] == ["if-shell", "-F", "#{m:gd/panel/*,#{session_name}}"]
+        assert bind_3[7] == (
+            "run-shell -C \"select-pane -t '#{P:#{?#{==:#{@gd_slot},3},#{pane_id},}}'\""
+        )
+        assert bind_3[-1] == "my-own-3"
+        assert ["set-option", "-g", "@gd_prefix_original_3", "my-own-3"] in commands
+
+    def test_an_old_raw_panel_slot_binding_falls_back_to_tmux_default(self):
+        # Older versions bound prefix 1..9 without keeping the user's binding.
+        old = (
+            'bind-key    -T prefix 3       if-shell -F "#{m:gd/panel/*,#{session_name}}" '
+            '"run-shell -C x" "select-window -t :=3"\n'
+        )
+        commands = _run_with(old)
+        assert _binding(commands, "3")[-1] == "select-window -t :=3"
+
+    def test_a_slot_key_the_user_unbound_stays_unbound(self):
+        commands = _run_with("")
+        assert len(_binding(commands, "4")) == 8
+        assert ["set-option", "-g", "@gd_prefix_original_4", "none"] in commands
+        wrapped = (
+            'bind-key    -T prefix 4       if-shell -F "#{m:gd/panel/*,#{session_name}}" '
+            '"run-shell -C x"\n'
+        )
+        commands = _run_with(wrapped, {"@gd_prefix_original_4": "none"})
+        assert len(_binding(commands, "4")) == 8
 
     def test_an_unwrapped_prefix_s_is_left_alone(self):
         commands = _run_with("bind-key    -T prefix s       my-sessions\n")
@@ -238,6 +294,9 @@ class TestAttachDeck:
             assert D.attach_deck("gd/r/claude/1") is True
         create.assert_called_once_with("gd/r/claude/1", return_to=None)
         assert mock_run.call_args.args[0] == [
+            # 24-bit colour for this client only.
+            "-T",
+            "RGB",
             "attach-session",
             "-t",
             "=gd/deck/1-a",

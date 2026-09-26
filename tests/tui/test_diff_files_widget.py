@@ -1,4 +1,4 @@
-"""Tests for the FileTile and FileTileList widgets.
+"""Tests for the FileTileList widget.
 
 Covers the tile layout (status letter + filename + right-aligned stats, the
 folder under it), the selection tint, and the "diff visualization updates on
@@ -10,20 +10,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.widgets import Static
 
 from gitdirector.commands.tui import (
     DiffReviewScreen,
     GitDirectorConsole,
 )
 from gitdirector.commands.tui.diff_renderer import ChangedFile
+from gitdirector.commands.tui.screens.diff import DiffContentView
 from gitdirector.commands.tui.screens.diff_files import (
-    FileTile,
     FileTileList,
     _FileTileSpec,
 )
 
-from .conftest import _mock_manager, _wait_for_deferred_scroll
+from .conftest import _mock_manager, _open_diff_screen, _wait_for_deferred_scroll
 
 # ---------------------------------------------------------------------------
 # _FileTileSpec
@@ -143,15 +142,13 @@ class TestFileTileLayout:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
-            tile = files_list.children[0].query_one(FileTile)
-            assert tile.query_one(".tile-icon") is not None
-            assert tile.query_one(".tile-title") is not None
-            assert tile.query_one(".tile-subtitle") is not None
-            assert tile.query_one(".tile-stats") is not None
+            title, subtitle = files_list.tile_text(0).plain.split("\n")
+            assert title.startswith("M foo.py")
+            assert title.endswith("+1 -1")
+            assert subtitle == "  src/"
 
     async def test_title_shows_filename_only(self, mocker):
         _patch_repo_methods(mocker, diff_text=SAMPLE_DIFF)
@@ -159,15 +156,13 @@ class TestFileTileLayout:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
-            tile = files_list.children[0].query_one(FileTile)
-            title = tile.query_one(".tile-title", Static)
+            title = files_list.tile_text(0).plain.split("\n")[0]
             # Title is just the basename, not the full path.
-            assert "foo.py" in str(title.render())
-            assert "src/" not in str(title.render())
+            assert "foo.py" in title
+            assert "src/" not in title
 
     async def test_subtitle_shows_full_path(self, mocker):
         _patch_repo_methods(mocker, diff_text=SAMPLE_DIFF)
@@ -175,13 +170,10 @@ class TestFileTileLayout:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
-            tile = files_list.children[0].query_one(FileTile)
-            subtitle = tile.query_one(".tile-subtitle", Static)
-            assert str(subtitle.render()) == "src/"
+            assert files_list.tile_text(0).plain.split("\n")[1].strip() == "src/"
 
     async def test_stats_render_in_title_row(self, mocker):
         _patch_repo_methods(mocker, diff_text=SAMPLE_DIFF)
@@ -189,15 +181,13 @@ class TestFileTileLayout:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
-            tile = files_list.children[0].query_one(FileTile)
-            stats = tile.query_one(".tile-stats", Static)
-            text = str(stats.render())
-            assert "+1" in text
-            assert "-1" in text
+            title = files_list.tile_text(0).plain.split("\n")[0]
+            assert title.endswith("+1 -1")
+            # Against the right edge of the tile.
+            assert len(title) == files_list._tile_width
 
     async def test_icon_is_the_status_letter_in_its_colour(self, mocker):
         from gitdirector.commands.tui.diff_renderer import STATUS_TEXT
@@ -207,15 +197,15 @@ class TestFileTileLayout:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
-            icons = [c.query_one(".tile-icon", Static).content for c in files_list.children]
+            tiles = [files_list.tile_text(i) for i in range(len(files_list._specs))]
             # SAMPLE_DIFF has one modified file and one new file; no pill backgrounds.
-            assert sorted(icon.plain for icon in icons) == ["A", "M"]
-            for icon in icons:
-                assert STATUS_TEXT[icon.plain] in str(icon.style)
+            assert sorted(tile.plain[0] for tile in tiles) == ["A", "M"]
+            for tile in tiles:
+                icon = next(span for span in tile.spans if span.start == 0)
+                assert STATUS_TEXT[tile.plain[0]] in str(icon.style)
                 assert " on " not in str(icon.style)
 
 
@@ -226,16 +216,17 @@ class TestFileTileSelection:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
-            first, second = (c.query_one(FileTile) for c in files_list.children)
-            assert first.selected and first.has_class("--selected")
-            assert not second.selected and not second.has_class("--selected")
-            assert first.styles.background != second.styles.background
+            assert files_list.highlighted == 0
+            plain = files_list.get_visual_style("option-list--option")
+            tinted = files_list.get_visual_style(
+                "option-list--option", "option-list--option-highlighted"
+            )
+            assert tinted.background != plain.background
 
 
 # ---------------------------------------------------------------------------
@@ -257,19 +248,18 @@ class TestDiffUpdatesOnSelection:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             screen._render_selected_file()
             await pilot.pause()
-            first = content.content
+            first = content.document
             await pilot.press("j")
             await pilot.pause()
-            second = content.content
+            second = content.document
             assert first is not second
 
     async def test_content_does_not_update_on_n_press(self, mocker):
@@ -285,19 +275,18 @@ class TestDiffUpdatesOnSelection:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             screen._render_selected_file()
             await pilot.pause()
-            first = content.content
+            first = content.document
             await pilot.press("n")
             await pilot.pause()
-            second = content.content
+            second = content.document
             assert first is second
 
     async def test_content_updates_on_bracket_press(self, mocker):
@@ -313,19 +302,18 @@ class TestDiffUpdatesOnSelection:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             screen._render_selected_file()
             await pilot.pause()
-            first = content.content
+            first = content.document
             await pilot.press("]")
             await pilot.pause()
-            second = content.content
+            second = content.document
             assert first is not second
 
     async def test_content_updates_on_navigation(self, mocker):
@@ -341,23 +329,22 @@ class TestDiffUpdatesOnSelection:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             screen._render_selected_file()
             await pilot.pause()
-            first = content.content
+            first = content.document
             await pilot.press("]")  # next file
             await pilot.pause()
-            second = content.content
+            second = content.document
             assert first is not second
 
     async def test_content_updates_via_clicked_event(self, mocker):
-        # A mouse click goes through ListView's own selection, a
+        # A mouse click goes through OptionList's own selection, a
         # different path from keyboard navigation.
         from gitdirector import repo as repo_mod
 
@@ -371,19 +358,19 @@ class TestDiffUpdatesOnSelection:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
             await pilot.pause()
-            content = app.screen.query_one("#diff-content", Static)
+            content = app.screen.query_one("#diff-content-scroll", DiffContentView)
             screen._render_selected_file()
             await pilot.pause()
-            first = content.content
-            await pilot.click(files_list.children[1].query_one(FileTile))
+            first = content.document
+            # Tiles are two lines tall: the second starts on line 2.
+            await pilot.click(files_list, offset=(4, 2))
             await pilot.pause()
-            second = content.content
+            second = content.document
             assert first is not second
             assert files_list.index == 1
 
@@ -421,8 +408,7 @@ class TestFileListScrolling:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 12)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             await _wait_for_deferred_scroll(files_list)
@@ -451,8 +437,7 @@ class TestFileListScrolling:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 12)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.index = 19
@@ -476,8 +461,7 @@ class TestFileListScrolling:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 12)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_list = app.screen.query_one("#diff-files-list", FileTileList)
             files_list.focus()
@@ -504,8 +488,7 @@ class TestFocusIndicator:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_pane = screen.query_one("#diff-files-pane")
             content_pane = screen.query_one("#diff-content-pane")
@@ -530,8 +513,7 @@ class TestFocusIndicator:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+            await _open_diff_screen(app, screen)
             await pilot.pause()
             files_pane = screen.query_one("#diff-files-pane")
             content_pane = screen.query_one("#diff-content-pane")
@@ -584,8 +566,7 @@ class TestSetFiles:
 
             fl.index = 1
             await pilot.pause()
-            tiles = [c.query_one(FileTile) for c in fl.children]
-            assert [t.selected for t in tiles] == [False, True]
+            assert fl.highlighted == 1
             assert received[-1] is files[1]
 
             await fl.set_files([])

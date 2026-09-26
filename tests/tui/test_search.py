@@ -422,3 +422,56 @@ class TestResultsBarFollowsTheFilter:
             await pilot.pause()
             for tab in ("repo", "sessions", "panels"):
                 assert not app.query_one(f"#{tab}-search-indicator").display
+
+
+class TestSearchAcrossTabs:
+    async def test_clearing_on_another_tab_unfilters_repos(self):
+        repos = [_make_info("alpha", Path("/tmp/alpha")), _make_info("beta", Path("/tmp/beta"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("slash", "a", "l", "enter")
+            await pilot.pause()
+            assert app._visible_repo_count == 1
+
+            app.action_tab_panels()
+            await pilot.pause()
+            await pilot.press("escape")
+            app.action_tab_repos()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert app._search_query == ""
+            assert app._visible_repo_count == 2
+
+    async def test_search_typed_on_another_tab_filters_repos(self):
+        repos = [_make_info("alpha", Path("/tmp/alpha")), _make_info("beta", Path("/tmp/beta"))]
+        app = GitDirectorConsole()
+        app.manager = _mock_manager(repos)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            app.action_tab_panels()
+            await pilot.pause()
+            await pilot.press("slash", "b", "e", "enter")
+            app.action_tab_repos()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert app._visible_repo_count == 1
+            assert "filter: 'be'" in str(app.query_one("#status-bar", Static).content)
+
+    async def test_reopening_search_after_escape_starts_empty(self):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
+        async with app.run_test(size=(120, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("slash", "a", "enter")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._search_query == ""
+
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.query_one("#search-bar", Input).value == ""

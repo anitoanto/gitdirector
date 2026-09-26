@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from gitdirector.cli import cli
 from gitdirector.config import Config
 
 
@@ -59,6 +60,19 @@ class TestConfigInit:
         cfg = Config()
         assert cfg.repositories == []
         assert cfg.max_workers == Config.DEFAULT_MAX_WORKERS
+
+    def test_null_repositories_key_loads_empty_and_accepts_link(
+        self, config_dir, fake_git_repo, runner, monkeypatch
+    ):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text("repositories:\n")
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+        assert Config().repositories == []
+
+        result = runner.invoke(cli, ["link", str(fake_git_repo)])
+
+        assert result.exit_code == 0, result.output
+        assert Config().repositories == [fake_git_repo.resolve()]
 
     @pytest.mark.parametrize(
         ("main_data", "secrets_data", "message"),

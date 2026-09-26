@@ -71,7 +71,7 @@ class TestScrubPolicy:
         setting and unsetting the same name, so the two lists must stay
         disjoint as either grows.
         """
-        injected = set(core._TMUX_CHILD_ENV)
+        injected = set(core._tmux_child_env())
         scrubbed = set(session_env.static_scrub_names())
         assert injected & scrubbed == set()
         assert not any(session_env.is_scrubbed(name) for name in injected)

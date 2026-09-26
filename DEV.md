@@ -67,6 +67,15 @@ Two rules keep it stable (see `tests/_timeouts.py`):
   They are deadlock backstops, not speed assertions. `Event.wait` returns
   `False` on timeout instead of raising, so an unchecked wait lets a test
   continue as if it had synchronized.
+- **Wait for a condition, never for time.** `pilot.pause()` only drains
+  the message queues: it does not wait for a thread worker, and a screen
+  pushed without `await` may not even be mounted yet. Open the Review Diff
+  screen with `_open_diff_screen` (awaits the mount, the load worker and
+  `_loading`), poll a predicate with a deadline (`_until` in
+  `test_sidebar.py`), wait for a repaint with `_wait_for_refresh`, and gate
+  a fake slow tmux call on a `threading.Event` the test releases instead of
+  a `sleep` that a loaded runner can outlast. Anything that flaked under
+  CPU load in the past came from one of these.
 
 Tests needing tmux start their own private server (`TMUX_TMPDIR`), never the
 developer's, are skipped without `tmux`, and are serialized behind a file lock.
@@ -106,6 +115,22 @@ A phase passes only if the tmux server never dies, no pane is left broken
 (`#{pane_pid}` -1), every resource failure reaches the user explained, and
 killing the server leaves no process and no pty behind. Reports land in
 `stress/out/<run>-<phase>/`.
+
+**Diff viewer benchmark.** `stress/bench_diff.py` builds a real repository
+with a massive uncommitted diff (800 files, about +30000/-12000 lines by
+default; `--files`, `--adds`, `--dels`) and times the Review Diff screen
+headlessly: the load, each keypress through the file list, paging, the jump
+to the last file, and scrolling the diff. It runs on its own or in the
+container (`BENCH_FILES` and friends override the sizes):
+
+```bash
+uv run python stress/bench_diff.py --files 800
+cd stress && docker compose run --rm stress bash /stress/bench.sh   # -> out/bench-diff.json
+```
+
+The file list is one `OptionList` that draws only the rows on screen; the
+earlier widget-per-file list took minutes to mount and reflowed on every
+keypress at that size. Each file's rendered diff is cached per width.
 
 ## Sessions and panels in tmux
 
@@ -177,13 +202,25 @@ lives on in the view until the view goes); a main pane whose client exited
 (its command falls back to `sleep`) gets a message too; a closed main pane is
 recreated; and when no repository session is left the deck is closed, which
 returns the client to the console. Statuses come from its own `TmuxMonitor`,
-the console's being paused while it is attached.
+the console's being paused while it is attached. A sample carries the deck's
+focus and shown session as of when it was read, so one begun before a click,
+while the mouse button is held (tmux makes the sidebar the active pane on any
+press, until the sidebar hands focus back), or while a session is still being
+shown or focused is applied without them: otherwise the highlight lit up
+under the pressed button and the shown marker flashed back for a frame. A
+release the sidebar never sees (the button let go over another pane) stops
+counting as held after a second. A click or Enter goes straight from
+`SessionList.action_select` to `open_session`, not through an
+`OptionSelected` message, so the highlight, the dimmed look and the marker
+land in the same frame.
 
 `prefix Tab` (unbound in tmux by default) and `prefix b` are rebound as
 `if-shell -F '#{m:gd/deck/*,...}' <deck command> <original>`, so outside a
 deck they do whatever they did before; the original is kept in
 `@gd_prefix_original_<key>` so wrapping is
-idempotent (panel bindings rewrap after rebinding `b`). `prefix Tab` toggles
+idempotent, and a gitdirector binding is never saved as the original.
+`prefix b` is one binding for decks and panels: `display-panes` in a panel,
+the sidebar toggle in a deck. `prefix Tab` toggles
 focus, or splits a new sidebar in from `@gd_deck_respawn_sidebar` when it
 was closed; `prefix b` sends `b` to the sidebar, which flips the global
 `@gd_sidebar_collapsed` and resizes itself. The window's `window-resized`
@@ -208,7 +245,7 @@ sample is in, then shows them all at once.
 
 Coming back is one frame change too. The attach client runs with
 `TERM=<term>-gdscreen`, a copy of the terminal's entry compiled once into
-`~/.gitdirector/terminfo` (`attach_client_env`) without `smcup`/`rmcup`, so
+`~/.gitdirector/cache/terminfo` (`attach_client_env`) without `smcup`/`rmcup`, so
 tmux never switches the terminal back to the shell's screen. Its `rmkx`, which
 tmux sends only on the way out and just before it clears the screen and prints
 `[detached ...]`, also starts synchronized output (`?2026h`): the deck's last
@@ -245,12 +282,15 @@ without `PWD`/`OLDPWD` (`launch_context.py`).
 
 ### Agent-reported status
 
-Three statuses, one meaning each: `running` (the agent is working), `waiting`
-(it needs a human to act), `idle` (it is doing nothing). An agent with
-lifecycle hooks reports its own, and the monitor trusts it instead of
-watching the pane (no captures, no heuristics). The protocol is a tmux pane
-option, `@gitdirector_agent_state`, holding `running`, `waiting`, or `idle`,
-optionally followed by the epoch of the report (`running 1788714352.120`).
+Four statuses, one meaning each: `running` (the agent is working), `waiting`
+(it needs a human to act), `pending` (the agent is at its prompt while
+subagents it started still work), `idle` (it is doing nothing). An agent with lifecycle hooks reports its own, and the monitor
+trusts it instead of watching the pane (no captures, no heuristics). The
+protocol is a tmux pane option, `@gitdirector_agent_state`, holding
+`running`, `waiting`, `pending`, or `idle`, optionally followed by the
+epoch of the report (`running 1788714352.120`) and, on a `waiting`, by
+`approval` when a tool waits for permission (see below). OpenCode reports
+`pending` itself; for Claude Code the monitor derives it (below).
 It is pane scoped because a session shown in a panel is also reachable
 through the panel's grouped view session, and a session option set through
 `$TMUX_PANE` lands on whichever of the two tmux picks. `list-panes` reads it
@@ -271,18 +311,33 @@ events:
 | --- | --- |
 | `SessionStart`, `Stop`, `StopFailure`, `PostCompact` (manual) | `idle` |
 | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionDenied` (auto mode denied; Claude carries on), `ElicitationResult`, `PreCompact`, `PostCompact` (auto) | `running` |
-| `PermissionRequest` (also fired for `AskUserQuestion`), `Elicitation` | `waiting` |
+| `PermissionRequest` for a tool | `waiting <epoch> approval` |
+| `PermissionRequest` for `AskUserQuestion` or `ExitPlanMode` (a question, not an approval), `Elicitation` | `waiting` |
 | `SessionEnd` | options cleared |
 
-Events from subagents carry an `agent_id` and keep firing after the main
-turn has ended (a background subagent's tool calls), so they only set
-`@gitdirector_agent_waiter` = `<agent id> <epoch>` on a `PermissionRequest`
-or `Elicitation`, and that subagent's next tool result clears it (inside tmux,
-with `if-shell`, so concurrent hooks cannot race). A new prompt clears it too.
+Events from subagents carry an `agent_id` and an `agent_type`, and keep
+firing after the main turn has ended (a background subagent's tool calls),
+so they never touch the main state. They keep two pane options instead,
+each changed inside tmux (`if-shell -F`, `set-option -a`, `set-option -F`
+with `#{s/…//:…}`) so concurrent hooks cannot race:
+
+- `@gitdirector_agent_waiter` = `<agent id> <epoch>` (plus `approval`, as
+  above) on a subagent's `PermissionRequest` or `Elicitation`; that
+  subagent's next tool result or its `SubagentStop` clears it, and so does a
+  new prompt.
+- `@gitdirector_agent_helpers` = `` <id> <id>`` of the subagents still
+  working. No hook marks a subagent's start (`SubagentStart` never fires in
+  2.1.282), so a subagent is listed on its first `PreToolUse`, which Claude
+  waits for and so lands before its `SubagentStop`, and removed on the
+  `PostToolUse` of its `SubagentHandback` (its last tool call) or on its
+  `SubagentStop`, whichever gets through first. Claude Code's own helper
+  sends a lone `SubagentStop` with an empty `agent_type` and is never
+  listed. `SessionStart` and `SessionEnd` clear the list; a new prompt does
+  not (background subagents keep going).
+
 `Notification` is not used: most of its types (`agent_completed`,
 `elicitation_response`, `auth_success`, ...) are not about the user being
 needed, and `PermissionRequest` already reports the ones that are.
-`SubagentStop` fires for Claude's own helpers after a turn.
 
 Two transitions fire no hook; the monitor fills them from Claude's own
 records (`resolve_agent_status` in `monitor.py`):
@@ -295,13 +350,31 @@ records (`resolve_agent_status` in `monitor.py`):
   the report means `idle`.
 - **Approving a prompt**: nothing fires until the tool finishes. The approved
   tool runs as a new child process of Claude (the Bash tool starts a shell),
-  so a `waiting` whose agent started a process that has lived at least 2 s
-  since the report is `running` (`caffeinate`, which Claude keeps running
-  while it works, is ignored).
+  so a `waiting … approval` whose agent started a direct child process that
+  has lived at least 2 s since the report is `running` (`caffeinate`, which
+  Claude keeps running while it works, is ignored). Only `approval` waits
+  are checked, and only Claude's own children count: a background task
+  keeps spawning processes of its own (grandchildren), which used to flip an
+  open question to `running`. Answering a question fires `PostToolUse` at
+  once, so it needs no inference.
 
-A finished background task or subagent comes back as a queued message, which
-fires `UserPromptSubmit`, so it needs no special case. Verified live against
-Claude Code 2.1.280.
+The monitor then turns an `idle` into `pending` while
+`@gitdirector_agent_helpers` lists a subagent that is still working. The
+list is kept by best-effort hooks (one seen live never took effect and left
+a finished subagent listed), so the monitor never trusts it alone: a
+subagent's transcript is `<session>/subagents/agent-<id>.jsonl` beside the
+session's own (`_has_live_helper`), and a listed subagent counts as gone
+when that file is missing, when its last `assistant` entry carries
+`stop_reason: end_turn` (a subagent runs one turn, so that is its final
+message; the tail is re-read only when the file changes), or when it has
+been quiet for 2 minutes (a killed subagent never sends its
+`SubagentStop`; a working one writes at every tool call). `running` and
+`waiting` always win over `pending`. Background shells are not counted: a
+dev server never finishes. A finished background task or subagent comes
+back as a queued message, which fires `UserPromptSubmit` then `Stop`, so it
+needs no special case. Verified live against Claude Code 2.1.282, in
+default and auto mode, with the hand-back arriving both at the prompt and
+mid-turn.
 
 **OpenCode.** The launch entry sets `OPENCODE_CONFIG_CONTENT` to a config
 that adds one plugin, `src/gitdirector/integrations/opencode_status.js`
@@ -313,12 +386,19 @@ the most urgent state across every session the process holds:
 | --- | --- |
 | `permission.asked`, `question.asked` | the request is pending |
 | `permission.replied`, `question.replied`, `question.rejected` | the request is no longer pending |
+| `session.created`, `session.updated` with `info.parentID` | the session is a subagent (a child session) |
 | `session.status` `busy` or `retry` | the session has a turn in progress |
 | `session.status` `idle`, `session.idle`, `session.error`, `session.deleted` | the session is no longer busy, and its pending requests are dropped |
 
 After every event the reported state is `waiting` if any request is pending,
-else `running` if any session is busy, else `idle`; the option is only
-rewritten when that state changes. OpenCode reports an interrupted turn as
+else `running` if a top-level session is busy, else `pending` if only
+subagents are busy, else `idle`; the option is only rewritten when that
+state changes. A subagent normally blocks its parent (`running`); with
+background subagents (`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`, or
+detaching a running one) the parent returns to its prompt while the child
+works, which is `pending`. Verified live against OpenCode 1.18.32;
+`tests/test_opencode_status.py` replays the recorded events through the
+plugin with Node. OpenCode reports an interrupted turn as
 idle itself. `opencode --pure` disables external plugins and therefore this
 reporting.
 
@@ -350,9 +430,14 @@ changed      visible pane content differs from the last capture, ignoring
              of the pane being resized (a client attaching at another size)
 cpu          the process tree burned >= 0.5 s of CPU within the last 3 s
              (a lone housekeeping burst from an idle agent does not count)
-bell         tmux's window bell flag rose (tmux only raises it while no
-             client is attached, so the monitor never attaches one);
-             cleared by a real content change >= 1 s later or on attach
+bell         tmux's window bell flag is set (tmux only raises it while no
+             client is attached to that session, so the monitor never
+             attaches one); the monitor that sees it clears it with
+             `kill-session -C` (clears alerts, kills nothing) and leaves
+             `@gd_bell_at` for every other monitor, since a session shown
+             only through a deck or panel view never has it cleared by
+             tmux; the status clears on a real content change >= 1 s later
+             or on attach
 
 if pane is dead:                                        idle
 elif bell:                                              waiting

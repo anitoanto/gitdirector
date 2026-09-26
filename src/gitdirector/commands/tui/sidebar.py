@@ -15,7 +15,6 @@ import sys
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
 from rich.text import Text
 from textual import events, work
@@ -48,6 +47,8 @@ _FLASH_SECS = 4.0
 _RESIZE_AFTER_SECS = 0.03
 # The content comes back even if no resize arrives.
 _RESIZE_TIMEOUT_SECS = 0.6
+# A press released over another pane never sends its MouseUp here.
+_PRESS_TIMEOUT_SECS = 1.0
 # Narrower than this, the sidebar is a rail of status dots.
 RAIL_BELOW = 14
 _GROUP_PREFIX = "group:"
@@ -218,6 +219,13 @@ class CollapseToggle(Static):
 
 class SessionList(OptionList):
     """The session list; the cursor stops at either end instead of wrapping."""
+
+    def action_select(self) -> None:
+        # Straight to the app rather than an OptionSelected message: the
+        # highlight, the marker and the dimmed look then land in one frame.
+        option = self.highlighted_option
+        if option is not None and option.id and not option.disabled:
+            self.app.open_session(option.id)
 
     def next_enabled(self, start: int, direction: int) -> int | None:
         index = start
@@ -422,6 +430,14 @@ class SessionSidebar(App):
         self._reconcile_blocked = False
         self._revealed = False
         self._query = ""
+        # A sample begun before the last click, while a session is being
+        # shown or focused, or while the mouse button is held (tmux makes the
+        # sidebar the active pane on any press) still has the old focus and
+        # shown session: applying them would flash the highlight and the
+        # marker for a moment.
+        self._local_change_at = 0.0
+        self._showing = False
+        self._pressed_at: float | None = None
 
     # -- layout --------------------------------------------------------------
 
@@ -524,8 +540,26 @@ class SessionSidebar(App):
         finally:
             self._tick_running = False
 
+    def note_local_change(self) -> None:
+        self._local_change_at = time.monotonic()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._pressed_at = time.monotonic()
+        self.note_local_change()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self._pressed_at = None
+        self.note_local_change()
+
+    def _pressed(self) -> bool:
+        return (
+            self._pressed_at is not None
+            and time.monotonic() - self._pressed_at < _PRESS_TIMEOUT_SECS
+        )
+
     def _sample_once(self) -> None:
         """Read and repair the deck, then hand the result to the UI; on a worker thread."""
+        started = time.monotonic()
         state = deck_api.read_deck_state(self.deck)
         if state is None:
             self.call_from_thread(self.exit)
@@ -536,7 +570,7 @@ class SessionSidebar(App):
         if raw is None:
             raw = list_all_gd_sessions()
         entries = build_entries(raw, self._monitor.statuses(), state.live_sessions)
-        self.call_from_thread(self._apply_sample, state, entries)
+        self.call_from_thread(self._apply_sample, state, entries, started)
 
     def _reconcile(self, state: deck_api.DeckState) -> deck_api.DeckState | None:
         """Repair the deck after anything that happened behind the sidebar's back.
@@ -586,10 +620,16 @@ class SessionSidebar(App):
         if landing is not None:
             self._move_cursor(landing)
 
-    def _apply_sample(self, state: deck_api.DeckState, entries: list[SidebarEntry]) -> None:
+    def _apply_sample(
+        self, state: deck_api.DeckState, entries: list[SidebarEntry], started: float = 0.0
+    ) -> None:
         self._state = state
-        self.screen.set_class(not state.sidebar_focused, "-blurred")
+        stale = self._showing or self._pressed() or started < self._local_change_at
+        if not stale:
+            self.screen.set_class(not state.sidebar_focused, "-blurred")
         shown = state.target if state.main is not None and not state.main.placeholder else None
+        if stale:
+            shown = self._shown
         changed = shown != self._shown or entries != self._entries
         self._shown = shown
         self._entries = entries
@@ -675,11 +715,6 @@ class SessionSidebar(App):
 
     # -- actions ---------------------------------------------------------------
 
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        event.stop()
-        if event.option.id and not event.option.disabled:
-            self._open(event.option.id)
-
     def action_cursor_down(self) -> None:
         self.query_one(OptionList).action_cursor_down()
 
@@ -731,7 +766,7 @@ class SessionSidebar(App):
     def action_focus_session(self) -> None:
         state = self._state
         if state is not None and state.main is not None:
-            self._select_pane(state.main.pane_id)
+            self._focus_session(state.main.pane_id)
 
     def action_toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
@@ -752,16 +787,39 @@ class SessionSidebar(App):
             logger.warning("could not leave the deck", exc_info=True)
             self.call_from_thread(self._flash, f"could not leave: {exc}")
 
-    def _open(self, session_name: str) -> None:
+    def open_session(self, session_name: str) -> None:
         """Show *session_name* and move focus to it."""
         state = self._state
         if state is not None and state.main is not None:
             if session_name == self._shown and state.main_attached:
-                self._select_pane(state.main.pane_id)
+                self._focus_session(state.main.pane_id)
                 return
+        self._start_showing()
         self._shown = session_name
         self._render_list()
         self._show(session_name)
+
+    def _focus_session(self, pane_id: str) -> None:
+        self._start_showing()
+        self._select_pane(pane_id)
+
+    def _start_showing(self) -> None:
+        self.note_local_change()
+        # Focus goes to the session: dim now rather than when a sample says so.
+        self.screen.add_class("-blurred")
+        self._showing = True
+
+    def _show_finished(self) -> None:
+        self._showing = False
+        self.note_local_change()
+
+    def _finish_showing(self) -> None:
+        """On a worker thread: hand samples the deck back once tmux has caught up."""
+        try:
+            self.call_from_thread(self._show_finished)
+        except RuntimeError:
+            # The sidebar is shutting down.
+            pass
 
     @work(thread=True, group="deck")
     def _show(self, session_name: str) -> None:
@@ -773,10 +831,14 @@ class SessionSidebar(App):
             self.call_from_thread(self._flash, f"could not open {session_name}: {exc}")
         finally:
             self._reconcile_blocked = False
+            self._finish_showing()
 
     @work(thread=True, group="deck")
     def _select_pane(self, pane_id: str) -> None:
-        deck_api.select_pane(pane_id)
+        try:
+            deck_api.select_pane(pane_id)
+        finally:
+            self._finish_showing()
 
     @work(thread=True, group="deck")
     def _set_collapsed(self, collapsed: bool) -> None:
@@ -786,25 +848,13 @@ class SessionSidebar(App):
             logger.warning("could not resize the sidebar", exc_info=True)
 
 
-def _log_to_file() -> None:
-    log_path = Path.home() / ".gitdirector" / "sidebar.log"
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(log_path)
-    except OSError:
-        return
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    root = logging.getLogger("gitdirector")
-    root.addHandler(handler)
-    root.setLevel(logging.WARNING)
-
-
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1:
         print("usage: python -m gitdirector.commands.tui.sidebar <deck>", file=sys.stderr)
         return 2
-    _log_to_file()
+    # Python's fallback handler would print warnings over the sidebar.
+    logging.getLogger("gitdirector").addHandler(logging.NullHandler())
     app = SessionSidebar(args[0], os.environ.get("TMUX_PANE"))
     app.run()
     return app.return_code or 0

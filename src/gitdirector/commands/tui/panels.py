@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
+from ... import paths
 from ...storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -505,9 +505,9 @@ class Panel:
 
 class PanelStore:
     def __init__(self) -> None:
-        self.config_dir = Path.home() / ".gitdirector"
+        self.config_dir = paths.home_dir()
         self.panels_file = self.config_dir / "panels.yaml"
-        self.lock_file = self.config_dir / "panels.lock"
+        self.lock_file = paths.lock_file("panels")
         self._panels: list[Panel] = []
         self._load()
 
@@ -630,7 +630,7 @@ class PanelStore:
         return pane_index
 
     def _save(self) -> None:
-        self.config_dir.mkdir(exist_ok=True)
+        self.config_dir.mkdir(parents=True, exist_ok=True)
         data: dict = {"panels": []}
         for panel in self._panels:
             closed_panes = sorted(

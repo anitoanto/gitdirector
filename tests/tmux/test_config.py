@@ -13,6 +13,8 @@ from gitdirector.integrations.tmux.core import (
     _panel_window_status_format,
     _session_header_format,
     _session_tmux_config,
+    _tmux_child_environment_command,
+    _tmux_new_session_environment_args,
 )
 from gitdirector.integrations.tmux.panels import _configure_panel_window, _panel_pane_command
 from gitdirector.ui_theme import resolve_panel_theme
@@ -38,6 +40,15 @@ class TestDefaultTerminal:
     @patch("subprocess.run", side_effect=FileNotFoundError)
     def test_falls_back_without_infocmp(self, _mock_run):
         assert _default_terminal() == "screen-256color"
+
+
+class TestChildTerminal:
+    def test_panes_get_the_terminal_this_machine_has(self, monkeypatch):
+        monkeypatch.setattr(
+            "gitdirector.integrations.tmux.core._default_terminal", lambda: "screen-256color"
+        )
+        assert "TERM=screen-256color" in _tmux_new_session_environment_args()
+        assert " TERM=screen-256color " in _tmux_child_environment_command("true")
 
 
 class TestPanelPaneTitles:
@@ -82,16 +93,21 @@ class TestPanelPaneTitles:
         config = _session_tmux_config("gd/my-repo/shell/1", "rose-pine")
 
         assert "set-option -t =gd/my-repo/shell/1: status-left" in config
-        assert f"default-terminal {_default_terminal()}" in config
-        assert "'terminal-features[90]' '*:RGB'" in config
-        assert "'terminal-overrides[90]' '*:Tc'" in config
+        assert "default-terminal" not in config
+        # Truecolor is per client (tmux -T RGB); the server-wide entries older
+        # versions set are removed, and only while they are still ours.
+        assert "set-option -gq 'terminal-features" not in config
+        assert (
+            "if-shell -F '#{==:#{terminal-features[90]},*:RGB}' "
+            "\"set-option -gu 'terminal-features[90]'\""
+        ) in config
         assert "set-environment -r -t =gd/my-repo/shell/1: NO_COLOR" in config
         assert "set-environment -t =gd/my-repo/shell/1: COLORTERM truecolor" in config
         assert "set-environment -t =gd/my-repo/shell/1: FORCE_COLOR 3" in config
         assert "set-environment -t =gd/my-repo/shell/1: CLICOLOR_FORCE 1" in config
         assert "set-environment -t =gd/my-repo/shell/1: CLAUDE_CODE_TMUX_TRUECOLOR 1" in config
         assert "set-option -t =gd/my-repo/shell/1: mouse on" in config
-        assert "set-option -t =gd/my-repo/shell/1: set-clipboard on" in config
+        assert "set-clipboard" not in config
         assert "SHELL" in config
         assert "my-repo/shell/1" in config
         assert "window-status-current-format ' #I:#W '" in config
@@ -115,7 +131,7 @@ class TestPanelPaneTitles:
         assert "COPILOT" in config
         assert "my-repo/copilot/1" in config
         assert "pane-border-status top" in config
-        assert "set-clipboard on" in config
+        assert "set-clipboard" not in config
 
     def test_status_line_truncates_badge_and_label_with_an_ellipsis(self):
         config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
@@ -130,13 +146,27 @@ class TestPanelPaneTitles:
         assert "pane-border-status off" in config
         assert "pane-border-format" not in config
 
-    def test_panel_tmux_config_emits_set_clipboard_on(self):
+    def test_panel_tmux_config_leaves_server_options_alone(self):
         with patch(
             "gitdirector.integrations.tmux.core._current_window_target",
             return_value="gd/panel/main:0",
         ):
             config = _panel_tmux_config("Main", "gd/panel/main", "rose-pine")
-        assert "set-option -t =gd/panel/main: set-clipboard on" in config
+        # Both are server-wide options: setting them would change the user's own sessions.
+        assert "set-clipboard" not in config
+        assert "default-terminal" not in config
+
+    @patch("gitdirector.commands.tui.panels.PanelStore")
+    def test_live_panel_sessions_reads_no_panels_file_without_a_live_panel(self, mock_store):
+        assert _live_panel_sessions({"gd/repo/shell/1": "gd/repo/shell/1:0"}) == []
+        mock_store.assert_not_called()
+
+    @patch(
+        "gitdirector.commands.tui.panels.PanelStore",
+        side_effect=ValueError("Invalid GitDirector panels config"),
+    )
+    def test_an_unreadable_panels_file_themes_no_panel(self, _mock_store):
+        assert _live_panel_sessions({"gd/panel/main": "gd/panel/main:0"}) == []
 
     @patch("gitdirector.commands.tui.panels.PanelStore")
     def test_live_panel_sessions_filters_running_sessions(self, mock_store):
@@ -339,7 +369,7 @@ class TestDeckDivider:
         from gitdirector.integrations.tmux.core import _deck_tmux_config
 
         config = _deck_tmux_config("gd/deck/1-a").splitlines()
-        (line,) = [line for line in config if line.startswith("if-shell")]
+        (line,) = [line for line in config if line.startswith("if-shell -F '#{>=:#{version}")]
         argv = shlex.split(line)
         assert argv[:3] == ["if-shell", "-F", "#{>=:#{version},3.6}"]
         assert "pane-border-lines spaces" in argv[3]

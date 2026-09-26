@@ -13,6 +13,7 @@ from rich.text import Text
 from textual import work
 from textual.widgets import DataTable, Static
 
+from ... import paths
 from ...repo import RepositoryInfo, RepoStatus
 from ...storage import load_yaml_mapping, write_yaml_atomic
 from .app_groups import RepoGroup, detect_repo_groups
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 class ConsoleReposMixin:
     @property
     def _repos_cache_file(self) -> Path:
-        return Path.home() / ".gitdirector" / "cache" / "repos.yaml"
+        return paths.cache_dir() / "repos.yaml"
 
     def _save_repos_cache(self, *, updated_at: float | None = None) -> None:
         saved_at = time() if updated_at is None else updated_at
@@ -245,6 +246,8 @@ class ConsoleReposMixin:
 
             self._repos_cache_updated_at = monotonic()
             self._save_repos_cache()
+            # Cleared first so the layout can narrow now that the refresh is done.
+            self._repos_refreshing = False
             safe_call(self._apply_filter_and_sort)
         finally:
             self._repos_refreshing = False
@@ -322,14 +325,15 @@ class ConsoleReposMixin:
         self._repos_cache_saved_at = None
         return True
 
-    def _refresh_repos(self) -> None:
+    def _refresh_repos(self, *, config_changed: bool = False) -> None:
         """Fetch every repository again, in place.
 
         What is on screen stays until each fresh result replaces it, so a
         refresh never blanks the table; repositories new to the config show
         as checking until theirs arrives.
         """
-        config_changed = self._reload_config_if_changed()
+        # Or'd in: a caller that already reloaded consumed the one-shot change flag.
+        config_changed = self._reload_config_if_changed() or config_changed
         if self._repos_refreshing:
             # The running load read the repository list before this change;
             # run again once it finishes rather than dropping the change.
@@ -357,10 +361,13 @@ class ConsoleReposMixin:
             self._apply_filter_and_sort(update_status=False)
             return
         row_key = str(info.path)
-        if row_key not in table.rows:
-            return
         sessions = self._repo_sessions()
         group = self._repo_group_containing(info.path)
+        if row_key not in table.rows:
+            # A folded group's heading still summarises its hidden repos.
+            if group is not None:
+                self._update_group_row(table, group, infos, loading, sessions)
+            return
         row = repo_row(
             info,
             self._repo_layout,
@@ -451,11 +458,13 @@ class ConsoleReposMixin:
         groups: dict[Path, RepoGroup] = {}
         for path in changed:
             info = by_path.get(path)
-            if info is None or str(path) not in table.rows:
+            if info is None:
                 continue
             group = self._repo_group_containing(path)
             if group is not None:
                 groups[group.path] = group
+            if str(path) not in table.rows:
+                continue
             row = repo_row(
                 info,
                 self._repo_layout,
@@ -713,6 +722,11 @@ class ConsoleReposMixin:
         if self._resume_selection_tab == "repos":
             self._restore_resume_selection("repos")
         else:
+            if preserved_row_key is not None and preserved_row_key not in table.rows:
+                group = self._repo_group_containing(Path(preserved_row_key))
+                if group is not None:
+                    # The selected repo was folded away; land on its group.
+                    preserved_row_key = self._group_row_key(group.path)
             self._restore_table_selection(
                 table,
                 preserved_row_key,
@@ -749,7 +763,7 @@ class ConsoleReposMixin:
             msg += f"  ({', '.join(indicators)})"
 
         msg += "   ↑↓/jk navigate  [enter] actions"
-        if group_count:
+        if group_count and not self._search_query:
             msg += "  [space] toggle  [shift+space] toggle all"
         msg += "  g git  / search  s sort  r refresh  q quit"
         if self._search_query:
@@ -761,7 +775,8 @@ class ConsoleReposMixin:
         return msg
 
     def action_toggle_group(self) -> None:
-        if self._active_tab != "repos":
+        # Search shows every group expanded, so a toggle would only flip hidden state.
+        if self._active_tab != "repos" or self._search_query:
             return
         group = self._get_selected_group()
         if group is None:
@@ -775,7 +790,7 @@ class ConsoleReposMixin:
 
     def action_toggle_all_groups(self) -> None:
         """Collapse every group, or expand them all once none is left open."""
-        if self._active_tab != "repos":
+        if self._active_tab != "repos" or self._search_query:
             return
         group_keys = {str(group.path) for group in self._groups_entries}
         if not group_keys:

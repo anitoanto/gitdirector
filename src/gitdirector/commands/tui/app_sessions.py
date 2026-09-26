@@ -331,6 +331,7 @@ class ConsoleSessionsMixin:
                 # missing tmux or a hung server must log, not take the
                 # console down with a worker error. The cache stays as is.
                 logger.warning("Loading tmux sessions failed", exc_info=True)
+                self.call_from_thread(self._show_sessions_load_failure, generation)
                 return
             self.call_from_thread(
                 self._apply_sessions_snapshot,
@@ -362,6 +363,17 @@ class ConsoleSessionsMixin:
         else:
             self._sessions_entries = entries
             self._on_statuses_updated()
+
+    def _show_sessions_load_failure(self, generation: int) -> None:
+        # Leaves _sessions_loaded False so the next activation retries tmux.
+        if (
+            generation != self._sessions_snapshot_generation
+            or self._shutdown_requested
+            or self._sessions_loaded
+            or self._active_tab != "sessions"
+        ):
+            return
+        self._apply_sessions_filter_and_sort()
 
     def _populate_sessions_table(self, entries: list[dict[str, str]]) -> None:
         self._sessions_entries = entries

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +14,8 @@ from textual.widgets import OptionList, Static
 from gitdirector.commands.tui import sidebar as S
 from gitdirector.commands.tui.constants import TablePalette
 from gitdirector.integrations.tmux.deck import DeckPane, DeckState
+
+from .conftest import _wait_for_refresh
 
 PALETTE = TablePalette(success="green", yellow="yellow", muted="grey50", primary="magenta")
 DECK = "gd/deck/1-a"
@@ -153,6 +157,37 @@ def _highlighted(app) -> str | None:
     return option.id if option else None
 
 
+def _trace_rows(app) -> dict[str, list[tuple[bool, bool, bool]]]:
+    """Every rendered frame of each session's first line: (dimmed, highlighted, marked)."""
+    frames: dict[str, list[tuple[bool, bool, bool]]] = {}
+    sessions = app.query_one(OptionList)
+    original = sessions.render_line
+
+    def render_line(y):
+        strip = original(y)
+        try:
+            index, offset = sessions._lines[sessions.scroll_offset.y + y]
+        except IndexError:
+            return strip
+        option = sessions.options[index]
+        if offset == 0 and not option.disabled:
+            frames.setdefault(option.id, []).append(
+                (
+                    app.screen.has_class("-blurred"),
+                    sessions.highlighted == index,
+                    strip.text.startswith(S._MARKER),
+                )
+            )
+        return strip
+
+    sessions.render_line = render_line
+    return frames
+
+
+# Widget-relative offsets of the first line of each row.
+ROW = {CLAUDE: (5, 2), CLAUDE_2: (5, 4)}
+
+
 class TestSidebarApp:
     async def test_lists_sessions_with_the_cursor_on_the_shown_one(self, deck_api):
         app = S.SessionSidebar(DECK, "%2")
@@ -173,6 +208,112 @@ class TestSidebarApp:
             await _until(pilot, lambda: deck_api.show_session.called)
             deck_api.show_session.assert_called_once_with(DECK, CLAUDE_2)
 
+    async def test_a_sample_from_before_a_click_changes_nothing(self, deck_api):
+        # It still has the old focus and shown session: applying it would
+        # flash the highlight and the marker back for a moment.
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True  # no samples of its own during the test
+            before = time.monotonic()
+            await pilot.press("j", "enter")
+            assert app.screen.has_class("-blurred")
+            await _until(pilot, lambda: not app._showing)
+
+            app._apply_sample(_state(target=CLAUDE), app._entries, before)
+            assert app.screen.has_class("-blurred")
+            assert app._shown == CLAUDE_2
+
+            app._apply_sample(_state(target=CLAUDE_2), app._entries, time.monotonic())
+            assert not app.screen.has_class("-blurred")
+            assert app._shown == CLAUDE_2
+
+    async def test_a_sample_while_a_session_is_shown_changes_nothing(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True
+            app._showing = True
+            app.screen.add_class("-blurred")
+            app._apply_sample(_state(target=CLAUDE), app._entries, time.monotonic())
+            assert app.screen.has_class("-blurred")
+
+    async def test_a_sample_while_the_button_is_held_changes_nothing(self, deck_api):
+        # tmux makes the sidebar the active pane on the press: a sample taken
+        # then would light the highlight up until the click dims it again.
+        deck_api.read_deck_state.return_value = _state(sidebar_focused=False)
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True
+            assert app.screen.has_class("-blurred")
+            await pilot.mouse_down(OptionList, offset=ROW[CLAUDE_2])
+            app._apply_sample(_state(sidebar_focused=True), app._entries, time.monotonic())
+            assert app.screen.has_class("-blurred")
+            # Released with nothing opened: focus really stayed here.
+            await pilot.mouse_up(OptionList, offset=ROW[CLAUDE_2])
+            app._apply_sample(_state(sidebar_focused=True), app._entries, time.monotonic())
+            assert not app.screen.has_class("-blurred")
+
+    async def test_a_release_the_sidebar_never_saw_times_out(self, deck_api):
+        deck_api.read_deck_state.return_value = _state(sidebar_focused=False)
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True
+            app._pressed_at = time.monotonic() - S._PRESS_TIMEOUT_SECS
+            app._apply_sample(_state(sidebar_focused=True), app._entries, time.monotonic())
+            assert not app.screen.has_class("-blurred")
+
+    async def test_a_click_switches_in_one_frame(self, deck_api):
+        deck_api.read_deck_state.return_value = _state(sidebar_focused=False)
+        # tmux is slow to show the session until the test says otherwise.
+        shown = threading.Event()
+        deck_api.show_session.side_effect = lambda *args: shown.wait(5)
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True
+            sessions = app.query_one(OptionList)
+            frames = _trace_rows(app)
+            await pilot.mouse_down(OptionList, offset=ROW[CLAUDE_2])
+            app._apply_sample(_state(sidebar_focused=True), app._entries, time.monotonic())
+            sessions.refresh()
+            await _wait_for_refresh(sessions)
+            await pilot.click(OptionList, offset=ROW[CLAUDE_2])
+            await _wait_for_refresh(sessions)
+            shown.set()
+            await _until(pilot, lambda: not app._showing)
+            await _wait_for_refresh(sessions)
+            deck_api.show_session.assert_called_once_with(DECK, CLAUDE_2)
+            # The clicked row is plain until the frame that shows it
+            # highlighted, dimmed and marked, all at once.
+            plain, done = (True, False, False), (True, True, True)
+            assert set(frames[CLAUDE_2]) == {plain, done}
+            assert frames[CLAUDE_2].index(done) > frames[CLAUDE_2].index(plain)
+            # The row it leaves never lit up while the button was held.
+            assert set(frames[CLAUDE]) == {(True, True, True), plain}
+
+    async def test_clicking_the_shown_session_keeps_the_sidebar_dim(self, deck_api):
+        deck_api.read_deck_state.return_value = _state(sidebar_focused=False)
+        # select-pane goes through only when the test says so.
+        selected = threading.Event()
+        deck_api.select_pane.side_effect = lambda pane: selected.wait(5)
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True
+            await pilot.click(OptionList, offset=ROW[CLAUDE])
+            assert app._showing
+            # tmux still has the sidebar active until select-pane goes through.
+            app._apply_sample(_state(sidebar_focused=True), app._entries, time.monotonic())
+            assert app.screen.has_class("-blurred")
+            selected.set()
+            await _until(pilot, lambda: not app._showing)
+            deck_api.select_pane.assert_called_once_with("%1")
+            deck_api.show_session.assert_not_called()
+            assert app.screen.has_class("-blurred")
+
     async def test_enter_on_the_shown_session_just_focuses_it(self, deck_api):
         app = S.SessionSidebar(DECK, "%2")
         async with app.run_test(size=(32, 30)) as pilot:
@@ -186,8 +327,11 @@ class TestSidebarApp:
         app = S.SessionSidebar(DECK, "%2")
         async with app.run_test(size=(32, 30)) as pilot:
             await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            assert not app.screen.has_class("-blurred")
             await pilot.press("tab")
-            await _until(pilot, lambda: deck_api.select_pane.called)
+            # Dimmed at once, not when a sample says so.
+            assert app.screen.has_class("-blurred")
+            await _until(pilot, lambda: deck_api.select_pane.called and not app._showing)
             deck_api.select_pane.assert_called_once_with("%1")
 
     async def test_b_toggles_the_rail(self, deck_api):
@@ -351,6 +495,21 @@ class TestNoHover:
             plain = sessions.get_visual_style("option-list--option")
             hovered = sessions.get_visual_style("option-list--option", "option-list--option-hover")
             assert hovered.background == plain.background
+
+    async def test_a_hovered_row_is_drawn_like_any_other(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            sessions = app.query_one(OptionList)
+
+            def backgrounds():
+                strip = sessions.render_line(ROW[CLAUDE_2][1])
+                return {segment.style.bgcolor for segment in strip if segment.style}
+
+            before = backgrounds()
+            await pilot.hover(OptionList, offset=ROW[CLAUDE_2])
+            assert sessions._mouse_hovering_over == sessions.get_option_index(CLAUDE_2)
+            assert backgrounds() == before
 
     @pytest.mark.parametrize("selector", ["#back", "#toggle"])
     async def test_hovering_a_bar_button_changes_nothing(self, deck_api, selector):

@@ -27,7 +27,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import version_check
-from ..repo import RepositoryInfo, RepoStatus
+from ..repo import MISSING_REPOSITORY_MESSAGE, RepositoryInfo, RepoStatus
 
 if TYPE_CHECKING:
     from ..manager import RepositoryManager
@@ -42,6 +42,8 @@ error_console = Console(highlight=False, stderr=True)
 # Styles shared with the console's design language.
 ATTENTION = "bold yellow"
 SUCCESS = "bold green"
+# Work goes on in a subagent: the same green, the ◐ glyph tells them apart.
+PENDING = SUCCESS
 DANGER = "bold red"
 MUTED = "dim"
 
@@ -287,6 +289,10 @@ def _count(items: list[str] | None) -> str:
     return f"{len(items)} " if items else ""
 
 
+def is_missing(info: RepositoryInfo) -> bool:
+    return info.message == MISSING_REPOSITORY_MESSAGE
+
+
 def status_parts(info: RepositoryInfo) -> list[tuple[str, str]]:
     """The console's status wording: ``↑1 to push · 2 staged · 5 changed``."""
     parts: list[tuple[str, str]] = []
@@ -298,7 +304,9 @@ def status_parts(info: RepositoryInfo) -> list[tuple[str, str]]:
         parts.append((f"{_count(info.staged_files)}staged", SUCCESS))
     if info.unstaged:
         parts.append((f"{_count(info.unstaged_files)}changed", ATTENTION))
-    if info.status is RepoStatus.UNKNOWN:
+    if is_missing(info):
+        parts.append(("missing", ATTENTION))
+    elif info.status is RepoStatus.UNKNOWN:
         label = "no remote branch" if info.message.startswith("No origin/") else "sync unknown"
         parts.append((label, MUTED))
     if info.sync_stale:

@@ -200,6 +200,7 @@ def _split_panel_region(
     cols: int,
     placements: tuple[tuple[int, int, int, int], ...],
 ) -> None:
+    # -d keeps the split pane active, so a window target still names it.
     if len(placements) <= 1:
         return
 
@@ -212,6 +213,7 @@ def _split_panel_region(
         second_size_pct = round(100 * (rows - boundary) / rows)
         second_target = _tmux_output(
             "split-window",
+            "-d",
             "-v",
             "-l",
             f"{second_size_pct}%",
@@ -229,6 +231,7 @@ def _split_panel_region(
     second_size_pct = round(100 * (cols - boundary) / cols)
     second_target = _tmux_output(
         "split-window",
+        "-d",
         "-h",
         "-l",
         f"{second_size_pct}%",
@@ -561,27 +564,18 @@ def _slot_pane_format(slot: int) -> str:
     return f"#{{P:#{{?#{{==:#{{{PANEL_SLOT_OPTION}}},{slot}}},#{{pane_id}},}}}}"
 
 
-def _ensure_panel_prefix_bindings() -> None:
-    in_panel = "#{m:gd/panel/*,#{session_name}}"
-    commands = [["bind-key", "-T", "prefix", "b", "if-shell", "-F", in_panel, "display-panes"]]
-    commands.extend(
-        [
-            "bind-key",
-            "-T",
-            "prefix",
-            str(slot),
-            "if-shell",
-            "-F",
-            in_panel,
-            # Slots, not pane indexes: tmux numbers panes in layout-tree
-            # order, which is not slot order for every layout.
-            f"run-shell -C \"select-pane -t '{_slot_pane_format(slot)}'\"",
-            f"select-window -t :={slot}",
-        ]
+def _panel_slot_key_commands() -> dict[str, str]:
+    """What ``prefix 1``..``prefix 9`` do inside a panel."""
+    # Slots, not pane indexes: tmux numbers panes in layout-tree order,
+    # which is not slot order for every layout.
+    return {
+        str(slot): f"run-shell -C \"select-pane -t '{_slot_pane_format(slot)}'\""
         for slot in range(1, 10)
-    )
-    _run_tmux(_chain_tmux_commands(commands), check=True)
-    # prefix b was just rebound without its deck meaning.
+    }
+
+
+def _ensure_panel_prefix_bindings() -> None:
+    # Panel keys are wrapped with the deck's, keeping the user's own bindings.
     from .deck import ensure_deck_bindings
 
     ensure_deck_bindings()
@@ -615,7 +609,14 @@ def _configure_panel_window(
     _run_tmux(_chain_tmux_commands(commands), check=True)
 
 
-def _panel_view_command(panel_name: str, slot: int, session_name: str) -> str:
+def _panel_tmux_client(socket: str | None) -> str:
+    """The pane's tmux client, pinned to *socket* when known (the panel's server)."""
+    return f"tmux -S {shlex.quote(socket)}" if socket else "tmux"
+
+
+def _panel_view_command(
+    panel_name: str, slot: int, session_name: str, socket: str | None = None
+) -> str:
     """Show *session_name* in a panel pane through a view of it.
 
     The view is a session grouped with the real one: it shows the same
@@ -626,7 +627,10 @@ def _panel_view_command(panel_name: str, slot: int, session_name: str) -> str:
     # $$ is the pane shell's pid, so a view whose pane is gone can be reaped.
     view_name = f"gd/view/{_sanitize_view_part(panel_name)}-{slot}-$$"
     return view_attach_command(
-        "env -u TMUX tmux", session_name, view_name, f"{PANEL_SLOT_OPTION} {slot}"
+        f"env -u TMUX {_panel_tmux_client(socket)}",
+        session_name,
+        view_name,
+        f"{PANEL_SLOT_OPTION} {slot}",
     )
 
 
@@ -640,6 +644,7 @@ def _panel_pane_command(
     session_name: str | None,
     *,
     closed: bool = False,
+    socket: str | None = None,
 ) -> str:
     closed_message = _printf_lines_command(["", "\033[2mSESSION CLOSED\033[0m"])
     if session_name:
@@ -653,8 +658,9 @@ def _panel_pane_command(
         )
         script = (
             "clear; "
-            f"if tmux has-session -t {quoted_session_target} >/dev/null 2>&1; then "
-            f"{_panel_view_command(panel_name, pane_index, session_name)}; "
+            f"if {_panel_tmux_client(socket)} has-session -t {quoted_session_target} "
+            ">/dev/null 2>&1; then "
+            f"{_panel_view_command(panel_name, pane_index, session_name, socket)}; "
             f"clear; {closed_message}; "
             "else "
             f"{missing_message}; "
@@ -746,16 +752,17 @@ def _rebuild_panel_tmux_session(
         pane_ids = _equalize_panel_layout(build_session_name, pane_ids, layout)
         _configure_panel_window(build_session_name, pane_ids, panes, theme_name)
         total_panes = layout.total_panes
+        socket = _tmux_output("display-message", "-p", "#{socket_path}")
         for pane_index, pane_id in enumerate(pane_ids[:total_panes], start=1):
             pane_session = panes.get(pane_index)
             if pane_session is not None and not _session_exists(pane_session):
+                # Its pane command says the session is missing.
                 logger.warning(
-                    "Panel %s pane %d references missing session %s; skipping attach",
+                    "Panel %s pane %d references missing session %s",
                     panel_name,
                     pane_index,
                     pane_session,
                 )
-                continue
             respawn_pane(
                 pane_id,
                 _tmux_child_environment_command(
@@ -764,6 +771,7 @@ def _rebuild_panel_tmux_session(
                         pane_index,
                         pane_session,
                         closed=pane_index in closed_panes,
+                        socket=socket,
                     )
                 ),
             )

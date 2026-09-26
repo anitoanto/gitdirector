@@ -19,7 +19,8 @@ def register(cli: click.Group):
     def gd_send(session_name: str, text: str | None, enter: bool, key: str | None) -> None:
         """Type text or press a key in a live session
 
-        TEXT is pasted as-is; add --enter to submit it. --key sends one key,
+        TEXT is pasted as-is, as one paste even across lines; add --enter
+        to submit it. --key sends one key,
         e.g. C-c to stop the foreground program.
 
         \b

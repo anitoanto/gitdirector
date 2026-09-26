@@ -119,6 +119,14 @@ def _shut_down_private_tmux(tmux_dir: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path_factory):
+    """No test reads or writes the real ~/.gitdirector."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GITDIRECTOR_HOME", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_tmux_monitor():
     with patch("gitdirector.integrations.tmux.TmuxMonitor.start"):
         with patch("gitdirector.integrations.tmux.TmuxMonitor.stop"):

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import time
 
+from rich.cells import cell_len
 from rich.text import Text
 
 from ...repo import RepositoryInfo, RepoStatus
@@ -156,6 +157,8 @@ def _session_items(sessions: RepoSessions | None, palette: TablePalette) -> list
         if status == "waiting":
             waiting = f"bold {palette.yellow}"
             items.append(Text.assemble(("● ", waiting), (purpose, waiting)))
+        elif status == "pending":
+            items.append(Text.assemble(("◐ ", palette.pending), purpose))
         else:
             items.append(Text.assemble(("● ", palette.success), purpose))
     return items
@@ -222,9 +225,9 @@ def _indent(grouped: bool) -> int:
 
 
 def name_width(info: RepositoryInfo, *, grouped: bool, loading: bool = False) -> int:
-    width = len(info.name) + _indent(grouped)
+    width = cell_len(info.name) + _indent(grouped)
     branch = "" if loading else shown_branch(info)
-    return width + (_BRANCH_GAP + len(branch) if branch else 0)
+    return width + (_BRANCH_GAP + cell_len(branch) if branch else 0)
 
 
 def resolve_repo_layout(

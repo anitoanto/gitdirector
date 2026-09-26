@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 from gitdirector.agents import AGENTS_BY_KEY
 from gitdirector.cli import cli
+from gitdirector.commands.sessions import live_sessions
 
 
 def _entry(name: str, repo: str, purpose: str, description: str = "-") -> dict[str, str]:
@@ -38,10 +39,23 @@ def monitor(monkeypatch):
         _entry("gd/web_aaaaa/claude-auto/2", "web", "claude-auto", "Claude: fix tests"),
     ]
     monkeypatch.setattr("gitdirector.integrations.tmux.TmuxMonitor", lambda: fake)
+    monkeypatch.setattr("gitdirector.commands.sessions._SECOND_SAMPLE_SECS", 0)
     return fake
 
 
 class TestSessions:
+    def test_pending_is_shown_and_counted(self, monitor):
+        name = "gd/web_aaaaa/claude-auto/2"
+        monitor.refresh.return_value = {**monitor.refresh.return_value, name: "pending"}
+
+        result = CliRunner().invoke(cli, ["sessions"])
+
+        assert result.exit_code == 0, result.output
+        assert "◐ pending" in result.output
+        assert result.output.splitlines()[-1] == "3 sessions · 1 running · 1 pending"
+        sessions = json.loads(CliRunner().invoke(cli, ["sessions", "--json"]).stdout)
+        assert {s["session"]: s["status"] for s in sessions}[name] == "pending"
+
     def test_table_groups_sessions_by_repo(self, monitor):
         result = CliRunner().invoke(cli, ["sessions"])
 
@@ -79,6 +93,24 @@ class TestSessions:
         assert result.exit_code == 0
         assert "No live sessions" in result.output
         assert json.loads(CliRunner().invoke(cli, ["sessions", "--json"]).stdout) == []
+
+    def test_idle_session_is_sampled_twice(self, monitor):
+        monitor.refresh.side_effect = [
+            {"gd/api_bbbbb/shell/1": "idle"},
+            {"gd/api_bbbbb/shell/1": "running"},
+        ]
+
+        sessions = live_sessions()
+
+        assert monitor.refresh.call_count == 2
+        assert sessions[0]["status"] == "running"
+
+    def test_no_idle_session_is_sampled_once(self, monitor):
+        monitor.refresh.return_value = {"gd/api_bbbbb/shell/1": "running"}
+
+        live_sessions()
+
+        monitor.refresh.assert_called_once()
 
 
 class TestGdKill:

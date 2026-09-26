@@ -324,3 +324,65 @@ class TestTempWrapperIntegration:
                     timeout=TMUX_CMD_TIMEOUT,
                 )
                 _cleanup_tmux_tmpdir(tmux_dir)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+class TestPanelOnItsOwnSocket:
+    def test_views_are_made_on_the_panels_server_and_missing_slots_say_so(
+        self, tmp_path, monkeypatch
+    ):
+        """A panel built on a ``-S`` server must not look for sessions on the default one."""
+        with _tmux_integration_lock():
+            home_dir = tmp_path / "home"
+            _make_shell_home(home_dir)
+            tmux_dir = _make_short_tmux_tmpdir()
+            socket = str(tmux_dir / "other")
+            monkeypatch.setenv("HOME", str(home_dir))
+            monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
+
+            def run_tmux(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["tmux", "-S", socket, *args],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=TMUX_CMD_TIMEOUT,
+                )
+
+            def sessions() -> list[str]:
+                return run_tmux("list-sessions", "-F", "#{session_name}").stdout.splitlines()
+
+            base = f"gd/socket-{uuid.uuid4().hex[:8]}/shell/1"
+            try:
+                run_tmux("new-session", "-d", "-s", base)
+                pid = run_tmux("display-message", "-p", "#{pid}").stdout.strip()
+                # As when gitdirector runs inside that server.
+                monkeypatch.setenv("TMUX", f"{socket},{pid},0")
+                panel_session = rebuild_panel_tmux_session(
+                    f"sock-{uuid.uuid4().hex[:6]}",
+                    1,
+                    2,
+                    {1: base, 2: "gd/gone/shell/1"},
+                    layout_key="grid_1x2",
+                )
+
+                assert _wait_for(lambda: any(n.startswith("gd/view/") for n in sessions()))
+                slots = dict(
+                    line.split(" ", 1)
+                    for line in run_tmux(
+                        "list-panes", "-t", f"={panel_session}:^", "-F", "#{@gd_slot} #{pane_id}"
+                    ).stdout.splitlines()
+                )
+                assert _wait_for(
+                    lambda: (
+                        "missing session" in run_tmux("capture-pane", "-p", "-t", slots["2"]).stdout
+                    )
+                )
+            finally:
+                subprocess.run(
+                    ["tmux", "-S", socket, "kill-server"],
+                    capture_output=True,
+                    check=False,
+                    timeout=TMUX_CMD_TIMEOUT,
+                )
+                _cleanup_tmux_tmpdir(tmux_dir)

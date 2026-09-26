@@ -21,6 +21,7 @@ from gitdirector.commands.tui import (
 from gitdirector.commands.tui.app import _panel_row_height, _render_panel_preview
 from gitdirector.commands.tui.panels import resolve_panel_layout
 from gitdirector.commands.tui.screens import RenamePanelScreen
+from gitdirector.integrations.tmux.core import TmuxError
 
 from .conftest import _mock_manager
 
@@ -106,13 +107,13 @@ class TestPanelStore:
         config_dir.mkdir()
         (config_dir / "panels.yaml").write_text(yaml.safe_dump(data))
 
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             with pytest.raises(ValueError, match=message):
                 PanelStore()
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_create_skips_empty_panel(self, mock_kill_panel_tmux_session, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
 
             panel = store.create("Empty", layout_key="grid_1x2", panes={1: None, 2: None})
@@ -127,7 +128,7 @@ class TestPanelStore:
     def test_delete_kills_panel_tmux_session(
         self, mock_kill_panel_tmux_session, mock_sync_panel_tmux_config, tmp_path
     ):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x2", panes={1: "gd/my-repo/shell/1"})
 
@@ -149,7 +150,7 @@ class TestPanelStore:
         mock_sync_panel_tmux_config,
         tmp_path,
     ):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x2", panes={1: "gd/my-repo/shell/1"})
 
@@ -163,7 +164,7 @@ class TestPanelStore:
 
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_delete_missing_panel_skips_tmux_cleanup(self, mock_kill_panel_tmux_session, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
 
             deleted = store.delete("Missing")
@@ -177,7 +178,7 @@ class TestPanelStore:
         mock_kill_panel_tmux_session,
         tmp_path,
     ):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x2", panes={1: "gd/repo/shell/1"})
 
@@ -193,7 +194,7 @@ class TestPanelStore:
         mock_kill_panel_tmux_session,
         tmp_path,
     ):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main!", layout_key="grid_1x2", panes={1: "gd/repo/shell/1"})
 
@@ -208,7 +209,7 @@ class TestPanelStore:
         mock_kill_panel_tmux_session,
         tmp_path,
     ):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create(
                 "Main",
@@ -251,7 +252,7 @@ class TestPanelStoreCreateCaseCollision:
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     def test_create_rejects_collision_with_existing_panel(self, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             first = store.create(
                 "Foo",
@@ -272,7 +273,7 @@ class TestPanelStoreCreateCaseCollision:
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     def test_rename_rejects_case_insensitive_collision_with_other_panel(self, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create(
                 "Main",
@@ -298,7 +299,7 @@ class TestReconfigureEdgeCases:
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_reconfigure_persists_new_panes_on_success(self, _mock_kill, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x1", panes={1: "gd/repo/shell/1"})
 
@@ -312,7 +313,7 @@ class TestReconfigureEdgeCases:
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.kill_panel_tmux_session")
     def test_unknown_panel_returns_false(self, _mock_kill, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
 
             ok = store.reconfigure("Ghost", layout_key="grid_1x1", panes={1: None})
@@ -330,7 +331,7 @@ class TestPanelStoreKillFailurePath:
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     def test_reconfigure_aborts_when_outer_session_kill_fails(self, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x1", panes={1: "gd/repo/shell/1"})
             panel = store.get("Main")
@@ -353,7 +354,7 @@ class TestPanelStoreKillFailurePath:
 
     @patch("gitdirector.integrations.tmux.sync_panel_tmux_config")
     def test_rename_reports_failure_when_outer_session_kill_fails(self, _mock_sync, tmp_path):
-        with patch("gitdirector.commands.tui.panels.Path.home", return_value=tmp_path):
+        with patch("gitdirector.paths.Path.home", return_value=tmp_path):
             store = PanelStore()
             store.create("Main", layout_key="grid_1x1", panes={1: "gd/repo/shell/1"})
 
@@ -758,6 +759,22 @@ class TestGitDirectorConsolePanels:
         app._panel_store.rename.assert_not_called()
         app._update_status.assert_called_once_with("TMUX session 'gd/panel/main' already exists")
 
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=False)
+    def test_rename_failure_is_reported(self, _mock_session_exists):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = None
+        app._panel_store.panels = [Panel(name="Old", rows=1, cols=1)]
+        app._panel_store.rename.return_value = False
+        app._update_status = MagicMock()
+        app._load_panels = MagicMock()
+
+        app._do_rename_panel("Old", "New")
+
+        app._panel_store.rename.assert_called_once_with("Old", "New")
+        app._update_status.assert_called_once_with("Could not rename panel 'Old'")
+        app._load_panels.assert_not_called()
+
     def test_handle_panel_action_delete_pushes_confirmation(self):
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
@@ -835,6 +852,28 @@ class TestGitDirectorConsolePanels:
         app._open_panel("Main")
 
         mock_protect.assert_called_once_with("gd/panel/main")
+        app._suspend_and_attach.assert_called_once_with("gd/panel/main", row_key="Main")
+
+    @patch(
+        "gitdirector.integrations.tmux.rebuild_panel_tmux_session",
+        return_value="gd/panel/main",
+    )
+    @patch(
+        "gitdirector.integrations.tmux.core._protect_session",
+        side_effect=TmuxError("tmux command failed", returncode=1),
+    )
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
+    def test_open_panel_rebuilds_when_the_session_dies_before_protect(
+        self, _mock_exists, _mock_protect, mock_rebuild
+    ):
+        app = GitDirectorConsole()
+        app._panel_store = MagicMock()
+        app._panel_store.get.return_value = Panel(name="Main", rows=1, cols=1, panes={1: None})
+        app._suspend_and_attach = MagicMock()
+
+        app._open_panel("Main")
+
+        mock_rebuild.assert_called_once()
         app._suspend_and_attach.assert_called_once_with("gd/panel/main", row_key="Main")
 
     @patch(

@@ -28,7 +28,8 @@
   GitHub Copilot, Codex, or Pi in a repo with one keypress, or run a dev
   server there. Each lives in its own named tmux session.
 - **Live session status.** Every session shows `running`, `waiting` (blocked
-  on you), or `idle`, so you can leave an agent alone until it needs an answer.
+  on you), `pending` (the agent's background subagents are still working), or
+  `idle`, so you can leave an agent alone until it needs an answer.
 - **Session sidebar.** An open session sits beside a list of every other
   session and its status; click one to switch.
 - **Panels.** Reusable tmux layouts that show several sessions side by side.
@@ -45,7 +46,7 @@ pip install gitdirector        # or: pipx install gitdirector / uv tool install 
 ```
 
 Runs on macOS and Linux with Python 3.10–3.14 and git; sessions and panels
-need [tmux](https://github.com/tmux/tmux) ≥ 3.2a. `gitdirector doctor` checks
+need [tmux](https://github.com/tmux/tmux) ≥ 3.7. `gitdirector doctor` checks
 all of it.
 
 ## Quick start
@@ -83,8 +84,9 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 **Repositories** shows each repo's branch, status (`↑1 to push · 2 staged ·
 5 changed`, or nothing when clean and in step with origin), and last commit.
 Repos sharing a parent directory collapse into a group. `enter` opens the
-action menu: start a shell or an AI agent, open the repo in VS Code, or attach
-to or remove a session. Pick Claude Code's permission mode on its row with Tab
+action menu: start a shell or an AI agent, open the repo in VS Code (started
+as if you had opened it yourself: nothing of GitDirector reaches it), or
+attach to or remove a session. Pick Claude Code's permission mode on its row with Tab
 or `←`/`→`: `default` (your settings), `auto` (preselected), or `bypass`
 (`--dangerously-skip-permissions`). `g` opens the git menu: status, timeline,
 branches, remotes, pull, push, and **Review Diff**, a two-pane diff of
@@ -93,7 +95,8 @@ pushes).
 
 **Sessions** lists every session under its repo, with its status, purpose,
 name, and description. `running` means the program is working, `waiting` that
-it needs you (a permission prompt, a question, a bell), and `idle` that
+it needs you (a permission prompt, a question, a bell), `pending` that the
+agent is at its prompt while subagents it started keep working, and `idle` that
 nothing is happening. Claude Code and OpenCode report their own status through
 hooks passed inline on their launch command (your settings are never
 touched); everything else is judged from its pane ([DEV.md](DEV.md)).
@@ -148,7 +151,7 @@ pick another; when no sessions are left you are back in the console. Set
 | `info PATH\|NAME [--full] [--json]` | File, line, and token counts per extension |
 | `autoclean [--yes]` | Stop tracking repos that no longer exist |
 | `cd PATH\|NAME\|SESSION [--agent A]` | Open a shell or an agent in a new session, or rejoin a live one |
-| `sessions [--json]` | Live sessions and their status: `running`, `waiting`, `idle` |
+| `sessions [--json]` | Live sessions and their status: `running`, `waiting`, `pending`, `idle` |
 | `panel [NAME]` | Open a saved panel, or list them |
 | `gd-tmux PATH\|NAME [CMD] [--agent A] [-d TEXT]` | Start a command or agent in a background session; prints its name |
 | `gd-capture SESSION [-n N\|--full]` | Print a live session's recent output |
@@ -236,6 +239,14 @@ github_PAT: github_pat_...
 It is only used to retry a command that failed authentication, through a
 temporary credential helper, never on the command line or in the TUI. The
 file is plaintext, so scope the token narrowly.
+
+### Where files go
+
+Everything GitDirector writes lives in `~/.gitdirector`: your settings
+(`config.yaml`, `panels.yaml`, `secrets.yaml`) at the top, anything it can
+rebuild under `cache/`, and lock files under `state/`. Set `GITDIRECTOR_HOME`
+to keep it somewhere else. Outside that folder it only runs its own tmux
+sessions; your tmux key bindings keep working outside them.
 
 ## Shell completion
 

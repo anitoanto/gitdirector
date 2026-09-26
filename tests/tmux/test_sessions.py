@@ -366,6 +366,40 @@ class TestSessionNamespaceHelpers:
 
 
 class TestCreateTmuxSession:
+    @patch(
+        "gitdirector.integrations.tmux.core.sync_panel_tmux_config",
+        side_effect=ValueError("Invalid GitDirector panels config"),
+    )
+    @patch("gitdirector.integrations.tmux.core.kill_tmux_session")
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("subprocess.run")
+    def test_a_failed_theme_sync_keeps_the_session(
+        self, mock_run, _mock_list, mock_kill, _mock_sync, tmp_path
+    ):
+        path = tmp_path / "my-repo"
+        path.mkdir()
+        mock_run.side_effect = _fake_tmux_run(path)
+
+        assert create_tmux_session("my-repo", path) == (
+            f"gd/{_repo_session_name_segment(path)}/shell/1"
+        )
+        mock_kill.assert_not_called()
+
+    @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
+    @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
+    @patch("subprocess.run")
+    def test_a_path_registered_in_another_letter_case_is_the_repository(
+        self, mock_run, _mock_list, _mock_sync, tmp_path
+    ):
+        (tmp_path / "My-Repo").mkdir()
+        registered = tmp_path / "my-repo"
+        if not registered.is_dir():
+            pytest.skip("case-sensitive file system")
+        # tmux reports the letter case on disk.
+        mock_run.side_effect = _fake_tmux_run(tmp_path / "My-Repo")
+
+        assert create_tmux_session("my-repo", registered).endswith("/shell/1")
+
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("subprocess.run")
@@ -751,7 +785,7 @@ class TestAttachTmuxSession:
             assert attach_tmux_session("gd/repo/shell/1") is True
         assert [call.args[0] for call in mock_run.call_args_list] == [
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
-            ["tmux", "attach-session", "-t", "=gd/repo/shell/1"],
+            ["tmux", "-T", "RGB", "attach-session", "-t", "=gd/repo/shell/1"],
         ]
         # The interactive attach blocks until detach, so it must run without
         # the default tmux command timeout.

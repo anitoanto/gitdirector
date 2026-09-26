@@ -7,6 +7,7 @@ from . import (
     SUCCESS,
     console,
     count_noun,
+    is_missing,
     print_json,
     repository_json,
     summary_line,
@@ -39,11 +40,13 @@ def register(cli: click.Group):
                 console.print(Text.assemble("  ", ("changed  ", ATTENTION), path), soft_wrap=True)
             console.print()
 
-        clean = len(results) - len(dirty)
+        missing = sum(is_missing(info) for info in results)
+        clean = len(results) - len(dirty) - missing
         console.print(
             summary_line(
                 count_noun(len(results), "repository", "repositories"),
                 (f"{clean} clean", MUTED),
                 *([(f"{len(dirty)} with changes", ATTENTION)] if dirty else []),
+                *([(f"{missing} missing", ATTENTION)] if missing else []),
             )
         )

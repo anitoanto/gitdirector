@@ -19,6 +19,7 @@ from ..constants import _MODAL_BINDINGS
 from ..panels import (
     DEFAULT_PANEL_LAYOUT_KEY,
     Panel,
+    PanelLayout,
     PanelStore,
     get_create_panel_layouts,
     render_panel_layout_preview,
@@ -456,10 +457,9 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             yield Static(id="create-panel-hint")
 
     def on_mount(self) -> None:
-        layouts = get_create_panel_layouts()
-        keys = [layout.key for layout in layouts]
+        keys = [layout.key for layout in self._menu_layouts()]
         menu = self.query_one("#layout-menu", OptionList)
-        menu.highlighted = keys.index(self._layout_key) if self._layout_key in keys else 0
+        menu.highlighted = keys.index(self._layout_key)
         self._render_pane_menu(highlight=0)
         self._show_step(self._step)
 
@@ -590,11 +590,17 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
             )
         return options
 
-    @staticmethod
-    def _layout_options() -> list[Option]:
+    def _menu_layouts(self) -> list[PanelLayout]:
+        layouts = list(get_create_panel_layouts())
+        if self._layout_key not in {layout.key for layout in layouts}:
+            # A saved panel may use a layout the create menu does not offer.
+            layouts.insert(0, self._layout)
+        return layouts
+
+    def _layout_options(self) -> list[Option]:
         return [
             Option(f" {layout.menu_display_label}", id=f"layout:{layout.key}")
-            for layout in get_create_panel_layouts()
+            for layout in self._menu_layouts()
         ]
 
     def _hint(self) -> str:
@@ -741,7 +747,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         self._show_step(2)
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if event.option_list.id == "layout-menu" and event.option.id:
+        if event.option_list.id == "layout-menu" and self._step == 2 and event.option.id:
             self._set_layout(event.option.id.split(":", 1)[1])
         elif event.option_list.id in ("pane-menu", "session-menu"):
             self.query_one("#grid-preview", Static).update(self._preview())

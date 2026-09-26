@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from . import paths
 from .storage import (
     advisory_file_lock,
     load_yaml_mapping,
@@ -37,10 +38,10 @@ class Config:
     DEFAULT_THEME = "rose-pine"
 
     def __init__(self):
-        self.config_dir = Path.home() / ".gitdirector"
+        self.config_dir = paths.home_dir()
         self.config_file = self.config_dir / "config.yaml"
         self.secrets_file = self.config_dir / "secrets.yaml"
-        self.lock_file = self.config_dir / "config.lock"
+        self.lock_file = paths.lock_file("config")
         self.repositories: list[Path] = []
         self._repo_set: set[Path] = set()
         self.max_workers = self.DEFAULT_MAX_WORKERS
@@ -78,7 +79,7 @@ class Config:
         self._config_state_snapshot = self._cache_token()
 
     def _invalidate_repository_cache(self) -> None:
-        cache_file = self.config_dir / "cache" / "repos.yaml"
+        cache_file = paths.cache_dir() / "repos.yaml"
         try:
             cache_file.unlink(missing_ok=True)
         except OSError:
@@ -149,7 +150,7 @@ class Config:
     def _validate_loaded_data(
         cls, main_data: dict[str, object], secrets_data: dict[str, object]
     ) -> None:
-        cls._validate_repositories(main_data.get("repositories", []))
+        cls._validate_repositories(main_data.get("repositories") or [])
         cls._parse_settings(main_data, secrets_data)
 
     @staticmethod
@@ -191,7 +192,7 @@ class Config:
     ) -> None:
         secrets = secrets_data if secrets_data is not None else {}
         self._validate_loaded_data(main_data, secrets)
-        repositories = self._normalize_paths(main_data.get("repositories", []))
+        repositories = self._normalize_paths(main_data.get("repositories") or [])
         self._apply(repositories, self._parse_settings(main_data, secrets))
 
     def _read_main_unlocked(self) -> dict[str, object]:
@@ -276,7 +277,7 @@ class Config:
         repositories = list(self.repositories)
         with self._locked_latest() as (latest_main, latest_secrets):
             if tuple(repositories) == self._snapshot_repositories:
-                repositories = self._normalize_paths(latest_main.get("repositories", []))
+                repositories = self._normalize_paths(latest_main.get("repositories") or [])
             self._write_data_unlocked(
                 repositories,
                 self._merged_settings(latest_main, latest_secrets),
@@ -292,7 +293,7 @@ class Config:
         state is still refreshed from disk.
         """
         with self._locked_latest() as (latest_main, latest_secrets):
-            repositories = self._normalize_paths(latest_main.get("repositories", []))
+            repositories = self._normalize_paths(latest_main.get("repositories") or [])
             changed = update(repositories)
             if changed:
                 self._write_data_unlocked(

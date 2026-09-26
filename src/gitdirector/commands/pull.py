@@ -39,7 +39,11 @@ def summarize_pull(ok: bool, output: str) -> str:
     """One line for a pull: ``up to date``, ``a1b2..c3d4 · 2 files changed``, or the error."""
     if not ok:
         lines = [line.strip() for line in output.splitlines() if line.strip()]
-        return lines[0].removeprefix("fatal: ") if lines else "git pull failed"
+        # git prints the fetch banner and hints before the actual failure.
+        errors = [line for line in lines if line.startswith(("fatal:", "error:"))]
+        if errors:
+            return errors[-1].removeprefix("fatal: ").removeprefix("error: ")
+        return lines[0] if lines else "git pull failed"
     updating = _UPDATING_RE.search(output)
     if updating is None:
         return "up to date"

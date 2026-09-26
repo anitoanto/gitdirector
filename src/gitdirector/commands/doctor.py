@@ -21,7 +21,8 @@ from . import ATTENTION, DANGER, MUTED, SUCCESS, console, count_noun, display_pa
 OK, WARN, FAIL = "ok", "warn", "fail"
 
 # Oldest tmux sessions and panels are tested against.
-_MIN_TMUX = (3, 2, "a")
+# kill-session -g, which the session crash guard relies on, arrived in 3.7.
+_MIN_TMUX = (3, 7, "")
 
 
 @dataclass(frozen=True)
@@ -51,13 +52,17 @@ def _current_shell_name() -> str | None:
     return name if name in {"bash", "zsh", "fish"} else None
 
 
+def _zdotdir(home: Path) -> Path:
+    return Path(os.environ.get("ZDOTDIR") or home).expanduser()
+
+
 def _completion_installed(shell_name: str, home: Path) -> tuple[bool, str]:
     if shell_name == "zsh":
         paths = [
             home / ".zsh/completions/_gitdirector",
             home / ".zfunc/_gitdirector",
         ]
-        rc_files = [home / ".zshrc"]
+        rc_files = [_zdotdir(home) / ".zshrc"]
     elif shell_name == "bash":
         paths = [
             home / ".local/share/bash-completion/completions/gitdirector",
@@ -87,9 +92,11 @@ def _completion_installed(shell_name: str, home: Path) -> tuple[bool, str]:
 
 
 def _config_writable(config: Config) -> tuple[bool, str]:
-    config.config_dir.mkdir(parents=True, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=str(config.config_dir), prefix="doctor-", suffix=".tmp")
     try:
+        config.config_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            dir=str(config.config_dir), prefix="doctor-", suffix=".tmp"
+        )
         os.close(fd)
         Path(temp_path).unlink(missing_ok=True)
     except OSError as exc:
@@ -228,7 +235,7 @@ def _tmux_check() -> DoctorCheck:
             "tmux",
             FAIL,
             "not installed; sessions, panels, and the gd-* commands need it",
-            fix="Install tmux 3.2a or newer.",
+            fix="Install tmux 3.7 or newer.",
             critical=True,
         )
     version_text = _tool_version(tmux)
@@ -238,7 +245,7 @@ def _tmux_check() -> DoctorCheck:
             "tmux",
             FAIL,
             f"{version_text} is too old ({tmux})",
-            fix="Install tmux 3.2a or newer.",
+            fix="Install tmux 3.7 or newer.",
             critical=True,
         )
     label = version_text.removeprefix("tmux ") if version_text else "installed"
@@ -301,6 +308,8 @@ def _completion_check() -> DoctorCheck:
     if installed:
         return DoctorCheck("Completion", OK, f"{shell_name}, {detail}")
     line, rc_file = _COMPLETION_SETUP[shell_name]
+    if shell_name == "zsh" and os.environ.get("ZDOTDIR"):
+        rc_file = display_path(_zdotdir(Path.home()) / ".zshrc")
     return DoctorCheck(
         "Completion", WARN, f"not set up for {shell_name}", fix=f"Add to {rc_file}: {line}"
     )

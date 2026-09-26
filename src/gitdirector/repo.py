@@ -61,6 +61,9 @@ _HOST_KEY_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The status message of a tracked repository whose directory is gone.
+MISSING_REPOSITORY_MESSAGE = "Repository path not found or invalid"
+
 #: Appended on its own line to a diff cut short by ``get_diff_against_head``.
 DIFF_TRUNCATED_MARKER = "[gd-truncated] diff exceeded size cap"
 
@@ -112,6 +115,24 @@ def _classify_remote_error(stderr: str) -> str | None:
     return None
 
 
+_REMOTE_GIT_COMMANDS = frozenset({"fetch", "pull", "push", "ls-remote"})
+
+
+def _is_remote_command(args: tuple[str, ...]) -> bool:
+    # Local commands (commit hooks especially) can print text that looks
+    # like a remote failure; only network commands are classified or retried.
+    return bool(args) and args[0] in _REMOTE_GIT_COMMANDS
+
+
+_MISSING_REMOTE_REF_RE = re.compile(
+    r"couldn't find remote ref|^no remote named ", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _is_missing_remote_ref_error(stderr: str) -> bool:
+    return _MISSING_REMOTE_REF_RE.search(stderr) is not None
+
+
 def _is_no_commits_error(stderr: str) -> bool:
     return _NO_COMMITS_RE.search(stderr) is not None
 
@@ -147,7 +168,8 @@ def _add_env_git_config(env: dict[str, str], key: str, value: str) -> None:
 
 
 def _apply_github_auth_env(env: dict[str, str], username: str, token: str) -> None:
-    helper = f"!{shlex.quote(sys.executable)} -m gitdirector.github_credential_helper"
+    # -I: git runs the helper from the repo root, which would otherwise shadow the module.
+    helper = f"!{shlex.quote(sys.executable)} -I -m gitdirector.github_credential_helper"
     _add_env_git_config(env, "credential.helper", "")
     _add_env_git_config(env, "credential.helper", helper)
     env["GITDIRECTOR_GITHUB_USERNAME"] = username
@@ -258,6 +280,7 @@ def _normalize_git_result(
     stderr: str,
     *,
     strip_stdout: bool,
+    remote: bool = True,
 ) -> tuple[int, str, str]:
     normalized_stdout = stdout.strip() if strip_stdout else stdout
     normalized_stderr = stderr.strip()
@@ -265,7 +288,7 @@ def _normalize_git_result(
     if returncode < 0:
         return 1, normalized_stdout, normalized_stderr or "git command cancelled"
 
-    if returncode != 0:
+    if returncode != 0 and remote:
         classified = _classify_remote_error(normalized_stderr)
         if classified:
             return returncode, normalized_stdout, classified
@@ -344,6 +367,9 @@ class Repository:
     def _git_env(self, *, github_auth: tuple[str, str] | None = None) -> dict[str, str]:
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
+        # Messages are matched in English, and paths are shown unquoted.
+        env["LANGUAGE"] = "C"
+        _add_env_git_config(env, "core.quotepath", "false")
         if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
             env["GIT_SSH_COMMAND"] = _default_ssh_command()
         if github_auth is not None:
@@ -372,12 +398,13 @@ class Repository:
             result.stdout,
             result.stderr,
             strip_stdout=_strip,
+            remote=_is_remote_command(args),
         )
         return code, out, err, result.stderr.strip()
 
     def _run_git(self, *args: str, _strip: bool = True, _timeout: int = 30) -> tuple[int, str, str]:
         code, out, err, raw_err = self._run_git_once(*args, _strip=_strip, _timeout=_timeout)
-        if code == 0 or not _is_auth_error(raw_err or err):
+        if code == 0 or not _is_remote_command(args) or not _is_auth_error(raw_err or err):
             return code, out, err
 
         github_auth = _github_credentials_from_config()
@@ -579,7 +606,8 @@ class Repository:
         fetch_error = ""
         if fetch and branch is not None:
             code, err = self._fetch_origin_branch(branch)
-            if code != 0:
+            # The remote answered: it just has no origin or no such branch.
+            if code != 0 and not _is_missing_remote_ref_error(err):
                 fetch_error = err or "could not fetch from origin"
 
         if fetch and branch is not None and not fetch_error:

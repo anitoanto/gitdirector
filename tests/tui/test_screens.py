@@ -222,6 +222,22 @@ class TestActionMenuScreen:
             await pilot.pause()
             assert results == ["agent:claude:auto"]
 
+    @pytest.mark.parametrize(("key", "agent"), [("g", "copilot"), ("p", "pi")])
+    @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
+    async def test_g_is_copilot_and_p_is_pi(self, mock_sessions, key, agent):
+        results: list = []
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                ActionMenuScreen("my-repo", Path("/tmp/my-repo")),
+                callback=lambda v: results.append(v),
+            )
+            await pilot.pause()
+            await pilot.press(key)
+            await pilot.pause()
+            assert results == [f"agent:{agent}"]
+
     @patch(
         "gitdirector.integrations.tmux.list_repo_sessions",
         return_value=["gd/my-repo/shell/1", "gd/my-repo/claude/1"],
@@ -1188,6 +1204,42 @@ class TestCreatePanelScreen:
             await pilot.press("escape", "escape")
             await pilot.pause()
             assert results == [None]
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_edit_keeps_a_layout_the_create_menu_does_not_offer(self, _mock_sessions):
+        assert "grid_1x1" not in [layout.key for layout in get_create_panel_layouts()]
+        results: list = []
+        screen = CreatePanelScreen(
+            panel_name="Solo",
+            initial_layout_key="grid_1x1",
+            initial_panes={1: "gd/a_x/shell/1"},
+            editing=True,
+        )
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert results == [("Solo", "grid_1x1", {1: "gd/a_x/shell/1"})]
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
+    async def test_edit_layout_step_offers_the_current_layout(self, _mock_sessions):
+        results: list = []
+        screen = CreatePanelScreen(
+            panel_name="Solo",
+            initial_layout_key="grid_1x1",
+            initial_panes={1: "gd/a_x/shell/1"},
+            editing=True,
+        )
+        app = GitDirectorConsole()
+        async with app.run_test(size=(130, 36)) as pilot:
+            await self._open(pilot, app, screen, results)
+            await pilot.press("escape")
+            menu = app.screen.query_one("#layout-menu", OptionList)
+            assert menu.highlighted_option.id == "layout:grid_1x1"
+            await pilot.press("enter", "ctrl+o")
+            await pilot.pause()
+            assert results == [("Solo", "grid_1x1", {1: "gd/a_x/shell/1"})]
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=_FOUR_SESSIONS)
     async def test_preview_names_each_panes_repo(self, _mock_sessions):

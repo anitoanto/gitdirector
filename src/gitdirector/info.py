@@ -106,6 +106,8 @@ class RepoInfoResult:
 
 
 def _get_non_ignored_files(repo_path: Path) -> list[str]:
+    if not repo_path.is_dir():
+        raise RuntimeError(f"Repository path not found: {repo_path}")
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -125,7 +127,9 @@ def _get_non_ignored_files(repo_path: Path) -> list[str]:
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(stderr or f"git ls-files failed for {repo_path}")
-    return [f for f in result.stdout.decode("utf-8", errors="replace").split("\0") if f]
+    # An unmerged path is listed once per index stage.
+    files = result.stdout.decode("utf-8", errors="replace").split("\0")
+    return list(dict.fromkeys(f for f in files if f))
 
 
 def _read_text(file_path: Path, *, max_bytes: int | None = None) -> str | None:

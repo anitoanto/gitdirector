@@ -351,3 +351,37 @@ class TestDiscoverWalkSemantics:
 
         assert ok is True
         assert added == [kept.resolve()]
+
+    def test_repo_ignoring_dotfiles_is_still_discovered(self, manager, tmp_path):
+        repo = _make_real_git_repo(tmp_path, "dotty")
+        (repo / ".gitignore").write_text(".*\n!.gitignore\n")
+
+        ok, _msg, added, _skipped = manager.add_repository(tmp_path, discover=True)
+
+        assert ok is True
+        assert added == [repo.resolve()]
+
+
+class TestResolveRepositoryTarget:
+    def test_bare_name_matching_an_untracked_cwd_dir_falls_back_to_tracked_repo(
+        self, manager, tmp_path, monkeypatch
+    ):
+        tracked = _make_real_git_repo(tmp_path, "api")
+        manager.add_repository(tracked)
+        cwd = tmp_path / "elsewhere"
+        (cwd / "api").mkdir(parents=True)
+        monkeypatch.chdir(cwd)
+
+        path, matches, attempted = manager.resolve_repository_target("api")
+
+        assert path == tracked.resolve()
+        assert matches == [tracked.resolve()]
+        assert attempted is False
+
+    def test_explicit_untracked_path_is_not_resolved_by_name(self, manager, tmp_path, monkeypatch):
+        manager.add_repository(_make_real_git_repo(tmp_path, "api"))
+        cwd = tmp_path / "elsewhere"
+        (cwd / "api").mkdir(parents=True)
+        monkeypatch.chdir(cwd)
+
+        assert manager.resolve_repository_target("./api") == (None, [], True)

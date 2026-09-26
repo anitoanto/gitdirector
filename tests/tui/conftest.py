@@ -44,6 +44,24 @@ async def _wait_for_animated_scroll(pilot, widget) -> None:
     await pilot.wait_for_scheduled_animations()
 
 
+async def _open_diff_screen(app, screen, *, timeout: float = SYNC_TIMEOUT) -> None:
+    """Push the Review Diff screen and return once its diff has loaded.
+
+    ``push_screen`` mounts asynchronously and the load runs in a thread
+    worker started on mount, so a bare ``wait_for_complete`` right after an
+    unawaited push can find no worker yet and return with the screen still
+    loading; under CPU load the test then asserts against an empty list.
+    """
+    await app.push_screen(screen)
+    await app.workers.wait_for_complete()
+    deadline = time.monotonic() + timeout
+    while screen._loading:
+        if time.monotonic() > deadline:
+            raise AssertionError("diff screen did not finish loading")
+        await asyncio.sleep(0.01)
+    await _wait_for_refresh(screen)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_tui_tmux_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

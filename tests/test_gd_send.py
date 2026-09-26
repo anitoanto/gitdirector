@@ -157,9 +157,21 @@ class TestSendTextToSession:
         assert calls[0][0][3].startswith("gitdirector-send-")
         assert calls[0][0][-1] == "-"
         assert calls[0][1]["input"] == "hello"
-        assert calls[1][0][:3] == ["tmux", "paste-buffer", "-b"]
+        assert calls[1][0][:4] == ["tmux", "paste-buffer", "-p", "-b"]
         assert calls[1][0][-2:] == ["-t", "=gd/repo/shell/1:"]
         assert calls[2][0][:3] == ["tmux", "delete-buffer", "-b"]
+
+    def test_empty_text_with_enter_only_presses_enter(self, monkeypatch):
+        monkeypatch.setattr(
+            "gitdirector.integrations.tmux.core._session_exists", lambda _name: True
+        )
+        fake_run = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr("gitdirector.integrations.tmux.core.subprocess.run", fake_run)
+
+        assert send_text_to_session("gd/repo/shell/1", "", enter=True) is True
+
+        (call,) = fake_run.call_args_list
+        assert call.args[0][:2] == ["tmux", "send-keys"]
 
     def test_enter_sends_enter_after_paste(self, monkeypatch):
         monkeypatch.setattr(

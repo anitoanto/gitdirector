@@ -177,11 +177,13 @@ class TestRunGit:
         assert "GITDIRECTOR_GITHUB_PAT" not in first_env
         assert retry_env["GITDIRECTOR_GITHUB_USERNAME"] == "octocat"
         assert retry_env["GITDIRECTOR_GITHUB_PAT"] == "ghp_secret"
-        assert retry_env["GIT_CONFIG_COUNT"] == "2"
-        assert retry_env["GIT_CONFIG_KEY_0"] == "credential.helper"
-        assert retry_env["GIT_CONFIG_VALUE_0"] == ""
+        assert retry_env["GIT_CONFIG_COUNT"] == "3"
+        assert retry_env["GIT_CONFIG_KEY_0"] == "core.quotepath"
         assert retry_env["GIT_CONFIG_KEY_1"] == "credential.helper"
-        assert "gitdirector.github_credential_helper" in retry_env["GIT_CONFIG_VALUE_1"]
+        assert retry_env["GIT_CONFIG_VALUE_1"] == ""
+        assert retry_env["GIT_CONFIG_KEY_2"] == "credential.helper"
+        # -I: a repo's own gitdirector/ package must not shadow the helper.
+        assert " -I -m gitdirector.github_credential_helper" in retry_env["GIT_CONFIG_VALUE_2"]
         assert "ghp_secret" not in " ".join(retry_command)
 
     def test_auth_failure_without_configured_github_credentials_does_not_retry(
@@ -350,6 +352,7 @@ def _setup_status_mocks(
     fetch_ok=True,
     branch="main",
     remote_exists=True,
+    fetch_err="fetch error",
 ):
     """Configure subprocess.run to return canned values for get_status flow."""
     calls = []
@@ -360,7 +363,7 @@ def _setup_status_mocks(
         calls.append(git_args)
 
         if git_args[:2] == ["fetch", "origin"]:
-            return _make_run_result(0 if fetch_ok else 1, "", "" if fetch_ok else "fetch error")
+            return _make_run_result(0 if fetch_ok else 1, "", "" if fetch_ok else fetch_err)
         if "status" in git_args:
             v2 = f"# branch.oid abc123\n# branch.head {branch}\n"
             if porcelain:
@@ -501,6 +504,30 @@ class TestGetStatusSync:
         assert info.sync_stale is True
         assert "fetch error" in info.message
         assert (info.ahead, info.behind) == (0, 0)
+
+    @pytest.mark.parametrize(
+        "fetch_err",
+        [
+            "fatal: couldn't find remote ref feature",
+            "fatal: 'origin' does not appear to be a git repository\n"
+            "fatal: Could not read from remote repository.",
+        ],
+    )
+    def test_missing_remote_or_ref_is_not_offline(self, fake_git_repo, mocker, fetch_err):
+        _setup_status_mocks(
+            mocker, ahead_behind=None, remote_exists=False, fetch_ok=False, fetch_err=fetch_err
+        )
+        info = Repository(fake_git_repo).get_status(fetch=True)
+        assert info.sync_stale is False
+        assert info.message == "No origin/main branch"
+
+    def test_network_fetch_failure_is_stale(self, fake_git_repo, mocker):
+        _setup_status_mocks(
+            mocker, ahead_behind="0\t0", fetch_ok=False, fetch_err="ssh: connection refused"
+        )
+        info = Repository(fake_git_repo).get_status(fetch=True)
+        assert info.sync_stale is True
+        assert "network error" in info.message
 
     def test_successful_fetch_is_not_stale(self, fake_git_repo, mocker):
         _setup_status_mocks(mocker, ahead_behind="0\t0")
@@ -1140,6 +1167,25 @@ class TestDefaultSshCommand:
         monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -vvv")
         assert repo._git_env()["GIT_SSH_COMMAND"] == "ssh -vvv"
 
+    def test_git_env_pins_language_and_unquoted_paths(self, fake_git_repo, monkeypatch):
+        monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+        monkeypatch.setenv("LANGUAGE", "de")
+        env = Repository(fake_git_repo)._git_env()
+        assert env["LANGUAGE"] == "C"
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "core.quotepath"
+        assert env["GIT_CONFIG_VALUE_0"] == "false"
+
+    def test_non_ascii_untracked_name_is_unquoted(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _run_git(repo_dir, "init")
+        (repo_dir / "café.txt").write_text("x")
+
+        info = Repository(repo_dir).get_status()
+
+        assert info.unstaged_files == ["café.txt"]
+
     @pytest.mark.skipif(shutil.which("ssh") is None, reason="requires ssh")
     def test_real_ssh_parses_the_option(self, monkeypatch):
         # No stub: the local ssh must accept the exact option handed to git.
@@ -1182,6 +1228,43 @@ class TestRunGitErrorClassification:
         code, out, err = repo._run_git("fetch")
         assert code == 128
         assert "authentication" in err
+
+    @pytest.mark.parametrize(
+        "stderr",
+        ["hook: connection refused\n", "hook: authentication failed for linter\n"],
+    )
+    def test_local_command_keeps_raw_stderr_and_is_not_retried(self, fake_git_repo, mocker, stderr):
+        mocker.patch(
+            "gitdirector.repo._github_credentials_from_config",
+            return_value=("octocat", "ghp_secret"),
+        )
+        run_git = mocker.patch(
+            "gitdirector.repo._run_git_process",
+            return_value=_make_run_result(1, "", stderr),
+        )
+
+        ok, output = Repository(fake_git_repo).commit("msg")
+
+        assert ok is False
+        assert output == stderr.strip()
+        run_git.assert_called_once()
+
+    @pytest.mark.parametrize("command", ["fetch", "pull", "push", "ls-remote"])
+    def test_remote_commands_are_classified_and_retried(self, fake_git_repo, mocker, command):
+        mocker.patch(
+            "gitdirector.repo._github_credentials_from_config",
+            return_value=("octocat", "ghp_secret"),
+        )
+        run_git = mocker.patch(
+            "gitdirector.repo._run_git_process",
+            return_value=_make_run_result(128, "", "fatal: Authentication failed\n"),
+        )
+
+        code, _, err = Repository(fake_git_repo)._run_git(command)
+
+        assert code == 128
+        assert err.startswith("authentication failed:")
+        assert run_git.call_count == 2
 
 
 # ---------------------------------------------------------------------------

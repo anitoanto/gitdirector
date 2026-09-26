@@ -1,9 +1,7 @@
-import shutil
-from pathlib import Path
-
 import click
 from rich.text import Text
 
+from .. import paths
 from ..config import Config
 from . import ATTENTION, MUTED, confirm, console, count_noun, display_path, error_console
 
@@ -17,7 +15,7 @@ def register(cli: click.Group):
         Tracked repositories, panels, and settings are all lost; the
         repositories themselves are not touched.
         """
-        config_dir = Path.home() / ".gitdirector"
+        config_dir = paths.home_dir()
         if not yes and not confirm(
             f"Kill every GitDirector session and delete {display_path(config_dir)}?",
             default=False,
@@ -30,7 +28,7 @@ def register(cli: click.Group):
         )
         for name in killed:
             console.print(Text(f"  {name}", style=MUTED))
-        _wipe_config_dir(config_dir)
+        _wipe_config_dir()
         config = _recreate_config()
         console.print(f"Reset {display_path(config.config_dir)}")
 
@@ -45,13 +43,11 @@ def _kill_all_sessions() -> list[str]:
         return []
 
 
-def _wipe_config_dir(config_dir: Path) -> None:
-    if not config_dir.exists():
-        return
+def _wipe_config_dir() -> None:
     try:
-        shutil.rmtree(config_dir)
+        paths.remove_all()
     except OSError as exc:
-        raise RuntimeError(f"Failed to remove {config_dir}: {exc}") from exc
+        raise RuntimeError(f"Failed to remove {paths.home_dir()}: {exc}") from exc
 
 
 def _recreate_config() -> Config:

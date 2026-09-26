@@ -144,6 +144,15 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         scrollbar-size-vertical: 0;
         overflow-y: hidden;
     }
+    #commit-message-error {
+        display: none;
+        height: auto;
+        padding: 0 3;
+        color: $error;
+    }
+    #commit-message-error.-shown {
+        display: block;
+    }
     """,
     )
 
@@ -170,6 +179,7 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
                 id="commit-message-input",
                 classes="card-input",
             )
+            yield Static(id="commit-message-error")
             yield _CommitActionOptionList(
                 Option(
                     menu_row(Text.assemble(("↑ ", "dim"), ("Commit and push", "bold"))),
@@ -195,6 +205,8 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id == "commit-message-input":
             self.call_after_refresh(self._resize_message_input)
+            if self._message_valid():
+                self._set_error(None)
 
     def _resize_message_input(self) -> None:
         message = self.query_one("#commit-message-input", TextArea)
@@ -210,6 +222,8 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
 
     def _confirm(self) -> None:
         if not self._message_valid():
+            self._set_error("Write a commit message first")
+            self.action_focus_message()
             return
         message = self._message()
         push_after = self._selected_action_id() == "commit_push"
@@ -217,6 +231,11 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def _set_error(self, message: str | None) -> None:
+        error = self.query_one("#commit-message-error", Static)
+        error.update(message or "")
+        error.set_class(bool(message), "-shown")
 
     def action_focus_action(self) -> None:
         self._in_message = False

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
+from . import paths
 from .storage import advisory_file_lock, load_yaml_mapping, write_yaml_atomic
 
 _PACKAGE_NAME = "gitdirector"
@@ -35,8 +36,7 @@ def _utcnow() -> datetime:
 
 
 def _cache_paths() -> tuple[Path, Path]:
-    cache_dir = Path.home() / ".gitdirector"
-    return cache_dir / "version_check.yaml", cache_dir / "version_check.lock"
+    return paths.cache_dir() / "version_check.yaml", paths.lock_file("version_check")
 
 
 def _parse_checked_at(raw_value: object) -> datetime | None:
@@ -53,8 +53,12 @@ def _parse_checked_at(raw_value: object) -> datetime | None:
 
 def _read_cache() -> tuple[datetime | None, str | None]:
     cache_path, lock_path = _cache_paths()
-    with advisory_file_lock(lock_path):
-        data = load_yaml_mapping(cache_path, description="GitDirector version cache")
+    # A broken cache must not take down help or doctor; doctor reports it.
+    try:
+        with advisory_file_lock(lock_path):
+            data = load_yaml_mapping(cache_path, description="GitDirector version cache")
+    except (OSError, ValueError):
+        return None, None
     checked_at = _parse_checked_at(data.get("checked_at"))
     latest_version = data.get("latest_version")
     if not isinstance(latest_version, str) or not latest_version.strip():
@@ -67,8 +71,11 @@ def _write_cache(checked_at: datetime, latest_version: str | None) -> None:
     data: dict[str, object] = {"checked_at": checked_at.isoformat()}
     if latest_version:
         data["latest_version"] = latest_version
-    with advisory_file_lock(lock_path):
-        write_yaml_atomic(cache_path, data)
+    try:
+        with advisory_file_lock(lock_path):
+            write_yaml_atomic(cache_path, data)
+    except OSError:
+        pass
 
 
 def _fetch_latest_version() -> str | None:

@@ -557,9 +557,12 @@ class GitDirectorConsole(
 
     @work(thread=True)
     def _load_update_notice(self) -> None:
-        status = version_check.get_update_status()
-        notice = version_check.format_update_notice(status)
-        self.call_from_thread(self._set_update_notice, notice, _newer_version(status))
+        try:
+            status = version_check.get_update_status()
+            notice = version_check.format_update_notice(status)
+            self.call_from_thread(self._set_update_notice, notice, _newer_version(status))
+        except Exception:
+            logger.debug("Update check failed", exc_info=True)
 
     def _set_update_notice(self, notice: str | None, latest: str | None = None) -> None:
         self._update_notice = notice
@@ -570,7 +573,11 @@ class GitDirectorConsole(
     def _sync_tmux_theme_config(self, theme_name: str | None = None) -> None:
         from ...integrations.tmux import sync_panel_tmux_config
 
-        sync_panel_tmux_config(theme_name or self.theme)
+        # Theming live tmux sessions is best effort; tmux may not even be installed.
+        try:
+            sync_panel_tmux_config(theme_name or self.theme)
+        except Exception:
+            logger.debug("Syncing the tmux theme config failed", exc_info=True)
 
     def _watch_theme(self, theme_name: str) -> None:
         super()._watch_theme(theme_name)

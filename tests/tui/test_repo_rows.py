@@ -13,6 +13,7 @@ from gitdirector.commands.tui.repo_rows import (
     RepoSessions,
     attention_rank,
     group_row,
+    name_width,
     repo_header,
     repo_row,
     resolve_repo_layout,
@@ -68,6 +69,10 @@ class TestSessionsText:
     def test_one_dot_per_session_by_type(self):
         sessions = RepoSessions((("claude-auto", "running"), ("shell", "idle")))
         assert sessions_text(sessions, PALETTE).plain == "● claude-auto  ● shell"
+
+    def test_a_pending_session_has_a_half_dot(self):
+        text = sessions_text(RepoSessions((("claude", "pending"),)), PALETTE)
+        assert text.plain == "◐ claude"
 
     def test_a_waiting_session_is_yellow(self):
         text = sessions_text(RepoSessions((("claude", "waiting"),)), PALETTE)
@@ -154,6 +159,14 @@ class TestRows:
         lines = group_row(group, [], set(), {}, layout, PALETTE, collapsed=False, lead=True).plain
         blank, heading = lines.split("\n")
         assert blank.strip() == "" and heading.strip() == "▾ work"
+
+
+class TestNameWidth:
+    def test_wide_characters_count_their_cells(self):
+        plain = name_width(_make_info("abc"), grouped=False)
+        assert name_width(_make_info("日本語"), grouped=False) == plain + 3
+        wide_branch = _make_info("abc", branch="機能")
+        assert name_width(wide_branch, grouped=False) == plain + 2 + 4
 
 
 class TestLocalRefresh:

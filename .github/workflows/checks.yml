@@ -50,6 +50,8 @@ jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      TMUX_VERSION: "3.7c"
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +69,32 @@ jobs:
 
       - name: Install dependencies
         run: uv sync
+
+      # GitDirector needs tmux 3.7+ (kill-session -g); the runner ships an older one.
+      - name: Cache tmux
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/tmux
+          key: tmux-${{ env.TMUX_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build tmux
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libncurses-dev bison pkg-config
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" | tar xz -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-${TMUX_VERSION}"
+          ./configure --prefix="$HOME/.local/tmux"
+          make -j"$(nproc)"
+          make install
+
+      # libevent's runtime comes with the runner's own tmux package.
+      - name: Put tmux on PATH
+        run: echo "$HOME/.local/tmux/bin" >> "$GITHUB_PATH"
+
+      - name: Show tmux version
+        run: tmux -V
 
       - name: Run tests
         run: uv run pytest

@@ -33,7 +33,10 @@ from datetime import datetime
 from itertools import zip_longest
 from pathlib import Path
 
+from ... import paths
 from ...agents import (
+    AGENT_APPROVAL,
+    AGENT_HELPERS_OPTION,
     AGENT_STATE_OPTION,
     AGENT_STATES,
     AGENT_TRANSCRIPT_OPTION,
@@ -45,6 +48,7 @@ from .core import (
     TMUX_COMMAND_TIMEOUT,
     TmuxError,
     _active_pane_target,
+    _chain_tmux_commands,
     _parse_gd_session_name,
     _run_tmux,
     _tmux_child_environment_command,
@@ -59,7 +63,9 @@ logger = logging.getLogger(__name__)
 
 def _make_agent_ready_marker() -> Path:
     """Create a unique marker path used to signal agent startup."""
-    fd, raw_path = tempfile.mkstemp(prefix="gitdirector-agent-", suffix=".ready")
+    directory = paths.temp_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, raw_path = tempfile.mkstemp(prefix="agent-", suffix=".ready", dir=directory)
     os.close(fd)
     marker_path = Path(raw_path)
     try:
@@ -115,6 +121,8 @@ _SHELL_COMMANDS = frozenset({"zsh", "bash", "fish", "sh", "dash", "tcsh", "csh",
 
 STATUS_WAITING = "waiting"
 STATUS_RUNNING = "running"
+#: The agent is at its prompt while subagents it started still work.
+STATUS_PENDING = "pending"
 STATUS_IDLE = "idle"
 
 # How often the monitor samples tmux.
@@ -128,6 +136,10 @@ _RESIZE_REDRAW_SECS = 1.5
 # Output that arrives together with a bell (the final render of a result)
 # must not immediately cancel the bell.
 _BELL_GRACE_SECS = 1.0
+# Session option: when a monitor last took a bell off the session. tmux never
+# clears the bell flag of a session seen only through a view, so the monitor
+# that sees it clears it and leaves this mark for every other monitor.
+_BELL_MARK_OPTION = "@gd_bell_at"
 # CPU the process tree must burn over a short window to count as active.
 # Idle programs still do periodic housekeeping (an agent at its prompt was
 # measured at 70 ms in a single second), so a lone burst must not count; real
@@ -147,6 +159,12 @@ _PROCESS_START_SLACK_SECS = 1.0
 _AGENT_HELPERS = frozenset({"caffeinate"})
 # Where Claude Code's transcript records an interrupt.
 _INTERRUPT_MARKER = "[Request interrupted by user"
+# A listed subagent whose transcript has been quiet this long is taken as
+# gone: a killed one never sends its SubagentStop, and a lost hook leaves a
+# finished one listed. A working one writes at every tool call.
+_HELPER_QUIET_SECS = 120
+# What a subagent's last message carries once its one turn is over.
+_TURN_END = "end_turn"
 # How much of the transcript's end is read for it.
 _TRANSCRIPT_TAIL_BYTES = 64 * 1024
 
@@ -168,6 +186,8 @@ _PANE_LIST_FIELDS = (
     ("agent_state", f"#{{{AGENT_STATE_OPTION}}}"),
     ("agent_waiter", f"#{{{AGENT_WAITER_OPTION}}}"),
     ("agent_transcript", f"#{{{AGENT_TRANSCRIPT_OPTION}}}"),
+    ("agent_helpers", f"#{{{AGENT_HELPERS_OPTION}}}"),
+    ("bell_mark", f"#{{{_BELL_MARK_OPTION}}}"),
     ("repo_label", f"#{{{GD_REPO_LABEL_OPTION}}}"),
     ("description", f"#{{{GD_DESCRIPTION_OPTION}}}"),
 )
@@ -196,6 +216,10 @@ class PaneSample:
     agent_waiter: str = ""
     #: The agent's transcript, when it keeps one we read ("" otherwise).
     agent_transcript: str = ""
+    #: `` <id> <id>`` of the agent's subagents still working ("" when none).
+    agent_helpers: str = ""
+    #: When a monitor last took a bell off the session ("" when never).
+    bell_mark: str = ""
     #: User-facing metadata stored on the session, for the Sessions tab.
     repo_label: str = ""
     description: str = ""
@@ -371,7 +395,8 @@ def _int_or_zero(text: str) -> int:
 
 def _parse_agent_report(value: str) -> tuple[str, float | None]:
     """``(state, epoch)`` from a raw report; state is "" when not a known one."""
-    state, _, stamp = value.strip().partition(" ")
+    state, _, rest = value.strip().partition(" ")
+    stamp = rest.partition(" ")[0]
     if state not in AGENT_STATES:
         return "", None
     try:
@@ -420,6 +445,8 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
             agent_state=row["agent_state"].strip(),
             agent_waiter=row["agent_waiter"].strip(),
             agent_transcript=row["agent_transcript"].strip(),
+            agent_helpers=row["agent_helpers"].strip(),
+            bell_mark=row["bell_mark"].strip(),
             repo_label=row["repo_label"],
             description=row["description"],
         )
@@ -459,6 +486,31 @@ def _is_cursor_blink(previous: str, current: str, before_previous: str | None) -
     if before_previous is None or current != before_previous:
         return False
     return _changed_cells(previous, current, _NOISE_MAX_CELLS) <= _NOISE_MAX_CELLS
+
+
+def _consume_bell(session_name: str, now: float) -> str | None:
+    """Clear *session_name*'s bell flag and mark it; the new mark, or None on failure.
+
+    ``kill-session -C`` only clears the session's alerts, it never kills.
+    """
+    mark = f"{now:.3f}"
+    result = _run_tmux(
+        _chain_tmux_commands(
+            [
+                ["set-option", "-t", f"={session_name}:", _BELL_MARK_OPTION, mark],
+                ["kill-session", "-C", "-t", f"={session_name}"],
+            ]
+        )
+    )
+    return mark if result.returncode == 0 else None
+
+
+def _quiet_since(activity: int, mark: str) -> bool:
+    """Whether tmux saw no output after the bell *mark* was left."""
+    try:
+        return activity <= float(mark)
+    except ValueError:
+        return False
 
 
 def _ignores_bell(session_name: str) -> bool:
@@ -503,8 +555,9 @@ def resolve_pane_status(
 
 
 def _parse_stamped(value: str) -> tuple[str, float | None]:
-    """``(word, epoch)`` from ``"<word> <epoch>"``; epoch is None when missing."""
-    word, _, stamp = value.strip().partition(" ")
+    """``(word, epoch)`` from ``"<word> <epoch> ..."``; epoch is None when missing."""
+    word, _, rest = value.strip().partition(" ")
+    stamp = rest.partition(" ")[0]
     try:
         return word, float(stamp) if stamp else None
     except ValueError:
@@ -528,13 +581,8 @@ def _last_interrupt(path: str) -> float | None:
     the transcript's end is read: anything the agent did after an interrupt
     fired hooks that report a newer status anyway.
     """
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
-            tail = handle.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail = _transcript_tail(path)
+    if tail is None:
         return None
     for line in reversed(tail.splitlines()):
         if _INTERRUPT_MARKER not in line:
@@ -559,6 +607,82 @@ def _last_interrupt(path: str) -> float | None:
     return None
 
 
+def _transcript_tail(path: str | Path) -> str | None:
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _turn_ended(path: Path) -> bool:
+    """Whether the subagent transcript at *path* records the end of its turn.
+
+    A subagent runs one turn, so only its last message carries
+    ``stop_reason: end_turn``; a working one ends in a tool call or its
+    result. Notifications appended after the end are user entries.
+    """
+    tail = _transcript_tail(path)
+    if tail is None:
+        return False
+    for line in reversed(tail.splitlines()):
+        if '"assistant"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        message = entry.get("message")
+        return isinstance(message, dict) and message.get("stop_reason") == _TURN_END
+    return False
+
+
+def _has_live_helper(
+    helpers: str, transcript: str, now: float, activity: _SessionActivity | None = None
+) -> bool:
+    """Whether a subagent listed in *helpers* is still working.
+
+    Claude Code keeps each subagent's transcript at
+    ``<session>/subagents/agent-<id>.jsonl`` beside the session's own. The
+    list is kept by best-effort hooks, so the transcript decides: one that
+    is missing, has ended its turn, or has been quiet for long is gone.
+    """
+    agents = helpers.split()
+    if not agents or not transcript:
+        return False
+    directory = Path(transcript).with_suffix("") / "subagents"
+    ended = activity.helper_ends if activity is not None else {}
+    live = False
+    for agent in agents:
+        path = directory / f"agent-{agent}.jsonl"
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if now - info.st_mtime >= _HELPER_QUIET_SECS:
+            continue
+        key = (info.st_size, info.st_mtime_ns)
+        cached = ended.get(agent)
+        if cached is None or cached[0] != key:
+            cached = ended[agent] = (key, _turn_ended(path))
+        if not cached[1]:
+            live = True
+    for agent in list(ended):
+        if agent not in agents:
+            del ended[agent]
+    return live
+
+
+def _awaits_approval(report: str) -> bool:
+    """Whether a report is a tool waiting for permission (see ``claude_status``)."""
+    return report.split()[-1:] == [AGENT_APPROVAL]
+
+
 def _started_a_tool_since(
     pane_pid: int, snapshot: ProcessSnapshot, since: float, now: float
 ) -> bool:
@@ -567,9 +691,16 @@ def _started_a_tool_since(
     Approving a permission prompt fires no hook until the tool finishes, but
     the tool runs as a new child process of the agent (Claude Code's Bash
     tool starts a shell); a hook of the user's own is gone within moments.
+    Only the agent's own children count: a background task it started
+    earlier keeps spawning processes of its own.
     """
-    for _depth, pid, command in _descendants(pane_pid, snapshot):
-        if command in _AGENT_HELPERS:
+    agents = [entry for entry in _descendants(pane_pid, snapshot) if not _is_shell(entry[2])]
+    if not agents:
+        return False
+    agent = min(agents, key=lambda entry: (entry[0], entry[1]))[1]
+    for pid in snapshot.children_by_parent.get(agent, []):
+        command = snapshot.commands_by_pid.get(pid, "")
+        if not command or command in _AGENT_HELPERS:
             continue
         elapsed = snapshot.elapsed_by_pid.get(pid)
         if elapsed is None or elapsed < _APPROVED_TOOL_MIN_SECS:
@@ -622,7 +753,8 @@ class _SessionActivity:
     #: Recent ``(time, cumulative cpu seconds)`` samples, oldest first.
     cpu_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=16))
     last_cpu_time: float = 0.0
-    bell_flag: bool = False
+    #: The session's bell mark as last seen (None before the first sample).
+    bell_mark: str | None = None
     bell_active: bool = False
     bell_time: float = 0.0
     #: Status last reported by the agent's own hooks ("" when none), the raw
@@ -634,7 +766,23 @@ class _SessionActivity:
     #: The transcript's size and mtime when it was last read, and what it said.
     transcript_key: tuple | None = None
     interrupted_at: float | None = None
+    #: Per listed subagent, its transcript's size and mtime when last read
+    #: and whether it had ended its turn.
+    helper_ends: dict[str, tuple[tuple, bool]] = field(default_factory=dict)
     status: str = STATUS_RUNNING
+
+    def forget_samples(self) -> None:
+        """Drop the screen, CPU and bell history: after a pause it says nothing about now."""
+        self.content = self.previous_content = None
+        self.last_change_time = 0.0
+        self.last_activity = -1
+        self.size = ""
+        self.resize_time = float("-inf")
+        self.cpu_samples.clear()
+        self.last_cpu_time = 0.0
+        self.bell_mark = None
+        self.bell_active = False
+        self.bell_time = 0.0
 
 
 class TmuxMonitor:
@@ -646,7 +794,9 @@ class TmuxMonitor:
 
     Bells come from ``list-panes``' bell flag, which tmux only raises while
     no client is attached to the session -- so nothing here may attach one
-    (a read-only client would also make tmux refuse ``send-keys``).
+    (a read-only client would also make tmux refuse ``send-keys``). A monitor
+    that sees the flag clears it and leaves a mark (:data:`_BELL_MARK_OPTION`)
+    that every other monitor reads as the same bell.
     """
 
     def __init__(self):
@@ -672,6 +822,9 @@ class TmuxMonitor:
         if self._stop_event is not None:
             return
         # Whatever was sampled before the stop is old news.
+        with self._lock:
+            for activity in self._sessions.values():
+                activity.forget_samples()
         self.invalidate()
         stop_event = threading.Event()
         self._stop_event = stop_event
@@ -781,14 +934,23 @@ class TmuxMonitor:
         # A report outlives an agent that exited without saying so.
         if reported and _is_shell(command):
             reported = ""
+        ignores_bell = _ignores_bell(pane.session_name)
+        bell_mark = pane.bell_mark
+        took_bell = pane.bell and not ignores_bell
+        if took_bell:
+            bell_mark = _consume_bell(pane.session_name, now) or bell_mark
 
         with self._lock:
             activity = self._sessions.setdefault(pane.session_name, _SessionActivity())
             first_sample = activity.last_activity < 0
-            bell_rose = (
-                pane.bell and not activity.bell_flag and not _ignores_bell(pane.session_name)
+            # Another monitor's mark is a bell this one never saw the flag of.
+            bell_rose = took_bell or (
+                not ignores_bell
+                and bool(bell_mark)
+                and bell_mark != activity.bell_mark
+                and _quiet_since(pane.activity, bell_mark)
             )
-            activity.bell_flag = pane.bell
+            activity.bell_mark = bell_mark
             if pane.agent_state != activity.report_raw or reported != activity.reported:
                 activity.report_raw = pane.agent_state
                 activity.reported = reported
@@ -860,9 +1022,12 @@ class TmuxMonitor:
         interrupted_at = None
         if pane.agent_transcript and (activity.reported != STATUS_IDLE or waiter_at is not None):
             interrupted_at = TmuxMonitor._transcript_interrupt(activity, pane.agent_transcript)
-        waiting = waiter_at is not None or activity.reported == STATUS_WAITING
+        report = pane.agent_waiter if waiter_at is not None else pane.agent_state
+        waiting = (
+            waiter_at is not None or activity.reported == STATUS_WAITING
+        ) and _awaits_approval(report)
         since = waiter_at if waiter_at is not None else activity.report_time
-        return resolve_agent_status(
+        status = resolve_agent_status(
             reported=activity.reported,
             reported_at=activity.report_time,
             waiter_at=waiter_at,
@@ -871,6 +1036,11 @@ class TmuxMonitor:
             and pane.pane_pid > 0
             and _started_a_tool_since(pane.pane_pid, snapshot, since, now),
         )
+        if status == STATUS_IDLE and _has_live_helper(
+            pane.agent_helpers, pane.agent_transcript, now, activity
+        ):
+            return STATUS_PENDING
+        return status
 
     @staticmethod
     def _transcript_interrupt(activity: _SessionActivity, path: str) -> float | None:
@@ -894,7 +1064,8 @@ class TmuxMonitor:
             if sampled_at >= now - _CPU_WINDOW_SECS:
                 baseline = sampled_cpu
                 break
-        if baseline is None and samples:
+        # One from before a stall would count all the CPU used since as recent.
+        if baseline is None and samples and now - samples[-1][0] <= 2 * _CPU_WINDOW_SECS:
             baseline = samples[-1][1]
         samples.append((now, cpu_seconds))
         return baseline is not None and cpu_seconds - baseline >= _CPU_ACTIVE_MIN_SECS
@@ -932,6 +1103,7 @@ class TmuxMonitor:
 
 __all__ = [
     "STATUS_IDLE",
+    "STATUS_PENDING",
     "STATUS_RUNNING",
     "STATUS_WAITING",
     "PaneSample",

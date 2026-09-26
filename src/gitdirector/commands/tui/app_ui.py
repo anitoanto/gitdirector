@@ -134,16 +134,14 @@ class ConsoleUIHelpersMixin:
         elif tab_id == "panels":
             self._load_panels()
         elif tab_id == "repos":
-            if self._reload_config_if_changed() or self._repo_cache_expired():
-                self._refresh_repos()
-            else:
-                total = len(self._results)
-                try:
-                    self.query_one("#repo-table", DataTable)
-                except NoMatches:
-                    return
-                shown = getattr(self, "_visible_repo_count", total)
-                self._update_status(self._build_loaded_status(shown, total))
+            config_changed = self._reload_config_if_changed()
+            try:
+                # The search is shared, so it may have changed on another tab.
+                self._apply_filter_and_sort()
+            except NoMatches:
+                return
+            if config_changed or self._repo_cache_expired():
+                self._refresh_repos(config_changed=config_changed)
 
     def _handle_app_resume(self, _app: App) -> None:
         if self._resume_target_tab is None:
@@ -404,6 +402,7 @@ class ConsoleUIHelpersMixin:
             self._set_search_query("")
             self._get_active_table().focus()
         elif self._search_query:
+            self.query_one("#search-bar", Input).value = ""
             self._set_search_query("")
 
     def on_input_changed(self, event: Input.Changed) -> None:
