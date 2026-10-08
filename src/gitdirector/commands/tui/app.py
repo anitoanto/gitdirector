@@ -775,9 +775,10 @@ class GitDirectorConsole(
         )
 
         self._pause_session_status_tracking(wait=False)
-        deck = self._prepare_attach(session_name)
+        deck, prepared = self._prepare_attach(session_name, skip_config_sync=skip_config_sync)
         frame = self._current_frame()
         attach_error: Exception | None = None
+        self._hold_frame()
         try:
             try:
                 # Everything that can fail runs *inside* the suspend block
@@ -794,6 +795,7 @@ class GitDirectorConsole(
                         session_name,
                         skip_config_sync=skip_config_sync,
                         deck=deck,
+                        prepared=prepared,
                         frame=frame,
                     )
                     self._drop_input_from_before_attach()
@@ -824,6 +826,21 @@ class GitDirectorConsole(
 
         attach_client_env()
 
+    def _hold_frame(self) -> None:
+        """Keep the console on screen until tmux has drawn the whole deck.
+
+        Starts synchronized output while the driver still owns the terminal:
+        Textual leaving the alt screen on suspend, the console going back in
+        and tmux's own clear all happen unseen, and tmux's first redraw,
+        bracketed by the client's ``sync`` feature, ends the hold on the
+        finished deck. Inside tmux the client just switches, and a pane's
+        hold would not reach the terminal anyway.
+        """
+        if self._driver is None or os.environ.get("TMUX"):
+            return
+        self._driver.write("\033[?2026h")
+        self._driver.flush()
+
     def _release_held_frame(self) -> None:
         # Ends the synchronized output tmux's exit and the frame restore
         # began, should the repaint not have ended it.
@@ -853,19 +870,22 @@ class GitDirectorConsole(
         self.capture_mouse(None)
 
     @staticmethod
-    def _prepare_attach(session_name: str) -> str | None:
-        """Build the session's deck while the console is still on screen.
+    def _prepare_attach(
+        session_name: str, *, skip_config_sync: bool = False
+    ) -> tuple[str | None, bool]:
+        """Get the session ready while the console is still on screen.
 
-        The terminal then goes straight from the console to the finished
-        deck. A failure is left for the attach itself to report.
+        Returns the deck it opens in, or None, and whether the preparation
+        ran; the terminal then goes straight from the console to the
+        finished deck. A failure is left for the attach itself to report.
         """
         from ...integrations.tmux import prepare_attach
 
         try:
-            return prepare_attach(session_name)
+            return prepare_attach(session_name, skip_config_sync=skip_config_sync), True
         except Exception:
             logger.debug("could not prepare %s", session_name, exc_info=True)
-            return None
+            return None, False
 
     @staticmethod
     def _discard_deck(deck: str | None) -> None:
@@ -881,6 +901,7 @@ class GitDirectorConsole(
         *,
         skip_config_sync: bool,
         deck: str | None = None,
+        prepared: bool = False,
         frame: str | None = None,
     ) -> Exception | None:
         """Run the blocking tmux attach with the TUI suspended.
@@ -906,11 +927,18 @@ class GitDirectorConsole(
         error: Exception | None = None
         try:
             if not os.environ.get("TMUX"):
-                # Enter the alt screen before tmux does so the primary
-                # screen never flashes between the TUI and the session.
+                # Textual left the alt screen on suspend; go back in, under
+                # the hold _hold_frame began, so tmux draws over a cleared
+                # alt screen and the shell's own screen is never touched.
                 write_terminal("\033[?1049h\033[H\033[2J\033[?25l")
                 entered_manual_alt_screen = True
-            attach_tmux_session(session_name, skip_config_sync=skip_config_sync, deck=deck)
+            attach_tmux_session(
+                session_name,
+                skip_config_sync=skip_config_sync,
+                deck=deck,
+                prepared=prepared,
+                same_screen=True,
+            )
         except Exception as exc:
             logger.warning("tmux attach failed: %s", exc)
             error = exc
@@ -1483,10 +1511,10 @@ class GitDirectorConsole(
             return
         if action == "new_session":
             self.action_open_tmux()
-        elif action == "vscode":
+        elif action == "editor":
             path = self._get_selected_path()
             if path is not None:
-                self._open_in_vscode(path)
+                self._open_in_editor(path)
         elif action.startswith("agent:"):
             key, _, mode = action[len("agent:") :].partition(":")
             agent = AGENTS_BY_KEY.get(key)
@@ -1498,7 +1526,10 @@ class GitDirectorConsole(
         elif action.startswith("attach:"):
             session_name = action[len("attach:") :]
             path = self._get_selected_path()
-            self._attach_to_session(session_name, path)
+            # The menu is still on screen while its callback runs; attach
+            # once it has gone, so the frame kept for the way back is the
+            # console's.
+            self.call_after_refresh(self._attach_to_session, session_name, path)
         elif action == "remove_session":
             path = self._get_selected_path()
             if path:
@@ -1508,20 +1539,20 @@ class GitDirectorConsole(
                 )
 
     @work(thread=True)
-    def _open_in_vscode(self, path: Path) -> None:
-        from ...editor import open_in_vscode
+    def _open_in_editor(self, path: Path) -> None:
+        from ...editor import editor_label, open_in_editor
 
         try:
-            open_in_vscode(path)
+            open_in_editor(path)
         except Exception as exc:
-            logger.warning("opening VS Code failed: %s", exc)
-            message = f"VS Code: {exc}"
+            logger.warning("opening the editor failed: %s", exc)
+            message = f"{editor_label()}: {exc}"
         else:
-            message = f"{path.name}: opened in VS Code"
+            message = f"{path.name}: opened in {editor_label()}"
         try:
             self.call_from_thread(self._update_status, message)
         except Exception:
-            logger.debug("Failed to post VS Code result to UI", exc_info=True)
+            logger.debug("Failed to post the editor result to UI", exc_info=True)
 
     def _open_review_diff(self, path: Path | None = None) -> None:
         if path is None:

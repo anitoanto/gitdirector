@@ -826,6 +826,7 @@ class TestGitDirectorConsolePanels:
         app._load_panels = MagicMock()
         app._open_panel = MagicMock()
         app._update_status = MagicMock()
+        app.call_after_refresh = MagicMock(side_effect=lambda fn, *a: fn(*a))
 
         app._handle_reconfigure_panel(
             "Main",

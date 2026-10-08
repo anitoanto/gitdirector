@@ -438,4 +438,5 @@ class TestDeckStatusHints:
         assert "," not in full and "," not in compact
         assert "session ↔ sidebar" in full
         assert "sidebar" in compact and "session ↔" not in compact
+        assert "v#[nobold]" in full and "editor" in full and "editor" in compact
         assert "#{prefix} b" in compact and "#{prefix} d" in compact

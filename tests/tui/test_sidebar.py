@@ -208,6 +208,27 @@ class TestSidebarApp:
             await _until(pilot, lambda: deck_api.show_session.called)
             deck_api.show_session.assert_called_once_with(DECK, CLAUDE_2)
 
+    async def test_v_opens_the_shown_session_in_the_editor(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        from pathlib import Path
+
+        with (
+            patch.object(S, "session_path", return_value=Path("/tmp/alpha")) as session_path,
+            patch("gitdirector.editor.open_in_editor") as open_in_editor,
+            patch("gitdirector.editor.editor_setting", return_value="cursor"),
+        ):
+            async with app.run_test(size=(32, 30)) as pilot:
+                await _until(pilot, lambda: app._revealed and app._shown == CLAUDE)
+                await pilot.press("v")
+                await _until(pilot, lambda: open_in_editor.called)
+                await pilot.pause()
+                session_path.assert_called_once_with(CLAUDE)
+                open_in_editor.assert_called_once_with(Path("/tmp/alpha"))
+                await _until(
+                    pilot,
+                    lambda: "opened in cursor" in str(app.query_one("#title", Static).render()),
+                )
+
     async def test_a_sample_from_before_a_click_changes_nothing(self, deck_api):
         # It still has the old focus and shown session: applying it would
         # flash the highlight and the marker back for a moment.

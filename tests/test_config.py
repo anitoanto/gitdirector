@@ -85,6 +85,8 @@ class TestConfigInit:
             ({"max_workers": 33}, None, "Invalid max_workers"),
             ({"theme": None}, None, "Invalid theme"),
             ({"theme": "   "}, None, "Invalid theme"),
+            ({"editor": ""}, None, "Invalid editor"),
+            ({"editor": ["code"]}, None, "Invalid editor"),
             (None, {"github_username": 1}, "Invalid github_username"),
             (None, {"github_PAT": []}, "Invalid github_PAT"),
         ],
@@ -209,6 +211,26 @@ class TestConfigClear:
         config.clear()
         data = yaml.safe_load(config.config_file.read_text())
         assert data["repositories"] == []
+
+
+class TestConfigEditor:
+    def test_default_editor(self, config):
+        assert config.editor == "code"
+
+    def test_loads_custom_editor(self, config_dir, monkeypatch):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.dump({"repositories": [], "editor": " cursor --new-window "})
+        )
+        monkeypatch.setattr(Path, "home", lambda: config_dir.parent)
+        assert Config().editor == "cursor --new-window"
+
+    def test_saves_custom_editor_and_not_the_default(self, config):
+        config.save()
+        assert "editor" not in yaml.safe_load(config.config_file.read_text())
+        config.editor = "zed"
+        config.save()
+        assert yaml.safe_load(config.config_file.read_text())["editor"] == "zed"
 
 
 class TestConfigTheme:

@@ -409,10 +409,27 @@ def create_deck(session_name: str, *, return_to: str | None = None) -> str:
             _run_tmux(["set-option", "-t", target, DECK_RETURN_OPTION, return_to], check=True)
         try_sync_panel_tmux_config()
         ensure_deck_bindings()
+        _wait_for_main_client(deck)
     except BaseException:
         kill_tmux_session(deck)
         raise
     return deck
+
+
+def _wait_for_main_client(deck: str, timeout: float = 1.0) -> None:
+    # The view client in the main pane attaches on its own, after
+    # split-window returns; the deck is handed over once it is there, so
+    # its first frame shows the session and not an empty pane.
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            state = read_deck_state(deck)
+        except Exception:
+            logger.debug("could not read the deck state", exc_info=True)
+            return
+        if state is None or state.main is None or state.main_attached:
+            return
+        time.sleep(0.02)
 
 
 def show_session(deck: str, session_name: str, *, focus: bool = True) -> None:
@@ -589,6 +606,7 @@ def _deck_key_commands() -> dict[str, tuple[str, str]]:
         f"#{{?#{{==:#{{pane_id}},{_SIDEBAR}}},select-pane -t {_MAIN},select-pane -t {_SIDEBAR}}}"
     )
     to_sidebar = f"#{{?{_SIDEBAR_EXISTS},send-keys -t {_SIDEBAR} b,{_SIDEBAR_CLOSED_MESSAGE}}}"
+    to_editor = f"#{{?{_SIDEBAR_EXISTS},send-keys -t {_SIDEBAR} v,{_SIDEBAR_CLOSED_MESSAGE}}}"
     return {
         # Unbound by default in tmux.
         "Tab": (
@@ -601,12 +619,15 @@ def _deck_key_commands() -> dict[str, tuple[str, str]]:
             f"#{{?{_IN_DECK},1,{_IN_PANEL}}}",
             f'run-shell -C "#{{?{_IN_PANEL},display-panes,{to_sidebar}}}"',
         ),
+        # The sidebar opens the shown session's repository in the editor.
+        "v": (_IN_DECK, f'run-shell -C "{to_editor}"'),
     }
 
 
 _ORIGINAL_BINDING_OPTIONS = {
     "Tab": "@gd_prefix_original_tab",
     "b": "@gd_prefix_original_b",
+    "v": "@gd_prefix_original_v",
     **{str(slot): f"@gd_prefix_original_{slot}" for slot in range(1, 10)},
 }
 # tmux's own binding for a key: what runs when no original was kept.
@@ -737,7 +758,7 @@ def open_deck(session_name: str) -> str:
     return create_deck(session_name, return_to=return_to)
 
 
-def attach_deck(session_name: str, deck: str | None = None) -> bool:
+def attach_deck(session_name: str, deck: str | None = None, *, same_screen: bool = False) -> bool:
     """Attach to *deck* (a new one for *session_name* when None); see :func:`.core.attach_tmux_session`."""
     inside_tmux = bool(os.environ.get("TMUX"))
     deck = deck or open_deck(session_name)
@@ -765,7 +786,7 @@ def attach_deck(session_name: str, deck: str | None = None) -> bool:
         ],
         capture_output=False,
         timeout=None,
-        extra_env=attach_client_env(),
+        extra_env=attach_client_env() if same_screen else None,
     )
     deck_left_behind = kill_tmux_session(deck)
     if result.returncode != 0 and deck_left_behind:

@@ -137,6 +137,14 @@ class TestPrefixBindings:
         assert len(bind_tab) == 8
         assert ["set-option", "-gu", "@gd_prefix_original_tab"] in commands
 
+    def test_the_editor_key_reaches_the_sidebar(self):
+        commands = _run_with("bind-key -T prefix v my-own-v\n")
+        bind_v = _binding(commands, "v")
+        assert bind_v[4:7] == ["if-shell", "-F", "#{m:gd/deck/*,#{session_name}}"]
+        assert "send-keys -t" in bind_v[7] and " v," in bind_v[7]
+        assert bind_v[-1] == "my-own-v"
+        assert ["set-option", "-g", "@gd_prefix_original_v", "my-own-v"] in commands
+
     def test_rewrapping_keeps_the_stored_original(self):
         wrapped_b = (
             'bind-key    -T prefix b       if-shell -F "#{m:gd/deck/*,#{session_name}}" '
@@ -294,9 +302,9 @@ class TestAttachDeck:
             assert D.attach_deck("gd/r/claude/1") is True
         create.assert_called_once_with("gd/r/claude/1", return_to=None)
         assert mock_run.call_args.args[0] == [
-            # 24-bit colour for this client only.
+            # 24-bit colour and synchronized redraws for this client only.
             "-T",
-            "RGB",
+            "RGB,sync",
             "attach-session",
             "-t",
             "=gd/deck/1-a",

@@ -143,7 +143,7 @@ class TestActionMenuScreen:
             assert ids[:5] == [
                 f"agent:{key}" for key in ("claude", "opencode", "codex", "copilot", "pi")
             ]
-            assert ids[5:] == ["new_session", "vscode"]
+            assert ids[5:] == ["new_session", "editor"]
             assert menu.highlighted_option.id == "agent:claude"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
@@ -376,7 +376,7 @@ class TestActionMenuAgentModes:
             assert "mode" not in str(hint.content)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_vscode_is_offered(self, _):
+    async def test_the_editor_is_offered(self, _):
         results: list = []
         app = GitDirectorConsole()
         app.manager = _mock_manager()
@@ -388,7 +388,7 @@ class TestActionMenuAgentModes:
             await pilot.pause()
             await pilot.press("v")
             await pilot.pause()
-            assert results == ["vscode"]
+            assert results == ["editor"]
 
 
 class TestGitOperationsMenuScreen:
@@ -1656,6 +1656,7 @@ class TestAgentLoadingScreen:
         screen.dismiss = MagicMock()
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
+        app.call_after_refresh = MagicMock(side_effect=lambda fn, *a: fn(*a))
         screen._parent = app
 
         screen._do_dismiss()
@@ -1666,12 +1667,28 @@ class TestAgentLoadingScreen:
         )
         screen.dismiss.assert_called_once_with(None)
 
+    def test_do_dismiss_attaches_only_after_the_card_has_gone(self):
+        """The frame kept for the way back must be the console's, not the card."""
+        on_attach = MagicMock()
+        screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1", on_attach=on_attach)
+        screen.dismiss = MagicMock()
+        app = GitDirectorConsole()
+        app.call_after_refresh = MagicMock()
+        screen._parent = app
+
+        screen._do_dismiss()
+
+        screen.dismiss.assert_called_once_with(None)
+        on_attach.assert_not_called()
+        app.call_after_refresh.assert_called_once_with(on_attach)
+
     def test_do_dismiss_prefers_on_attach_callback(self):
         on_attach = MagicMock()
         screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1", on_attach=on_attach)
         screen.dismiss = MagicMock()
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
+        app.call_after_refresh = MagicMock(side_effect=lambda fn, *a: fn(*a))
         screen._parent = app
 
         screen._do_dismiss()

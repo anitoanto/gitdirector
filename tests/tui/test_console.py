@@ -409,6 +409,9 @@ class TestGitDirectorConsole:
             await app.workers.wait_for_complete()
             await pilot.pause()
             app._handle_menu_action("attach:gd/alpha/shell/1")
+            # Not yet: the menu is still on screen while its callback runs.
+            app._attach_to_session.assert_not_called()
+            await pilot.pause()
             app._attach_to_session.assert_called_once_with("gd/alpha/shell/1", Path("/tmp/alpha"))
 
     @patch(
@@ -580,32 +583,38 @@ class TestGitDirectorConsoleActionRouting:
             assert launched.startswith(prefix)
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_handle_menu_action_vscode_opens_the_selected_path(self, _):
+    async def test_handle_menu_action_editor_opens_the_selected_path(self, _):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
-        with patch("gitdirector.editor.open_in_vscode") as open_in_vscode:
+        with (
+            patch("gitdirector.editor.open_in_editor") as open_in_editor,
+            patch("gitdirector.editor.editor_setting", return_value="cursor"),
+        ):
             async with app.run_test(size=(120, 30)) as pilot:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
-                app._handle_menu_action("vscode")
+                app._handle_menu_action("editor")
                 await app.workers.wait_for_complete()
                 await pilot.pause()
-                open_in_vscode.assert_called_once_with(Path("/tmp/alpha"))
-                assert "opened in VS Code" in app._status_message
+                open_in_editor.assert_called_once_with(Path("/tmp/alpha"))
+                assert app._status_message == "alpha: opened in cursor"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
-    async def test_handle_menu_action_vscode_reports_a_failure(self, _):
+    async def test_handle_menu_action_editor_reports_a_failure(self, _):
         app = GitDirectorConsole()
         app.manager = _mock_manager([_make_info("alpha", Path("/tmp/alpha"))])
-        failure = FileNotFoundError("VS Code not found")
-        with patch("gitdirector.editor.open_in_vscode", side_effect=failure):
+        failure = FileNotFoundError("code not found")
+        with (
+            patch("gitdirector.editor.open_in_editor", side_effect=failure),
+            patch("gitdirector.editor.editor_setting", return_value="code"),
+        ):
             async with app.run_test(size=(120, 30)) as pilot:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
-                app._handle_menu_action("vscode")
+                app._handle_menu_action("editor")
                 await app.workers.wait_for_complete()
                 await pilot.pause()
-                assert app._status_message == "VS Code: VS Code not found"
+                assert app._status_message == "code: code not found"
 
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     @patch(

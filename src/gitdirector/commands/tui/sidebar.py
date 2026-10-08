@@ -31,6 +31,7 @@ from ...integrations.tmux.core import (
     GD_DEFAULT_DESCRIPTION,
     _parse_gd_session_name,
     list_all_gd_sessions,
+    session_path,
 )
 from ...integrations.tmux.monitor import TmuxMonitor
 from .app_sessions import session_matches
@@ -400,6 +401,7 @@ class SessionSidebar(App):
         Binding("tab,right,l", "focus_session", show=False, priority=True),
         Binding("escape", "escape", show=False, priority=True),
         Binding("b", "toggle_collapse", show=False),
+        Binding("v", "open_editor", show=False),
         Binding("slash", "search", show=False),
     ]
 
@@ -680,12 +682,18 @@ class SessionSidebar(App):
         highlighted = option_list.highlighted_option
         highlighted_id = highlighted.id if highlighted is not None else None
         if ids != self._option_ids or force:
+            previous_ids = self._option_ids
             option_list.clear_options()
             option_list.add_options(options)
             self._option_ids = ids
             self._rendered = {option.id or "": option.prompt for option in options}
             if highlighted_id in ids:
                 option_list.highlighted = ids.index(highlighted_id)
+            elif highlighted_id is not None and ids:
+                # The highlighted session went away: land on its neighbour,
+                # so Enter keeps working without a j/k first.
+                at = previous_ids.index(highlighted_id) if highlighted_id in previous_ids else 0
+                option_list.highlighted = min(at, len(ids) - 1)
             return
         for option in options:
             option_id = option.id or ""
@@ -778,6 +786,26 @@ class SessionSidebar(App):
 
     def _end_resize(self) -> None:
         self.screen.remove_class("-resizing")
+
+    @work(thread=True, group="editor", exclusive=True)
+    def action_open_editor(self) -> None:
+        """Open the shown session's repository in the editor (`editor` in config.yaml)."""
+        from ...editor import editor_label, open_in_editor
+
+        shown = self._shown
+        if shown is None:
+            self.call_from_thread(self._flash, "no session shown")
+            return
+        try:
+            path = session_path(shown)
+            if path is None:
+                raise FileNotFoundError("the session's directory is unknown")
+            open_in_editor(path)
+        except Exception as exc:
+            logger.warning("could not open the editor", exc_info=True)
+            self.call_from_thread(self._flash, f"{editor_label()}: {exc}")
+            return
+        self.call_from_thread(self._flash, f"{path.name}: opened in {editor_label()}")
 
     @work(thread=True, group="deck")
     def action_leave_deck(self) -> None:

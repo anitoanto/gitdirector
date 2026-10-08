@@ -14,6 +14,7 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from ....agents import AGENTS, AGENTS_BY_KEY, AgentSpec
+from ....editor import editor_label
 from ..constants import _MODAL_BINDINGS
 from .card import (
     ShortcutKeys,
@@ -54,7 +55,7 @@ def _mode_picker(agent: AgentSpec, selected: str | None, success: str, danger: s
 
 
 class SessionActionMenuScreen(ShortcutKeys, ModalScreen[str]):
-    """Launch an agent, a shell or VS Code, or rejoin one of the running sessions."""
+    """Launch an agent, a shell or the editor, or rejoin one of the running sessions."""
 
     BINDINGS = [
         *_MODAL_BINDINGS,
@@ -110,11 +111,13 @@ class SessionActionMenuScreen(ShortcutKeys, ModalScreen[str]):
             ),
             Option(
                 menu_row(
-                    Text.assemble(("› ", "dim"), ("VS Code", "bold")),
-                    Text("editor", style="dim"),
+                    Text.assemble(
+                        ("› ", "dim"), ("Editor", "bold"), (f" ({editor_label()})", "dim")
+                    ),
+                    Text("open the repo", style="dim"),
                     _EDITOR_KEY,
                 ),
-                id="vscode",
+                id="editor",
             ),
         ]
 
@@ -175,7 +178,7 @@ class SessionActionMenuScreen(ShortcutKeys, ModalScreen[str]):
 
         self._shortcuts = {key: f"agent:{agent}" for agent, key in _AGENT_KEYS.items()}
         self._shortcuts[_SHELL_KEY] = "new_session"
-        self._shortcuts[_EDITOR_KEY] = "vscode"
+        self._shortcuts[_EDITOR_KEY] = "editor"
         for key, session_name in zip(_SESSION_KEYS, sessions):
             self._shortcuts[key] = f"attach:{session_name}"
 

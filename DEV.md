@@ -128,6 +128,20 @@ uv run python stress/bench_diff.py --files 800
 cd stress && docker compose run --rm stress bash /stress/bench.sh   # -> out/bench-diff.json
 ```
 
+**Handoff recording.** `stress/handoff.py` makes sample repositories and a
+session on a private tmux server, runs the console in a pty, opens the
+session from the Sessions tab, detaches, and checks the recorded bytes: on
+the way in the console's `?2026h` precedes Textual's `?1049l` and the next
+`?2026l` is tmux's, after its first redraw; on the way back there is no
+`?1049l` and the console frame goes up under tmux's hold. It then opens the
+session with `gitdirector cd` from a pty, where tmux's own `smcup`/`rmcup`
+must restore the shell and no hold may be left. It needs a tmux server of its
+own, so run it in the container:
+
+```bash
+cd stress && docker compose run --rm stress bash /src/stress/handoff.sh   # -> out/handoff.bin
+```
+
 The file list is one `OptionList` that draws only the rows on screen; the
 earlier widget-per-file list took minutes to mount and reflowed on every
 keypress at that size. Each file's rendered diff is cached per width.
@@ -214,7 +228,7 @@ counting as held after a second. A click or Enter goes straight from
 `OptionSelected` message, so the highlight, the dimmed look and the marker
 land in the same frame.
 
-`prefix Tab` (unbound in tmux by default) and `prefix b` are rebound as
+`prefix Tab` (unbound in tmux by default), `prefix b` and `prefix v` are rebound as
 `if-shell -F '#{m:gd/deck/*,...}' <deck command> <original>`, so outside a
 deck they do whatever they did before; the original is kept in
 `@gd_prefix_original_<key>` so wrapping is
@@ -223,7 +237,9 @@ idempotent, and a gitdirector binding is never saved as the original.
 the sidebar toggle in a deck. `prefix Tab` toggles
 focus, or splits a new sidebar in from `@gd_deck_respawn_sidebar` when it
 was closed; `prefix b` sends `b` to the sidebar, which flips the global
-`@gd_sidebar_collapsed` and resizes itself. The window's `window-resized`
+`@gd_sidebar_collapsed` and resizes itself; `prefix v` sends `v`, and the
+sidebar opens the shown session's `#{session_path}` with the configured
+`editor` command (`editor.py`), scrubbed of anything of ours. The window's `window-resized`
 hook applies the width format (32 columns, a third of narrow windows, 5 when
 collapsed), and the sidebar renders as a rail of status dots under 14.
 
@@ -241,12 +257,27 @@ client's exact size less the status line, so attaching resizes nothing; the
 sidebar pane comes first so the main pane's client attaches once, at its
 final width. tmux paints the sidebar pane in Textual's `$surface` before the
 app starts, and the app keeps its widgets hidden until the monitor's first
-sample is in, then shows them all at once.
+sample is in, then shows them all at once. The console starts synchronized
+output (`?2026h`) while its driver still owns the terminal (`_hold_frame`),
+because Textual's `suspend` leaves the alt screen (`?1049l`) before any code
+inside the block runs and the shell's screen would show for a frame. The
+re-entry, tmux's clear and its first redraw all land under that hold; the
+attach client's `sync` feature (`TMUX_CLIENT_FEATURES`) makes tmux bracket
+every redraw in `?2026h`/`?2026l`, so the first one ends the hold on the
+finished deck. Whatever is slow runs before the suspend: `prepare_attach`
+also does a direct session's config sync and panel layout, and an attach
+started from a card's dismiss callback is deferred with `call_after_refresh`,
+since Textual runs the callback before the pop and the frame kept for the way
+back would otherwise be the card. `stress/handoff.py` records a pty across an
+open and a detach and checks both orders (below).
 
-Coming back is one frame change too. The attach client runs with
+Coming back is one frame change too. The console's attach client runs with
 `TERM=<term>-gdscreen`, a copy of the terminal's entry compiled once into
 `~/.gitdirector/cache/terminfo` (`attach_client_env`) without `smcup`/`rmcup`, so
-tmux never switches the terminal back to the shell's screen. Its `rmkx`, which
+tmux never switches the terminal back to the shell's screen. Only the console
+asks for it (`same_screen=True`): `gitdirector cd` and `panel` attach from a
+shell, where tmux's own `smcup`/`rmcup` must restore the shell's screen and
+nothing would end the hold. Its `rmkx`, which
 tmux sends only on the way out and just before it clears the screen and prints
 `[detached ...]`, also starts synchronized output (`?2026h`): the deck's last
 frame stays up while the console writes its captured frame over it

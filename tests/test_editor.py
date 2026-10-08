@@ -1,4 +1,4 @@
-"""Tests for opening a folder in VS Code."""
+"""Tests for opening a folder in the configured editor."""
 
 import subprocess
 from pathlib import Path
@@ -9,32 +9,59 @@ import pytest
 from gitdirector import editor
 
 
-class TestVscodeCommand:
-    def test_the_mac_app_wins_over_the_cli(self, tmp_path, monkeypatch):
+class TestEditorCommand:
+    def test_the_mac_app_wins_over_the_cli_for_the_default(self, tmp_path, monkeypatch):
         # LaunchServices starts it from the login environment: no trace of us.
         monkeypatch.setattr(editor.sys, "platform", "darwin")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         (tmp_path / "Applications" / "Visual Studio Code.app").mkdir(parents=True)
         with patch("shutil.which", return_value="/usr/local/bin/code"):
-            command = editor.vscode_command(Path("/r"))
+            command = editor.editor_command(Path("/r"), "code")
         assert command == ["open", "-a", "Visual Studio Code", "/r"]
 
-    def test_the_cli_without_the_app(self, tmp_path, monkeypatch):
+    def test_the_cli_without_the_app(self, monkeypatch):
         monkeypatch.setattr(editor.sys, "platform", "linux")
         with patch("shutil.which", return_value="/usr/local/bin/code"):
-            assert editor.vscode_command(Path("/r")) == ["/usr/local/bin/code", "/r"]
+            assert editor.editor_command(Path("/r"), "code") == ["/usr/local/bin/code", "/r"]
 
-    def test_none_when_not_installed(self, tmp_path, monkeypatch):
+    def test_a_configured_command_keeps_its_arguments(self, monkeypatch):
+        monkeypatch.setattr(editor.sys, "platform", "darwin")
+        with patch("shutil.which", return_value="/opt/bin/zed") as which:
+            assert editor.editor_command(Path("/r"), "zed -n") == ["/opt/bin/zed", "-n", "/r"]
+        which.assert_called_once_with("zed")
+
+    def test_the_configured_command_is_used_by_default(self, monkeypatch):
+        monkeypatch.setattr(editor.sys, "platform", "linux")
+        with (
+            patch.object(editor, "editor_setting", return_value="cursor"),
+            patch("shutil.which", return_value="/usr/local/bin/cursor"),
+        ):
+            assert editor.editor_command(Path("/r")) == ["/usr/local/bin/cursor", "/r"]
+
+    def test_none_when_not_installed_or_empty(self, monkeypatch):
         monkeypatch.setattr(editor.sys, "platform", "linux")
         with patch("shutil.which", return_value=None):
-            assert editor.vscode_command(Path("/r")) is None
+            assert editor.editor_command(Path("/r"), "code") is None
+        assert editor.editor_command(Path("/r"), "   ") is None
+        assert editor.editor_command(Path("/r"), "'unterminated") is None
 
 
-class TestOpenInVscode:
+class TestEditorLabel:
+    def test_names_the_command(self):
+        assert editor.editor_label("code") == "code"
+        assert editor.editor_label("/opt/homebrew/bin/cursor --new-window") == "cursor"
+        assert editor.editor_label("") == "code"
+
+    def test_falls_back_when_the_config_cannot_be_read(self):
+        with patch.object(editor.Config, "__init__", side_effect=ValueError("bad yaml")):
+            assert editor.editor_setting() == "code"
+
+
+class TestOpenInEditor:
     def test_raises_when_not_installed(self):
-        with patch.object(editor, "vscode_command", return_value=None):
-            with pytest.raises(FileNotFoundError):
-                editor.open_in_vscode(Path("/r"))
+        with patch.object(editor, "editor_command", return_value=None):
+            with pytest.raises(FileNotFoundError, match="cursor not found; set `editor`"):
+                editor.open_in_editor(Path("/r"), "cursor")
 
     def test_the_cli_gets_no_trace_of_gitdirector(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,1,0")
@@ -48,10 +75,10 @@ class TestOpenInVscode:
         monkeypatch.setenv("HOME", str(tmp_path))
         done = subprocess.CompletedProcess([], 0, "", "")
         with (
-            patch.object(editor, "vscode_command", return_value=["code", "/r"]),
+            patch.object(editor, "editor_command", return_value=["code", "/r"]),
             patch("subprocess.run", return_value=done) as run,
         ):
-            editor.open_in_vscode(Path("/r"))
+            editor.open_in_editor(Path("/r"), "code")
         env = run.call_args.kwargs["env"]
         for name in ("TMUX", "TMUX_PANE", "VIRTUAL_ENV", "GITDIRECTOR_GITHUB_PAT", "GD_SOMETHING"):
             assert name not in env
@@ -65,8 +92,8 @@ class TestOpenInVscode:
     def test_reports_the_cli_error(self):
         failed = subprocess.CompletedProcess([], 1, "", "boom\n")
         with (
-            patch.object(editor, "vscode_command", return_value=["code", "/r"]),
+            patch.object(editor, "editor_command", return_value=["code", "/r"]),
             patch("subprocess.run", return_value=failed),
         ):
             with pytest.raises(RuntimeError, match="boom"):
-                editor.open_in_vscode(Path("/r"))
+                editor.open_in_editor(Path("/r"), "code")

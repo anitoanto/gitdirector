@@ -133,7 +133,12 @@ class RepositoryManager:
             return False, f"Path is not a directory: {path}", [], []
 
         if not is_git_repository(path):
-            return False, f"Not a git repository: {path}", [], []
+            return (
+                False,
+                f"Not a git repository: {path} (use --discover to track the repositories under it)",
+                [],
+                [],
+            )
 
         if self.config.has_repository(path):
             return False, f"Repository already tracked: {path}", [], []

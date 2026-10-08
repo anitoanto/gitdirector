@@ -1108,7 +1108,7 @@ class TestSessionsRefreshOnReturn:
             )
         )
 
-        def prepare(session):
+        def prepare(session, **_):
             order.append("prepare")
             return "gd/deck/1-a"
 
@@ -1212,6 +1212,58 @@ class TestSessionsRefreshOnReturn:
         else:
             assert written.endswith("\033[?2026h\033[?1049h\033[?25l<frame>")
         app.call_after_refresh.assert_called_once_with(app._release_held_frame)
+
+    async def test_the_display_is_held_before_the_suspend(self):
+        """Synchronized output starts while the driver still owns the terminal.
+
+        Textual leaves the alt screen on suspend, so a hold begun any later
+        would let the shell's screen through. The console does not end the
+        hold itself: tmux's first redraw, bracketed by the client's ``sync``
+        feature, does, on the finished deck.
+        """
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._active_tab = "sessions"
+        app._load_sessions = MagicMock()
+        app.call_after_refresh = MagicMock()
+        app._driver = MagicMock()
+        driver_output_at_suspend: list[str] = []
+
+        def enter_suspend(*_):
+            driver_output_at_suspend.extend(c.args[0] for c in app._driver.write.call_args_list)
+
+        app.suspend = MagicMock(
+            return_value=MagicMock(
+                __enter__=MagicMock(side_effect=enter_suspend),
+                __exit__=MagicMock(return_value=False),
+            )
+        )
+        stdout = MagicMock()
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with patch("sys.stdout", stdout), patch.dict("os.environ", {}, clear=True):
+                app._suspend_and_attach("gd-test-session")
+        assert driver_output_at_suspend == ["\033[?2026h"]
+        app._driver.flush.assert_called_once_with()
+        written = "".join(call.args[0] for call in stdout.write.call_args_list)
+        assert "\033[?2026l" not in written
+
+    async def test_inside_tmux_the_display_is_not_held(self):
+        """The client only switches sessions there, and a pane's hold goes nowhere."""
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        app._load_sessions = MagicMock()
+        app.call_after_refresh = MagicMock()
+        app._driver = MagicMock()
+        app.suspend = MagicMock(
+            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+        )
+        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
+            with (
+                patch("sys.stdout"),
+                patch.dict("os.environ", {"TMUX": "/tmp/tmux-1/default,1,0"}, clear=True),
+            ):
+                app._suspend_and_attach("gd-test-session")
+        app._driver.write.assert_not_called()
 
     async def test_suspend_keeps_repository_cache_valid(self):
         app = GitDirectorConsole()
@@ -1326,7 +1378,7 @@ class TestNoReopenAfterReturn:
 
             pending = list(stale_input(table))
 
-            def prepare(_session_name):
+            def prepare(_session_name, **_):
                 # The driver keeps reading the terminal while the deck is built.
                 while pending:
                     app.post_message(pending.pop(0))

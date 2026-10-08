@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 from base64 import b32encode
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -29,7 +30,9 @@ _TMUX_TERMINAL_NAME = "tmux-256color"
 _TMUX_TERMINAL_FALLBACK = "screen-256color"
 # 24-bit colour for the tmux clients gitdirector starts, and only those:
 # terminal-features would claim it server-wide, for the user's sessions too.
-TMUX_CLIENT_FEATURES = ("-T", "RGB")
+# sync: tmux brackets each redraw in synchronized output, so the first one
+# after an attach lands whole and ends the hold the console began.
+TMUX_CLIENT_FEATURES = ("-T", "RGB,sync")
 # Server-wide entries older versions set; removed only while still ours.
 _LEGACY_SERVER_OPTIONS = {"terminal-features[90]": "*:RGB", "terminal-overrides[90]": "*:Tc"}
 # Colour-policy opt-out gitdirector overrides on purpose. The rest of
@@ -373,6 +376,17 @@ def view_attach_command(tmux: str, session_name: str, view: str, *options: str) 
     )
     client = f"{tmux} {shlex.join(TMUX_CLIENT_FEATURES)}"
     return f'{client} {chain} || {tmux} kill-session -t "={view}" >/dev/null 2>&1'
+
+
+def session_path(session_name: str) -> Path | None:
+    """The directory *session_name* was started in: a work session's repository."""
+    # display-message takes a pane target; a bare "=name" with slashes in the
+    # name resolves to nothing, the window form "=name:" to its active pane.
+    result = _run_tmux(
+        ["display-message", "-p", "-t", f"={session_name}:", "#{session_path}"], text=True
+    )
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return Path(value) if value else None
 
 
 def guard_session_window(session_name: str) -> None:
@@ -912,23 +926,40 @@ def _opens_in_deck(session_name: str) -> bool:
     return _parse_gd_session_name(session_name) is not None and _sidebar_enabled()
 
 
-def prepare_attach(session_name: str) -> str | None:
-    """Build the deck *session_name* will open in, or None when it attaches directly.
+def _prepare_direct_attach(session_name: str, *, skip_config_sync: bool) -> None:
+    """The tmux work a session that attaches without a deck needs first."""
+    if not skip_config_sync and session_name.startswith("gd/"):
+        try_sync_panel_tmux_config()
+    if _is_persistent_panel_session(session_name):
+        from .panels import _ensure_panel_prefix_bindings
 
-    Callers that give up the terminal to attach (the console) build it
-    first, so the screen goes straight from them to the finished deck.
+        _ensure_panel_prefix_bindings()
+        reflow_panel_tmux_session(session_name)
+
+
+def prepare_attach(session_name: str, *, skip_config_sync: bool = False) -> str | None:
+    """Get *session_name* ready to attach; the deck it opens in, or None.
+
+    Callers that give up the terminal to attach (the console) do this first,
+    so nothing slow runs between their last frame and tmux's first: the deck
+    is built, or a direct session's config sync and panel layout are done.
+    :func:`attach_tmux_session` then takes ``prepared=True``.
     """
-    if not _opens_in_deck(session_name) or not _session_exists(session_name):
+    if not _session_exists(session_name):
         return None
-    from .deck import open_deck
+    if _opens_in_deck(session_name):
+        from .deck import open_deck
 
-    return open_deck(session_name)
+        return open_deck(session_name)
+    _prepare_direct_attach(session_name, skip_config_sync=skip_config_sync)
+    return None
 
 
 # Suffix of the terminal description a tmux attach client is given; see
 # attach_client_env.
 _SAME_SCREEN_SUFFIX = "-gdscreen"
 _same_screen_env: dict[str, str] | None = None
+_same_screen_lock = threading.Lock()
 
 
 # Synchronized output: the terminal keeps showing its last frame until the
@@ -972,14 +1003,23 @@ def attach_client_env() -> dict[str, str]:
     as before.
     """
     global _same_screen_env
-    if _same_screen_env is not None:
+    directory = paths.cache_dir() / "terminfo"
+    # Built once, under a lock: the console starts the build in a thread at
+    # startup and an early attach must wait for it, not attach without it.
+    # A build `gitdirector reset` has since wiped is made again.
+    with _same_screen_lock:
+        cached = _same_screen_env
+        if cached is not None and (not cached or _terminfo_compiled(directory, cached["TERM"])):
+            return cached
+        _same_screen_env = _build_attach_client_env(directory)
         return _same_screen_env
-    _same_screen_env = {}
+
+
+def _build_attach_client_env(directory: Path) -> dict[str, str]:
     base = os.environ.get("TERM", "")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", base) or base.endswith(_SAME_SCREEN_SUFFIX):
-        return _same_screen_env
+        return {}
     name = base + _SAME_SCREEN_SUFFIX
-    directory = paths.cache_dir() / "terminfo"
     source = directory / f"{name}.src"
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -999,20 +1039,24 @@ def attach_client_env() -> dict[str, str]:
         )
     except (OSError, subprocess.SubprocessError):
         logger.debug("could not build the attach terminal description", exc_info=True)
-        return _same_screen_env
+        return {}
     finally:
         source.unlink(missing_ok=True)
     if result.returncode != 0 or not _terminfo_compiled(directory, name):
         logger.debug("tic failed for %s: %s", name, result.stderr)
-        return _same_screen_env
+        return {}
     dirs = [str(directory), *(d for d in os.environ.get("TERMINFO_DIRS", "").split(":") if d)]
     # An empty entry keeps ncurses' own default locations in the search.
-    _same_screen_env = {"TERM": name, "TERMINFO_DIRS": ":".join([*dirs, ""])}
-    return _same_screen_env
+    return {"TERM": name, "TERMINFO_DIRS": ":".join([*dirs, ""])}
 
 
 def attach_tmux_session(
-    session_name: str, *, skip_config_sync: bool = False, deck: str | None = None
+    session_name: str,
+    *,
+    skip_config_sync: bool = False,
+    deck: str | None = None,
+    prepared: bool = False,
+    same_screen: bool = False,
 ) -> bool:
     """Attach to *session_name*, blocking until the client detaches or the session ends.
 
@@ -1025,21 +1069,21 @@ def attach_tmux_session(
 
     When *skip_config_sync* is true the theme sync is left out; callers that
     just created the session (and therefore synced moments ago) set it.
-    *deck* is one :func:`prepare_attach` already built for the session.
+    *deck* is one :func:`prepare_attach` already built for the session, and
+    *prepared* says that call already did the direct session's preparation.
+    *same_screen* draws the client on the screen it is handed instead of
+    tmux's own alternate screen (:func:`attach_client_env`): for the console,
+    which covers the handoff itself. From a shell the terminal's smcup/rmcup
+    must restore the shell's screen, and nothing would end the hold.
     """
     if not _session_exists(session_name):
         raise TmuxError(f"tmux session no longer exists: {session_name}")
     if deck is not None or _opens_in_deck(session_name):
         from .deck import attach_deck
 
-        return attach_deck(session_name, deck)
-    if not skip_config_sync and session_name.startswith("gd/"):
-        try_sync_panel_tmux_config()
-    if _is_persistent_panel_session(session_name):
-        from .panels import _ensure_panel_prefix_bindings
-
-        _ensure_panel_prefix_bindings()
-        reflow_panel_tmux_session(session_name)
+        return attach_deck(session_name, deck, same_screen=same_screen)
+    if not prepared:
+        _prepare_direct_attach(session_name, skip_config_sync=skip_config_sync)
     if os.environ.get("TMUX"):
         _run_tmux(["switch-client", "-t", f"={session_name}"], check=True, capture_output=False)
         return False
@@ -1051,7 +1095,7 @@ def attach_tmux_session(
         [*TMUX_CLIENT_FEATURES, "attach-session", "-t", f"={session_name}"],
         capture_output=False,
         timeout=None,
-        extra_env=attach_client_env(),
+        extra_env=attach_client_env() if same_screen else None,
     )
     # A non-zero exit is not necessarily a failed attach. The client also
     # exits 1 after a perfectly normal interactive session when the server
@@ -1543,11 +1587,13 @@ def _deck_key_hints(theme) -> str:
     full = (
         f" {key}⇥ / #{{prefix}} ⇥{label} session ↔ sidebar   "
         f"{key}#{{prefix}} b{label} toggle   "
+        f"{key}#{{prefix}} v{label} editor   "
         f"{key}#{{prefix}} d{label} console #[default]"
     )
     compact = (
         f" {key}⇥{label} sidebar  "
         f"{key}#{{prefix}} b{label} toggle  "
+        f"{key}#{{prefix}} v{label} editor  "
         f"{key}#{{prefix}} d{label} console #[default]"
     )
     wide = f"#{{e|>=:#{{client_width}},{_DECK_HINTS_MIN_WIDTH}}}"

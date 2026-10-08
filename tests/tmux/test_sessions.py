@@ -785,7 +785,7 @@ class TestAttachTmuxSession:
             assert attach_tmux_session("gd/repo/shell/1") is True
         assert [call.args[0] for call in mock_run.call_args_list] == [
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
-            ["tmux", "-T", "RGB", "attach-session", "-t", "=gd/repo/shell/1"],
+            ["tmux", "-T", "RGB,sync", "attach-session", "-t", "=gd/repo/shell/1"],
         ]
         # The interactive attach blocks until detach, so it must run without
         # the default tmux command timeout.
@@ -853,7 +853,7 @@ class TestAttachOpensDeck:
     def test_repository_session_goes_through_the_deck(self, mock_run, _enabled, mock_deck):
         mock_run.return_value = MagicMock(returncode=0)
         assert attach_tmux_session("gd/repo/shell/1") is True
-        mock_deck.assert_called_once_with("gd/repo/shell/1", None)
+        mock_deck.assert_called_once_with("gd/repo/shell/1", None, same_screen=False)
         assert [call.args[0] for call in mock_run.call_args_list] == [
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
         ]
@@ -863,11 +863,12 @@ class TestAttachOpensDeck:
     def test_a_prepared_deck_is_attached_as_is(self, mock_run, mock_deck):
         mock_run.return_value = MagicMock(returncode=0)
         attach_tmux_session("gd/repo/shell/1", deck="gd/deck/1-a")
-        mock_deck.assert_called_once_with("gd/repo/shell/1", "gd/deck/1-a")
+        mock_deck.assert_called_once_with("gd/repo/shell/1", "gd/deck/1-a", same_screen=False)
 
+    @patch("gitdirector.integrations.tmux.core._prepare_direct_attach")
     @patch("gitdirector.integrations.tmux.deck.open_deck", return_value="gd/deck/1-a")
     @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
-    def test_prepare_attach_builds_the_deck(self, _exists, mock_open):
+    def test_prepare_attach_builds_the_deck(self, _exists, mock_open, mock_direct):
         from gitdirector.integrations.tmux.core import prepare_attach
 
         with patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=True):
@@ -876,6 +877,60 @@ class TestAttachOpensDeck:
         with patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False):
             assert prepare_attach("gd/repo/shell/1") is None
         mock_open.assert_called_once_with("gd/repo/shell/1")
+        # A direct session's slow work (config sync, panel layout) runs here,
+        # before the console gives up the terminal, not inside the attach.
+        assert [c.args[0] for c in mock_direct.call_args_list] == [
+            "gd/panel/dev",
+            "gd/repo/shell/1",
+        ]
+
+    @patch("subprocess.run")
+    def test_session_path_asks_the_sessions_active_pane(self, mock_run):
+        from gitdirector.integrations.tmux.core import session_path
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="/tmp/repo\n")
+        assert session_path("gd/repo/shell/1") == Path("/tmp/repo")
+        assert mock_run.call_args.args[0] == [
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            "=gd/repo/shell/1:",
+            "#{session_path}",
+        ]
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        assert session_path("gd/repo/shell/1") is None
+
+    @patch("gitdirector.integrations.tmux.core._prepare_direct_attach")
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
+    @patch("subprocess.run")
+    def test_a_prepared_session_is_not_prepared_again(self, mock_run, _exists, mock_direct):
+        mock_run.return_value = MagicMock(returncode=0)
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False),
+        ):
+            attach_tmux_session("gd/panel/dev", prepared=True)
+            mock_direct.assert_not_called()
+            attach_tmux_session("gd/panel/dev")
+            mock_direct.assert_called_once()
+
+    @patch("gitdirector.integrations.tmux.core._session_exists", return_value=True)
+    @patch("subprocess.run")
+    def test_only_the_console_attaches_on_the_same_screen(self, mock_run, _exists):
+        """From a shell the terminal's own smcup/rmcup must restore the screen."""
+        mock_run.return_value = MagicMock(returncode=0)
+        env = {"TERM": "xterm-256color-gdscreen", "TERMINFO_DIRS": "/x:"}
+        with (
+            patch.dict("os.environ", {"TERM": "xterm-256color"}, clear=True),
+            patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False),
+            patch("gitdirector.integrations.tmux.core.attach_client_env", return_value=env),
+            patch("gitdirector.integrations.tmux.core._prepare_direct_attach"),
+        ):
+            attach_tmux_session("gd/repo/shell/1")
+            assert mock_run.call_args.kwargs["env"].get("TERM") == "xterm-256color"
+            attach_tmux_session("gd/repo/shell/1", same_screen=True)
+            assert mock_run.call_args.kwargs["env"].get("TERM") == "xterm-256color-gdscreen"
 
     @patch("gitdirector.integrations.tmux.deck.attach_deck")
     @patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=True)

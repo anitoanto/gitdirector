@@ -341,7 +341,8 @@ class ConsolePanelsMixin:
         if action is None:
             return
         if action == "open":
-            self._open_panel(panel_name)
+            # Once the menu has gone; see _handle_menu_action.
+            self.call_after_refresh(self._open_panel, panel_name)
         elif action == "reconfigure":
             panel = self._panel_store.get(panel_name)
             if not panel:
@@ -450,7 +451,7 @@ class ConsolePanelsMixin:
         if created_panel is None:
             self._update_status(f"Panel '{name}' was not created because all panes are empty")
             return
-        self._open_panel(name)
+        self.call_after_refresh(self._open_panel, name)
 
     def _handle_reconfigure_panel(
         self,
@@ -466,7 +467,7 @@ class ConsolePanelsMixin:
             return
 
         self._load_panels()
-        self._open_panel(panel_name)
+        self.call_after_refresh(self._open_panel, panel_name)
 
     def _do_delete_panel(self, confirmed: bool, panel_name: str) -> None:
         if not confirmed:

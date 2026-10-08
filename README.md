@@ -84,9 +84,10 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 **Repositories** shows each repo's branch, status (`↑1 to push · 2 staged ·
 5 changed`, or nothing when clean and in step with origin), and last commit.
 Repos sharing a parent directory collapse into a group. `enter` opens the
-action menu: start a shell or an AI agent, open the repo in VS Code (started
-as if you had opened it yourself: nothing of GitDirector reaches it), or
-attach to or remove a session. Pick Claude Code's permission mode on its row with Tab
+action menu: start a shell or an AI agent, open the repo in your editor
+(`code` unless `editor:` in the config says otherwise, started as if you had
+opened it yourself: nothing of GitDirector reaches it), or attach to or remove
+a session. Pick Claude Code's permission mode on its row with Tab
 or `←`/`→`: `default` (your settings), `auto` (preselected), or `bypass`
 (`--dangerously-skip-permissions`). `g` opens the git menu: status, timeline,
 branches, remotes, pull, push, and **Review Diff**, a two-pane diff of
@@ -121,6 +122,7 @@ right; the session you leave keeps running.
 | --- | --- |
 | `prefix Tab` | From the session, focus the sidebar (reopening it if it was closed) |
 | `prefix b` | Collapse the sidebar to a rail of status dots, or expand it |
+| `prefix v` | Open the shown session's repo in your editor (`editor:` in the config, `code` by default) |
 | `prefix d` | Detach and go back to the console |
 | `↑`/`↓`, `j`/`k`, Enter | In the sidebar: move, open the session |
 | Tab, `→`, `l`, Esc | In the sidebar: focus the session |
@@ -131,8 +133,8 @@ collapses or expands it. The keys are listed on the left of the status line, in 
 shorter form on a narrow window.
 
 The usual tmux ways of moving between panes (`prefix ←`/`→`, `prefix o`, a
-click) work too. `prefix Tab` and `prefix b` only mean this inside the sidebar
-view; everywhere else they keep whatever they were bound to.
+click) work too. `prefix Tab`, `prefix b` and `prefix v` only mean this inside
+the sidebar view; everywhere else they keep whatever they were bound to.
 
 When the shown session ends, the sidebar says so and takes focus so you can
 pick another; when no sessions are left you are back in the console. Set
@@ -200,7 +202,12 @@ repositories:
 max_workers: 10   # optional, 1-32, default 10
 theme: rose-pine  # optional
 sidebar: true     # optional; false attaches to sessions without the sidebar
+editor: code      # optional; the command that opens a repo, e.g. cursor or "zed -n"
 ```
+
+The editor command gets the repository path as its last argument and is
+started with nothing of GitDirector in its environment. On macOS the default
+`code` opens Visual Studio Code through LaunchServices, as the Dock would.
 
 Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`,
 `gruvbox`, `dracula`, `tokyo-night`, `monokai`, `flexoki`, `solarized-light`,

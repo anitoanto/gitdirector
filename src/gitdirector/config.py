@@ -16,7 +16,7 @@ from .storage import (
 
 logger = logging.getLogger(__name__)
 
-_MAIN_KEYS = frozenset({"repositories", "max_workers", "theme", "sidebar"})
+_MAIN_KEYS = frozenset({"repositories", "max_workers", "theme", "sidebar", "editor"})
 _SECRET_KEYS = frozenset({"github_username", "github_PAT"})
 
 
@@ -27,6 +27,7 @@ class _Settings:
     max_workers: int
     theme: str
     sidebar: bool
+    editor: str
     github_username: str | None
     github_PAT: str | None
 
@@ -36,6 +37,7 @@ class Config:
     MIN_MAX_WORKERS = 1
     MAX_MAX_WORKERS = 32
     DEFAULT_THEME = "rose-pine"
+    DEFAULT_EDITOR = "code"
 
     def __init__(self):
         self.config_dir = paths.home_dir()
@@ -47,6 +49,7 @@ class Config:
         self.max_workers = self.DEFAULT_MAX_WORKERS
         self.theme = self.DEFAULT_THEME
         self.sidebar = True
+        self.editor = self.DEFAULT_EDITOR
         self.github_username: str | None = None
         self.github_PAT: str | None = None
         # What was last read from or written to disk. A field that still
@@ -130,6 +133,12 @@ class Config:
             raise ValueError("Invalid theme: expected a nonempty string")
         return value
 
+    @staticmethod
+    def _validate_editor(value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Invalid editor: expected a command, like code or cursor")
+        return value.strip()
+
     @classmethod
     def _parse_settings(
         cls, main_data: dict[str, object], secrets_data: dict[str, object]
@@ -140,6 +149,7 @@ class Config:
             ),
             theme=cls._validate_theme(main_data.get("theme", cls.DEFAULT_THEME)),
             sidebar=cls._validate_sidebar(main_data.get("sidebar", True)),
+            editor=cls._validate_editor(main_data.get("editor", cls.DEFAULT_EDITOR)),
             github_username=cls._optional_str(
                 secrets_data.get("github_username"), "github_username"
             ),
@@ -170,6 +180,7 @@ class Config:
             max_workers=self.max_workers,
             theme=self.theme,
             sidebar=self.sidebar,
+            editor=self.editor,
             github_username=self.github_username,
             github_PAT=self.github_PAT,
         )
@@ -180,6 +191,7 @@ class Config:
         self.max_workers = settings.max_workers
         self.theme = settings.theme
         self.sidebar = settings.sidebar
+        self.editor = settings.editor
         self.github_username = settings.github_username
         self.github_PAT = settings.github_PAT
         self._snapshot_repositories = tuple(repositories)
@@ -244,6 +256,8 @@ class Config:
             main_data["theme"] = settings.theme
         if not settings.sidebar:
             main_data["sidebar"] = False
+        if settings.editor != self.DEFAULT_EDITOR:
+            main_data["editor"] = settings.editor
         main_data.update({k: v for k, v in latest_main.items() if k not in _MAIN_KEYS})
         write_yaml_atomic(self.config_file, main_data)
 

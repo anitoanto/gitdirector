@@ -276,11 +276,14 @@ class AgentLoadingScreen(LoadingCard):
         # session is killed early.
         if self._ready_marker is not None:
             self._ready_marker.unlink(missing_ok=True)
-        if self._on_attach is not None:
-            self._on_attach()
-        else:
-            self.app._suspend_and_attach(self._session_name, skip_config_sync=True)
+        attach = self._on_attach or (
+            lambda: self.app._suspend_and_attach(self._session_name, skip_config_sync=True)
+        )
+        # Attach once this card has gone, so the frame kept for the way back
+        # is the console's and not the card.
+        app = self.app
         self.dismiss(None)
+        app.call_after_refresh(attach)
 
 
 _STEPS = ("Name", "Layout", "Sessions")
