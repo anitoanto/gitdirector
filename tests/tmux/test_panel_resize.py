@@ -33,6 +33,28 @@ class TestParseTmuxLayout:
         with pytest.raises(ValueError):
             P._parse_tmux_layout("xxxx,oops")
 
+    def test_json_nested_splits(self):
+        root = P._parse_tmux_layout(
+            '{"V":2,"L":{"t":"h","w":80,"h":24,"x":0,"y":0,"c":['
+            '{"t":"p","w":40,"h":24,"x":0,"y":0,"a":true,"i":0,"I":"%3"},'
+            '{"t":"v","w":39,"h":24,"x":41,"y":0,"c":['
+            '{"t":"p","w":39,"h":12,"x":41,"y":0,"i":1,"I":"%4"},'
+            '{"t":"p","w":39,"h":11,"x":41,"y":13,"i":2,"I":"%5"}]}]}}'
+        )
+        assert root.axis == "x"
+        assert root.children[0].pane == 3
+        right = root.children[1]
+        assert right.axis == "y"
+        assert [(leaf.pane, leaf.x, leaf.y) for leaf in right.children] == [(4, 41, 0), (5, 41, 13)]
+
+    def test_json_single_pane(self):
+        layout = '{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"i":0,"I":"%7"}}'
+        assert P._parse_tmux_layout(layout).pane == 7
+
+    def test_json_garbage_raises(self):
+        with pytest.raises(ValueError):
+            P._parse_tmux_layout('{"V":2}')
+
 
 def _layout(rows, cols, cells):
     placements = tuple(

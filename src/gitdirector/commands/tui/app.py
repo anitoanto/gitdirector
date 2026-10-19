@@ -26,6 +26,7 @@ from ...agents import AGENTS_BY_KEY
 from ...manager import RepositoryManager
 from ...repo import Repository, RepositoryInfo
 from ...storage import normalize_repository_path
+from ...ui_theme import SupportedThemes
 from .. import get_version
 from . import app_panels as _app_panels
 from .app_groups import ConsoleGroupsMixin
@@ -138,6 +139,7 @@ class GitDirectorConsole(
     ConsoleGroupsMixin,
     ConsoleReposMixin,
     ConsoleUIHelpersMixin,
+    SupportedThemes,
     App,
 ):
     TITLE = f"GitDirector [v{get_version()}]"
@@ -164,7 +166,7 @@ class GitDirectorConsole(
         margin: 0;
         padding: 0 2 0 1;
         background: $footer-background;
-        color: $text-muted;
+        color: $footer-description-foreground;
     }
     #search-container {
         dock: bottom;
@@ -176,7 +178,7 @@ class GitDirectorConsole(
     }
     #search-label {
         width: auto;
-        color: $accent;
+        color: $text-accent;
         padding: 0 1 0 0;
     }
     #search-bar {
@@ -207,19 +209,19 @@ class GitDirectorConsole(
     #repo-table {
         overflow-x: hidden;
     }
-    /* Highlight rows and options with a translucent tint of the theme's
-       primary colour instead of Textual's solid block cursor. A solid
-       primary block forces a contrasting text colour over the cell, which
-       erases status colours and turns dimmed text unreadable; a tint keeps
-       the row's own colours legible in both dark and light themes. */
+    /* Highlight rows and options with a tint of the theme's primary colour
+       instead of Textual's solid block cursor. A solid primary block forces
+       a contrasting text colour over the cell, which erases status colours
+       and turns dimmed text unreadable; the tint (see ui_theme) is as
+       strong as the theme allows while the row's own colours stay legible. */
     DataTable > .datatable--cursor,
     DataTable:focus > .datatable--cursor {
-        background: $primary 30%;
+        background: $highlight;
         color: $text;
         text-style: bold;
     }
     DataTable > .datatable--hover {
-        background: $primary 12%;
+        background: $highlight-hover;
     }
     /* Column titles sit on the table's own surface as quiet labels, not
        as another bar under the top one. */
@@ -229,16 +231,27 @@ class GitDirectorConsole(
         text-style: bold;
     }
     DataTable > .datatable--header-hover {
-        background: $primary 12%;
+        background: $highlight-hover;
     }
+    /* Option lists sit in cards, on the panel. */
     OptionList > .option-list--option-highlighted,
     OptionList:focus > .option-list--option-highlighted {
-        background: $primary 30%;
+        background: $highlight-panel;
         color: $text;
         text-style: bold;
     }
     OptionList > .option-list--option-hover {
-        background: $primary 12%;
+        background: $highlight-panel-hover;
+    }
+    /* The diff screen's file list sits on the surface. */
+    #diff-files-list > .option-list--option-highlighted,
+    #diff-files-list:focus > .option-list--option-highlighted {
+        background: $highlight;
+        color: $text;
+        text-style: none;
+    }
+    #diff-files-list > .option-list--option-hover {
+        background: $highlight-hover;
     }
     #repo-table,
     #sessions-table,
@@ -261,7 +274,7 @@ class GitDirectorConsole(
         dock: top;
         height: 1;
         display: none;
-        background: $accent 30%;
+        background: $highlight;
         color: $text;
         padding: 0 2;
     }
@@ -326,10 +339,9 @@ class GitDirectorConsole(
         from ...integrations.tmux import TmuxMonitor
 
         self.manager = RepositoryManager()
-        # A theme a Textual upgrade removed, or a typo in config.yaml, must
-        # not stop the console from starting.
-        if self.manager.config.theme in self.available_themes:
-            self.theme = self.manager.config.theme
+        # A theme that is not offered (removed by a Textual upgrade, a typo
+        # in config.yaml, an ANSI theme) must not stop the console starting.
+        self.apply_theme(self.manager.config.theme)
         self._repo_paths: list[Path] = []
         self._results: dict[str, RepositoryInfo] = {}
         self._search_query: str = ""

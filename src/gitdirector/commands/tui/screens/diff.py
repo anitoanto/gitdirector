@@ -228,7 +228,7 @@ class DiffReviewScreen(ModalScreen[None]):
         text-style: bold;
     }
     .diff-pane-label.--focused {
-        color: $accent;
+        color: $text-accent;
     }
     #diff-files-list {
         width: 1fr;
@@ -265,7 +265,7 @@ class DiffReviewScreen(ModalScreen[None]):
     }
     #diff-loading LoadingIndicator {
         height: 1;
-        color: $primary;
+        color: $text-primary;
     }
     #diff-loading-text {
         text-align: center;

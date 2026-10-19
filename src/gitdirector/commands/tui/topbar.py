@@ -78,7 +78,7 @@ class TopBar(Horizontal):
     TopBar #brand {
         width: auto;
         padding: 0 2 0 1;
-        color: $accent;
+        color: $text-accent;
         text-style: bold;
     }
     TopBar .nav-tab {
@@ -91,11 +91,11 @@ class TopBar(Horizontal):
         color: $foreground 15%;
     }
     TopBar .nav-tab:hover {
-        background: $primary 12%;
+        background: $highlight-panel-hover;
         color: $text;
     }
     TopBar .nav-tab.-active {
-        background: $primary 30%;
+        background: $highlight-panel;
         color: $text;
         text-style: bold;
     }
@@ -113,7 +113,7 @@ class TopBar(Horizontal):
         color: $text-muted;
     }
     TopBar #palette:hover {
-        background: $primary 30%;
+        background: $highlight-panel;
         color: $text;
     }
     """

@@ -8,11 +8,14 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from rich.style import Style
 from textual import events
 from textual.widgets import OptionList, Static
 
 from gitdirector.commands.tui import sidebar as S
 from gitdirector.commands.tui.constants import TablePalette
+from gitdirector.commands.tui.screens._shared import ConfirmScreen
+from gitdirector.commands.tui.sidebar import SessionList
 from gitdirector.integrations.tmux.deck import DeckPane, DeckState
 
 from .conftest import _wait_for_refresh
@@ -89,18 +92,32 @@ class TestBuildOptions:
         assert [o.disabled for o in options] == [True, False, False, True, False]
 
     def test_session_rows(self):
-        options = {o.id: o.prompt.plain for o in self._options(rail=False)}
-        # Each row leads with the number that ends its tmux session name.
-        assert options[CLAUDE] == "▌ ● 1/claude\n▌   waiting · fix tests"
-        assert options[CLAUDE_2] == "  · 2/claude\n    checking"
-        assert options[SHELL] == "  ○ 1/shell\n    idle"
+        options = {o.id: o.prompt.plain.split("\n") for o in self._options(rail=False)}
+        # Each row leads with the number that ends its tmux session name and
+        # ends with the mark that closes it, in the last column.
+        assert options[CLAUDE] == ["▌ ● 1/claude".ljust(29) + "✕", "▌   waiting · fix tests"]
+        assert options[CLAUDE_2] == ["  · 2/claude".ljust(29) + "✕", "    checking"]
+        assert options[SHELL] == ["  ○ 1/shell".ljust(29) + "✕", "    idle"]
+
+    def test_the_close_mark_carries_its_session(self):
+        (_group, option) = S.build_options(
+            S.build_entries([_raw(CLAUDE, "alpha")], {}), PALETTE, shown=None, rail=False, width=30
+        )
+        marks = [
+            span
+            for span in option.prompt.spans
+            if isinstance(span.style, Style) and span.style.meta.get("close")
+        ]
+        assert [span.style.meta["close"] for span in marks] == [CLAUDE]
+        assert option.prompt.plain[marks[0].start : marks[0].end] == "✕"
 
     def test_lines_are_cut_to_the_width(self):
         raw = [_raw(CLAUDE, "alpha", "a very long description of what this agent does")]
         entries = S.build_entries(raw, {CLAUDE: "running"})
         (_group, option) = S.build_options(entries, PALETTE, shown=None, rail=False, width=20)
-        assert all(len(line) <= 20 for line in option.prompt.plain.split("\n"))
-        assert option.prompt.plain.endswith("…")
+        title, detail = option.prompt.plain.split("\n")
+        assert len(title) == 20 and title.endswith(" ✕")
+        assert len(detail) <= 20 and detail.endswith("…")
 
     def test_rail(self):
         options = self._options(rail=True, width=4)
@@ -228,6 +245,88 @@ class TestSidebarApp:
                     pilot,
                     lambda: "opened in cursor" in str(app.query_one("#title", Static).render()),
                 )
+
+    async def test_x_asks_before_closing_the_highlighted_session(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        with (
+            patch.object(S, "kill_tmux_session", return_value=True) as kill,
+            patch.object(S, "sync_panel_tmux_config") as sync,
+        ):
+            async with app.run_test(size=(32, 30)) as pilot:
+                await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+                await pilot.press("j", "x")
+                await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                assert app.screen.message == "Close 2/claude?"
+                assert app.screen.detail.startswith("alpha")
+                # No is the safe default: a stray Enter closes nothing.
+                await pilot.press("enter")
+                await _until(pilot, lambda: app.screen is app._main)
+                await pilot.pause()
+                kill.assert_not_called()
+                await pilot.press("x")
+                await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                await pilot.press("escape")
+                await _until(pilot, lambda: app.screen is app._main)
+                await pilot.pause()
+                kill.assert_not_called()
+                await pilot.press("x")
+                await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                await pilot.press("y")
+                await _until(pilot, lambda: sync.called)
+                kill.assert_called_once_with(CLAUDE_2)
+                await pilot.pause()
+                title = app._main.query_one("#title", Static)
+                assert "closed" not in str(title.render())
+
+    async def test_a_session_that_will_not_close_says_so(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        with (
+            patch.object(S, "kill_tmux_session", return_value=False),
+            patch.object(S, "sync_panel_tmux_config") as sync,
+        ):
+            async with app.run_test(size=(32, 30)) as pilot:
+                await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+                await pilot.press("x")
+                await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                await pilot.press("y")
+                title = app._main.query_one("#title", Static)
+                await _until(pilot, lambda: "could not close" in str(title.render()))
+                sync.assert_not_called()
+
+    async def test_samples_keep_landing_under_the_card(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            app._tick_running = True
+            await pilot.press("x")
+            await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+            # The sidebar's own list and title, not the card's, take the sample.
+            entries = S.build_entries(RAW, {}, live_sessions={CLAUDE, SHELL})
+            app._apply_sample(_state(live=(CLAUDE, SHELL)), entries, time.monotonic())
+            assert app._main.query_one(SessionList).option_count == 4
+            assert "2" in str(app._main.query_one("#title", Static).render())
+            assert isinstance(app.screen, ConfirmScreen)
+            await pilot.press("escape")
+            await _until(pilot, lambda: app.screen is app._main)
+            assert _highlighted(app) == CLAUDE
+
+    async def test_offers_only_the_supported_themes(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            assert "ansi-light" not in app.available_themes
+            assert "ansi-dark" not in app.available_themes
+            assert app.theme == "rose-pine"
+
+    async def test_x_does_nothing_in_the_rail(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            await pilot.resize_terminal(5, 30)
+            await _until(pilot, lambda: app._main.has_class("-rail"))
+            await pilot.press("x")
+            await pilot.pause()
+            assert app.screen is app._main
 
     async def test_a_sample_from_before_a_click_changes_nothing(self, deck_api):
         # It still has the old focus and shown session: applying it would
@@ -378,6 +477,21 @@ class TestSidebarApp:
             await _until(pilot, lambda: app._revealed)
             ids = [widget.id for widget in app.query_one("#bar").children]
             assert ids == ["back", "title", "toggle"]
+
+    async def test_the_close_mark_on_a_row_asks_about_that_session(self, deck_api):
+        app = S.SessionSidebar(DECK, "%2")
+        with patch.object(S, "kill_tmux_session", return_value=True) as kill:
+            async with app.run_test(size=(32, 30)) as pilot:
+                await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+                # The ✕ ends the second session's first line, before the scrollbar.
+                await pilot.click(OptionList, offset=(30, ROW[CLAUDE_2][1]))
+                await _until(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                assert app.screen.message == "Close 2/claude?"
+                assert _highlighted(app) == CLAUDE_2
+                deck_api.show_session.assert_not_called()
+                kill.assert_not_called()
+                await pilot.press("escape")
+                await _until(pilot, lambda: app.screen is app._main)
 
     async def test_an_error_shows_in_the_header_then_clears(self, deck_api):
         app = S.SessionSidebar(DECK, "%2")

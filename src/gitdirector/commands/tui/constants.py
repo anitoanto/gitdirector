@@ -8,14 +8,13 @@ from dataclasses import dataclass
 from textual.binding import Binding
 from textual.color import Color
 
-from ...ui_theme import readable_on
+from ...ui_theme import MIN_CONTRAST, highlight_backgrounds, readable_on
 
 # Rows are Rich markup, which cannot reference theme variables, so table
 # colours are resolved from the active theme into concrete values that are
-# guaranteed to read against both the table surface and the highlighted row.
-_CURSOR_TINT = 0.30
-_MIN_CONTRAST = 4.5
-_MUTED_CONTRAST = 3.5
+# guaranteed to read on the table surface, a card's panel, and the
+# highlighted row of either.
+_MIN_CONTRAST = MIN_CONTRAST
 # The yellow used to flag attention (sync drift, uncommitted changes, a
 # waiting session, repo names). Fixed rather than taken from the theme so it
 # stays yellow in every theme; only its lightness adapts for contrast.
@@ -24,11 +23,8 @@ _ATTENTION_YELLOW = "#ffd75f"
 # Neon so it stands out at a glance, and fixed for the same reason as the
 # yellow: a theme's own success colour can be teal or olive.
 _LIVE_GREEN = "#39ff14"
-# The red for a mode that drops permission prompts. A saturated red is too
-# dark to reach 4.5:1 on a tinted row without washing out to pink, so it gets
-# the 3:1 floor for bold text instead.
+# The red for a mode that drops permission prompts.
 _DANGER_RED = "#ff2d2d"
-_DANGER_CONTRAST = 3.0
 
 
 def _variable_color(variables: Mapping[str, str], name: str, fallback: str) -> Color:
@@ -38,11 +34,7 @@ def _variable_color(variables: Mapping[str, str], name: str, fallback: str) -> C
         return Color.parse(fallback)
 
 
-def _markup_color(color: Color, source: str) -> str:
-    # Rich understands "green" but not "ansi_green"; ANSI themes keep the
-    # terminal's own palette on purpose.
-    if color.ansi is not None:
-        return source[5:] if source.startswith("ansi_") else source
+def _markup_color(color: Color) -> str:
     return color.hex6
 
 
@@ -83,53 +75,27 @@ class TablePalette:
 def resolve_table_palette(variables: Mapping[str, str]) -> TablePalette:
     """Build the palette for a theme from its CSS variables.
 
-    Every colour is checked against the plain surface and against the
-    highlighted row (surface tinted with the primary colour) and nudged
-    toward black or white until it clears the contrast threshold on both.
+    Every colour is checked against each background a row can have and
+    nudged toward black or white until it clears the contrast threshold on
+    all of them.
     """
     surface = _variable_color(variables, "surface", "#1e1e1e")
     primary = _variable_color(variables, "primary", "#5fd7ff")
     foreground = _variable_color(variables, "foreground", "#f0f0f0")
-    # ANSI themes name terminal palette slots; their real values are unknown,
-    # so no contrast math is possible and the slot names are used as-is.
-    ansi_theme = any(c.ansi is not None for c in (surface, primary, foreground))
-    if not ansi_theme:
-        # A focused table tints its surface 5% toward the foreground.
-        surface = surface.blend(foreground, 0.05)
-    tint = surface if ansi_theme else surface.blend(primary, _CURSOR_TINT)
-    backgrounds = (surface, tint)
+    panel = _variable_color(variables, "panel", surface.hex6)
+    backgrounds = highlight_backgrounds(
+        {"surface": surface.hex6, "panel": panel.hex6, "primary": primary.hex6}
+    )
 
-    def readable(name: str, fallback: str) -> str:
-        source = variables.get(name) or fallback
-        color = _variable_color(variables, name, fallback)
-        return _markup_color(readable_on(color, *backgrounds, minimum=_MIN_CONTRAST), source)
-
-    if ansi_theme:
-        success = "bright_green"
-        yellow = "yellow"
-        muted = "bright_black"
-        danger = "bright_red"
-    else:
-        success = _markup_color(
-            readable_on(Color.parse(_LIVE_GREEN), *backgrounds, minimum=_MIN_CONTRAST), ""
-        )
-        yellow = _markup_color(
-            readable_on(Color.parse(_ATTENTION_YELLOW), *backgrounds, minimum=_MIN_CONTRAST), ""
-        )
-        muted = _markup_color(
-            readable_on(foreground.blend(surface, 0.45), *backgrounds, minimum=_MUTED_CONTRAST),
-            "",
-        )
-        danger = _markup_color(
-            readable_on(Color.parse(_DANGER_RED), *backgrounds, minimum=_DANGER_CONTRAST), ""
-        )
+    def readable(color: Color) -> str:
+        return _markup_color(readable_on(color, *backgrounds, minimum=_MIN_CONTRAST))
 
     return TablePalette(
-        success=success,
-        yellow=yellow,
-        muted=muted,
-        primary=readable("primary", "#5fd7ff"),
-        danger=danger,
+        success=readable(Color.parse(_LIVE_GREEN)),
+        yellow=readable(Color.parse(_ATTENTION_YELLOW)),
+        muted=readable(foreground.blend(surface, 0.45)),
+        primary=readable(primary),
+        danger=readable(Color.parse(_DANGER_RED)),
     )
 
 

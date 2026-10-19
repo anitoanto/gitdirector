@@ -94,6 +94,8 @@ class FileTileList(OptionList):
     FileTileList > .option-list--option {
         padding: 0 2;
     }
+    /* Theme variables only, so the list also mounts outside the console,
+       which overrides these with its own highlight (see app.py). */
     FileTileList > .option-list--option-highlighted,
     FileTileList:focus > .option-list--option-highlighted {
         background: $primary 30%;

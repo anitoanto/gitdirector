@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -441,7 +442,34 @@ def _layout_leaves(node: _LayoutCell):
 
 
 def _parse_tmux_layout(layout: str) -> _LayoutCell:
-    """Parse ``csum,WxH,X,Y{...}`` / ``[...]`` / ``,ID`` into a cell tree."""
+    """Parse a ``#{window_layout}`` into a cell tree.
+
+    tmux 3.8 prints it as JSON; earlier versions as ``csum,WxH,X,Y{...}``.
+    """
+    if layout.startswith("{"):
+        return _parse_json_layout(layout)
+    return _parse_legacy_layout(layout)
+
+
+_JSON_LAYOUT_AXES = {"h": "x", "v": "y"}
+
+
+def _parse_json_layout(layout: str) -> _LayoutCell:
+    def cell(node: dict) -> _LayoutCell:
+        x, y = int(node["x"]), int(node["y"])
+        if node["t"] == "p":
+            return _LayoutCell(x, y, pane=int(node["I"].lstrip("%")))
+        return _LayoutCell(
+            x, y, axis=_JSON_LAYOUT_AXES[node["t"]], children=[cell(c) for c in node["c"]]
+        )
+
+    try:
+        return cell(json.loads(layout)["L"])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"bad tmux layout: {layout}") from exc
+
+
+def _parse_legacy_layout(layout: str) -> _LayoutCell:
     text = layout.split(",", 1)[1]
 
     def cell(pos: int) -> tuple[_LayoutCell, int]:

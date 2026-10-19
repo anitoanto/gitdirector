@@ -126,10 +126,12 @@ right; the session you leave keeps running.
 | `prefix d` | Detach and go back to the console |
 | `↑`/`↓`, `j`/`k`, Enter | In the sidebar: move, open the session |
 | Tab, `→`, `l`, Esc | In the sidebar: focus the session |
+| `x` | In the sidebar: close the selected session (a card asks first; the tmux session ends) |
 | `/` | In the sidebar: search by repo, agent, or session name (Enter keeps the filter, Esc clears it) |
 
 The `«` next to the sidebar's title goes back to the console, like `prefix d`, and `◧`
-collapses or expands it. The keys are listed on the left of the status line, in a
+collapses or expands it. The `✕` ending each session's line closes that session,
+asking first, like `x`. The keys are listed on the left of the status line, in a
 shorter form on a narrow window.
 
 The usual tmux ways of moving between panes (`prefix ←`/`→`, `prefix o`, a
@@ -209,11 +211,14 @@ The editor command gets the repository path as its last argument and is
 started with nothing of GitDirector in its environment. On macOS the default
 `code` opens Visual Studio Code through LaunchServices, as the Dock would.
 
-Themes: `textual-dark`, `textual-light`, `ansi-dark`, `ansi-light`, `nord`,
-`gruvbox`, `dracula`, `tokyo-night`, `monokai`, `flexoki`, `solarized-light`,
-`solarized-dark`, `atom-one-dark`, `atom-one-light`, `rose-pine`,
-`rose-pine-moon`, `rose-pine-dawn`, `catppuccin-latte`, `catppuccin-frappe`,
-`catppuccin-macchiato`, `catppuccin-mocha`.
+Themes: `textual-dark`, `textual-light`, `nord`, `gruvbox`, `dracula`,
+`tokyo-night`, `monokai`, `flexoki`, `solarized-light`, `solarized-dark`,
+`atom-one-dark`, `atom-one-light`, `rose-pine`, `rose-pine-moon`,
+`rose-pine-dawn`, `catppuccin-latte`, `catppuccin-frappe`,
+`catppuccin-macchiato`, `catppuccin-mocha`. Textual's `ansi-dark` and
+`ansi-light` are not offered: they take the terminal's own palette, so they
+cannot be kept readable or made light on a dark terminal. A theme that is not
+offered falls back to `rose-pine`.
 
 ### GitHub credentials
 

@@ -16,12 +16,15 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from rich.markup import escape
+from rich.style import Style
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.events import Click, Resize
+from textual.screen import Screen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -30,12 +33,17 @@ from ...integrations.tmux import deck as deck_api
 from ...integrations.tmux.core import (
     GD_DEFAULT_DESCRIPTION,
     _parse_gd_session_name,
+    kill_tmux_session,
     list_all_gd_sessions,
     session_path,
+    sync_panel_tmux_config,
 )
 from ...integrations.tmux.monitor import TmuxMonitor
+from ...ui_theme import SupportedThemes
 from .app_sessions import session_matches
 from .constants import TablePalette, resolve_table_palette
+from .screens._shared import ConfirmScreen
+from .screens.card import key_hints
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,9 @@ _MARKER = "▌"
 _BACK = "«"
 # A panel beside the content: the sidebar itself.
 _TOGGLE = "◧"
+# Ends every session's line; a click on it closes that session.
+_CLOSE = "✕"
+_CLOSE_META = "close"
 
 
 @dataclass(frozen=True)
@@ -142,6 +153,11 @@ def render_session(entry: SidebarEntry, palette: TablePalette, *, shown: bool, w
     # The number that ends the tmux session name: gd/<repo>/claude/2 is 2/claude.
     title.append(f"{entry.sequence}/", style=palette.muted)
     title.append(entry.purpose, style="bold" if shown else "")
+    if width > 8:
+        title.truncate(width - 2, overflow="ellipsis", pad=True)
+        title.append(" ")
+        close = Style.parse(palette.muted) + Style.from_meta({_CLOSE_META: entry.session_name})
+        title.append(_CLOSE, style=close)
     detail = Text()
     detail.append(*marker)
     detail.append("   ")
@@ -221,6 +237,18 @@ class CollapseToggle(Static):
 class SessionList(OptionList):
     """The session list; the cursor stops at either end instead of wrapping."""
 
+    def _on_click(self, event: Click) -> None:
+        session_name = event.style.meta.get(_CLOSE_META)
+        if not session_name:
+            return
+        # Ours instead of the base handler's select, which runs otherwise.
+        event.stop()
+        event.prevent_default()
+        index = event.style.meta.get("option")
+        if index is not None:
+            self.highlighted = index
+        self.app.close_session(session_name)
+
     def action_select(self) -> None:
         # Straight to the app rather than an OptionSelected message: the
         # highlight, the marker and the dimmed look then land in one frame.
@@ -267,7 +295,7 @@ class BackToConsole(Static):
         self.app.action_leave_deck()
 
 
-class SessionSidebar(App):
+class SessionSidebar(SupportedThemes, App):
     CSS = """
     * {
         scrollbar-size-vertical: 1;
@@ -290,7 +318,7 @@ class SessionSidebar(App):
         text-style: bold;
     }
     #title.-error {
-        color: $error;
+        color: $text-error;
         text-style: none;
     }
     #toggle {
@@ -329,9 +357,19 @@ class SessionSidebar(App):
        status colours readable, instead of a solid block cursor. */
     #sessions > .option-list--option-highlighted,
     #sessions:focus > .option-list--option-highlighted {
-        background: $primary 30%;
+        background: $highlight;
         color: $text;
         text-style: none;
+    }
+    /* The cards (closing a session) highlight like the console's. */
+    OptionList > .option-list--option-highlighted,
+    OptionList:focus > .option-list--option-highlighted {
+        background: $highlight-panel;
+        color: $text;
+        text-style: bold;
+    }
+    OptionList > .option-list--option-hover {
+        background: $highlight-panel-hover;
     }
     /* No hover anywhere in the sidebar: tmux never tells a pane the pointer
        left it, so a hover would stay lit after the pointer moved away. */
@@ -342,7 +380,7 @@ class SessionSidebar(App):
         color: $text;
     }
     Screen.-blurred #sessions > .option-list--option-highlighted {
-        background: $primary 12%;
+        background: $highlight-hover;
     }
     #search {
         display: none;
@@ -402,6 +440,7 @@ class SessionSidebar(App):
         Binding("escape", "escape", show=False, priority=True),
         Binding("b", "toggle_collapse", show=False),
         Binding("v", "open_editor", show=False),
+        Binding("x", "close_session", show=False),
         Binding("slash", "search", show=False),
     ]
 
@@ -412,8 +451,7 @@ class SessionSidebar(App):
         self.deck = deck
         self.pane_id = pane_id
         self._config = Config()
-        if self._config.theme in self.available_themes:
-            self.theme = self._config.theme
+        self.apply_theme(self._config.theme)
         self._palette: TablePalette | None = None
         self._monitor = TmuxMonitor()
         self._state: deck_api.DeckState | None = None
@@ -441,6 +479,11 @@ class SessionSidebar(App):
         self._showing = False
         self._pressed_at: float | None = None
 
+    @property
+    def _main(self) -> Screen:
+        """The sidebar's own screen: a card on top of it must not catch its queries."""
+        return self.screen_stack[0]
+
     # -- layout --------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
@@ -456,7 +499,7 @@ class SessionSidebar(App):
     def on_mount(self) -> None:
         self._palette = resolve_table_palette(self.get_css_variables())
         # A deck opens with the session focused.
-        self.screen.add_class("-blurred")
+        self._main.add_class("-blurred")
         self._monitor.start()
         self._start()
         self.set_interval(_TICK_SECS, self._tick)
@@ -472,9 +515,9 @@ class SessionSidebar(App):
         rail = self._width < RAIL_BELOW
         if rail != self._rail:
             self._rail = rail
-            self.screen.set_class(rail, "-rail")
+            self._main.set_class(rail, "-rail")
         self._render_list(force=True)
-        if self.screen.has_class("-resizing"):
+        if self._main.has_class("-resizing"):
             self.call_after_refresh(self._end_resize)
 
     def _follow_theme(self) -> None:
@@ -484,11 +527,12 @@ class SessionSidebar(App):
         except Exception:
             logger.debug("could not reload the config", exc_info=True)
             return
-        if self._config.theme in self.available_themes and self._config.theme != self.theme:
-            self.theme = self._config.theme
-            self._palette = resolve_table_palette(self.get_css_variables())
-            self._render_title()
-            self._render_list(force=True)
+        before = self.theme
+        if self.apply_theme(self._config.theme) == before:
+            return
+        self._palette = resolve_table_palette(self.get_css_variables())
+        self._render_title()
+        self._render_list(force=True)
 
     # -- state -----------------------------------------------------------------
 
@@ -522,10 +566,10 @@ class SessionSidebar(App):
         if self._revealed:
             return
         self._revealed = True
-        for widget in self.query(".-pending"):
+        for widget in self._main.query(".-pending"):
             widget.remove_class("-pending")
         # A hidden widget cannot take focus, so it is given it only now.
-        self.query_one(OptionList).focus()
+        self._main.query_one(OptionList).focus()
 
     def _tick(self) -> None:
         if self._tick_running or not self._revealed:
@@ -628,7 +672,7 @@ class SessionSidebar(App):
         self._state = state
         stale = self._showing or self._pressed() or started < self._local_change_at
         if not stale:
-            self.screen.set_class(not state.sidebar_focused, "-blurred")
+            self._main.set_class(not state.sidebar_focused, "-blurred")
         shown = state.target if state.main is not None and not state.main.placeholder else None
         if stale:
             shown = self._shown
@@ -646,7 +690,7 @@ class SessionSidebar(App):
     def _render_title(self) -> None:
         if self._palette is None or self._flash_timer is not None:
             return
-        title = self.query_one("#title", Static)
+        title = self._main.query_one("#title", Static)
         title.remove_class("-error")
         count = str(len(self._entries))
         if self._query:
@@ -665,11 +709,11 @@ class SessionSidebar(App):
     def _render_list(self, *, force: bool = False) -> None:
         if self._palette is None:
             return
-        option_list = self.query_one(OptionList)
+        option_list = self._main.query_one(OptionList)
         self._render_title()
         visible = self._visible_entries()
-        self.screen.set_class(not visible, "-empty")
-        self.query_one("#empty", Static).update("no match" if self._query else "no sessions")
+        self._main.set_class(not visible, "-empty")
+        self._main.query_one("#empty", Static).update("no match" if self._query else "no sessions")
         options = build_options(
             visible,
             self._palette,
@@ -703,12 +747,12 @@ class SessionSidebar(App):
 
     def _move_cursor(self, session_name: str) -> None:
         if session_name in self._option_ids:
-            option_list = self.query_one(OptionList)
+            option_list = self._main.query_one(OptionList)
             option_list.highlighted = self._option_ids.index(session_name)
             option_list.scroll_to_highlight()
 
     def _flash(self, message: str) -> None:
-        title = self.query_one("#title", Static)
+        title = self._main.query_one("#title", Static)
         title.add_class("-error")
         # Less the two buttons and the title's padding.
         title.update(_fit([Text(message)], max(self._width - 7, 1)))
@@ -724,12 +768,15 @@ class SessionSidebar(App):
     # -- actions ---------------------------------------------------------------
 
     def action_cursor_down(self) -> None:
-        self.query_one(OptionList).action_cursor_down()
+        self._main.query_one(OptionList).action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.query_one(OptionList).action_cursor_up()
+        self._main.query_one(OptionList).action_cursor_up()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # A card on top has the keys until it is answered.
+        if self.screen is not self._main:
+            return False
         # Typing a search must not move focus to the session.
         if action in ("focus_session", "escape") and isinstance(self.focused, SearchInput):
             return False
@@ -744,28 +791,28 @@ class SessionSidebar(App):
     def action_search(self) -> None:
         if self._rail:
             return
-        self.screen.add_class("-searching")
-        self.query_one(SearchInput).focus()
+        self._main.add_class("-searching")
+        self._main.query_one(SearchInput).focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "search":
             return
         self._query = event.value
         self._render_list()
-        option_list = self.query_one(SessionList)
+        option_list = self._main.query_one(SessionList)
         if option_list.highlighted_option is None or option_list.highlighted_option.disabled:
             option_list.highlighted = option_list.next_enabled(0, 1)
 
     def action_focus_list(self) -> None:
-        self.query_one(OptionList).focus()
+        self._main.query_one(OptionList).focus()
 
     def action_close_search(self) -> None:
-        search = self.query_one(SearchInput)
-        highlighted = self.query_one(OptionList).highlighted_option
+        search = self._main.query_one(SearchInput)
+        highlighted = self._main.query_one(OptionList).highlighted_option
         keep = highlighted.id if highlighted is not None else None
         self._query = ""
         search.value = ""
-        self.screen.remove_class("-searching")
+        self._main.remove_class("-searching")
         self._render_list()
         if keep:
             self._move_cursor(keep)
@@ -779,13 +826,13 @@ class SessionSidebar(App):
     def action_toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
         self._render_title()
-        self.screen.add_class("-resizing")
+        self._main.add_class("-resizing")
         collapsed = self._collapsed
         self.set_timer(_RESIZE_AFTER_SECS, lambda: self._set_collapsed(collapsed))
         self.set_timer(_RESIZE_TIMEOUT_SECS, self._end_resize)
 
     def _end_resize(self) -> None:
-        self.screen.remove_class("-resizing")
+        self._main.remove_class("-resizing")
 
     @work(thread=True, group="editor", exclusive=True)
     def action_open_editor(self) -> None:
@@ -806,6 +853,49 @@ class SessionSidebar(App):
             self.call_from_thread(self._flash, f"{editor_label()}: {exc}")
             return
         self.call_from_thread(self._flash, f"{path.name}: opened in {editor_label()}")
+
+    def action_close_session(self) -> None:
+        if self._rail:
+            return
+        option = self._main.query_one(SessionList).highlighted_option
+        if option is not None and not option.disabled and option.id:
+            self.close_session(option.id)
+
+    def close_session(self, session_name: str) -> None:
+        """Close *session_name*, once the user has said so on a card."""
+        if self.screen is not self._main:
+            return
+        entry = next((e for e in self._entries if e.session_name == session_name), None)
+        if entry is None:
+            return
+        card = ConfirmScreen(
+            f"Close {entry.sequence}/{escape(entry.purpose)}?",
+            f"{escape(entry.repo)}\nends the tmux session",
+            hint=key_hints(("⏎", "choose"), ("esc", "cancel")),
+        )
+        self.push_screen(
+            card, callback=lambda confirmed: self._close_session(entry.session_name, confirmed)
+        )
+
+    @work(thread=True, group="close")
+    def _close_session(self, session_name: str, confirmed: bool) -> None:
+        if not confirmed:
+            return
+        label = deck_api.session_label(session_name)
+        try:
+            closed = kill_tmux_session(session_name)
+        except Exception:
+            logger.warning("could not close %s", session_name, exc_info=True)
+            closed = False
+        if not closed:
+            self.call_from_thread(self._flash, f"could not close {label}")
+            return
+        try:
+            sync_panel_tmux_config()
+        except Exception:
+            logger.debug("syncing the panel tmux config failed", exc_info=True)
+        # The next sample drops the row; a shown session gets its "session ended" note.
+        self._monitor.invalidate()
 
     @work(thread=True, group="deck")
     def action_leave_deck(self) -> None:
@@ -834,7 +924,7 @@ class SessionSidebar(App):
     def _start_showing(self) -> None:
         self.note_local_change()
         # Focus goes to the session: dim now rather than when a sample says so.
-        self.screen.add_class("-blurred")
+        self._main.add_class("-blurred")
         self._showing = True
 
     def _show_finished(self) -> None:

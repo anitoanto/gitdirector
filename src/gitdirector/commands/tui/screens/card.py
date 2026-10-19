@@ -42,7 +42,7 @@ def card_css(screen_name: str, width: int | str = 64, extra: str = "") -> str:
 
 def key_hints(*pairs: tuple[str, str]) -> str:
     """``↑↓ select   ⏎ open   esc close`` with the keys picked out."""
-    return "   ".join(f"[bold $accent]{key}[/] {label}" for key, label in pairs)
+    return "   ".join(f"[bold $text-accent]{key}[/] {label}" for key, label in pairs)
 
 
 def heading(label: str) -> Option:
@@ -124,7 +124,7 @@ class LoadingCard(ModalScreen[None]):
     .-loading-card LoadingIndicator {
         height: 1;
         margin: 1 2 0 2;
-        color: $primary;
+        color: $text-primary;
     }
     """,
     )

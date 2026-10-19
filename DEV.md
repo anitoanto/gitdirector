@@ -190,6 +190,8 @@ ratios drift. When a panel is laid out, `_panel_resize_commands` turns its
 tmux layout tree into `resize-pane -x/-y N%` commands (every split's children
 but the last, top down) installed as the window's `window-resized` hook, so
 proportions are restored inside tmux the moment the window changes size.
+`_parse_tmux_layout` reads `#{window_layout}` in both forms: JSON from tmux
+3.8, `csum,WxH,X,Y{...}` before it.
 `tests/tmux/test_panel_resize.py` checks every layout against the exact
 layout at several sizes.
 
@@ -239,7 +241,11 @@ focus, or splits a new sidebar in from `@gd_deck_respawn_sidebar` when it
 was closed; `prefix b` sends `b` to the sidebar, which flips the global
 `@gd_sidebar_collapsed` and resizes itself; `prefix v` sends `v`, and the
 sidebar opens the shown session's `#{session_path}` with the configured
-`editor` command (`editor.py`), scrubbed of anything of ours. The window's `window-resized`
+`editor` command (`editor.py`), scrubbed of anything of ours. `x` in the sidebar
+puts a `ConfirmScreen` card over the list and, on yes, kills the highlighted
+session; the next sample drops its row and, if it was shown, posts the
+"session ended" placeholder. The sidebar's queries go through `_main` (its own
+screen) so a card on top never catches them. The window's `window-resized`
 hook applies the width format (32 columns, a third of narrow windows, 5 when
 collapsed), and the sidebar renders as a rail of status dots under 14.
 

@@ -177,10 +177,10 @@ def _placeholder_command(title: str, detail: str, hint: str) -> str:
     """A centred message that redraws itself when the pane is resized."""
     theme = resolve_panel_theme(_resolved_panel_theme_name())
     bold, reset = "\033[1m", "\033[0m"
-    muted = _rgb(theme.border_inactive)
+    muted = _rgb(theme.text_muted)
     lines = [
         (f"{bold}{_rgb(theme.foreground)}{title}{reset}", title),
-        (f"{_rgb(theme.accent)}{detail}{reset}", detail),
+        (f"{_rgb(theme.text_accent)}{detail}{reset}", detail),
         ("", ""),
         (f"{muted}{hint}{reset}", hint),
     ]

@@ -25,10 +25,11 @@ class ConfirmScreen(ShortcutKeys, ModalScreen[bool]):
 
     CSS = card_css("ConfirmScreen", width=56)
 
-    def __init__(self, message: str, detail: str = "") -> None:
+    def __init__(self, message: str, detail: str = "", hint: str | None = None) -> None:
         super().__init__()
         self.message = message
         self.detail = detail
+        self.hint = hint or key_hints(("y", "yes"), ("n", "no"), ("esc", "cancel"))
         self._shortcuts = {"n": "no", "y": "yes"}
 
     def compose(self) -> ComposeResult:
@@ -40,7 +41,7 @@ class ConfirmScreen(ShortcutKeys, ModalScreen[bool]):
                 Option(menu_row(Text("Yes", style="bold"), "", "y"), id="yes"),
                 id="action-menu",
             )
-            yield Static(key_hints(("y", "yes"), ("n", "no"), ("esc", "cancel")), id="menu-hint")
+            yield Static(self.hint, id="menu-hint")
 
     def on_mount(self) -> None:
         self.query_one("#action-menu", OptionList).focus()

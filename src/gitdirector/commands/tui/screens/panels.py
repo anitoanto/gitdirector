@@ -393,7 +393,7 @@ class CreatePanelScreen(ModalScreen[tuple[str, str, dict[int, str | None]] | Non
         height: auto;
     }
     #create-panel-error {
-        color: $error;
+        color: $text-error;
         padding: 1 2 0 2;
         display: none;
     }

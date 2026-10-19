@@ -148,7 +148,7 @@ class CommitMessageScreen(ModalScreen[Optional[tuple[str, bool]]]):
         display: none;
         height: auto;
         padding: 0 3;
-        color: $error;
+        color: $text-error;
     }
     #commit-message-error.-shown {
         display: block;
