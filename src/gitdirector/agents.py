@@ -71,6 +71,15 @@ CLAUDE_STATUS_EVENTS: tuple[str, ...] = (
     "SubagentStop",
     "SessionEnd",
 )
+#: Only the events whose ``matcher`` values say something about the status.
+#: Automatic compaction (``auto`` also covers idle compaction, which runs at
+#: the prompt) is no turn of its own, and the ``SessionStart`` that follows
+#: any compaction is no new session.
+CLAUDE_STATUS_MATCHERS: dict[str, str] = {
+    "SessionStart": "startup|resume|clear|fork",
+    "PreCompact": "manual",
+    "PostCompact": "manual",
+}
 # Hooks run synchronously; a hung tmux must never hold Claude up for long.
 _CLAUDE_HOOK_TIMEOUT_SECS = 5
 
@@ -83,10 +92,15 @@ def claude_status_hook_path() -> Path:
 def _claude_hook_settings() -> dict:
     """Claude Code ``--settings`` payload running the status hook on every event."""
     command = shlex.join([sys.executable, "-I", "-S", str(claude_status_hook_path())])
-    hook = [
-        {"hooks": [{"type": "command", "command": command, "timeout": _CLAUDE_HOOK_TIMEOUT_SECS}]}
-    ]
-    return {"hooks": {event: hook for event in CLAUDE_STATUS_EVENTS}}
+    hook = {
+        "hooks": [{"type": "command", "command": command, "timeout": _CLAUDE_HOOK_TIMEOUT_SECS}]
+    }
+
+    def entry(event: str) -> dict:
+        matcher = CLAUDE_STATUS_MATCHERS.get(event)
+        return {"matcher": matcher, **hook} if matcher else hook
+
+    return {"hooks": {event: [entry(event)] for event in CLAUDE_STATUS_EVENTS}}
 
 
 def claude_launch_command(command: str) -> str:
@@ -240,6 +254,7 @@ __all__ = [
     "AgentSpec",
     "CLAUDE_MODES",
     "CLAUDE_STATUS_EVENTS",
+    "CLAUDE_STATUS_MATCHERS",
     "agent_tools",
     "claude_launch_command",
     "claude_status_hook_path",

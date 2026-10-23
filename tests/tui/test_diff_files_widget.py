@@ -572,3 +572,25 @@ class TestSetFiles:
             await fl.set_files([])
             assert fl.index is None
             assert fl.selected_file() is None
+
+    async def test_a_long_list_builds_only_the_tiles_drawn(self, mocker):
+        from textual.app import App, ComposeResult
+
+        class _MiniApp(App):
+            def compose(self) -> ComposeResult:
+                yield FileTileList(id="fl")
+
+        built = mocker.spy(_FileTileSpec, "prompt")
+        files = [ChangedFile(path=f"pkg/m{i}.py", status="M", additions=i) for i in range(20_000)]
+        app = _MiniApp()
+        async with app.run_test(size=(60, 20)) as pilot:
+            fl = app.query_one("#fl", FileTileList)
+            await fl.set_files(files)
+            await pilot.pause()
+            assert fl.virtual_size.height == 2 * len(files)
+            assert built.call_count < 100
+
+            fl.index = len(files) - 1
+            await pilot.pause()
+            assert fl.selected_file() is files[-1]
+            assert fl.tile_text(len(files) - 1).plain.startswith("M m19999.py")

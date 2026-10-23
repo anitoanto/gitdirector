@@ -62,7 +62,6 @@ _MAIN_STATUS = {
     "PermissionRequest": _WAITING,
     "Elicitation": _WAITING,
     "ElicitationResult": _RUNNING,
-    "PreCompact": _RUNNING,
     "Stop": _IDLE,
     "StopFailure": _IDLE,
 }
@@ -87,9 +86,14 @@ def _stamp(payload: dict, event: str, now: float) -> str:
 
 def main_status(event: str, payload: dict) -> str | None:
     """The main thread's status after *event*, or ``None`` when it says nothing."""
-    if event == "PostCompact":
-        # A manual /compact is not a turn; an automatic one happens inside one.
-        return _IDLE if payload.get("trigger") == "manual" else _RUNNING
+    if event in ("PreCompact", "PostCompact"):
+        # Only /compact is the user's to wait on: an automatic compaction runs
+        # inside a turn or, for idle compaction, at the prompt.
+        if payload.get("trigger") != "manual":
+            return None
+        return _RUNNING if event == "PreCompact" else _IDLE
+    if event == "SessionStart" and payload.get("source") == "compact":
+        return None
     return _MAIN_STATUS.get(event)
 
 

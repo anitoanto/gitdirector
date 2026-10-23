@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from rich.text import Text
 from textual.binding import Binding
 from textual.events import Resize
+from textual.geometry import Size
 from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
@@ -22,6 +23,7 @@ from textual.widgets.option_list import Option
 from ..constants import resolve_table_palette
 from ..diff_renderer import ChangedFile, status_letter
 
+_TILE_HEIGHT = 2
 _TILE_PADDING = 2
 _STATS_GAP = 1
 # The scrollbar keeps a column, so the stats never wrap when it appears.
@@ -76,6 +78,19 @@ class _FileTileSpec:
         return Text.assemble(title, " " * gap, stats, "\n  ", subtitle, no_wrap=True)
 
 
+class _TileOption(Option):
+    """A file's tile, built when it is first drawn, at the list's current width."""
+
+    def __init__(self, spec: _FileTileSpec, tiles: FileTileList, index: int) -> None:
+        self._spec = spec
+        self._tiles = tiles
+        super().__init__("", id=str(index))
+
+    @property
+    def prompt(self) -> Text:
+        return self._spec.prompt(self._tiles._tile_width, self._tiles._muted)
+
+
 class FileTileList(OptionList):
     """List of file tiles with vertical/horizontal navigation."""
 
@@ -123,6 +138,7 @@ class FileTileList(OptionList):
         super().__init__(**kwargs)
         self._specs: list[_FileTileSpec] = []
         self._tile_width = _DEFAULT_WIDTH
+        self._muted = _MUTED
 
     @property
     def index(self) -> int | None:
@@ -145,18 +161,30 @@ class FileTileList(OptionList):
             return _MUTED
 
     def _rebuild(self) -> None:
-        muted = self._muted_style()
-        width = self._tile_width
-        options = [
-            Option(spec.prompt(width, muted), id=str(index))
-            for index, spec in enumerate(self._specs)
-        ]
+        self._muted = self._muted_style()
+        options = [_TileOption(spec, self, index) for index, spec in enumerate(self._specs)]
         keep = self.highlighted
         self.clear_options()
         if options:
             self.add_options(options)
         if keep is not None and self._specs:
             self.highlighted = min(keep, len(self._specs) - 1)
+
+    def _update_lines(self) -> None:
+        # Every tile is two rows tall, so the line table is filled in
+        # without rendering each tile to measure it.
+        if not self.scrollable_content_region:
+            return
+        cache = self._line_cache
+        for index in range(len(cache.heights), self.option_count):
+            cache.index_to_line[index] = len(cache.lines)
+            cache.heights[index] = _TILE_HEIGHT
+            cache.lines.extend((index, row) for row in range(_TILE_HEIGHT))
+        width = self.scrollable_content_region.width - self._get_left_gutter_width()
+        virtual_size = Size(width, len(cache.lines))
+        if virtual_size != self.virtual_size:
+            self.virtual_size = virtual_size
+            self._scroll_update(virtual_size)
 
     def on_resize(self, event: Resize) -> None:
         # Stats sit against the right edge, so the tiles follow the width.

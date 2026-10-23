@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from textual.widgets import LoadingIndicator, OptionList, Static
+from textual.widgets import Input, LoadingIndicator, OptionList, Static
 
 from gitdirector.commands.tui import (
     ActionMenuScreen,
@@ -1237,3 +1237,137 @@ class TestCommitMessageScreenFocus:
             assert app.focused is action_list
             assert action_list.highlighted == 1
             assert action_list.highlighted_option.id == "commit"
+
+
+class TestWideLines:
+    async def test_a_wide_line_does_not_pad_the_other_rows(self, mocker):
+        from gitdirector import repo as repo_mod
+
+        diff = "diff --git a/w.txt b/w.txt\n@@ -1 +1 @@\n-" + "x" * 5000 + "\n+short\n"
+        mocker.patch.object(
+            repo_mod.Repository,
+            "get_diff_against_head",
+            lambda self, **_kw: (True, diff, []),
+        )
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+            await _open_diff_screen(app, screen)
+            await pilot.pause()
+            content = screen.query_one("#diff-content-scroll", DiffContentView)
+            assert content.document.width > 5000
+            short_row = len(content.document) - 1
+            strip, _ = content._line_strip(short_row, content.rich_style)
+            assert strip.cell_length < 100
+            visible = content.render_line(short_row)
+            assert visible.cell_length == content.scrollable_content_region.width
+
+
+SEARCH_DIFF = SAMPLE_DIFF + (
+    "diff --git a/docs/Guide.md b/docs/Guide.md\n"
+    "--- a/docs/Guide.md\n"
+    "+++ b/docs/Guide.md\n"
+    "@@ -1 +1 @@\n"
+    "-old guide\n"
+    "+new guide\n"
+)
+
+
+class TestDiffReviewScreenSearch:
+    async def _open(self, app, mocker):
+        _patch_repo_methods(mocker, diff_text=SEARCH_DIFF, untracked=[])
+        screen = DiffReviewScreen("my-repo", Path("/tmp/my-repo"), branch="main")
+        await _open_diff_screen(app, screen)
+        files_list = screen.query_one("#diff-files-list", FileTileList)
+        await _wait_for_deferred_scroll(files_list)
+        return screen, files_list
+
+    @staticmethod
+    def _paths(files_list: FileTileList) -> list[str]:
+        return [spec.file.path for spec in files_list._specs]
+
+    async def test_slash_opens_the_search_bar(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen, _files_list = await self._open(app, mocker)
+            container = screen.query_one("#diff-search-container")
+            assert not container.display
+            await pilot.press("slash")
+            assert container.display
+            assert screen.focused is screen.query_one("#diff-search-bar", Input)
+
+    async def test_typing_filters_the_files_by_path_ignoring_case(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen, files_list = await self._open(app, mocker)
+            assert len(self._paths(files_list)) == 3
+            await pilot.press("slash", *"GUIDE")
+            await pilot.pause()
+            assert self._paths(files_list) == ["docs/Guide.md"]
+            content = screen.query_one("#diff-content-scroll", DiffContentView)
+            assert content.document is not None
+            indicator = screen.query_one("#diff-search-indicator", Static)
+            assert indicator.display
+            assert "1" in str(indicator.render()) and "of 3" in str(indicator.render())
+            screen.query_one("#diff-search-bar", Input).value = "src/"
+            await pilot.pause()
+            assert sorted(self._paths(files_list)) == ["src/bar.py", "src/foo.py"]
+
+    async def test_keys_typed_into_the_search_are_not_shortcuts(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen, _files_list = await self._open(app, mocker)
+            await pilot.press("slash", *"qjkgr[]")
+            await pilot.pause()
+            assert app.screen is screen
+            assert screen.query_one("#diff-search-bar", Input).value == "qjkgr[]"
+
+    async def test_no_match_says_so(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen, files_list = await self._open(app, mocker)
+            await pilot.press("slash", *"zzz")
+            await pilot.pause()
+            assert self._paths(files_list) == []
+            assert not screen.query_one("#diff-content-scroll").display
+            empty = screen.query_one("#diff-empty", Static)
+            assert empty.display
+            assert "no files match 'zzz'" in str(empty.render())
+
+    async def test_enter_keeps_the_filter_and_esc_clears_it_before_closing(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen, files_list = await self._open(app, mocker)
+            await pilot.press("slash", *"bar", "enter")
+            await pilot.pause()
+            assert not screen.query_one("#diff-search-container").display
+            assert screen.focused is files_list
+            assert self._paths(files_list) == ["src/bar.py"]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(self._paths(files_list)) == 3
+            assert not screen.query_one("#diff-search-indicator").display
+            assert app.screen is screen
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.screen is not screen
+
+    async def test_clearing_the_search_keeps_the_selected_file(self, mocker):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen, files_list = await self._open(app, mocker)
+            await pilot.press("slash", *"guide")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert screen.query_one("#diff-search-bar", Input).value == ""
+            assert screen.focused is files_list
+            assert files_list.selected_file().path == "docs/Guide.md"
+            assert self._paths(files_list)[files_list.index] == "docs/Guide.md"

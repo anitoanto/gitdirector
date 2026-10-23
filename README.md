@@ -91,8 +91,8 @@ a session. Pick Claude Code's permission mode on its row with Tab
 or `←`/`→`: `default` (your settings), `auto` (preselected), or `bypass`
 (`--dangerously-skip-permissions`). `g` opens the git menu: status, timeline,
 branches, remotes, pull, push, and **Review Diff**, a two-pane diff of
-uncommitted changes where `g` stages everything and commits (and optionally
-pushes).
+uncommitted changes where `/` filters the files by path and `g` stages
+everything and commits (and optionally pushes).
 
 **Sessions** lists every session under its repo, with its status, purpose,
 name, and description. `running` means the program is working, `waiting` that

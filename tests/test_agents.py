@@ -11,6 +11,7 @@ from gitdirector.agents import (
     AGENTS,
     AGENTS_BY_KEY,
     CLAUDE_STATUS_EVENTS,
+    CLAUDE_STATUS_MATCHERS,
     agent_tools,
     claude_status_hook_path,
     opencode_status_plugin_path,
@@ -50,6 +51,14 @@ class TestClaudeLaunchCommand:
             (hook,) = entries[0]["hooks"]
             assert hook["type"] == "command"
             assert hook["timeout"] > 0
+
+    def test_compaction_reaches_the_hook_only_when_the_user_asked_for_it(self):
+        hooks = _claude_settings(AGENTS_BY_KEY["claude"].launch_command)["hooks"]
+        assert hooks["PreCompact"][0]["matcher"] == "manual"
+        assert hooks["PostCompact"][0]["matcher"] == "manual"
+        assert "compact" not in hooks["SessionStart"][0]["matcher"].split("|")
+        for event in set(CLAUDE_STATUS_EVENTS) - set(CLAUDE_STATUS_MATCHERS):
+            assert "matcher" not in hooks[event][0], event
 
     def test_hook_script_ships_with_the_package(self):
         assert claude_status_hook_path().is_file()

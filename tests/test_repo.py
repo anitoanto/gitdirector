@@ -1475,22 +1475,23 @@ class TestGetDiffAgainstHead:
         assert "untracked.txt" not in text
         assert untracked == ["untracked.txt"]
 
-    def test_truncates_diff_above_max_bytes(self, fake_git_repo, mocker):
-        huge = "x" * (3 * 1024 * 1024)
+    def test_large_diff_is_returned_whole(self, fake_git_repo, mocker):
+        huge = "x" * (3 * 1024 * 1024) + "\n"
+        timeouts = []
         responses = {
             (*DIFF_CONFIG, "diff", "HEAD", *DIFF_OPTIONS): (0, huge, ""),
             ("ls-files", "--others", "--exclude-standard", "-z"): (0, "", ""),
         }
 
-        def fake_run_git(self, *args, **_kwargs):
+        def fake_run_git(self, *args, **kwargs):
+            timeouts.append(kwargs.get("_timeout"))
             return responses.get(tuple(args), (1, "", "unexpected"))
 
         mocker.patch.object(repo_mod.Repository, "_run_git", fake_run_git)
-        repo = Repository(fake_git_repo)
-        ok, text, _ = repo.get_diff_against_head(max_bytes=1024)
+        ok, text, _ = Repository(fake_git_repo).get_diff_against_head()
         assert ok is True
-        assert len(text) < len(huge)
-        assert "gd-truncated" in text
+        assert text == huge
+        assert timeouts == [repo_mod._LONG_GIT_TIMEOUT] * 2
 
     def test_empty_diff_returns_empty_string(self, fake_git_repo, mocker):
         responses = {
@@ -1544,14 +1545,11 @@ class TestReadFileText:
         repo = Repository(fake_git_repo)
         assert repo.read_file_text("blob.bin") is None
 
-    def test_truncates_large_file(self, fake_git_repo):
-        big = "x" * 1024
+    def test_reads_large_file_whole(self, fake_git_repo):
+        big = "x" * (4 * 1024 * 1024)
         (fake_git_repo / "big.txt").write_text(big)
         repo = Repository(fake_git_repo)
-        text = repo.read_file_text("big.txt", max_bytes=100)
-        assert text is not None
-        assert "gd-truncated" in text
-        assert len(text) < 200
+        assert repo.read_file_text("big.txt") == big
 
     def test_handles_unicode(self, fake_git_repo):
         (fake_git_repo / "u.txt").write_text("héllo wörld 🚀\n", encoding="utf-8")
@@ -1562,10 +1560,8 @@ class TestReadFileText:
 class TestReadFileTextBinaryDetection:
     """Binary detection must apply to large files too.
 
-    The oversized branch read only the first ``max_bytes`` and returned it
-    without the NUL check the small-file branch does, so a large binary came
-    back as a screenful of replacement characters instead of the ``None`` the
-    docstring promises.
+    A large binary used to come back as a screenful of replacement
+    characters instead of the ``None`` the docstring promises.
     """
 
     def test_large_binary_file_returns_none(self, fake_git_repo):
@@ -1573,7 +1569,14 @@ class TestReadFileTextBinaryDetection:
         blob.write_bytes(b"\x00\xff" * 4096)
         repo = Repository(fake_git_repo)
 
-        assert repo.read_file_text("big.bin", max_bytes=64) is None
+        assert repo.read_file_text("big.bin") is None
+
+    def test_nul_past_the_sniffed_head_still_marks_binary(self, fake_git_repo):
+        blob = fake_git_repo / "late.bin"
+        blob.write_bytes(b"a" * (repo_mod._BINARY_SNIFF_BYTES + 10) + b"\x00")
+        repo = Repository(fake_git_repo)
+
+        assert repo.read_file_text("late.bin") is None
 
     def test_small_binary_file_returns_none(self, fake_git_repo):
         blob = fake_git_repo / "small.bin"
@@ -1582,16 +1585,13 @@ class TestReadFileTextBinaryDetection:
 
         assert repo.read_file_text("small.bin") is None
 
-    def test_large_text_file_is_truncated_and_marked(self, fake_git_repo):
+    def test_text_longer_than_the_sniffed_head_is_returned_whole(self, fake_git_repo):
         target = fake_git_repo / "big.txt"
-        target.write_text("a" * 4096)
+        text = "a" * (repo_mod._BINARY_SNIFF_BYTES * 3)
+        target.write_text(text)
         repo = Repository(fake_git_repo)
 
-        result = repo.read_file_text("big.txt", max_bytes=64)
-
-        assert result is not None
-        assert result.startswith("a" * 64)
-        assert result.endswith("[gd-truncated]\n")
+        assert repo.read_file_text("big.txt") == text
 
     def test_small_text_file_is_returned_whole(self, fake_git_repo):
         target = fake_git_repo / "small.txt"

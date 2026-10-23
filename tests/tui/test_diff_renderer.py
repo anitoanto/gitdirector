@@ -975,22 +975,6 @@ class TestBuildDiffBundle:
         assert "@@ -0,0 +1,2 @@" in f.diff_text
         assert "+a\x0cb\u2028c\n+d" in f.diff_text
 
-    def test_truncation_at_line_boundary_adds_no_blank_line(self):
-        from gitdirector.repo import DIFF_TRUNCATED_MARKER
-
-        diff = f"diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-x\n+y\n\n{DIFF_TRUNCATED_MARKER}\n"
-        f = build_diff_bundle(diff, [], lambda p: None).files[0]
-        assert (f.first_new_line, f.last_new_line) == (1, 1)
-
-    def test_truncation_marker_is_stripped_and_flagged(self):
-        from gitdirector.repo import DIFF_TRUNCATED_MARKER
-
-        diff = f"diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-x\n+y\n{DIFF_TRUNCATED_MARKER}\n"
-        bundle = build_diff_bundle(diff, [], lambda p: None)
-        assert bundle.truncated is True
-        assert DIFF_TRUNCATED_MARKER not in bundle.files[0].diff_text
-        assert bundle.files[0].additions == 1
-
     def test_raw_diff_preserved(self):
         diff = "diff --git a/a.py b/a.py\n"
         bundle = build_diff_bundle(diff, [], lambda p: None)
@@ -1046,3 +1030,81 @@ class TestDiffBundle:
         b = DiffBundle()
         assert b.files == []
         assert b.raw == ""
+
+
+class TestLargeDiffs:
+    """Nothing is capped: every file of a huge diff is parsed, and a huge
+    file's rows are built lazily, a block at a time."""
+
+    def test_every_file_of_a_large_diff_is_parsed(self):
+        diff = "".join(
+            f"diff --git a/f{i}.py b/f{i}.py\n@@ -1,2 +1,2 @@\n ctx\n-old {i}\n+new {i}\n"
+            for i in range(5000)
+        )
+        files = parse_diff_files(diff)
+        assert len(files) == 5000
+        assert files[-1].path == "f4999.py"
+        assert sum(f.additions for f in files) == sum(f.deletions for f in files) == 5000
+
+    def test_hunks_after_the_first_are_counted(self):
+        diff = (
+            "diff --git a/f b/f\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n@@ -50,2 +50,3 @@\n x\n+y\n+z\n-w\n"
+        )
+        f = parse_diff_files(diff)[0]
+        assert (f.additions, f.deletions) == (3, 2)
+        assert (f.first_new_line, f.last_new_line) == (1, 52)
+
+    def _long_hunk(self) -> str:
+        lines = []
+        for i in range(2500):
+            lines.append(("-old", "+new", " same")[i % 3] + f" {i}")
+        lines.insert(1200, "\\ No newline at end of file")
+        return (
+            "diff --git a/big.txt b/big.txt\n"
+            "@@ -1,1667 +1,1667 @@\n" + "\n".join(lines) + "\n+tail\n"
+        )
+
+    def test_document_rows_match_the_full_render_across_blocks(self):
+        from gitdirector.commands.tui.diff_renderer import build_diff_document
+
+        f = ChangedFile(path="big.txt", status="M", diff_text=self._long_hunk())
+        expected = _body_text(render_file_diff(f)).plain.split("\n")
+        document = build_diff_document(f, code_width=40)
+        first_hunk_row = len(document) - len(expected)
+        rows = [document.line(i).plain for i in range(first_hunk_row, len(document))]
+        assert rows == expected
+
+    def test_jumping_straight_to_the_end_numbers_it_correctly(self):
+        from gitdirector.commands.tui.diff_renderer import build_diff_document
+
+        f = ChangedFile(path="big.txt", status="M", diff_text=self._long_hunk())
+        expected_last = _body_text(render_file_diff(f)).plain.split("\n")[-1]
+        document = build_diff_document(f, code_width=40)
+        assert document.line(len(document) - 1).plain == expected_last
+        assert expected_last.split() == ["1667", "+", "tail"]
+
+    def test_a_block_too_large_to_lex_is_drawn_plain(self):
+        from gitdirector.commands.tui import diff_renderer
+        from gitdirector.commands.tui.diff_renderer import build_diff_document
+
+        minified = "x=1;" * (diff_renderer._HIGHLIGHT_MAX_CHARS // 4 + 1)
+        diff = (
+            "diff --git a/m.py b/m.py\n@@ -1 +1,2 @@\n-def f(): pass\n"
+            f"+{minified}\n+def g(): pass\n"
+        )
+        f = ChangedFile(path="m.py", status="M", diff_text=diff)
+        document = build_diff_document(f, code_width=40)
+        gutter_and_marker = 2
+        assert len(document.line(len(document) - 1).spans) == gutter_and_marker
+
+        small = ChangedFile(path="m.py", status="M", diff_text=diff.replace(minified, "x = 1"))
+        document = build_diff_document(small, code_width=40)
+        assert len(document.line(len(document) - 1).spans) > gutter_and_marker
+
+    def test_width_follows_the_widest_line(self):
+        from gitdirector.commands.tui.diff_renderer import build_diff_document
+
+        diff = "diff --git a/w.txt b/w.txt\n@@ -1 +1 @@\n-short\n+" + "y" * 900 + "\n"
+        f = ChangedFile(path="w.txt", status="M", diff_text=diff)
+        document = build_diff_document(f, code_width=40)
+        assert document.width == 901 + document.gutter_width

@@ -64,13 +64,12 @@ _HOST_KEY_ERROR_RE = re.compile(
 #: The status message of a tracked repository whose directory is gone.
 MISSING_REPOSITORY_MESSAGE = "Repository path not found or invalid"
 
-#: Appended on its own line to a diff cut short by ``get_diff_against_head``.
-DIFF_TRUNCATED_MARKER = "[gd-truncated] diff exceeded size cap"
-
 # Pin the output format against user config (diff.noprefix,
 # diff.mnemonicPrefix, diff.external, core.quotepath) the parser relies on.
 _DIFF_CONFIG = ("-c", "core.quotepath=false")
 _DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/")
+# git's own binary heuristic looks for a NUL in the first 8000 bytes.
+_BINARY_SNIFF_BYTES = 8000
 
 _NO_COMMITS_RE = re.compile(
     r"does not have any commits yet|bad default revision 'HEAD'|ambiguous argument 'HEAD'",
@@ -721,52 +720,49 @@ class Repository:
             return out
         return _EMPTY_TREE_SHA1
 
-    def get_diff_against_head(
-        self, *, max_bytes: int = 2 * 1024 * 1024
-    ) -> tuple[bool, str, list[str]]:
+    def get_diff_against_head(self) -> tuple[bool, str, list[str]]:
         """Return combined uncommitted diff plus list of untracked file paths.
 
         The diff covers both staged and unstaged changes for tracked files,
         produced by ``git diff HEAD`` so reviewers see a single coherent
         picture of uncommitted work. Untracked files are returned separately
         because git cannot produce a diff for files that have no HEAD entry.
-
-        The diff text is capped at ``max_bytes`` to keep the TUI responsive
-        on very large changesets. A truncated diff is signalled by a trailing
-        marker line that the renderer can display to the user.
         """
         code, diff_text, err = self._run_git(
-            *_DIFF_CONFIG, "diff", "HEAD", *_DIFF_OPTIONS, _strip=False
+            *_DIFF_CONFIG, "diff", "HEAD", *_DIFF_OPTIONS, _strip=False, _timeout=_LONG_GIT_TIMEOUT
         )
         if code != 0 and _is_no_commits_error(err):
             code, diff_text, err = self._run_git(
-                *_DIFF_CONFIG, "diff", self._empty_tree_hash(), *_DIFF_OPTIONS, _strip=False
+                *_DIFF_CONFIG,
+                "diff",
+                self._empty_tree_hash(),
+                *_DIFF_OPTIONS,
+                _strip=False,
+                _timeout=_LONG_GIT_TIMEOUT,
             )
         if code != 0:
             return False, err or "git diff failed", []
 
         untracked = self._list_untracked_files()
-        # Encode once: a multi-megabyte diff is exactly the case this cap
-        # exists for, and encoding it repeatedly to measure then slice it
-        # costs more than the truncation saves.
-        encoded = diff_text.encode("utf-8", errors="replace")
-        if len(encoded) > max_bytes:
-            truncated = encoded[:max_bytes].decode("utf-8", errors="replace")
-            diff_text = f"{truncated}\n{DIFF_TRUNCATED_MARKER}\n"
-        elif diff_text and not diff_text.endswith("\n"):
+        if diff_text and not diff_text.endswith("\n"):
             diff_text += "\n"
         return True, diff_text, untracked
 
     def _list_untracked_files(self) -> list[str]:
         code, out, _ = self._run_git(
-            "ls-files", "--others", "--exclude-standard", "-z", _strip=False
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            _strip=False,
+            _timeout=_LONG_GIT_TIMEOUT,
         )
         if code != 0 or not out:
             return []
         return [chunk for chunk in out.split("\x00") if chunk]
 
-    def read_file_text(self, rel_path: str, *, max_bytes: int = 256 * 1024) -> str | None:
-        """Read a tracked or untracked file's text content, capped to ``max_bytes``.
+    def read_file_text(self, rel_path: str) -> str | None:
+        """Read a tracked or untracked file's whole text content.
 
         Returns ``None`` if the file is missing, binary, or unreadable.
         """
@@ -774,19 +770,15 @@ class Repository:
         if not candidate.is_file():
             return None
         try:
-            size = candidate.stat().st_size
-        except OSError:
-            return None
-        truncated = size > max_bytes
-        try:
             with candidate.open("rb") as fh:
-                data = fh.read(max_bytes) if truncated else fh.read()
+                # A large binary is rejected without reading the rest of it.
+                head = fh.read(_BINARY_SNIFF_BYTES)
+                if b"\x00" in head:
+                    return None
+                rest = fh.read()
         except OSError:
             return None
-        # Applies to large files too: reading only the first max_bytes of a
-        # binary file used to skip this check and hand back a screenful of
-        # replacement characters instead of the documented None.
-        if b"\x00" in data:
+        if b"\x00" in rest:
             return None
-        text = data.decode("utf-8", errors="replace")
-        return text + "\n[gd-truncated]\n" if truncated else text
+        data = head + rest if rest else head
+        return data.decode("utf-8", errors="replace")

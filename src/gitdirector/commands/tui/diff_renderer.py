@@ -18,8 +18,12 @@ fully unit-testable without booting Textual.
 from __future__ import annotations
 
 import re
+from array import array
+from bisect import bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
+from itertools import accumulate
 from pathlib import PurePosixPath
 
 from pygments.lexer import Lexer
@@ -38,14 +42,13 @@ from pygments.token import (
     Whitespace,
 )
 from pygments.util import ClassNotFound
+from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.padding import Padding
 from rich.style import Style as RichStyle
 from rich.syntax import PygmentsSyntaxTheme
 from rich.text import Span
 from rich.text import Text as RichText
-
-from ...repo import DIFF_TRUNCATED_MARKER
 
 _STATUS_LABEL: dict[str, str] = {
     "M": "modified",
@@ -199,12 +202,13 @@ class DiffBundle:
 
     files: list[ChangedFile] = field(default_factory=list)
     raw: str = ""
-    #: The diff hit the size cap, so later files are missing.
-    truncated: bool = False
 
 
 _BINARY_RE = re.compile(r"^Binary files .* differ$")
-_HUNK_HEADER_RE = re.compile(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+# Used with ``match``, which anchors it, also at a line's offset in a text.
+_HUNK_HEADER_RE = re.compile(
+    r"@@[^\S\n]+-(?P<old>\d+)(?:,\d+)?[^\S\n]+\+(?P<new>\d+)(?:,\d+)?[^\S\n]+@@"
+)
 _NO_NEWLINE_MARKER = r"\ No newline at end of file"
 
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
@@ -436,105 +440,160 @@ def _split_lines(text: str) -> list[str]:
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
+def _normalize_newlines(text: str) -> str:
+    """Drop the ``\\r`` of every CRLF, as ``_split_lines`` does per line."""
+    if "\r" not in text:
+        return text
+    text = text.replace("\r\n", "\n")
+    return text[:-1] if text.endswith("\r") else text
+
+
+def _line_offsets(text: str, prefix: str, start: int = 0, end: int | None = None) -> Iterator[int]:
+    """Offsets of the lines in ``text[start:end]`` that begin with *prefix*.
+
+    A substring search runs in C, so a diff of any size is scanned without
+    a Python step per line.
+    """
+    end = len(text) if end is None else end
+    if text.startswith(prefix, start, end):
+        yield start
+    needle = "\n" + prefix
+    pos = text.find(needle, start, end)
+    while pos != -1:
+        yield pos + 1
+        pos = text.find(needle, pos + 1, end)
+
+
+def _count_lines_starting(text: str, prefix: str, start: int, end: int) -> int:
+    return text.count("\n" + prefix, start, end) + text.startswith(prefix, start, end)
+
+
+def _hunk_header_offsets(text: str, start: int = 0) -> list[tuple[int, re.Match[str]]]:
+    headers = []
+    for offset in _line_offsets(text, "@@", start):
+        match = _HUNK_HEADER_RE.match(text, offset)
+        if match:
+            headers.append((offset, match))
+    return headers
+
+
+def _hunk_stats(chunk: str, hunks: list[tuple[int, re.Match[str]]]) -> tuple[int, int, int | None]:
+    """Additions, deletions, and the new-side number of the last line shown.
+
+    Every line in a hunk starts with its marker and a hunk header with "@@",
+    so counting line starts, which runs in C, counts the changes exactly.
+    """
+    ends = [offset for offset, _ in hunks[1:]] + [len(chunk)]
+    removed = [chunk.count("\n-", offset, end) for (offset, _), end in zip(hunks, ends)]
+    last_new_line = None
+    for (offset, match), end, hunk_removed in zip(
+        reversed(hunks), reversed(ends), reversed(removed)
+    ):
+        body = chunk.find("\n", offset, end) + 1
+        if body:
+            shown = chunk.count("\n", body, end) - hunk_removed
+            shown -= _count_lines_starting(chunk, "\\", body, end)
+            if shown > 0:
+                last_new_line = int(match["new"]) + shown - 1
+                break
+    return chunk.count("\n+", hunks[0][0]), sum(removed), last_new_line
+
+
+def _file_chunks(diff_text: str) -> Iterator[str]:
+    """Each file's part of a diff, from its ``diff --git`` line, newline-ended."""
+    starts = list(_line_offsets(diff_text, "diff --git "))
+    for start, end in zip(starts, [*starts[1:], len(diff_text)]):
+        chunk = diff_text[start:end]
+        yield chunk if chunk.endswith("\n") else chunk + "\n"
+
+
+def _parse_file_chunk(chunk: str) -> ChangedFile | None:
+    old_name, new_name = _parse_diff_git_paths(chunk[: chunk.find("\n")])
+    if old_name is None or new_name is None:
+        return None
+    hunks = _hunk_header_offsets(chunk)
+    body = hunks[0][0] if hunks else len(chunk)
+    path, old_path, status, is_binary = new_name, old_name, "M", False
+    for line in chunk[:body].split("\n")[1:]:
+        if line.startswith("new file"):
+            status = "A"
+        elif line.startswith("deleted file"):
+            status = "D"
+        elif line.startswith(("rename from ", "copy from ")):
+            verb, _, value = line.partition(" from ")
+            status = "R" if verb == "rename" else "C"
+            old_path = _unquote_git_path(value)
+        elif line.startswith(("rename to ", "copy to ")):
+            path = _unquote_git_path(line.partition(" to ")[2])
+        elif line.startswith("--- "):
+            side = _patch_line_path(line[4:], "a/")
+            old_path = old_path if side is None else side
+        elif line.startswith("+++ "):
+            side = _patch_line_path(line[4:], "b/")
+            path = path if side is None else side
+        elif _BINARY_RE.match(line):
+            is_binary = True
+    is_rename = old_path is not None and old_path != path
+    additions, deletions, last_new_line = _hunk_stats(chunk, hunks) if hunks else (0, 0, None)
+    return ChangedFile(
+        path=path,
+        status=status,
+        additions=additions,
+        deletions=deletions,
+        is_binary=is_binary,
+        is_image=is_image_file(path),
+        is_rename=is_rename,
+        old_path=old_path if is_rename else None,
+        diff_text=chunk,
+        first_new_line=int(hunks[0][1]["new"]) if hunks else None,
+        last_new_line=last_new_line,
+    )
+
+
 def parse_diff_files(diff_text: str) -> list[ChangedFile]:
-    """Walk a unified ``git diff`` payload and return one ``ChangedFile`` per file."""
-    files: list[ChangedFile] = []
-    current: dict | None = None
-    lines: list[str] = []
-
-    def flush() -> None:
-        if current is None:
-            return
-        old_path = current["old_path"]
-        is_rename = old_path is not None and old_path != current["path"]
-        files.append(
-            ChangedFile(
-                path=current["path"],
-                status=current["status"],
-                additions=current["additions"],
-                deletions=current["deletions"],
-                is_binary=current["is_binary"],
-                is_image=is_image_file(current["path"]),
-                is_rename=is_rename,
-                old_path=old_path if is_rename else None,
-                diff_text="".join(f"{line}\n" for line in lines),
-                first_new_line=current["first_new"],
-                last_new_line=current["last_new"],
-            )
-        )
-
-    for raw_line in _split_lines(diff_text):
-        if raw_line.startswith("diff --git "):
-            flush()
-            old_name, new_name = _parse_diff_git_paths(raw_line)
-            if old_name is None or new_name is None:
-                current = None
-                continue
-            current = {
-                "path": new_name,
-                "old_path": old_name,
-                "status": "M",
-                "additions": 0,
-                "deletions": 0,
-                "is_binary": False,
-                "in_hunk": False,
-                "old_running": 0,
-                "new_running": 0,
-                "first_new": None,
-                "last_new": None,
-            }
-            lines = [raw_line]
-            continue
-        if current is None:
-            continue
-        lines.append(raw_line)
-
-        if current["in_hunk"] or raw_line.startswith("@@"):
-            match = _HUNK_HEADER_RE.match(raw_line)
-            if match:
-                current["in_hunk"] = True
-                current["old_running"] = int(match.group(1))
-                current["new_running"] = int(match.group(2))
-                if current["first_new"] is None:
-                    current["first_new"] = current["new_running"]
-                continue
-            marker = raw_line[:1]
-            if marker == "+":
-                current["additions"] += 1
-                current["last_new"] = current["new_running"]
-                current["new_running"] += 1
-            elif marker == "-":
-                current["deletions"] += 1
-                current["old_running"] += 1
-            elif marker in (" ", ""):
-                # diff.suppressBlankEmpty writes blank context lines as "".
-                current["last_new"] = current["new_running"]
-                current["new_running"] += 1
-                current["old_running"] += 1
-            continue
-
-        if raw_line.startswith("new file"):
-            current["status"] = "A"
-        elif raw_line.startswith("deleted file"):
-            current["status"] = "D"
-        elif raw_line.startswith(("rename from ", "copy from ")):
-            verb, _, value = raw_line.partition(" from ")
-            current["status"] = "R" if verb == "rename" else "C"
-            current["old_path"] = _unquote_git_path(value)
-        elif raw_line.startswith(("rename to ", "copy to ")):
-            current["path"] = _unquote_git_path(raw_line.partition(" to ")[2])
-        elif raw_line.startswith("--- "):
-            old_path = _patch_line_path(raw_line[4:], "a/")
-            if old_path is not None:
-                current["old_path"] = old_path
-        elif raw_line.startswith("+++ "):
-            new_path = _patch_line_path(raw_line[4:], "b/")
-            if new_path is not None:
-                current["path"] = new_path
-        elif _BINARY_RE.match(raw_line):
-            current["is_binary"] = True
-    flush()
+    """Split a unified ``git diff`` payload into one ``ChangedFile`` per file."""
+    files = []
+    for chunk in _file_chunks(_normalize_newlines(diff_text)):
+        file = _parse_file_chunk(chunk)
+        if file is not None:
+            files.append(file)
     return files
+
+
+def _untracked_file(rel_path: str, text: str | None) -> ChangedFile:
+    if text is None:
+        return ChangedFile(
+            path=rel_path,
+            status="?",
+            is_binary=True,
+            is_image=is_image_file(rel_path),
+            diff_text=(
+                f"diff --git a/{rel_path} b/{rel_path}\n"
+                f"new file mode 100644\n"
+                f"Binary files /dev/null and b/{rel_path} differ"
+            ),
+        )
+    text = _normalize_newlines(text)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    line_count = text.count("\n")
+    # The hunk header is what marks the lines below it as the added body.
+    diff_text = (
+        f"diff --git a/{rel_path} b/{rel_path}\n"
+        f"new file mode 100644\n"
+        f"--- /dev/null\n"
+        f"+++ b/{rel_path}\n"
+        f"@@ -0,0 +1,{line_count} @@"
+    )
+    if text:
+        diff_text += "\n+" + text[:-1].replace("\n", "\n+")
+    return ChangedFile(
+        path=rel_path,
+        status="?",
+        additions=line_count,
+        is_image=is_image_file(rel_path),
+        diff_text=diff_text,
+    )
 
 
 def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_lookup) -> DiffBundle:
@@ -542,54 +601,11 @@ def build_diff_bundle(diff_text: str, untracked_paths: list[str], untracked_look
 
     ``untracked_lookup`` is a callable ``(rel_path) -> str | None`` that
     returns the text content of an untracked file, or ``None`` if the file
-    cannot be read (binary, missing, too large).
+    cannot be read (binary, missing).
     """
-    truncated = False
-    body, marker, _ = diff_text.rpartition(f"\n{DIFF_TRUNCATED_MARKER}\n")
-    if marker:
-        diff_text = body if body.endswith("\n") else body + "\n"
-        truncated = True
     files = parse_diff_files(diff_text)
-    for rel_path in untracked_paths:
-        text = untracked_lookup(rel_path)
-        if text is None:
-            files.append(
-                ChangedFile(
-                    path=rel_path,
-                    status="?",
-                    is_binary=True,
-                    is_image=is_image_file(rel_path),
-                    diff_text=(
-                        f"diff --git a/{rel_path} b/{rel_path}\n"
-                        f"new file mode 100644\n"
-                        f"Binary files /dev/null and b/{rel_path} differ"
-                    ),
-                )
-            )
-            continue
-        body_lines = _split_lines(text)
-        line_count = len(body_lines)
-        # The synthetic diff MUST include a ``@@`` hunk header, otherwise
-        # ``_split_diff_for_render`` can't tell where the meta block ends
-        # and the body begins, and the whole thing ends up styled as the
-        # muted-gray "meta" caption instead of the green "added" body.
-        synthetic = (
-            f"diff --git a/{rel_path} b/{rel_path}\n"
-            f"new file mode 100644\n"
-            f"--- /dev/null\n"
-            f"+++ b/{rel_path}\n"
-            f"@@ -0,0 +1,{line_count} @@\n" + "".join(f"+{line}\n" for line in body_lines)
-        )
-        files.append(
-            ChangedFile(
-                path=rel_path,
-                status="?",
-                additions=line_count,
-                is_image=is_image_file(rel_path),
-                diff_text=synthetic.rstrip("\n"),
-            )
-        )
-    return DiffBundle(files=files, raw=diff_text, truncated=truncated)
+    files.extend(_untracked_file(path, untracked_lookup(path)) for path in untracked_paths)
+    return DiffBundle(files=files, raw=diff_text)
 
 
 def render_file_diff(
@@ -646,7 +662,7 @@ def _hunk_number_width(hunks: list[tuple[str, list[str]]]) -> int:
         match = _HUNK_HEADER_RE.match(header)
         if match:
             span = len(lines)
-            highest = max(highest, int(match.group(1)) + span, int(match.group(2)) + span)
+            highest = max(highest, int(match["old"]) + span, int(match["new"]) + span)
     return len(str(highest))
 
 
@@ -718,10 +734,19 @@ def _hunk_header_row(header: str) -> RichText:
     return RichText(f" {header} ", style=_HUNK_HEADER_STYLE)
 
 
-def _hunk_prefixes(header: str, lines: list[str], number_width: int) -> list[tuple[str, str]]:
-    """``(marker, gutter text)`` per line: the old and new line numbers."""
+def _hunk_start(header: str) -> tuple[int, int]:
     match = _HUNK_HEADER_RE.match(header)
-    old_no, new_no = (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+    return (int(match["old"]), int(match["new"])) if match else (0, 0)
+
+
+def _hunk_prefixes(header: str, lines: list[str], number_width: int) -> list[tuple[str, str]]:
+    return _line_prefixes(lines, *_hunk_start(header), number_width)
+
+
+def _line_prefixes(
+    lines: list[str], old_no: int, new_no: int, number_width: int
+) -> list[tuple[str, str]]:
+    """``(marker, gutter text)`` per line: the old and new line numbers."""
     blank = " " * number_width
     prefixes: list[tuple[str, str]] = []
     for line in lines:
@@ -773,101 +798,231 @@ def _render_hunks(
     return RichText("\n", no_wrap=True, overflow="crop").join(rows)
 
 
+# Lines of a hunk highlighted together: scrolling into a new block lexes
+# that block alone, however long the hunk is.
+_BLOCK_LINES = 1000
+# A block holding more text than this, like a minified bundle, is drawn
+# plain: lexing it would stall the UI.
+_HIGHLIGHT_MAX_CHARS = 256 * 1024
+_BLOCK_CACHE_SIZE = 64
+
+
+def _longest_line_cells(lines: list[str], text: str) -> int:
+    if not lines:
+        return 0
+    if text.isascii():
+        longest = max(map(len, lines))
+        if "\t" in text:
+            longest = max(longest, *(len(line.expandtabs(4)) for line in lines if "\t" in line))
+        return longest
+    return max(
+        len(line) if line.isascii() and "\t" not in line else cell_len(line.expandtabs(4))
+        for line in lines
+    )
+
+
+class _TextLines:
+    """Random access to the lines of a text, with no ``str`` kept per line."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        # A line's end offset, less the newlines before it.
+        self._ends = array("q", accumulate(map(len, lines)))
+        self.longest = _longest_line_cells(lines, text)
+
+    def __len__(self) -> int:
+        return len(self._ends)
+
+    def start(self, index: int) -> int:
+        return self._ends[index - 1] + index if index else 0
+
+    def end(self, index: int) -> int:
+        return self._ends[index] + index
+
+    def __getitem__(self, index: int) -> str:
+        line = self.text[self.start(index) : self.end(index)]
+        return line[:-1] if line.endswith("\r") else line
+
+    def span(self, first: int, last: int) -> list[str]:
+        """Lines *first* through *last*."""
+        text = self.text[self.start(first) : self.end(last)]
+        lines = text.split("\n")
+        if "\r" in text:
+            lines = [line[:-1] if line.endswith("\r") else line for line in lines]
+        return lines
+
+    def index_of(self, offsets: list[int]) -> list[int]:
+        """The line each of the ascending *offsets* falls on."""
+        indices = []
+        index = previous = 0
+        for offset in offsets:
+            index += self.text.count("\n", previous, offset)
+            previous = offset
+            indices.append(index)
+        return indices
+
+
 @dataclass
-class _Hunk:
-    header: str
-    lines: list[str]
+class _Block:
     code: list[str]
     prefixes: list[tuple[str, str]]
-    spans: list[list[Span]] | None = None
+    spans: list[list[Span]]
+
+
+class _Hunk:
+    """A hunk's rows, built a block of lines at a time."""
+
+    def __init__(self, header: str, first: int, end: int, skipped: list[int]) -> None:
+        self.header = header
+        self.first = first
+        # "\ No newline at end of file" lines, which get no row.
+        self.skipped = skipped
+        self.size = end - first - len(skipped)
+        # The old and new line numbers at the start of each block seen so far.
+        self.numbers = [_hunk_start(header)]
+
+    def line_index(self, row: int) -> int:
+        index = self.first + row
+        for skipped in self.skipped:
+            if skipped > index:
+                break
+            index += 1
+        return index
+
+    def block_lines(self, block: int) -> tuple[int, int]:
+        first_row = block * _BLOCK_LINES
+        last_row = min(self.size, first_row + _BLOCK_LINES) - 1
+        return self.line_index(first_row), self.line_index(last_row)
+
+    def block_numbers(self, block: int, lines: _TextLines) -> tuple[int, int]:
+        while len(self.numbers) <= block:
+            done = len(self.numbers) - 1
+            old_no, new_no = self.numbers[done]
+            first, last = self.block_lines(done)
+            start, end = lines.start(first), lines.end(last)
+            rows = min(self.size - done * _BLOCK_LINES, _BLOCK_LINES)
+            added = _count_lines_starting(lines.text, "+", start, end)
+            removed = _count_lines_starting(lines.text, "-", start, end)
+            self.numbers.append((old_no + rows - added, new_no + rows - removed))
+        return self.numbers[block]
 
 
 class DiffDocument:
-    """A file's diff as lines drawn on demand: the viewer shows a screenful
-    at a time, so a hunk is syntax-highlighted only once a line of it is
-    looked at, and a file of any size opens at once.
+    """A file's diff as lines drawn on demand.
 
-    *width* is the widest line in cells (the gutter included), which is
-    also the width every line is padded to.
+    Only line offsets are indexed up front, so a file of any size opens at
+    once; a row is built, and its block of lines syntax-highlighted, when
+    the viewer first draws it.
+
+    *width* is the widest line in cells, the gutter included.
     """
 
     def __init__(self, file: ChangedFile, *, code_width: int) -> None:
         self.file = file
+        self._fixed = [_file_header_row(file)]
+        self._lines: _TextLines | None = None
         self._lexer: Lexer | None = None
+        self._meta_count = 0
         self._hunks: list[_Hunk] = []
-        self._cache: dict[int, RichText] = {}
-        # ("text", RichText) for a fixed line, ("row", hunk, index) for code.
-        self._entries: list[tuple] = [("text", _file_header_row(file))]
+        self._hunk_rows: list[int] = []
+        self._blocks: dict[tuple[int, int], _Block] = {}
         self.gutter_width = 0
-        if file.is_image:
-            self.width = code_width
+        if file.is_image or file.is_binary:
+            if not file.is_image:
+                for line in (
+                    "",
+                    "  Binary file differs from HEAD.",
+                    "  Diff is not shown for binary files.",
+                    "",
+                ):
+                    self._fixed.append(RichText(f"  {line}" if line else "", style="italic dim"))
+            self._length = len(self._fixed)
+            shown = _split_lines(file.diff_text) or [file.display_path]
+            self.width = max(code_width, _longest_line_cells(shown, "\n".join(shown)))
             return
-        if file.is_binary:
-            for line in (
-                "",
-                "  Binary file differs from HEAD.",
-                "  Diff is not shown for binary files.",
-                "",
-            ):
-                self._entries.append(
-                    ("text", RichText(f"  {line}" if line else "", style="italic dim"))
-                )
-            self.width = code_width
-            return
-        meta_lines, hunks = _split_diff_hunks(file.diff_text)
-        self._entries.extend(("text", row) for row in _meta_rows(meta_lines))
-        number_width = _hunk_number_width(hunks)
-        self.gutter_width = 2 * number_width + 4
-        self._lexer = _file_lexer(file.path)
-        for header, lines in hunks:
-            hunk = _Hunk(
-                header,
-                lines,
-                [line[1:].expandtabs(4) for line in lines],
-                _hunk_prefixes(header, lines, number_width),
-            )
-            self._entries.append(("text", _hunk_header_row(header)))
-            self._entries.extend(("row", hunk, index) for index in range(len(lines)))
+
+        lines = self._lines = _TextLines(file.diff_text)
+        text = lines.text
+        headers = _hunk_header_offsets(text)
+        header_lines = lines.index_of([offset for offset, _ in headers])
+        skipped_lines = lines.index_of(list(_line_offsets(text, "\\")))
+        self._meta_count = header_lines[0] if headers else len(lines)
+        row = len(self._fixed) + self._meta_count
+        for at, end in zip(header_lines, [*header_lines[1:], len(lines)]):
+            skipped = skipped_lines[
+                bisect_right(skipped_lines, at) : bisect_right(skipped_lines, end - 1)
+            ]
+            hunk = _Hunk(lines[at], at + 1, end, skipped)
             self._hunks.append(hunk)
-        self.width = code_width + self.gutter_width
+            self._hunk_rows.append(row)
+            row += 1 + hunk.size
+        self._length = row
+
+        highest = max([1, *(max(_hunk_start(hunk.header)) + hunk.size for hunk in self._hunks)])
+        self._number_width = len(str(highest))
+        self.gutter_width = 2 * self._number_width + 4
+        self._lexer = _file_lexer(file.path)
+        self.width = max(code_width, lines.longest) + self.gutter_width
 
     def __len__(self) -> int:
-        return len(self._entries)
+        return self._length
 
     def line(self, index: int) -> RichText:
-        cached = self._cache.get(index)
-        if cached is not None:
-            return cached
-        entry = self._entries[index]
-        if entry[0] == "text":
-            row = entry[1]
-        else:
-            _, hunk, row_index = entry
-            if hunk.spans is None:
-                hunk.spans = _line_spans(hunk.code, self._lexer)
-            marker, prefix = hunk.prefixes[row_index]
-            row = _code_row(
-                marker, prefix, hunk.code[row_index], hunk.spans[row_index], self.gutter_width, None
-            )
-        self._cache[index] = row
-        return row
+        if index < len(self._fixed):
+            return self._fixed[index]
+        assert self._lines is not None
+        meta_index = index - len(self._fixed)
+        if meta_index < self._meta_count:
+            return _meta_row(self._lines[meta_index])
+        position = bisect_right(self._hunk_rows, index) - 1
+        offset = index - self._hunk_rows[position]
+        hunk = self._hunks[position]
+        if offset == 0:
+            return _hunk_header_row(hunk.header)
+        block_index, row = divmod(offset - 1, _BLOCK_LINES)
+        block = self._block(position, block_index)
+        marker, prefix = block.prefixes[row]
+        return _code_row(marker, prefix, block.code[row], block.spans[row], self.gutter_width, None)
+
+    def _block(self, position: int, block_index: int) -> _Block:
+        key = (position, block_index)
+        block = self._blocks.get(key)
+        if block is not None:
+            return block
+        assert self._lines is not None
+        hunk = self._hunks[position]
+        raw = self._lines.span(*hunk.block_lines(block_index))
+        if hunk.skipped:
+            raw = [line for line in raw if not line.startswith("\\")]
+        code = [line[1:].expandtabs(4) for line in raw]
+        lexer = self._lexer if sum(map(len, code)) <= _HIGHLIGHT_MAX_CHARS else None
+        block = _Block(
+            code,
+            _line_prefixes(raw, *hunk.block_numbers(block_index, self._lines), self._number_width),
+            _line_spans(code, lexer),
+        )
+        if len(self._blocks) >= _BLOCK_CACHE_SIZE:
+            del self._blocks[next(iter(self._blocks))]
+        self._blocks[key] = block
+        return block
 
 
 def build_diff_document(file: ChangedFile, *, code_width: int) -> DiffDocument:
+    """*code_width* is the narrowest the code column is drawn."""
     return DiffDocument(file, code_width=code_width)
 
 
-def _meta_rows(lines: list[str]) -> list[RichText]:
-    rows = []
-    for line in lines:
-        row = RichText("    ", style=_CAPTION_BACKGROUND)
-        row.stylize("dim", 2, 4)
-        if line.startswith("diff --git "):
-            row.append(line, style=f"bold {GITHUB_DARK_HEADING}")
-        else:
-            row.append(line, style=f"italic {GITHUB_DARK_MUTED}")
-        rows.append(row)
-    return rows
+def _meta_row(line: str) -> RichText:
+    row = RichText("    ", style=_CAPTION_BACKGROUND)
+    row.stylize("dim", 2, 4)
+    if line.startswith("diff --git "):
+        row.append(line, style=f"bold {GITHUB_DARK_HEADING}")
+    else:
+        row.append(line, style=f"italic {GITHUB_DARK_MUTED}")
+    return row
 
 
 def _file_header_row(file: ChangedFile) -> RichText:

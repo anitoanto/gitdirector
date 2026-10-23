@@ -14,6 +14,7 @@ from gitdirector.agents import (
     AGENT_TRANSCRIPT_OPTION,
     AGENT_WAITER_OPTION,
     CLAUDE_STATUS_EVENTS,
+    CLAUDE_STATUS_MATCHERS,
     claude_status_hook_path,
 )
 from gitdirector.integrations import claude_status as H
@@ -45,7 +46,13 @@ class TestOptionNames:
         assert H.HELPERS_OPTION == AGENT_HELPERS_OPTION
 
     def test_every_listened_event_means_something(self):
+        fields = {"SessionStart": "source", "PreCompact": "trigger", "PostCompact": "trigger"}
+        assert set(fields) == set(CLAUDE_STATUS_MATCHERS)
         for event in CLAUDE_STATUS_EVENTS:
+            if event in CLAUDE_STATUS_MATCHERS:
+                for value in CLAUDE_STATUS_MATCHERS[event].split("|"):
+                    assert _commands(event, **{fields[event]: value}), (event, value)
+                continue
             # SubagentStop only speaks for a subagent (it carries an agent_id).
             assert event in ("SessionEnd", "SubagentStop") or _commands(event), event
 
@@ -63,7 +70,6 @@ class TestMainThread:
             ("PermissionDenied", "running"),
             ("Elicitation", "waiting"),
             ("ElicitationResult", "running"),
-            ("PreCompact", "running"),
             ("Stop", "idle"),
             ("StopFailure", "idle"),
         ],
@@ -82,9 +88,19 @@ class TestMainThread:
         assert _state_set(_commands("PreToolUse", tool_name=tool)).startswith("running")
         assert _state_set(_commands("PermissionRequest", tool_name=tool)) == f"waiting {NOW:.3f}"
 
-    def test_a_manual_compact_ends_idle_and_an_automatic_one_keeps_running(self):
+    def test_a_manual_compact_runs_then_ends_idle(self):
+        assert _state_set(_commands("PreCompact", trigger="manual")).startswith("running")
         assert _state_set(_commands("PostCompact", trigger="manual")).startswith("idle")
-        assert _state_set(_commands("PostCompact", trigger="auto")).startswith("running")
+
+    def test_an_automatic_compact_leaves_the_status_alone(self):
+        # Inside a turn it is already running; idle compaction runs at the prompt.
+        for event in ("PreCompact", "PostCompact"):
+            assert _commands(event, trigger="auto", transcript_path="/t/s.jsonl") == []
+        assert _commands("SessionStart", source="compact", transcript_path="/t/s.jsonl") == []
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear", "fork"])
+    def test_a_new_session_starts_idle(self, source):
+        assert _state_set(_commands("SessionStart", source=source)).startswith("idle")
 
     def test_a_new_prompt_clears_a_subagent_waiter(self):
         unset = ["set-option", "-p", "-u", "-t", PANE, AGENT_WAITER_OPTION]

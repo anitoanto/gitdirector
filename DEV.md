@@ -142,9 +142,13 @@ own, so run it in the container:
 cd stress && docker compose run --rm stress bash /src/stress/handoff.sh   # -> out/handoff.bin
 ```
 
-The file list is one `OptionList` that draws only the rows on screen; the
-earlier widget-per-file list took minutes to mount and reflowed on every
-keypress at that size. Each file's rendered diff is cached per width.
+The diff is never capped, so nothing on the UI thread may cost a Python step
+per line or per file. The parser finds file and hunk boundaries with substring
+searches. A file's `DiffDocument` indexes only line offsets and highlights a
+hunk 1000 lines at a time, as they scroll into view. The file list is one
+`OptionList` whose tiles are built only when drawn, and its two-row line table
+is filled without measuring them. Rows are padded to the pane, not the widest
+line, and the row, block and document caches are bounded.
 
 ## Sessions and panels in tmux
 
@@ -346,8 +350,8 @@ events:
 
 | Hook | Status |
 | --- | --- |
-| `SessionStart`, `Stop`, `StopFailure`, `PostCompact` (manual) | `idle` |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionDenied` (auto mode denied; Claude carries on), `ElicitationResult`, `PreCompact`, `PostCompact` (auto) | `running` |
+| `SessionStart` (not after a compaction), `Stop`, `StopFailure`, `PostCompact` (manual) | `idle` |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionDenied` (auto mode denied; Claude carries on), `ElicitationResult`, `PreCompact` (manual) | `running` |
 | `PermissionRequest` for a tool | `waiting <epoch> approval` |
 | `PermissionRequest` for `AskUserQuestion` or `ExitPlanMode` (a question, not an approval), `Elicitation` | `waiting` |
 | `SessionEnd` | options cleared |
@@ -371,6 +375,17 @@ with `#{s/…//:…}`) so concurrent hooks cannot race:
   sends a lone `SubagentStop` with an empty `agent_type` and is never
   listed. `SessionStart` and `SessionEnd` clear the list; a new prompt does
   not (background subagents keep going).
+
+Automatic compaction changes nothing. Its `auto` trigger also covers idle
+compaction (2.1.299+), which compacts a long conversation left at the prompt
+for about 54 minutes, and the precomputed summary that fires `PreCompact` in
+the background; mapping it to `running` left idle sessions stuck there. The
+`SessionStart` with `source: compact` that follows any compaction is no new
+session, and used to mark a working turn `idle` and drop its helpers. The
+documented hook `matcher`s keep these events from reaching the script at all
+(`CLAUDE_STATUS_MATCHERS`: `manual` for the compaction events,
+`startup|resume|clear|fork` for `SessionStart`), and the script ignores them
+too.
 
 `Notification` is not used: most of its types (`agent_completed`,
 `elicitation_response`, `auth_success`, ...) are not about the user being

@@ -12,7 +12,6 @@ import inspect
 import logging
 from pathlib import Path
 
-from rich.cells import cell_len
 from rich.color import Color
 from rich.markup import escape
 from rich.segment import Segment, Segments
@@ -26,7 +25,7 @@ from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.scrollbar import ScrollBarRender
 from textual.strip import Strip
-from textual.widgets import LoadingIndicator, OptionList, Static
+from textual.widgets import Input, LoadingIndicator, OptionList, Static
 
 from ..diff_renderer import (
     ChangedFile,
@@ -51,6 +50,9 @@ logger = logging.getLogger(__name__)
 
 _FOCUS_FILES = "files"
 _FOCUS_DIFF = "diff"
+# Bounds memory however far a huge diff is scrolled or browsed.
+_STRIP_CACHE_SIZE = 2048
+_DOCUMENT_CACHE_SIZE = 16
 
 
 class _ThinHorizontalScrollBarRender(ScrollBarRender):
@@ -110,7 +112,7 @@ class DiffContentView(ScrollView, can_focus=True):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._document: DiffDocument | None = None
-        self._strips: dict[tuple[int, Style], Strip] = {}
+        self._strips: dict[tuple[int, Style], tuple[Strip, Style]] = {}
 
     def on_mount(self) -> None:
         self.horizontal_scrollbar.renderer = _ThinHorizontalScrollBarRender
@@ -128,10 +130,11 @@ class DiffContentView(ScrollView, can_focus=True):
         self.scroll_to(0, 0, animate=False, force=True)
         self.refresh()
 
-    def _line_strip(self, index: int, base: Style) -> Strip:
+    def _line_strip(self, index: int, base: Style) -> tuple[Strip, Style]:
+        """The line's own cells, unpadded, and the style that fills past them."""
         key = (index, base)
-        strip = self._strips.get(key)
-        if strip is None:
+        cached = self._strips.get(key)
+        if cached is None:
             document = self._document
             assert document is not None
             text = document.line(index)
@@ -139,9 +142,11 @@ class DiffContentView(ScrollView, can_focus=True):
             # Text.render leaves a span-free line's own style off: apply it here.
             line_style = base + console.get_style(text.style) if text.style else base
             segments = Segment.apply_style(text.render(console, end=""), line_style)
-            strip = Strip(segments).extend_cell_length(document.width, line_style)
-            self._strips[key] = strip
-        return strip
+            cached = (Strip(segments), line_style)
+            if len(self._strips) >= _STRIP_CACHE_SIZE:
+                del self._strips[next(iter(self._strips))]
+            self._strips[key] = cached
+        return cached
 
     def render_line(self, y: int) -> Strip:
         base = self.rich_style
@@ -151,17 +156,19 @@ class DiffContentView(ScrollView, can_focus=True):
         document = self._document
         if document is None or index >= len(document):
             return Strip.blank(width, base)
-        strip = self._line_strip(index, base)
-        fill = strip._segments[-1].style if strip._segments else base
-        return strip.crop(scroll_x, scroll_x + width).extend_cell_length(width, fill or base)
+        strip, fill = self._line_strip(index, base)
+        # Padding only the visible slice keeps one very wide line from
+        # widening every other line's strip to match it.
+        return strip.crop(scroll_x, scroll_x + width).extend_cell_length(width, fill)
 
 
 class DiffReviewScreen(ModalScreen[None]):
     """Two-pane modal showing the uncommitted diff for a single repository."""
 
     BINDINGS = [
-        Binding("escape", "close", "Esc close", show=True),
+        Binding("escape", "escape", "Esc close", show=True),
         Binding("q", "close", "q close", show=False),
+        Binding("slash", "search", "/ search", show=False),
         Binding("tab", "switch_focus", "Tab switch panel", show=True),
         Binding("shift+tab", "switch_focus_back", "Shift+Tab switch panel", show=False),
         Binding("j", "cursor_down", "↓", show=False),
@@ -278,6 +285,32 @@ class DiffReviewScreen(ModalScreen[None]):
         padding: 0 2;
         color: $text-muted;
     }
+    #diff-search-indicator {
+        height: 1;
+        display: none;
+        background: $highlight;
+        color: $text;
+        padding: 0 2;
+    }
+    #diff-search-container {
+        height: 3;
+        display: none;
+        background: $boost;
+        padding: 0 1;
+        align: left middle;
+    }
+    #diff-search-label {
+        width: auto;
+        color: $text-accent;
+        padding: 0 1 0 0;
+    }
+    #diff-search-bar {
+        width: 1fr;
+        height: 3;
+        border: none;
+        background: $boost;
+        color: $text;
+    }
     #diff-hint {
         dock: bottom;
         height: 1;
@@ -293,14 +326,16 @@ class DiffReviewScreen(ModalScreen[None]):
         self.repo_path = repo_path
         self.branch = branch
         self._files: list[ChangedFile] = []
-        self._truncated = False
+        # The files the search query lets through, as the list shows them.
+        self._shown: list[ChangedFile] = []
+        self._query = ""
         self._focus_target: str = _FOCUS_FILES
         self._loading = True
         self._load_failed: str | None = None
         # Bumped per load so a slower, superseded worker cannot apply its
         # result over a newer one: a thread worker cannot be interrupted.
         self._load_generation = 0
-        self._diff_renders: dict[tuple[int, int], DiffDocument] = {}
+        self._diff_renders: dict[tuple[str, int], DiffDocument] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="diff-container"):
@@ -313,6 +348,7 @@ class DiffReviewScreen(ModalScreen[None]):
             with Horizontal(id="diff-body"):
                 with Vertical(id="diff-files-pane"):
                     yield Static("FILES", id="diff-files-pane-label", classes="diff-pane-label")
+                    yield Static("", id="diff-search-indicator")
                     yield FileTileList(id="diff-files-list")
                 with Vertical(id="diff-content-pane"):
                     yield Static("DIFF", id="diff-content-pane-label", classes="diff-pane-label")
@@ -321,6 +357,9 @@ class DiffReviewScreen(ModalScreen[None]):
                         yield LoadingIndicator()
                         yield Static("Loading diff\u2026", id="diff-loading-text")
                     yield Static("", id="diff-empty")
+            with Horizontal(id="diff-search-container"):
+                yield Static("/ search:", id="diff-search-label")
+                yield Input(placeholder="file name or path…", id="diff-search-bar")
             yield Static(
                 key_hints(
                     ("tab", "switch pane"),
@@ -328,6 +367,7 @@ class DiffReviewScreen(ModalScreen[None]):
                     ("J/K", "page"),
                     ("h/l", "scroll"),
                     ("\\[ ]", "file"),
+                    ("/", "search"),
                     ("g", "commit"),
                     ("r", "refresh"),
                     ("esc", "close"),
@@ -429,14 +469,15 @@ class DiffReviewScreen(ModalScreen[None]):
 
     async def _apply_bundle(self, bundle: DiffBundle) -> None:
         self._files = list(bundle.files)
-        self._truncated = bundle.truncated
         self._diff_renders.clear()
         self._loading = False
         self._load_failed = None
 
         files_list = self.query_one("#diff-files-list", FileTileList)
         if not self._files:
+            self._shown = []
             await files_list.set_files([])
+            self._update_search_indicator()
             try:
                 self.query_one("#diff-loading").display = False
             except Exception:
@@ -451,11 +492,40 @@ class DiffReviewScreen(ModalScreen[None]):
             self._update_summary()
             return
 
-        await files_list.set_files(self._files, repo_dir=str(self.repo_path))
-        self._render_selected_file()
-        self._show_content()
+        await self._show_files()
         self._update_summary()
         self._apply_focus()
+
+    def _matches(self, file: ChangedFile) -> bool:
+        query = self._query.lower()
+        return query in file.path.lower() or query in (file.old_path or "").lower()
+
+    async def _show_files(self, keep: str | None = None) -> None:
+        """List the files the query lets through, *keep*'s path selected if still listed."""
+        files_list = self.query_one("#diff-files-list", FileTileList)
+        self._shown = [f for f in self._files if self._matches(f)] if self._query else self._files
+        await files_list.set_files(self._shown, repo_dir=str(self.repo_path))
+        paths = [f.path for f in self._shown]
+        if keep in paths:
+            files_list.index = paths.index(keep)
+        self._update_search_indicator()
+        self._show_content()
+        empty = self.query_one("#diff-empty", Static)
+        empty.display = not self._shown
+        if not self._shown:
+            self.query_one("#diff-content-scroll").display = False
+            empty.update(f"[dim]no files match '{escape(self._query)}'[/dim]")
+            return
+        self._render_selected_file()
+
+    def _update_search_indicator(self) -> None:
+        indicator = self.query_one("#diff-search-indicator", Static)
+        if self._query:
+            indicator.update(
+                f"[bold]{len(self._shown)}[/bold] of {len(self._files)} for "
+                f"'[bold]{escape(self._query)}[/bold]'   [bold]esc[/bold] clear"
+            )
+        indicator.display = bool(self._query and self._files)
 
     def _update_summary(self) -> None:
         summary = self.query_one("#diff-summary", Static)
@@ -473,32 +543,29 @@ class DiffReviewScreen(ModalScreen[None]):
         total_del = sum(f.deletions for f in self._files)
         count = len(self._files)
         noun = "file" if count == 1 else "files"
-        truncated = (
-            "   [$text-warning]too large: later files not shown[/]" if self._truncated else ""
-        )
         summary.update(
-            f"{count} {noun}   [$text-success]+{total_add}[/] [$text-error]-{total_del}[/]"
-            f"{branch}{truncated}"
+            f"{count} {noun}   [$text-success]+{total_add}[/] [$text-error]-{total_del}[/]{branch}"
         )
 
     def _render_selected_file(self) -> None:
-        if not self._files:
+        if not self._shown:
             return
-        index = self._current_file_index()
-        if index is None:
-            # No selection yet (e.g. a caller invoked us before the
-            # list's deferred initial selection has run). Fall back to
-            # the first file so the panel is never blank when we have
-            # content to show.
-            index = 0
-        file = self._files[index]
+        try:
+            file = self.query_one("#diff-files-list", FileTileList).selected_file()
+        except Exception:
+            return
+        # Before the list's deferred initial selection the panel shows the
+        # first file, so it is never blank while there is content.
+        file = file or self._shown[0]
         try:
             view = self.query_one("#diff-content-scroll", DiffContentView)
-            code_width = self._diff_code_width(file)
-            key = (index, code_width)
+            code_width = self._content_width()
+            key = (file.path, code_width)
             document = self._diff_renders.get(key)
             if document is None:
                 document = build_diff_document(file, code_width=code_width)
+                if len(self._diff_renders) >= _DOCUMENT_CACHE_SIZE:
+                    del self._diff_renders[next(iter(self._diff_renders))]
                 self._diff_renders[key] = document
             view.set_document(document)
             self._apply_content_tone(file)
@@ -528,26 +595,9 @@ class DiffReviewScreen(ModalScreen[None]):
         except Exception:
             return 100
 
-    def _diff_code_width(self, file: ChangedFile) -> int:
-        longest_line = 0
-        lines = file.diff_text.split("\n") if file.diff_text else [file.display_path]
-        for line in lines:
-            longest_line = max(longest_line, cell_len(line.expandtabs(4)))
-        return max(self._content_width(), longest_line)
-
-    def _current_file_index(self) -> int | None:
-        try:
-            files_list = self.query_one("#diff-files-list", FileTileList)
-            index = files_list.index
-        except Exception:
-            return None
-        if index is None or not self._files:
-            return None
-        return max(0, min(index, len(self._files) - 1))
-
     def _apply_focus(self) -> None:
         target = self._focus_target
-        if not self._files:
+        if not self._shown:
             target = _FOCUS_FILES
         try:
             self._mark_focus(target)
@@ -594,31 +644,31 @@ class DiffReviewScreen(ModalScreen[None]):
         self._apply_focus()
 
     def action_switch_focus(self) -> None:
-        if not self._files:
+        if not self._shown:
             return
         self._focus_target = _FOCUS_DIFF if self._focus_target == _FOCUS_FILES else _FOCUS_FILES
         self._apply_focus()
 
     def action_switch_focus_back(self) -> None:
-        if not self._files:
+        if not self._shown:
             return
         self._focus_target = _FOCUS_FILES if self._focus_target == _FOCUS_DIFF else _FOCUS_DIFF
         self._apply_focus()
 
     def _move_file(self, delta: int) -> None:
-        if not self._files:
+        if not self._shown:
             return
         files_list = self.query_one("#diff-files-list", FileTileList)
         if files_list.index is None:
             files_list.index = 0
             return
-        new_index = max(0, min(len(self._files) - 1, files_list.index + delta))
+        new_index = max(0, min(len(self._shown) - 1, files_list.index + delta))
         if new_index == files_list.index:
             return
         files_list.index = new_index
 
     def action_cursor_down(self) -> None:
-        if self._focus_target == _FOCUS_FILES or not self._files:
+        if self._focus_target == _FOCUS_FILES or not self._shown:
             self._move_file(1)
             return
         try:
@@ -627,7 +677,7 @@ class DiffReviewScreen(ModalScreen[None]):
             pass
 
     def action_cursor_up(self) -> None:
-        if self._focus_target == _FOCUS_FILES or not self._files:
+        if self._focus_target == _FOCUS_FILES or not self._shown:
             self._move_file(-1)
             return
         try:
@@ -636,7 +686,7 @@ class DiffReviewScreen(ModalScreen[None]):
             pass
 
     def action_cursor_page_down(self) -> None:
-        if self._focus_target == _FOCUS_FILES or not self._files:
+        if self._focus_target == _FOCUS_FILES or not self._shown:
             self._move_file(1)
             return
         try:
@@ -645,7 +695,7 @@ class DiffReviewScreen(ModalScreen[None]):
             pass
 
     def action_cursor_page_up(self) -> None:
-        if self._focus_target == _FOCUS_FILES or not self._files:
+        if self._focus_target == _FOCUS_FILES or not self._shown:
             self._move_file(-1)
             return
         try:
@@ -660,13 +710,13 @@ class DiffReviewScreen(ModalScreen[None]):
         self._move_file(-1)
 
     def action_cursor_right(self) -> None:
-        if self._focus_target == _FOCUS_DIFF and self._files:
+        if self._focus_target == _FOCUS_DIFF and self._shown:
             self.action_scroll_right()
             return
         self.action_next_file()
 
     def action_cursor_left(self) -> None:
-        if self._focus_target == _FOCUS_DIFF and self._files:
+        if self._focus_target == _FOCUS_DIFF and self._shown:
             self.action_scroll_left()
             return
         self.action_prev_file()
@@ -876,6 +926,46 @@ class DiffReviewScreen(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+    async def action_escape(self) -> None:
+        if self._query or self.query_one("#diff-search-container").display:
+            await self._close_search()
+        else:
+            self.action_close()
+
+    def action_search(self) -> None:
+        if self._loading or self._load_failed or not self._files:
+            return
+        self.query_one("#diff-search-container").display = True
+        self.query_one("#diff-search-bar", Input).focus()
+
+    def _selected_path(self) -> str | None:
+        file = self.query_one("#diff-files-list", FileTileList).selected_file()
+        return file.path if file is not None else None
+
+    async def _set_query(self, query: str) -> None:
+        self._query = query
+        await self._show_files(keep=self._selected_path())
+
+    async def _close_search(self) -> None:
+        self.query_one("#diff-search-container").display = False
+        self.query_one("#diff-search-bar", Input).value = ""
+        if self._query:
+            await self._set_query("")
+        self._focus_target = _FOCUS_FILES
+        self._apply_focus()
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "diff-search-bar" and event.value != self._query:
+            await self._set_query(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "diff-search-bar":
+            return
+        event.stop()
+        self.query_one("#diff-search-container").display = False
+        self._focus_target = _FOCUS_FILES
+        self._apply_focus()
 
 
 __all__ = ["DiffReviewScreen"]
