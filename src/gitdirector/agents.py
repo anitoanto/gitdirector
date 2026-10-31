@@ -33,17 +33,16 @@ AGENT_STATE_OPTION = "@gitdirector_agent_state"
 AGENT_WAITER_OPTION = "@gitdirector_agent_waiter"
 #: `` <id> <id>`` of the Claude Code subagents still working (see ``claude_status``).
 AGENT_HELPERS_OPTION = "@gitdirector_agent_helpers"
+#: `` <id> <id>`` of the background shells Claude Code started.
+AGENT_SHELLS_OPTION = "@gitdirector_agent_shells"
 #: Claude Code's transcript, where an interrupt (which fires no hook) shows.
 AGENT_TRANSCRIPT_OPTION = "@gitdirector_agent_transcript"
 
 AGENT_STATE_WAITING = "waiting"
 AGENT_STATE_RUNNING = "running"
-#: At its prompt while subagents it started still work (OpenCode reports it;
-#: for Claude Code the monitor derives it).
-AGENT_STATE_PENDING = "pending"
 AGENT_STATE_IDLE = "idle"
 AGENT_STATES: frozenset[str] = frozenset(
-    {AGENT_STATE_WAITING, AGENT_STATE_RUNNING, AGENT_STATE_PENDING, AGENT_STATE_IDLE}
+    {AGENT_STATE_WAITING, AGENT_STATE_RUNNING, AGENT_STATE_IDLE}
 )
 #: Its answer fires no hook, so the monitor infers it from the tool's process.
 AGENT_APPROVAL = "approval"
@@ -52,7 +51,8 @@ AGENT_APPROVAL = "approval"
 #: ``Notification`` is left out: most of its types (``agent_completed``,
 #: ``elicitation_response``, ``auth_success``...) are not about the user
 #: being needed, and ``PermissionRequest`` already reports the ones that are.
-#: ``SubagentStop`` fires for Claude's own helpers after a turn has ended.
+#: ``SubagentStart``/``SubagentStop`` track subagents, which keep working
+#: after a turn has ended (``SubagentStop`` also fires for Claude's own helpers).
 CLAUDE_STATUS_EVENTS: tuple[str, ...] = (
     "SessionStart",
     "UserPromptSubmit",
@@ -68,6 +68,7 @@ CLAUDE_STATUS_EVENTS: tuple[str, ...] = (
     "PostCompact",
     "Stop",
     "StopFailure",
+    "SubagentStart",
     "SubagentStop",
     "SessionEnd",
 )
@@ -242,10 +243,10 @@ __all__ = [
     "AGENTS_BY_KEY",
     "AGENT_APPROVAL",
     "AGENT_HELPERS_OPTION",
+    "AGENT_SHELLS_OPTION",
     "AGENT_STATES",
     "AGENT_STATE_IDLE",
     "AGENT_STATE_OPTION",
-    "AGENT_STATE_PENDING",
     "AGENT_STATE_RUNNING",
     "AGENT_STATE_WAITING",
     "AGENT_TRANSCRIPT_OPTION",

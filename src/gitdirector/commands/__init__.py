@@ -42,8 +42,6 @@ error_console = Console(highlight=False, stderr=True)
 # Styles shared with the console's design language.
 ATTENTION = "bold yellow"
 SUCCESS = "bold green"
-# Work goes on in a subagent: the same green, the ◐ glyph tells them apart.
-PENDING = SUCCESS
 DANGER = "bold red"
 MUTED = "dim"
 

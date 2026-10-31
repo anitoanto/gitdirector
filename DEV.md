@@ -323,15 +323,16 @@ without `PWD`/`OLDPWD` (`launch_context.py`).
 
 ### Agent-reported status
 
-Four statuses, one meaning each: `running` (the agent is working), `waiting`
-(it needs a human to act), `pending` (the agent is at its prompt while
-subagents it started still work), `idle` (it is doing nothing). An agent with lifecycle hooks reports its own, and the monitor
-trusts it instead of watching the pane (no captures, no heuristics). The
-protocol is a tmux pane option, `@gitdirector_agent_state`, holding
-`running`, `waiting`, `pending`, or `idle`, optionally followed by the
-epoch of the report (`running 1788714352.120`) and, on a `waiting`, by
-`approval` when a tool waits for permission (see below). OpenCode reports
-`pending` itself; for Claude Code the monitor derives it (below).
+Three statuses, one meaning each: `running` (the agent's main thread, a
+subagent it started, or a shell it started is working; nothing else counts),
+`waiting` (it needs a human to act), `idle` (otherwise). An agent with
+lifecycle hooks reports its own, and the monitor trusts it instead of
+watching the pane (no captures, no heuristics). The protocol is a tmux pane
+option, `@gitdirector_agent_state`, holding `running`, `waiting`, or
+`idle`, optionally followed by the epoch of the report
+(`running 1788714352.120`) and, on a `waiting`, by `approval` when a tool
+waits for permission (see below). That is the main thread's status; for
+Claude Code the monitor adds the subagents and shells (below).
 It is pane scoped because a session shown in a panel is also reachable
 through the panel's grouped view session, and a session option set through
 `$TMUX_PANE` lands on whichever of the two tmux picks. `list-panes` reads it
@@ -358,7 +359,8 @@ events:
 
 Events from subagents carry an `agent_id` and an `agent_type`, and keep
 firing after the main turn has ended (a background subagent's tool calls),
-so they never touch the main state. They keep two pane options instead,
+so they never touch the main state. Background work is kept in three pane
+options instead,
 each changed inside tmux (`if-shell -F`, `set-option -a`, `set-option -F`
 with `#{s/…//:…}`) so concurrent hooks cannot race:
 
@@ -367,14 +369,24 @@ with `#{s/…//:…}`) so concurrent hooks cannot race:
   subagent's next tool result or its `SubagentStop` clears it, and so does a
   new prompt.
 - `@gitdirector_agent_helpers` = `` <id> <id>`` of the subagents still
-  working. No hook marks a subagent's start (`SubagentStart` never fires in
-  2.1.282), so a subagent is listed on its first `PreToolUse`, which Claude
-  waits for and so lands before its `SubagentStop`, and removed on the
+  working. A subagent is listed on its `SubagentStart` (2.1.311 fires it;
+  2.1.282 did not, so its first `PreToolUse`, which Claude waits for and so
+  lands before its `SubagentStop`, lists it too) and removed on the
   `PostToolUse` of its `SubagentHandback` (its last tool call) or on its
   `SubagentStop`, whichever gets through first. Claude Code's own helper
   sends a lone `SubagentStop` with an empty `agent_type` and is never
-  listed. `SessionStart` and `SessionEnd` clear the list; a new prompt does
-  not (background subagents keep going).
+  listed.
+- `@gitdirector_agent_shells` = `` <id> <id>`` of the background shells
+  started: a Bash call (main thread or subagent) whose `tool_response`
+  carries a `backgroundTaskId` lists it. No hook marks a shell's end.
+- The main thread's `Stop` carries `background_tasks`, everything still in
+  flight (`{"id", "type", "status", ...}`; a subagent's task id is its
+  `agent_id`), and rewrites both lists from its `subagent` and `shell`
+  entries. Other types (`monitor`, `workflow`, `MCP task`, ...) are not
+  counted. Only `Stop` does this: no subagent can start then, while a
+  `SubagentStop` still lists the subagent that is stopping. `SessionStart`
+  and `SessionEnd` clear both lists; a new prompt does not (background work
+  keeps going).
 
 Automatic compaction changes nothing. Its `auto` trigger also covers idle
 compaction (2.1.299+), which compacts a long conversation left at the prompt
@@ -410,23 +422,27 @@ records (`resolve_agent_status` in `monitor.py`):
   open question to `running`. Answering a question fires `PostToolUse` at
   once, so it needs no inference.
 
-The monitor then turns an `idle` into `pending` while
-`@gitdirector_agent_helpers` lists a subagent that is still working. The
-list is kept by best-effort hooks (one seen live never took effect and left
-a finished subagent listed), so the monitor never trusts it alone: a
+The monitor then turns an `idle` into `running` while a listed subagent or
+shell still works. The lists are kept by best-effort hooks (one seen live
+never took effect and left a finished subagent listed), so the monitor
+never trusts them alone. A shell counts only while Claude has a
+non-interactive shell child (`zsh -c source …/shell-snapshots/…`) that has
+lived 2 s; the list gates this so MCP servers and other children never
+count, and the age keeps out hook and status-line commands. For a subagent, a
 subagent's transcript is `<session>/subagents/agent-<id>.jsonl` beside the
 session's own (`_has_live_helper`), and a listed subagent counts as gone
 when that file is missing, when its last `assistant` entry carries
 `stop_reason: end_turn` (a subagent runs one turn, so that is its final
 message; the tail is re-read only when the file changes), or when it has
 been quiet for 2 minutes (a killed subagent never sends its
-`SubagentStop`; a working one writes at every tool call). `running` and
-`waiting` always win over `pending`. Background shells are not counted: a
-dev server never finishes. A finished background task or subagent comes
-back as a queued message, which fires `UserPromptSubmit` then `Stop`, so it
-needs no special case. Verified live against Claude Code 2.1.282, in
-default and auto mode, with the hand-back arriving both at the prompt and
-mid-turn.
+`SubagentStop`; a working one writes at every tool call). `waiting` always
+wins. A background shell that never ends (a dev server) keeps the session
+`running` for as long as it runs. A finished background shell or subagent
+comes back as a queued message, which fires `UserPromptSubmit` then a `Stop`
+whose `background_tasks` no longer lists it. Verified live against Claude
+Code 2.1.282 (subagents, in default and auto mode, with the hand-back
+arriving both at the prompt and mid-turn) and 2.1.311 (a background shell
+and a background subagent at once: `running` until the last of them ends).
 
 **OpenCode.** The launch entry sets `OPENCODE_CONFIG_CONTENT` to a config
 that adds one plugin, `src/gitdirector/integrations/opencode_status.js`
@@ -438,17 +454,16 @@ the most urgent state across every session the process holds:
 | --- | --- |
 | `permission.asked`, `question.asked` | the request is pending |
 | `permission.replied`, `question.replied`, `question.rejected` | the request is no longer pending |
-| `session.created`, `session.updated` with `info.parentID` | the session is a subagent (a child session) |
 | `session.status` `busy` or `retry` | the session has a turn in progress |
 | `session.status` `idle`, `session.idle`, `session.error`, `session.deleted` | the session is no longer busy, and its pending requests are dropped |
 
 After every event the reported state is `waiting` if any request is pending,
-else `running` if a top-level session is busy, else `pending` if only
-subagents are busy, else `idle`; the option is only rewritten when that
-state changes. A subagent normally blocks its parent (`running`); with
+else `running` if any session is busy, else `idle`; the option is only
+rewritten when that state changes. A subagent is a child session, so with
 background subagents (`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`, or
 detaching a running one) the parent returns to its prompt while the child
-works, which is `pending`. Verified live against OpenCode 1.18.32;
+works, which is still `running`. OpenCode has no background shells: its
+bash tool runs inside a busy turn. Verified live against OpenCode 1.18.32;
 `tests/test_opencode_status.py` replays the recorded events through the
 plugin with Node. OpenCode reports an interrupted turn as
 idle itself. `opencode --pure` disables external plugins and therefore this

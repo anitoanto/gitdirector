@@ -134,7 +134,6 @@ class SessionActionMenuScreen(ShortcutKeys, ModalScreen[str]):
         styles = {
             "waiting": ("●", f"bold {palette.yellow}"),
             "running": ("●", palette.success),
-            "pending": ("◐", palette.pending),
             "idle": ("○", palette.muted),
         }
         statuses = self._session_statuses()

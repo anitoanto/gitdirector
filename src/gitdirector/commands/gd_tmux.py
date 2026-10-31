@@ -29,7 +29,7 @@ def register(cli: click.Group):
         e.g. "make test 2>&1 | tee /tmp/test.log".
 
         An agent started with --agent reports its status (running, waiting,
-        pending, idle) exactly, like one started from the console.
+        idle) exactly, like one started from the console.
 
         \b
         Examples:

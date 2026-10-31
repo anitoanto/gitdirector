@@ -63,7 +63,7 @@ def _created(session: str, parent: str | None = None) -> dict:
     return {"type": "session.created", "properties": {"info": info}}
 
 
-def test_a_background_subagent_leaves_its_parent_pending():
+def test_a_background_subagent_keeps_its_idle_parent_running():
     # Recorded from OpenCode 1.18.32 with OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS.
     events = [
         _created("main"),
@@ -75,7 +75,7 @@ def test_a_background_subagent_leaves_its_parent_pending():
         _status("main", "busy"),
         _status("main", "idle"),
     ]
-    assert _states(events) == ["idle", "running", "pending", "idle", "running", "idle"]
+    assert _states(events) == ["idle", "running", "idle", "running", "idle"]
 
 
 def test_a_foreground_subagent_keeps_its_parent_running():
@@ -97,4 +97,4 @@ def test_a_question_from_a_subagent_still_waits():
         {"type": "question.asked", "properties": {"id": "q1", "sessionID": "sub"}},
         {"type": "question.replied", "properties": {"requestID": "q1", "sessionID": "sub"}},
     ]
-    assert _states(events) == ["idle", "pending", "waiting", "pending"]
+    assert _states(events) == ["idle", "running", "waiting", "running"]

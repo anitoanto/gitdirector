@@ -44,17 +44,17 @@ def monitor(monkeypatch):
 
 
 class TestSessions:
-    def test_pending_is_shown_and_counted(self, monitor):
+    def test_waiting_and_running_are_counted(self, monitor):
         name = "gd/web_aaaaa/claude-auto/2"
-        monitor.refresh.return_value = {**monitor.refresh.return_value, name: "pending"}
+        monitor.refresh.return_value = {**monitor.refresh.return_value, name: "waiting"}
 
         result = CliRunner().invoke(cli, ["sessions"])
 
         assert result.exit_code == 0, result.output
-        assert "◐ pending" in result.output
-        assert result.output.splitlines()[-1] == "3 sessions · 1 running · 1 pending"
+        assert "● waiting" in result.output
+        assert result.output.splitlines()[-1] == "3 sessions · 1 waiting · 1 running"
         sessions = json.loads(CliRunner().invoke(cli, ["sessions", "--json"]).stdout)
-        assert {s["session"]: s["status"] for s in sessions}[name] == "pending"
+        assert {s["session"]: s["status"] for s in sessions}[name] == "waiting"
 
     def test_table_groups_sessions_by_repo(self, monitor):
         result = CliRunner().invoke(cli, ["sessions"])

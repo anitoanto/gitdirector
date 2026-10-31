@@ -70,10 +70,6 @@ class TestSessionsText:
         sessions = RepoSessions((("claude-auto", "running"), ("shell", "idle")))
         assert sessions_text(sessions, PALETTE).plain == "● claude-auto  ● shell"
 
-    def test_a_pending_session_has_a_half_dot(self):
-        text = sessions_text(RepoSessions((("claude", "pending"),)), PALETTE)
-        assert text.plain == "◐ claude"
-
     def test_a_waiting_session_is_yellow(self):
         text = sessions_text(RepoSessions((("claude", "waiting"),)), PALETTE)
         assert text.plain == "● claude"

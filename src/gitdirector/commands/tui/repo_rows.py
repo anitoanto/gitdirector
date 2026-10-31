@@ -157,8 +157,6 @@ def _session_items(sessions: RepoSessions | None, palette: TablePalette) -> list
         if status == "waiting":
             waiting = f"bold {palette.yellow}"
             items.append(Text.assemble(("● ", waiting), (purpose, waiting)))
-        elif status == "pending":
-            items.append(Text.assemble(("◐ ", palette.pending), purpose))
         else:
             items.append(Text.assemble(("● ", palette.success), purpose))
     return items

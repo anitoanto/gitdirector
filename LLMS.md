@@ -1,6 +1,6 @@
 ---
 name: gitdirector
-description: Drive GitDirector from a shell. Run dev servers, watchers, REPLs, and other AI coding agents in background tmux sessions; read their output, send them input, and watch whether they are running, waiting, pending, or idle. Use when the user asks you to use GitDirector, `gitdirector`, or `gd`.
+description: Drive GitDirector from a shell. Run dev servers, watchers, REPLs, and other AI coding agents in background tmux sessions; read their output, send them input, and watch whether they are running, waiting, or idle. Use when the user asks you to use GitDirector, `gitdirector`, or `gd`.
 ---
 
 # GitDirector for AI agents
@@ -86,9 +86,8 @@ gitdirector gd-screenshot "$S" /tmp/api-session.png   # prints the saved path
 
 | status | meaning |
 | --- | --- |
-| `running` | the program is working |
+| `running` | the program is working; for an agent, also while subagents or background shells it started still run |
 | `waiting` | it needs a person: a permission prompt, a question, or a bell |
-| `pending` | the agent (Claude Code or OpenCode) is at its prompt, but subagents it started are still working; not done yet |
 | `idle` | nothing is happening; an agent is at its prompt, or a shell is at `$` |
 
 Agents started with `--agent claude` or `--agent opencode` report their own
@@ -113,7 +112,6 @@ S=$(gitdirector gd-tmux /abs/path/api --agent claude -d "Claude: fix auth tests"
 gitdirector gd-send "$S" "Fix the failing tests in tests/auth, then run them" --enter
 
 # Poll until it is idle (done) or waiting (needs an answer), then read it.
-# pending means its background subagents are still working: keep polling.
 gitdirector sessions --json
 gitdirector gd-capture "$S" -n 80
 

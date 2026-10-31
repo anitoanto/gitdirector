@@ -21,11 +21,17 @@ infers it from the tool's process; ``approval`` tells it to. Answering a
 question (``AskUserQuestion``, ``ExitPlanMode``, an MCP elicitation) fires
 ``PostToolUse`` or ``ElicitationResult`` at once and needs no guessing.
 * ``@gitdirector_agent_helpers``: `` <id> <id>`` of the subagents still
-  working, so a main thread at its prompt reads as pending. A subagent is
-  listed from its first tool call (no hook marks its start) until its
-  hand-back or its ``SubagentStop``; Claude Code's own helper stops without
-  ever starting. Hooks are best-effort, so the monitor checks the listed
-  subagents' transcripts before it trusts the list.
+  working, so a main thread at its prompt still reads as running. A
+  subagent is listed from its ``SubagentStart`` (or, on versions without
+  it, its first tool call) until its hand-back or its ``SubagentStop``;
+  Claude Code's own helper stops without ever starting.
+* ``@gitdirector_agent_shells``: `` <id> <id>`` of the background shells
+  started, likewise counted as running. A shell is listed when its Bash call
+  returns its ``backgroundTaskId``; no hook marks its end.
+
+Every ``Stop`` carries ``background_tasks``, the work still in flight, and
+rewrites both lists from it. Hooks are best-effort, so the monitor checks
+the subagents' transcripts and the shells' processes before it trusts them.
 * ``@gitdirector_agent_transcript``: the transcript, where the monitor sees
   an interrupt, the one transition no hook reports.
 
@@ -44,6 +50,7 @@ import time
 STATE_OPTION = "@gitdirector_agent_state"
 WAITER_OPTION = "@gitdirector_agent_waiter"
 HELPERS_OPTION = "@gitdirector_agent_helpers"
+SHELLS_OPTION = "@gitdirector_agent_shells"
 TRANSCRIPT_OPTION = "@gitdirector_agent_transcript"
 
 _RUNNING = "running"
@@ -73,6 +80,9 @@ _FRESH = frozenset({"SessionStart", "UserPromptSubmit"})
 _QUESTION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
 # A subagent's final tool call: it delivers the report and then stops.
 _HANDBACK_TOOL = "SubagentHandback"
+# ``background_tasks`` types: everything else in flight is not counted.
+_SUBAGENT_TASK = "subagent"
+_SHELL_TASK = "shell"
 APPROVAL = "approval"
 
 
@@ -97,6 +107,57 @@ def main_status(event: str, payload: dict) -> str | None:
     return _MAIN_STATUS.get(event)
 
 
+def _is_id(value: str) -> bool:
+    return bool(value) and value.replace("-", "").isalnum()
+
+
+def _add_to_list(option: str, item: str, pane: str) -> list[str]:
+    """Append *item* to the `` <id> <id>`` list in *option* unless it is listed."""
+    listed = f"#{{m:* {item} *, #{{{option}}} }}"
+    add = f"set-option -p -a -t {pane} {option} ' {item}'"
+    return ["if-shell", "-F", "-t", pane, listed, "", add]
+
+
+def _set_list(option: str, items: list[str], pane: str) -> list[str]:
+    if not items:
+        return ["set-option", "-p", "-u", "-t", pane, option]
+    return ["set-option", "-p", "-t", pane, option, "".join(f" {item}" for item in items)]
+
+
+def _shell_commands(event: str, payload: dict, pane: str) -> list[list[str]]:
+    """List a shell the moment a Bash call (main thread or subagent) backgrounds it."""
+    if event != "PostToolUse" or payload.get("tool_name") != "Bash":
+        return []
+    response = payload.get("tool_response")
+    shell = response.get("backgroundTaskId") if isinstance(response, dict) else None
+    if not isinstance(shell, str) or not _is_id(shell):
+        return []
+    return [_add_to_list(SHELLS_OPTION, shell, pane)]
+
+
+def _background_tasks_commands(payload: dict, pane: str) -> list[list[str]]:
+    """Rewrite the subagent and shell lists from a ``Stop``'s ``background_tasks``.
+
+    Only the main thread's ``Stop`` is trusted with this: no subagent can be
+    starting then, while a ``SubagentStop`` lists the subagent that is stopping.
+    """
+    tasks = payload.get("background_tasks")
+    if not isinstance(tasks, list):
+        return []
+    found: dict[str, list[str]] = {_SUBAGENT_TASK: [], _SHELL_TASK: []}
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        ids = found.get(task.get("type"))
+        task_id = task.get("id")
+        if ids is not None and isinstance(task_id, str) and _is_id(task_id):
+            ids.append(task_id)
+    return [
+        _set_list(HELPERS_OPTION, found[_SUBAGENT_TASK], pane),
+        _set_list(SHELLS_OPTION, found[_SHELL_TASK], pane),
+    ]
+
+
 def _helper_commands(event: str, payload: dict, agent: str, pane: str) -> list[list[str]]:
     """Keep *agent* in the helpers list while it works, decided inside tmux."""
     remove = [
@@ -119,11 +180,10 @@ def _helper_commands(event: str, payload: dict, agent: str, pane: str) -> list[l
     # or not the SubagentStop that follows gets through.
     if event == "PostToolUse" and payload.get("tool_name") == _HANDBACK_TOOL:
         return [remove]
-    # PreToolUse only: Claude waits for it, so it lands before the SubagentStop.
-    if event == "PreToolUse" and payload.get("agent_type"):
-        listed = f"#{{m:* {agent} *, #{{{HELPERS_OPTION}}} }}"
-        add = f"set-option -p -a -t {pane} {HELPERS_OPTION} ' {agent}'"
-        return [["if-shell", "-F", "-t", pane, listed, "", add]]
+    # PreToolUse only, for versions without SubagentStart: Claude waits for
+    # it, so it lands before the SubagentStop.
+    if event == "SubagentStart" or (event == "PreToolUse" and payload.get("agent_type")):
+        return [_add_to_list(HELPERS_OPTION, agent, pane)]
     return []
 
 
@@ -133,14 +193,21 @@ def tmux_commands(payload: dict, pane: str, now: float) -> list[list[str]]:
     if event == "SessionEnd":
         return [
             ["set-option", "-p", "-u", "-t", pane, option]
-            for option in (STATE_OPTION, WAITER_OPTION, HELPERS_OPTION, TRANSCRIPT_OPTION)
+            for option in (
+                STATE_OPTION,
+                WAITER_OPTION,
+                HELPERS_OPTION,
+                SHELLS_OPTION,
+                TRANSCRIPT_OPTION,
+            )
         ]
     agent = payload.get("agent_id")
     if agent:
         agent = str(agent)
-        if not agent.replace("-", "").isalnum():
+        if not _is_id(agent):
             return []
         commands = _helper_commands(event, payload, agent, pane)
+        commands += _shell_commands(event, payload, pane)
         if event in _ASKS:
             waiter = f"{agent} {_stamp(payload, event, now)}"
             commands.append(["set-option", "-p", "-t", pane, WAITER_OPTION, waiter])
@@ -155,10 +222,14 @@ def tmux_commands(payload: dict, pane: str, now: float) -> list[list[str]]:
         return []
     state = f"{status} {_stamp(payload, event, now)}"
     commands = [["set-option", "-p", "-t", pane, STATE_OPTION, state]]
+    commands += _shell_commands(event, payload, pane)
     if event in _FRESH:
         commands.append(["set-option", "-p", "-u", "-t", pane, WAITER_OPTION])
     if event == "SessionStart":
         commands.append(["set-option", "-p", "-u", "-t", pane, HELPERS_OPTION])
+        commands.append(["set-option", "-p", "-u", "-t", pane, SHELLS_OPTION])
+    if event == "Stop":
+        commands += _background_tasks_commands(payload, pane)
     transcript = payload.get("transcript_path")
     if isinstance(transcript, str) and transcript:
         commands.append(["set-option", "-p", "-t", pane, TRANSCRIPT_OPTION, transcript])

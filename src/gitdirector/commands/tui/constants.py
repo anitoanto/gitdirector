@@ -48,11 +48,6 @@ class TablePalette:
     primary: str
     danger: str = "red"
 
-    @property
-    def pending(self) -> str:
-        """Same green as ``success``: work goes on, in a subagent (the ◐ says so)."""
-        return self.success
-
     def group_label(self, text: str) -> str:
         return f"[bold {self.primary}]{text}[/]"
 
@@ -67,8 +62,6 @@ class TablePalette:
             return "● waiting", f"bold {self.yellow}"
         if status == "idle":
             return "○ idle", self.muted
-        if status == "pending":
-            return "◐ pending", self.pending
         return "● running", self.success
 
 
@@ -127,8 +120,7 @@ _DEFAULT_PANELS_SORT_COLUMN = 0
 _SESSION_STATUS_ORDER = {
     "waiting": 0,
     "running": 1,
-    "pending": 2,
-    "idle": 3,
+    "idle": 2,
 }
 
 

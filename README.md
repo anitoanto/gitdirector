@@ -27,9 +27,9 @@
 - **Agents and servers in tmux sessions.** Launch Claude Code, OpenCode,
   GitHub Copilot, Codex, or Pi in a repo with one keypress, or run a dev
   server there. Each lives in its own named tmux session.
-- **Live session status.** Every session shows `running`, `waiting` (blocked
-  on you), `pending` (the agent's background subagents are still working), or
-  `idle`, so you can leave an agent alone until it needs an answer.
+- **Live session status.** Every session shows `running` (the agent, one of
+  its subagents, or a shell it started is working), `waiting` (blocked on
+  you), or `idle`, so you can leave an agent alone until it needs an answer.
 - **Session sidebar.** An open session sits beside a list of every other
   session and its status; click one to switch.
 - **Panels.** Reusable tmux layouts that show several sessions side by side.
@@ -95,10 +95,10 @@ uncommitted changes where `/` filters the files by path and `g` stages
 everything and commits (and optionally pushes).
 
 **Sessions** lists every session under its repo, with its status, purpose,
-name, and description. `running` means the program is working, `waiting` that
-it needs you (a permission prompt, a question, a bell), `pending` that the
-agent is at its prompt while subagents it started keep working, and `idle` that
-nothing is happening. Claude Code and OpenCode report their own status through
+name, and description. `running` means the program is working (for an agent,
+that includes subagents and background shells it started), `waiting` that it
+needs you (a permission prompt, a question, a bell), and `idle` that nothing is
+happening. Claude Code and OpenCode report their own status through
 hooks passed inline on their launch command (your settings are never
 touched); everything else is judged from its pane ([DEV.md](DEV.md)).
 
@@ -155,7 +155,7 @@ pick another; when no sessions are left you are back in the console. Set
 | `info PATH\|NAME [--full] [--json]` | File, line, and token counts per extension |
 | `autoclean [--yes]` | Stop tracking repos that no longer exist |
 | `cd PATH\|NAME\|SESSION [--agent A]` | Open a shell or an agent in a new session, or rejoin a live one |
-| `sessions [--json]` | Live sessions and their status: `running`, `waiting`, `pending`, `idle` |
+| `sessions [--json]` | Live sessions and their status: `running`, `waiting`, `idle` |
 | `panel [NAME]` | Open a saved panel, or list them |
 | `gd-tmux PATH\|NAME [CMD] [--agent A] [-d TEXT]` | Start a command or agent in a background session; prints its name |
 | `gd-capture SESSION [-n N\|--full]` | Print a live session's recent output |

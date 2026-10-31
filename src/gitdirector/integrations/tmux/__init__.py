@@ -24,7 +24,6 @@ from .core import (
 )
 from .monitor import (
     STATUS_IDLE,
-    STATUS_PENDING,
     STATUS_RUNNING,
     STATUS_WAITING,
     TmuxMonitor,
@@ -41,7 +40,6 @@ from .session_env import SCRUB_POLICY_ENV_VAR, sanitized_environ, session_scrub_
 __all__ = [
     "SCRUB_POLICY_ENV_VAR",
     "STATUS_IDLE",
-    "STATUS_PENDING",
     "STATUS_RUNNING",
     "STATUS_WAITING",
     "ScreenCapture",

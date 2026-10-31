@@ -66,7 +66,8 @@ class TestClaudeLaunchCommand:
     def test_noisy_events_are_left_out(self):
         # Most notification types are not about the user being needed.
         assert "Notification" not in CLAUDE_STATUS_EVENTS
-        # It ends a subagent's run, the only thing pending needs to know.
+        # They bound a subagent's run, which keeps the session running.
+        assert "SubagentStart" in CLAUDE_STATUS_EVENTS
         assert "SubagentStop" in CLAUDE_STATUS_EVENTS
 
     def test_other_agents_launch_unchanged(self):

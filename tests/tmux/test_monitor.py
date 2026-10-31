@@ -18,9 +18,9 @@ from gitdirector.integrations.tmux import (
 )
 from gitdirector.integrations.tmux.core import TmuxError, _tmux_child_environment_command
 from gitdirector.integrations.tmux.monitor import (
-    _APPROVED_TOOL_MIN_SECS,
     _BELL_GRACE_SECS,
     _CPU_WINDOW_SECS,
+    _LASTING_CHILD_SECS,
     _PANE_LIST_NAMES,
     _RESIZE_REDRAW_SECS,
     _SILENCE_THRESHOLD_SECS,
@@ -522,6 +522,7 @@ def _pane_line(
     pane_id=None,
     bell_mark="",
     helpers="",
+    shells="",
 ) -> str:
     """One ``list-panes`` row, in the monitor's field order."""
     values = {
@@ -540,6 +541,7 @@ def _pane_line(
         "agent_waiter": waiter,
         "agent_transcript": transcript,
         "agent_helpers": helpers,
+        "agent_shells": shells,
         "bell_mark": bell_mark,
         "repo_label": label,
         "description": description,
@@ -643,13 +645,18 @@ class TestListGdPanes:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=_pane_line(
-                "gd/a/claude/1", agent="idle 5", waiter="ab12 7.5", transcript="/t/s.jsonl"
+                "gd/a/claude/1",
+                agent="idle 5",
+                waiter="ab12 7.5",
+                transcript="/t/s.jsonl",
+                shells=" bg1 bg2",
             )
             + "\n",
         )
         pane = _list_gd_panes()["gd/a/claude/1"]
         assert pane.agent_waiter == "ab12 7.5"
         assert pane.agent_transcript == "/t/s.jsonl"
+        assert pane.agent_shells == "bg1 bg2"
 
     @patch("subprocess.run")
     def test_tab_in_description_does_not_shift_fields(self, mock_run):
@@ -881,6 +888,7 @@ class _FakeTmux:
             "agent_waiter": "",
             "agent_transcript": "",
             "agent_helpers": "",
+            "agent_shells": "",
             "bell_mark": "",
             "repo_label": "",
             "description": "",
@@ -1576,7 +1584,7 @@ class TestStartedAToolSince:
         assert not _started_a_tool_since(1, self._snapshot(("caffeinate", 5.0)), 100.0, 110.0)
 
     def test_a_short_lived_hook_does_not_count(self):
-        young = _APPROVED_TOOL_MIN_SECS / 2
+        young = _LASTING_CHILD_SECS / 2
         assert not _started_a_tool_since(1, self._snapshot(("sh", young)), 100.0, 110.0)
 
     def test_a_background_task_spawning_processes_does_not_count(self):
@@ -1614,7 +1622,7 @@ class TestResolveAgentStatus:
 
     def test_an_approved_prompt_is_running(self):
         assert self._status(reported="waiting", started_tool=True) == "running"
-        # Only a pending prompt can be approved.
+        # Only an open prompt can be approved.
         assert self._status(reported="idle", started_tool=True) == "idle"
 
     def test_a_subagent_waiting_makes_the_session_wait(self):
@@ -1715,7 +1723,7 @@ class TestAgentRefresh:
         "message": {"content": "[SYSTEM NOTIFICATION - NOT USER INPUT]"},
     }
 
-    def test_an_idle_agent_with_a_working_subagent_is_pending(self, tmp_path):
+    def test_an_idle_agent_with_a_working_subagent_is_running(self, tmp_path):
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
@@ -1728,20 +1736,11 @@ class TestAgentRefresh:
                 agent_transcript=transcript,
             )
             world.run_program(name, "claude")
-            assert monitor.refresh()[name] == "pending"
+            assert monitor.refresh()[name] == "running"
             world.pane(name, agent_state=f"idle {world.now}", agent_transcript=transcript)
             assert monitor.refresh()[name] == "idle"
 
-    def test_opencode_reports_pending_itself(self):
-        stack, world = self._world()
-        with stack:
-            monitor = TmuxMonitor()
-            name = "gd/repo/opencode/1"
-            world.pane(name, agent_state="pending")
-            world.run_program(name, "opencode")
-            assert monitor.refresh()[name] == "pending"
-
-    def test_running_and_waiting_outrank_pending(self):
+    def test_waiting_outranks_working_subagents(self):
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
@@ -1768,13 +1767,13 @@ class TestAgentRefresh:
                 agent_transcript=transcript,
             )
             world.run_program(name, "claude")
-            assert monitor.refresh()[name] == "pending"
+            assert monitor.refresh()[name] == "running"
             world.advance(31)
             assert monitor.refresh()[name] == "idle"
 
     def test_a_subagent_that_ended_its_turn_is_gone_at_once(self, tmp_path):
         # Seen live: a hand-back landed, the SubagentStop hook never took
-        # effect, and the session stayed pending. The transcript's last
+        # effect, and the session stayed running. The transcript's last
         # message says the turn is over.
         stack, world = self._world()
         with stack:
@@ -1795,9 +1794,9 @@ class TestAgentRefresh:
             entries += (self._TOOL_CALL,)
             self._subagent_transcript(tmp_path, world, "a1", 0, entries)
             world.advance(1)
-            assert monitor.refresh()[name] == "pending"
+            assert monitor.refresh()[name] == "running"
 
-    def test_one_working_subagent_among_finished_ones_keeps_it_pending(self, tmp_path):
+    def test_one_working_subagent_among_finished_ones_keeps_it_running(self, tmp_path):
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
@@ -1811,11 +1810,11 @@ class TestAgentRefresh:
                 agent_transcript=transcript,
             )
             world.run_program(name, "claude")
-            assert monitor.refresh()[name] == "pending"
+            assert monitor.refresh()[name] == "running"
 
     def test_a_listed_subagent_without_a_transcript_is_gone(self, tmp_path):
         # The list comes from best-effort hooks; nothing to wait for is idle,
-        # never pending for good.
+        # never running for good.
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
@@ -1831,6 +1830,60 @@ class TestAgentRefresh:
             assert monitor.refresh()[name] == "idle"
             world.pane(name, agent_state=f"idle {world.now}", agent_helpers="a1")
             assert monitor.refresh()[name] == "idle"
+
+    def test_an_idle_agent_with_a_background_shell_is_running(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"idle {world.now}", agent_shells="bbz3y1iz5")
+            world.run_program(name, "claude", children=[("caffeinate", 60.0), ("zsh", 30.0)])
+            assert monitor.refresh()[name] == "running"
+            # The command ended: its shell is gone, whatever the list says.
+            world.run_program(name, "claude", children=[("caffeinate", 61.0)])
+            assert monitor.refresh()[name] == "idle"
+
+    def test_an_agent_that_is_the_pane_process_has_its_shells_found(self):
+        # tmux runs a plain command without a shell around it.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"idle {world.now}", agent_shells="b1")
+            world.snapshot = _snapshot(
+                children={100: [101, 102], 102: [103]},
+                commands={100: "claude", 101: "caffeinate", 102: "zsh", 103: "sleep"},
+                elapsed={100: 600.0, 101: 60.0, 102: 30.0, 103: 30.0},
+            )
+            assert monitor.refresh()[name] == "running"
+
+    def test_other_children_are_no_background_shell(self):
+        # MCP servers run as children too; a hook's shell is gone within moments.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"idle {world.now}", agent_shells="bbz3y1iz5")
+            world.run_program(name, "claude", children=[("node", 600.0), ("sh", 0.5)])
+            assert monitor.refresh()[name] == "idle"
+
+    def test_a_shell_child_counts_only_when_shells_were_started(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"idle {world.now}")
+            world.run_program(name, "claude", children=[("bash", 600.0)])
+            assert monitor.refresh()[name] == "idle"
+
+    def test_waiting_outranks_a_background_shell(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"waiting {world.now}", agent_shells="b1")
+            world.run_program(name, "claude", children=[("zsh", 30.0)])
+            assert monitor.refresh()[name] == "waiting"
 
     def test_a_background_subagent_asking_makes_it_wait(self):
         stack, world = self._world()

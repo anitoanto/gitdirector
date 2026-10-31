@@ -59,7 +59,6 @@ class TestTablePaletteLabels:
         assert PALETTE.session_status("waiting") == ("● waiting", "bold #ffaa00")
         assert PALETTE.session_status("running") == ("● running", "#00aa00")
         assert PALETTE.session_status("idle") == ("○ idle", "#888888")
-        assert PALETTE.session_status("pending") == ("◐ pending", PALETTE.pending)
         assert PALETTE.session_status("anything-else") == ("● running", "#00aa00")
 
     def test_panel_status_labels(self):
@@ -274,18 +273,11 @@ class TestSortConstants:
         ]
 
 
-def test_pending_shares_the_running_green():
-    from gitdirector.commands.tui.constants import _SESSION_STATUS_ORDER, resolve_table_palette
+def test_sessions_sort_busy_first():
+    from gitdirector.commands.tui.constants import _SESSION_STATUS_ORDER
 
-    palette = resolve_table_palette(
-        {"surface": "#1e1e2e", "primary": "#89b4fa", "foreground": "#cdd6f4"}
-    )
-    assert palette.pending == palette.success
-    assert PALETTE.pending == PALETTE.success
-    # Busy first: waiting, running, pending, idle.
     assert sorted(_SESSION_STATUS_ORDER, key=_SESSION_STATUS_ORDER.get) == [
         "waiting",
         "running",
-        "pending",
         "idle",
     ]

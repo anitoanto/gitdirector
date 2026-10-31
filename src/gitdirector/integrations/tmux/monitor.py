@@ -37,6 +37,7 @@ from ... import paths
 from ...agents import (
     AGENT_APPROVAL,
     AGENT_HELPERS_OPTION,
+    AGENT_SHELLS_OPTION,
     AGENT_STATE_OPTION,
     AGENT_STATES,
     AGENT_TRANSCRIPT_OPTION,
@@ -121,8 +122,6 @@ _SHELL_COMMANDS = frozenset({"zsh", "bash", "fish", "sh", "dash", "tcsh", "csh",
 
 STATUS_WAITING = "waiting"
 STATUS_RUNNING = "running"
-#: The agent is at its prompt while subagents it started still work.
-STATUS_PENDING = "pending"
 STATUS_IDLE = "idle"
 
 # How often the monitor samples tmux.
@@ -150,9 +149,9 @@ _CPU_ACTIVE_MIN_SECS = 0.5
 # program drawing its own blinking cursor, not work.
 _NOISE_MAX_CELLS = 2
 
-# An approved tool shows as a process the agent started after asking; one
-# that lived this long is the tool, not a short-lived hook of the user's.
-_APPROVED_TOOL_MIN_SECS = 2.0
+# A child process of the agent that lived this long is a tool (an approved
+# one, a background shell), not a short-lived hook or status line command.
+_LASTING_CHILD_SECS = 2.0
 # ps start times are whole seconds.
 _PROCESS_START_SLACK_SECS = 1.0
 # Claude Code keeps the machine awake with this while it works.
@@ -187,6 +186,7 @@ _PANE_LIST_FIELDS = (
     ("agent_waiter", f"#{{{AGENT_WAITER_OPTION}}}"),
     ("agent_transcript", f"#{{{AGENT_TRANSCRIPT_OPTION}}}"),
     ("agent_helpers", f"#{{{AGENT_HELPERS_OPTION}}}"),
+    ("agent_shells", f"#{{{AGENT_SHELLS_OPTION}}}"),
     ("bell_mark", f"#{{{_BELL_MARK_OPTION}}}"),
     ("repo_label", f"#{{{GD_REPO_LABEL_OPTION}}}"),
     ("description", f"#{{{GD_DESCRIPTION_OPTION}}}"),
@@ -218,6 +218,8 @@ class PaneSample:
     agent_transcript: str = ""
     #: `` <id> <id>`` of the agent's subagents still working ("" when none).
     agent_helpers: str = ""
+    #: `` <id> <id>`` of the background shells the agent started ("" when none).
+    agent_shells: str = ""
     #: When a monitor last took a bell off the session ("" when never).
     bell_mark: str = ""
     #: User-facing metadata stored on the session, for the Sessions tab.
@@ -446,6 +448,7 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
             agent_waiter=row["agent_waiter"].strip(),
             agent_transcript=row["agent_transcript"].strip(),
             agent_helpers=row["agent_helpers"].strip(),
+            agent_shells=row["agent_shells"].strip(),
             bell_mark=row["bell_mark"].strip(),
             repo_label=row["repo_label"],
             description=row["description"],
@@ -683,6 +686,34 @@ def _awaits_approval(report: str) -> bool:
     return report.split()[-1:] == [AGENT_APPROVAL]
 
 
+def _agent_children(pane_pid: int, snapshot: ProcessSnapshot) -> list[tuple[int, str, float]]:
+    """``(pid, command, elapsed)`` of the agent's own lasting child processes.
+
+    The agent is the shallowest program in the pane, which may be the
+    pane's own process. Only its own children count: a background task
+    keeps spawning processes of its own (grandchildren).
+    """
+    pane = (0, pane_pid, snapshot.commands_by_pid.get(pane_pid, ""))
+    agents = [
+        entry
+        for entry in (pane, *_descendants(pane_pid, snapshot))
+        if entry[2] and not _is_shell(entry[2])
+    ]
+    if not agents:
+        return []
+    agent = min(agents, key=lambda entry: (entry[0], entry[1]))[1]
+    children = []
+    for pid in snapshot.children_by_parent.get(agent, []):
+        command = snapshot.commands_by_pid.get(pid, "")
+        if not command or command in _AGENT_HELPERS:
+            continue
+        elapsed = snapshot.elapsed_by_pid.get(pid)
+        if elapsed is None or elapsed < _LASTING_CHILD_SECS:
+            continue
+        children.append((pid, command, elapsed))
+    return children
+
+
 def _started_a_tool_since(
     pane_pid: int, snapshot: ProcessSnapshot, since: float, now: float
 ) -> bool:
@@ -691,23 +722,26 @@ def _started_a_tool_since(
     Approving a permission prompt fires no hook until the tool finishes, but
     the tool runs as a new child process of the agent (Claude Code's Bash
     tool starts a shell); a hook of the user's own is gone within moments.
-    Only the agent's own children count: a background task it started
-    earlier keeps spawning processes of its own.
     """
-    agents = [entry for entry in _descendants(pane_pid, snapshot) if not _is_shell(entry[2])]
-    if not agents:
+    return any(
+        now - elapsed >= since - _PROCESS_START_SLACK_SECS
+        for _pid, _command, elapsed in _agent_children(pane_pid, snapshot)
+    )
+
+
+def _has_live_shell(shells: str, pane_pid: int, snapshot: ProcessSnapshot) -> bool:
+    """Whether a background shell the agent reported in *shells* still runs.
+
+    Claude Code runs each one as a ``<shell> -c`` child of its own process,
+    gone once the command ends. The list says shells were started, so
+    MCP servers and other children are not mistaken for one.
+    """
+    if not shells.split() or pane_pid <= 0:
         return False
-    agent = min(agents, key=lambda entry: (entry[0], entry[1]))[1]
-    for pid in snapshot.children_by_parent.get(agent, []):
-        command = snapshot.commands_by_pid.get(pid, "")
-        if not command or command in _AGENT_HELPERS:
-            continue
-        elapsed = snapshot.elapsed_by_pid.get(pid)
-        if elapsed is None or elapsed < _APPROVED_TOOL_MIN_SECS:
-            continue
-        if now - elapsed >= since - _PROCESS_START_SLACK_SECS:
-            return True
-    return False
+    return any(
+        _is_shell(command) and not _is_interactive_shell(snapshot.args_by_pid.get(pid, ""))
+        for pid, command, _elapsed in _agent_children(pane_pid, snapshot)
+    )
 
 
 def resolve_agent_status(
@@ -1036,10 +1070,11 @@ class TmuxMonitor:
             and pane.pane_pid > 0
             and _started_a_tool_since(pane.pane_pid, snapshot, since, now),
         )
-        if status == STATUS_IDLE and _has_live_helper(
-            pane.agent_helpers, pane.agent_transcript, now, activity
+        if status == STATUS_IDLE and (
+            _has_live_helper(pane.agent_helpers, pane.agent_transcript, now, activity)
+            or _has_live_shell(pane.agent_shells, pane.pane_pid, snapshot)
         ):
-            return STATUS_PENDING
+            return STATUS_RUNNING
         return status
 
     @staticmethod
@@ -1103,7 +1138,6 @@ class TmuxMonitor:
 
 __all__ = [
     "STATUS_IDLE",
-    "STATUS_PENDING",
     "STATUS_RUNNING",
     "STATUS_WAITING",
     "PaneSample",

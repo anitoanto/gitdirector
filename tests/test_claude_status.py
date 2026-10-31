@@ -10,6 +10,7 @@ import pytest
 from gitdirector.agents import (
     AGENT_APPROVAL,
     AGENT_HELPERS_OPTION,
+    AGENT_SHELLS_OPTION,
     AGENT_STATE_OPTION,
     AGENT_TRANSCRIPT_OPTION,
     AGENT_WAITER_OPTION,
@@ -44,6 +45,7 @@ class TestOptionNames:
         assert H.TRANSCRIPT_OPTION == AGENT_TRANSCRIPT_OPTION
         assert H.APPROVAL == AGENT_APPROVAL
         assert H.HELPERS_OPTION == AGENT_HELPERS_OPTION
+        assert H.SHELLS_OPTION == AGENT_SHELLS_OPTION
 
     def test_every_listened_event_means_something(self):
         fields = {"SessionStart": "source", "PreCompact": "trigger", "PostCompact": "trigger"}
@@ -53,8 +55,10 @@ class TestOptionNames:
                 for value in CLAUDE_STATUS_MATCHERS[event].split("|"):
                     assert _commands(event, **{fields[event]: value}), (event, value)
                 continue
-            # SubagentStop only speaks for a subagent (it carries an agent_id).
-            assert event in ("SessionEnd", "SubagentStop") or _commands(event), event
+            # Subagent events only speak for a subagent (they carry an agent_id).
+            assert event in ("SessionEnd", "SubagentStart", "SubagentStop") or _commands(event), (
+                event
+            )
 
 
 class TestMainThread:
@@ -119,7 +123,13 @@ class TestMainThread:
 
     def test_session_end_clears_everything(self):
         commands = _commands("SessionEnd")
-        for option in (AGENT_STATE_OPTION, AGENT_WAITER_OPTION, AGENT_TRANSCRIPT_OPTION):
+        for option in (
+            AGENT_STATE_OPTION,
+            AGENT_WAITER_OPTION,
+            AGENT_HELPERS_OPTION,
+            AGENT_SHELLS_OPTION,
+            AGENT_TRANSCRIPT_OPTION,
+        ):
             assert ["set-option", "-p", "-u", "-t", PANE, option] in commands
 
 
@@ -155,6 +165,10 @@ class TestSubagents:
         (command,) = _commands("PreToolUse", agent_id="a4b6", agent_type="general-purpose")
         assert command[:4] == ["if-shell", "-F", "-t", PANE]
         assert command[4] == f"#{{m:* a4b6 *, #{{{AGENT_HELPERS_OPTION}}} }}"
+        assert command[5:] == ["", f"set-option -p -a -t {PANE} {AGENT_HELPERS_OPTION} ' a4b6'"]
+
+    def test_a_started_subagent_is_listed_before_its_first_tool_call(self):
+        (command,) = _commands("SubagentStart", agent_id="a4b6", agent_type="Explore")
         assert command[5:] == ["", f"set-option -p -a -t {PANE} {AGENT_HELPERS_OPTION} ' a4b6'"]
 
     def test_claude_code_own_helper_is_never_listed(self):
@@ -203,6 +217,72 @@ class TestSubagents:
 
     def test_odd_agent_ids_are_ignored(self):
         assert _commands("PermissionRequest", agent_id="a b;kill") == []
+
+
+class TestBackgroundWork:
+    # Payload shapes recorded from Claude Code 2.1.311.
+    _BACKGROUNDED = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "sleep 40", "run_in_background": True},
+        "tool_response": {"stdout": "", "backgroundTaskId": "bbz3y1iz5"},
+    }
+    _TASKS = [
+        {"id": "bbz3y1iz5", "type": "shell", "status": "running", "command": "sleep 40"},
+        {"id": "a4b5470bd6bd3799b", "type": "subagent", "status": "running"},
+        {"id": "m1", "type": "monitor", "status": "running"},
+        {"id": "w1", "type": "workflow", "status": "running"},
+    ]
+
+    def _add_shell(self, shell):
+        return ["", f"set-option -p -a -t {PANE} {AGENT_SHELLS_OPTION} ' {shell}'"]
+
+    def test_a_backgrounded_shell_is_listed(self):
+        commands = _commands("PostToolUse", **self._BACKGROUNDED)
+        assert commands[1][:4] == ["if-shell", "-F", "-t", PANE]
+        assert commands[1][4] == f"#{{m:* bbz3y1iz5 *, #{{{AGENT_SHELLS_OPTION}}} }}"
+        assert commands[1][5:] == self._add_shell("bbz3y1iz5")
+
+    def test_a_subagent_backgrounding_a_shell_lists_it_too(self):
+        commands = _commands("PostToolUse", agent_id="a4b6", agent_type="x", **self._BACKGROUNDED)
+        assert self._add_shell("bbz3y1iz5") in [command[5:] for command in commands]
+
+    def test_a_foreground_command_is_not_listed(self):
+        commands = _commands("PostToolUse", tool_name="Bash", tool_response={"stdout": "hi"})
+        assert all(AGENT_SHELLS_OPTION not in " ".join(command) for command in commands)
+
+    def test_stop_rewrites_both_lists_from_the_work_in_flight(self):
+        commands = _commands("Stop", background_tasks=self._TASKS)
+        assert ["set-option", "-p", "-t", PANE, AGENT_HELPERS_OPTION, " a4b5470bd6bd3799b"] in (
+            commands
+        )
+        assert ["set-option", "-p", "-t", PANE, AGENT_SHELLS_OPTION, " bbz3y1iz5"] in commands
+
+    def test_stop_with_nothing_in_flight_clears_both_lists(self):
+        commands = _commands("Stop", background_tasks=[])
+        assert ["set-option", "-p", "-u", "-t", PANE, AGENT_HELPERS_OPTION] in commands
+        assert ["set-option", "-p", "-u", "-t", PANE, AGENT_SHELLS_OPTION] in commands
+
+    def test_stop_without_a_task_registry_leaves_the_lists_alone(self):
+        (command,) = _commands("Stop")
+        assert command[4] == AGENT_STATE_OPTION
+
+    def test_odd_task_ids_are_ignored(self):
+        tasks = [{"id": "x;kill", "type": "shell"}, {"id": 7, "type": "subagent"}]
+        commands = _commands("Stop", background_tasks=tasks)
+        assert ["set-option", "-p", "-u", "-t", PANE, AGENT_SHELLS_OPTION] in commands
+        assert ["set-option", "-p", "-u", "-t", PANE, AGENT_HELPERS_OPTION] in commands
+        response = {"backgroundTaskId": "x' ; kill"}
+        assert len(_commands("PostToolUse", tool_name="Bash", tool_response=response)) == 1
+
+    def test_a_subagent_stop_never_rewrites_the_lists(self):
+        # It still lists the subagent that is stopping.
+        commands = _commands("SubagentStop", agent_id="a1", background_tasks=self._TASKS)
+        assert all(AGENT_SHELLS_OPTION not in command for command in commands)
+
+    def test_a_new_session_forgets_shells(self):
+        unset = ["set-option", "-p", "-u", "-t", PANE, AGENT_SHELLS_OPTION]
+        assert unset in _commands("SessionStart")
+        assert unset not in _commands("UserPromptSubmit")
 
 
 class TestScript:
@@ -288,10 +368,22 @@ class TestScriptAgainstTmux:
                 )
                 assert option(AGENT_HELPERS_OPTION) == ""
 
+                hook(hook_event_name="SubagentStart", agent_id="c3", **sub)
+                backgrounded = {"tool_name": "Bash", "tool_response": {"backgroundTaskId": "bg1"}}
+                hook(hook_event_name="PostToolUse", session_id="s", **backgrounded)
+                hook(hook_event_name="PostToolUse", agent_id="c3", **sub, **backgrounded)
+                assert option(AGENT_HELPERS_OPTION).split() == ["c3"]
+                assert option(AGENT_SHELLS_OPTION).split() == ["bg1"]
+                tasks = [{"id": "bg2", "type": "shell"}, {"id": "c3", "type": "subagent"}]
+                hook(hook_event_name="Stop", session_id="s", background_tasks=tasks)
+                assert option(AGENT_SHELLS_OPTION).split() == ["bg2"]
+                assert option(AGENT_HELPERS_OPTION).split() == ["c3"]
+
                 hook(hook_event_name="SessionEnd", session_id="s")
                 assert option(AGENT_STATE_OPTION) == ""
                 assert option(AGENT_TRANSCRIPT_OPTION) == ""
                 assert option(AGENT_HELPERS_OPTION) == ""
+                assert option(AGENT_SHELLS_OPTION) == ""
             finally:
                 tmux("kill-server")
                 _cleanup_tmux_tmpdir(tmux_dir)
