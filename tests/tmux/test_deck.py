@@ -463,6 +463,69 @@ def test_deck_lifecycle():
     assert _session_exists(first)
 
 
+class TestCopyBindings:
+    _KEYS = (
+        "bind-key    -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel\n"
+        "bind-key    -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel\n"
+        "bind-key    -T copy-mode q send-keys -X cancel\n"
+        'bind-key    -T root DoubleClick1Pane select-pane -t = \\; if-shell -F "#{mouse_any_flag}" '
+        "{ send-keys -M } { copy-mode -H ; send-keys -X select-word ; "
+        "send-keys -X copy-pipe-and-cancel }\n"
+        "bind-key    -T root MouseDown1Pane select-pane -t = \\; send-keys -M\n"
+    )
+
+    def test_every_key_that_copies_also_forwards_the_copy_in_gitdirector(self):
+        commands = _run_with(self._KEYS)
+        drag = _binding(commands, "MouseDragEnd1Pane", "copy-mode")
+        assert drag[4:7] == ["if-shell", "-F", "#{m:gd/*,#{session_name}}"]
+        ours, original = drag[7], drag[8]
+        assert original == "send-keys -X copy-pipe-and-cancel"
+        assert ours.startswith(f"{original} ; run-shell -b ")
+        assert str(D.clipboard_forward_path()) in ours
+        assert "'#{socket_path}' '#{client_tty}'" in ours
+        enter = _binding(commands, "Enter", "copy-mode-vi")
+        assert "run-shell -b" in enter[7]
+        double = _binding(commands, "DoubleClick1Pane", "root")
+        assert double[8].startswith("select-pane -t = ; if-shell")
+        assert double[7].startswith(double[8]) and "run-shell -b" in double[7]
+
+    def test_keys_that_do_not_copy_are_left_alone(self):
+        commands = _run_with(self._KEYS)
+        for table, key in (("copy-mode", "q"), ("root", "MouseDown1Pane")):
+            assert not any(
+                c[:1] == ["bind-key"] and table in c and c[c.index(table) + 1] == key
+                for c in commands
+            )
+
+    def test_the_original_is_kept_once(self):
+        commands = _run_with(self._KEYS)
+        option = "@gd_original_copy_mode_copy_MouseDragEnd1Pane"
+        assert ["set-option", "-g", option, "send-keys -X copy-pipe-and-cancel"] in commands
+        assert D._key_option_slug("M-w") == "M_2dw"
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+@pytest.mark.usefixtures("tmux_server")
+def test_the_copy_wrap_is_idempotent_and_keeps_tmux_own_binding_elsewhere():
+    D.ensure_deck_bindings()
+    D.ensure_deck_bindings()
+    line = next(
+        line
+        for line in _out("list-keys", "-T", "copy-mode").splitlines()
+        if line.split()[3] == "MouseDragEnd1Pane"
+    )
+    assert line.count("clipboard_forward.py") == 1
+    assert line.endswith('"send-keys -X copy-pipe-and-cancel"')
+    # A multi-command original keeps its commands apart in both branches.
+    double = next(
+        line
+        for line in _out("list-keys", "-T", "root").splitlines()
+        if line.split()[3] == "DoubleClick1Pane"
+    )
+    assert double.count("clipboard_forward.py") == 1
+    assert "\\;" not in double.split("#{m:gd/*,#{session_name}}", 1)[1]
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
 @pytest.mark.usefixtures("tmux_server")
 def test_stale_unattached_decks_are_reaped(monkeypatch):

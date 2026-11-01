@@ -261,6 +261,29 @@ which a command string reads as an argument, so a kept original is turned
 back into ` ; ` before it is rebound. The console and the sidebar scroll one
 row per notch too (`scroll_sensitivity_y`).
 
+Every key that copies (a `root`, `copy-mode`, or `copy-mode-vi` binding
+running `copy-pipe*`, `copy-selection*`, `copy-line`, or `copy-end-of-line`:
+the mouse drag, double and triple click, and the keyboard's copy keys, the
+user's own included) is wrapped on the same condition, as its original
+followed by `run-shell -b` of `integrations/clipboard_forward.py`. tmux sends
+a copy's OSC 52 only to the clients showing the copied pane, which in a deck
+or panel is the nested client, and drops the nested client's OSC 52 output
+to its pane (`set-clipboard external`), so without this a selection never
+reached the terminal. The script climbs from `#{client_tty}` (the client
+that copied) through the pane whose tty it is to that session's clients,
+until it reaches terminals, and sends them the newest buffer with
+`load-buffer -w` (OSC 52, sent only to terminals tmux knows take it). For
+terminals without OSC 52 (Terminal.app, VTE) it also pipes the copy to the
+system clipboard's tool: `pbcopy`, `clip.exe` on WSL, `wl-copy`, `xclip`, or
+`xsel`. A buffer older than 3 s, or already forwarded
+(`@gd_clipboard_forwarded`), is left alone: a click a program in the pane
+took copies nothing. Programs that handle the mouse themselves (Claude Code,
+OpenCode) copy on their own and never reach these bindings. The bindings are
+installed with a deck or panel, and on creating or directly attaching any
+GitDirector session. Verified live on a nested deck driven through a pty with
+SGR mouse events: without the wrap the buffer is filled and no OSC 52
+arrives; with it, drag and double click both arrive.
+
 Opening is one frame change, from the console to the finished deck. The
 console builds the deck before it suspends (`prepare_attach`), at the
 client's exact size less the status line, so attaching resizes nothing; the

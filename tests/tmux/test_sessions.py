@@ -777,12 +777,15 @@ class TestAttachTmuxSession:
         ]
         mock_sync.assert_called_once_with()
 
+    @patch("gitdirector.integrations.tmux.core._try_ensure_gitdirector_bindings")
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("subprocess.run")
-    def test_outside_tmux_attaches_to_the_session(self, mock_run, mock_sync):
+    def test_outside_tmux_attaches_to_the_session(self, mock_run, mock_sync, mock_bindings):
         mock_run.return_value = MagicMock(returncode=0)
         with patch.dict("os.environ", {}, clear=True):
             assert attach_tmux_session("gd/repo/shell/1") is True
+        # Copy reaches the terminal in a session that never opens in a deck.
+        mock_bindings.assert_called_once_with()
         assert [call.args[0] for call in mock_run.call_args_list] == [
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
             ["tmux", "-T", "RGB,sync", "attach-session", "-t", "=gd/repo/shell/1"],

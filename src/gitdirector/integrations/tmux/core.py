@@ -805,6 +805,7 @@ def create_tmux_session(
         if description is not None and description.strip():
             _set_session_description(session_name, description)
         try_sync_panel_tmux_config()
+        _try_ensure_gitdirector_bindings()
         return session_name
     except Exception:
         kill_tmux_session(session_name)
@@ -921,6 +922,13 @@ def _sidebar_enabled() -> bool:
         return True
 
 
+def _try_ensure_gitdirector_bindings() -> None:
+    """Copy and wheel bindings for a session that may never open in a deck."""
+    from .deck import try_ensure_deck_bindings
+
+    try_ensure_deck_bindings()
+
+
 def _opens_in_deck(session_name: str) -> bool:
     """Repository sessions open beside the session sidebar unless it is turned off."""
     return _parse_gd_session_name(session_name) is not None and _sidebar_enabled()
@@ -930,6 +938,7 @@ def _prepare_direct_attach(session_name: str, *, skip_config_sync: bool) -> None
     """The tmux work a session that attaches without a deck needs first."""
     if not skip_config_sync and session_name.startswith("gd/"):
         try_sync_panel_tmux_config()
+        _try_ensure_gitdirector_bindings()
     if _is_persistent_panel_session(session_name):
         from .panels import _ensure_panel_prefix_bindings
 

@@ -26,7 +26,10 @@ import shlex
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
 
 from ...launch_context import neutral_directory
 from ...ui_theme import resolve_panel_theme, textual_surface
@@ -640,6 +643,36 @@ _WHEEL_COMMANDS = {
     "WheelDownPane": "select-pane ; send-keys -X scroll-down",
 }
 _WHEEL_TABLES = {"copy-mode": "copy_mode", "copy-mode-vi": "copy_mode_vi"}
+# Tables whose bindings may copy: copy mode's keys, and the root table's
+# double and triple clicks, which copy without entering copy mode first.
+_COPY_TABLES = {"root": "root", **_WHEEL_TABLES}
+_COPY_ACTIONS = ("copy-pipe", "copy-selection", "copy-line", "copy-end-of-line")
+
+
+def clipboard_forward_path() -> Path:
+    """The script GitDirector's copy bindings run (see ``clipboard_forward``)."""
+    return Path(str(resources.files("gitdirector.integrations").joinpath("clipboard_forward.py")))
+
+
+def _tmux_quoted(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+    return f'"{escaped}"'
+
+
+def _clipboard_forward_command() -> str:
+    """Runs the forwarder for the client that copied, in the background."""
+    script = shlex.join([sys.executable, "-I", "-S", str(clipboard_forward_path())])
+    # Silent even once GitDirector is uninstalled and the bindings outlive it.
+    shell = script + " '#{socket_path}' '#{client_tty}' >/dev/null 2>&1 || true"
+    return f"run-shell -b {_tmux_quoted(shell)}"
+
+
+def _copies(command: str) -> bool:
+    return any(action in command for action in _COPY_ACTIONS)
+
+
+def _key_option_slug(key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", lambda match: f"_{ord(match[0]):x}", key)
 
 
 def _key_bindings() -> dict[tuple[str, str], tuple[bool, str]]:
@@ -674,7 +707,7 @@ def _wrap_binding(
     key: str,
     option: str,
     condition: str,
-    command: str,
+    command: str | Callable[[str], str],
 ) -> list[list[str]]:
     repeat, current = bindings.get((table, key), (False, ""))
     default = _TMUX_DEFAULT_BINDINGS.get(key, "") if table == "prefix" else ""
@@ -698,6 +731,8 @@ def _wrap_binding(
             commands.append(["set-option", "-g", option, _NO_ORIGINAL])
         else:
             commands.append(["set-option", "-gu", option])
+    if callable(command):
+        command = command(_as_command_string(original))
     bind = ["bind-key", *(["-r"] if repeat else []), "-T", table, key]
     bind.extend(["if-shell", "-F", condition, command])
     if original:
@@ -710,8 +745,10 @@ def ensure_deck_bindings() -> None:
     """Give GitDirector's keys their meaning, inside its sessions only.
 
     ``prefix Tab`` and ``prefix b`` work the deck (``prefix b`` shows pane
-    numbers in a panel), ``prefix 1``..``9`` pick a panel's slot, and the
-    mouse wheel scrolls copy mode a line at a time. Each key is rebound to ``if-shell -F <condition> <our command>
+    numbers in a panel), ``prefix 1``..``9`` pick a panel's slot, the
+    mouse wheel scrolls copy mode a line at a time, and every key that copies
+    also hands the copy to the user's terminal (see ``clipboard_forward``).
+    Each key is rebound to ``if-shell -F <condition> <our command>
     <original>``: elsewhere the user's own binding
     (or tmux's default) still runs. The original is kept in a global option so
     re-wrapping is idempotent, and a binding the user changed since is picked
@@ -743,7 +780,29 @@ def ensure_deck_bindings() -> None:
                     wheel_command,
                 )
             )
+    forward = _clipboard_forward_command()
+    for (table, key), (_repeat, current) in sorted(bindings.items()):
+        if table not in _COPY_TABLES or not _copies(current):
+            continue
+        commands.extend(
+            _wrap_binding(
+                bindings,
+                table,
+                key,
+                f"@gd_original_{_COPY_TABLES[table]}_copy_{_key_option_slug(key)}",
+                _IN_GITDIRECTOR,
+                lambda original: f"{original} ; {forward}" if original else forward,
+            )
+        )
     _run_tmux(_chain_tmux_commands(commands), check=True)
+
+
+def try_ensure_deck_bindings() -> None:
+    """:func:`ensure_deck_bindings`, for callers a tmux failure must not stop."""
+    try:
+        ensure_deck_bindings()
+    except TmuxError:
+        logger.debug("could not install GitDirector key bindings", exc_info=True)
 
 
 def _current_session() -> str | None:
