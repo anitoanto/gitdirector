@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from rich.cells import cell_len
 from rich.markup import escape
 from rich.text import Text
 from textual import work
@@ -13,7 +14,7 @@ from textual.widgets import DataTable, Static
 from textual.worker import Worker
 
 from .constants import TablePalette
-from .table_text import wrap_table_cell_text
+from .table_text import pad_cells, truncate_cells, wrap_table_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def _resolve_sessions_total_width(screen_width: int) -> int:
 
 
 def _fit(values, header: str, max_width: int) -> int:
-    widest = max((len(value) for value in values), default=0)
+    widest = max((cell_len(value) for value in values), default=0)
     return max(len(header), min(max_width, widest))
 
 
@@ -112,16 +113,6 @@ def _resolve_sessions_layout(entries: list[dict[str, str]], screen_width: int) -
         purpose=purpose,
         session_id=session_id,
     )
-
-
-def _truncate(text: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    if len(text) <= width:
-        return text
-    if width == 1:
-        return "…"
-    return text[: width - 1] + "…"
 
 
 def _sessions_header(layout: SessionsLayout) -> Text:
@@ -262,17 +253,19 @@ def _render_session_row(
     text.append(pad)
     text.append(f"{guide.top} ", style=palette.muted)
     repo = entry.get("repo", "") if position in ("only", "first") else ""
-    text.append(_truncate(repo, layout.repo).ljust(layout.repo), style=f"bold {palette.yellow}")
+    text.append(
+        pad_cells(truncate_cells(repo, layout.repo), layout.repo), style=f"bold {palette.yellow}"
+    )
     text.append(" " * _SESSIONS_COL_GAP)
     text.append(status_label.ljust(layout.status), style=status_style)
     text.append(" " * _SESSIONS_COL_GAP)
-    text.append(_truncate(entry.get("purpose", ""), layout.purpose).ljust(layout.purpose))
+    text.append(pad_cells(truncate_cells(entry.get("purpose", ""), layout.purpose), layout.purpose))
     text.append(" " * _SESSIONS_COL_GAP)
-    text.append(session_lines[0].ljust(layout.session_id), style=palette.muted)
+    text.append(pad_cells(session_lines[0], layout.session_id), style=palette.muted)
     text.append(pad)
     for extra in session_lines[1:]:
         lower_line(layout.session_id_offset)
-        text.append(extra.ljust(layout.session_id), style=palette.muted)
+        text.append(pad_cells(extra, layout.session_id), style=palette.muted)
         text.append(pad)
 
     description = (entry.get("description") or "").strip()
@@ -285,7 +278,7 @@ def _render_session_row(
         style = f"italic {palette.muted}"
     for line in description_lines:
         lower_line(layout.status_offset)
-        text.append(line.ljust(width), style=style)
+        text.append(pad_cells(line, width), style=style)
         text.append(pad)
 
     lower_line(layout.cell_width - _SESSIONS_CELL_PADDING)

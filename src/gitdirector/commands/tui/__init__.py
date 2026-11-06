@@ -1,5 +1,6 @@
 """Interactive TUI console for GitDirector using Textual."""
 
+from ...terminal_text import drop_unprintable_from_textual_output
 from .app import GitDirectorConsole
 from .constants import (
     _DEFAULT_PANELS_SORT_COLUMN,
@@ -28,6 +29,9 @@ from .screens.repos import (
     RepoInfoScreen,
 )
 from .screens.sessions import RemoveSessionScreen, SelectSessionScreen
+
+# Every console, sidebar and panel writes repository text through here.
+drop_unprintable_from_textual_output()
 
 __all__ = [
     "ActionMenuScreen",

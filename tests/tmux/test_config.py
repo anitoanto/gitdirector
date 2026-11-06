@@ -75,7 +75,7 @@ class TestPanelPaneTitles:
         assert f"bg={theme.label_active_bg}" in _session_header_format("gd/r/shell/1")
 
     def test_panel_window_status_format_uses_active_pane(self):
-        assert _panel_window_status_format() == " #{pane_index}:#{pane_title} "
+        assert _panel_window_status_format() == " #{pane_index}:#{q/h:pane_title} "
 
     def test_panel_pane_command_shows_closed_message_for_closed_empty_pane(self):
         command = _panel_pane_command("Main", 1, None, closed=True)
@@ -269,6 +269,30 @@ class TestPanelPaneTitles:
         content = config_path.read_text()
         assert "# theme: rose-pine" in content
         mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_sync_panel_tmux_config_ends_with_the_spacing_mark_widths(self, _mock_run, tmp_path):
+        config_path = tmp_path / "tmux_design.conf"
+        with (
+            patch(
+                "gitdirector.integrations.tmux.core._tmux_design_config_path",
+                return_value=config_path,
+            ),
+            patch(
+                "gitdirector.integrations.tmux.core._live_session_windows",
+                return_value={"gd/my-repo/shell/1": "gd/my-repo/shell/1:0"},
+            ),
+            patch("gitdirector.integrations.tmux.core._live_panel_sessions", return_value=[]),
+            patch(
+                "gitdirector.integrations.tmux.core.tmux_codepoint_width_commands",
+                return_value=["set-option -s codepoint-widths[1000] U+0D3E=1"],
+            ),
+        ):
+            sync_panel_tmux_config("rose-pine")
+
+        widths = ["set-option -s codepoint-widths[1000] U+0D3E=1"]
+        lines = config_path.read_text().splitlines()
+        assert lines[-len(widths) :] == widths
 
     @patch("subprocess.run")
     def test_sync_panel_tmux_config_ignores_source_file_failure(self, mock_run, tmp_path):

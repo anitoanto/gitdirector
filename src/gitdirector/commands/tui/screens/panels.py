@@ -26,6 +26,7 @@ from ..panels import (
     render_panel_layout_text,
     resolve_panel_layout,
 )
+from ..table_text import pad_cells, truncate_cells
 from ..terminal_caps import strip_unsupported_css as _safe_css
 from .card import (
     LoadingCard,
@@ -292,9 +293,7 @@ _REPO_WIDTH = 18
 
 
 def _fit(text: str, width: int) -> str:
-    if len(text) <= width:
-        return text.ljust(width)
-    return text[: max(width - 1, 0)] + "…"
+    return pad_cells(truncate_cells(text, width), width)
 
 
 _CREATE_ROW_ID = "__create__"

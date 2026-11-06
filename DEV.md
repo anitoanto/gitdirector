@@ -48,6 +48,49 @@ or DejaVu Sans Mono (else `fc-match monospace`). A character that font lacks
 a short list of CJK and symbol fonts. Colours are VS Code's ANSI palette on
 the configured theme's background and foreground.
 
+## Text width
+
+tmux, Rich and the terminal must agree on how many cells a line takes. Where
+the terminal draws it wider than tmux counts, a pane on the right edge wraps
+the excess onto the next row, over the sidebar, and tmux never repaints those
+cells; where Rich counts it narrower than tmux, a console row overflows its
+own pane. tmux takes its widths from utf8proc or the C library and Rich from
+its own tables, and they differ: spacing marks (the vowel signs of Malayalam,
+Tamil, Devanagari, ...) get no cell where terminals draw one, and an older C
+library leaves new emoji one cell wide.
+
+`cell_widths.py` measures the binary of the running tmux server (found from
+its pid, so a different `tmux` on PATH does not matter) once per build, in a
+private server (`width_probe.py` asks tmux for the cursor after each
+codepoint, about 0.4s), and caches the result in
+`~/.gitdirector/cache/cell-widths.json`. Every codepoint gets the wider of
+the two widths, and at least one cell for a spacing mark. tmux gets the
+difference as `codepoint-widths` slots from 1000 up (server-wide; the user's
+own entries sit below) at the end of every config sync while tmux runs; Rich
+gets it when `gitdirector.commands` is imported. If tmux cannot be measured,
+spacing marks get one cell, and regional indicators and skin tones two in
+tmux, as Rich counts them.
+
+Rich also groups characters into cells the way tmux does
+(`tmux_graphemes`): VS16 widens any one-cell character; a ZWJ joins the next
+non-ASCII character; a skin tone joins only the emoji tmux lists; regional
+indicators pair; U+3164 is dropped; Hangul medial and final jamo join only
+after an initial or medial and are dropped otherwise; and a cell holds at
+most 32 bytes, where a ZWJ that overflows a full wide cell swallows the next
+character. `tests/tmux/test_cell_widths.py` fuzzes this against real tmux.
+Known differences that stay, because the terminal draws them differently
+from tmux: tmux joins any non-ASCII character onto a ZWJ, which narrows
+legacy Malayalam like "ന്‍റ"; terminals that do not cluster (xterm,
+Alacritty, VTE) draw ZWJ and skin-tone sequences wider; some draw a lone
+U+3164; and a terminal set to draw ambiguous characters wide is not
+detected.
+
+Control characters and bidi overrides never reach the terminal: Textual
+strips and CLI tables drop them (`terminal_text.py`), and Rich gives them no
+cell, so layouts stay as measured. Listings read from tmux turn them into
+spaces in the format itself (`one_line_format`), and status-line text has
+its `#` doubled.
+
 ## Test suite
 
 `pytest` runs across all cores with coverage, in a **randomized order**

@@ -55,6 +55,7 @@ from .core import (
     _tmux_child_environment_command,
     _tmux_server_is_gone,
     kill_tmux_session,
+    one_line_format,
     respawn_pane,
     session_entry,
 )
@@ -188,8 +189,8 @@ _PANE_LIST_FIELDS = (
     ("agent_helpers", f"#{{{AGENT_HELPERS_OPTION}}}"),
     ("agent_shells", f"#{{{AGENT_SHELLS_OPTION}}}"),
     ("bell_mark", f"#{{{_BELL_MARK_OPTION}}}"),
-    ("repo_label", f"#{{{GD_REPO_LABEL_OPTION}}}"),
-    ("description", f"#{{{GD_DESCRIPTION_OPTION}}}"),
+    ("repo_label", one_line_format(GD_REPO_LABEL_OPTION)),
+    ("description", one_line_format(GD_DESCRIPTION_OPTION)),
 )
 _PANE_LIST_NAMES = tuple(name for name, _ in _PANE_LIST_FIELDS)
 _PANE_LIST_FORMAT = _PANE_LIST_SEPARATOR.join(fmt for _, fmt in _PANE_LIST_FIELDS)

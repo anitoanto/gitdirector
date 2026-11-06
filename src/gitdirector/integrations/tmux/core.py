@@ -16,9 +16,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from ... import paths
+from ...cell_widths import tmux_codepoint_width_commands
 from ...config import Config
 from ...launch_context import neutral_directory
 from ...storage import atomic_write_text, normalize_repository_path
+from ...terminal_text import printable
 from ...ui_theme import DEFAULT_THEME_NAME, resolve_panel_theme
 from .session_env import child_unset_names, sanitized_environ, session_scrub_names
 
@@ -672,8 +674,8 @@ def list_all_gd_sessions() -> list[dict[str, str]]:
             _SESSION_LIST_SEPARATOR.join(
                 [
                     "#{session_name}",
-                    f"#{{{GD_REPO_LABEL_OPTION}}}",
-                    f"#{{{GD_DESCRIPTION_OPTION}}}",
+                    one_line_format(GD_REPO_LABEL_OPTION),
+                    one_line_format(GD_DESCRIPTION_OPTION),
                 ]
             ),
         ],
@@ -800,8 +802,10 @@ def create_tmux_session(
                 f"tmux session started in {pane_path} instead of the repository path {path}"
             )
 
-        if repo_label is not None and repo_label.strip():
-            _set_session_repo_label(session_name, repo_label)
+        # The session name keeps only [a-z0-9-] of the repository's own name.
+        _set_session_repo_label(
+            session_name, repo_label if repo_label and repo_label.strip() else repo_name
+        )
         if description is not None and description.strip():
             _set_session_description(session_name, description)
         try_sync_panel_tmux_config()
@@ -1308,6 +1312,17 @@ def send_text_to_session(session_name: str, text: str, *, enter: bool = False) -
 
 GD_DESCRIPTION_OPTION = "@gitdirector_description"
 GD_REPO_LABEL_OPTION = "@gitdirector_repo_label"
+
+
+def one_line_format(option: str) -> str:
+    """``#{option}`` with control characters as spaces.
+
+    A value set behind gitdirector's back can hold a newline or tab, which
+    would start a made-up row or shift a field in a listing read line by line.
+    """
+    return f"#{{s/[\x01-\x1f\x7f]/ /:{option}}}"
+
+
 GD_DEFAULT_DESCRIPTION = "-"
 
 
@@ -1405,7 +1420,8 @@ def _session_header_format(session_name: str, theme_name: str | None = None) -> 
 
 
 def _panel_window_status_format() -> str:
-    return " #{pane_index}:#{pane_title} "
+    # Agents set pane titles; q/h keeps a ``#[...]`` in one from restyling the line.
+    return " #{pane_index}:#{q/h:pane_title} "
 
 
 def _tmux_design_config_path() -> Path:
@@ -1442,6 +1458,11 @@ _STATUS_LABEL_OPTION = "@gd_label"
 _STATUS_BADGE_MAX = 24
 # The label gets what the badge, window list and clock leave of the width.
 _STATUS_LABEL_WIDTH = "#{?#{e|>:#{window_width},70},#{e|-:#{window_width},58},12}"
+
+
+def _status_text(text: str) -> str:
+    """*text* quoted for a status line option, drawn as written: tmux would read ``#[...]`` as a style."""
+    return shlex.quote(printable(text).replace("#", "##"))
 
 
 def _tmux_theme_config(
@@ -1487,11 +1508,11 @@ def _tmux_theme_config(
         )
         if badge_text is not None:
             lines.append(
-                f"set-option -t {quoted_session} {_STATUS_BADGE_OPTION} {shlex.quote(badge_text)}"
+                f"set-option -t {quoted_session} {_STATUS_BADGE_OPTION} {_status_text(badge_text)}"
             )
         if label_text is not None:
             lines.append(
-                f"set-option -t {quoted_session} {_STATUS_LABEL_OPTION} {shlex.quote(label_text)}"
+                f"set-option -t {quoted_session} {_STATUS_LABEL_OPTION} {_status_text(label_text)}"
             )
     else:
         lines.append(f"set-option -t {quoted_session} status off")
@@ -1735,17 +1756,27 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
         for session_name in live_repo_sessions
     )
     lines.extend(_deck_tmux_config(session_name, resolved_theme) for session_name in live_decks)
+    if windows:
+        # Last: a tmux that rejects it still takes the theme above.
+        lines.extend(tmux_codepoint_width_commands(_server_pid()))
 
     atomic_write_text(config_path, "\n".join(lines))
-    # Always sourced: identical text can still mean a new session that
-    # reuses a closed one's name and has never been themed.
-    if live_panel_sessions or live_repo_sessions or live_decks:
+    # Always sourced while tmux runs: identical text can still mean a new
+    # session that reuses a closed one's name and has never been themed, and
+    # a console in tmux needs the widths before it has any session.
+    if windows:
         try:
             _run_tmux(["source-file", str(config_path)], check=True)
         except TmuxError:
             return config_path
 
     return config_path
+
+
+def _server_pid() -> int | None:
+    result = _run_tmux(["display-message", "-p", "#{pid}"], text=True)
+    value = result.stdout.strip() if result.returncode == 0 and result.stdout else ""
+    return int(value) if value.isdigit() else None
 
 
 def try_sync_panel_tmux_config() -> None:

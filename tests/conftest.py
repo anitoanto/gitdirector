@@ -15,6 +15,7 @@ for _name in ("FORCE_COLOR", "CLICOLOR_FORCE", "TTY_COMPATIBLE", "TTY_INTERACTIV
 import pytest  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 
+from gitdirector import cell_widths  # noqa: E402
 from gitdirector.config import Config  # noqa: E402
 
 
@@ -124,6 +125,17 @@ def _isolated_home(monkeypatch, tmp_path_factory):
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("GITDIRECTOR_HOME", raising=False)
+
+
+REAL_TMUX_IDENTITY = cell_widths._identity
+
+
+@pytest.fixture(autouse=True)
+def _unmeasured_tmux(monkeypatch):
+    """Widths fall back to the spacing-mark rule; tests that measure tmux opt in."""
+    monkeypatch.setattr(cell_widths, "_identity", lambda _tmux: None)
+    monkeypatch.setattr(cell_widths, "_measured", {})
+    monkeypatch.setattr("gitdirector.integrations.tmux.core._server_pid", lambda: None)
 
 
 @pytest.fixture(autouse=True)

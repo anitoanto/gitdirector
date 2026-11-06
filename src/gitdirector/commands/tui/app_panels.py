@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from rich.cells import cell_len
 from rich.markup import escape
 from rich.text import Text
 from textual.css.query import NoMatches
@@ -17,6 +18,7 @@ from .screens.panels import (
     PanelActionMenuScreen,
     RenamePanelScreen,
 )
+from .table_text import pad_cells
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +90,7 @@ def panel_session_lines(
         session_name = panel.panes.get(placement.pane_index)
         purpose, repo = _session_parts(session_name, labels) if session_name else ("", "")
         rows.append((placement.pane_index, session_name, purpose, repo))
-    repo_width = max((len(repo) for *_rest, repo in rows), default=0)
+    repo_width = max((cell_len(repo) for *_rest, repo in rows), default=0)
     text = Text(no_wrap=True, overflow="ellipsis")
     for index, (pane, session_name, purpose, repo) in enumerate(rows):
         if index:
@@ -98,7 +100,7 @@ def panel_session_lines(
         if not session_name:
             text.append("empty", style=f"italic {palette.muted}")
             continue
-        text.append(repo.ljust(repo_width), style=palette.yellow if live else palette.muted)
+        text.append(pad_cells(repo, repo_width), style=palette.yellow if live else palette.muted)
         text.append("  ")
         text.append(purpose, style="bold" if live else palette.muted)
         if not live:

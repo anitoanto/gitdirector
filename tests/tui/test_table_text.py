@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from gitdirector.commands.tui.table_text import wrap_table_cell_text
+from rich.cells import cell_len
+
+from gitdirector.commands.tui.table_text import pad_cells, truncate_cells, wrap_table_cell_text
 
 
 class TestWrapTableCellText:
@@ -41,3 +43,20 @@ class TestWrapTableCellText:
         assert wrapped == text, (
             f"expected the helper to fall back to the original text, got {wrapped!r}"
         )
+
+
+class TestCellWidths:
+    def test_wide_text_wraps_by_cells(self):
+        for line in wrap_table_cell_text("日本語 のリポジトリ 説明文です", 6).split("\n"):
+            assert cell_len(line) <= 6
+
+    def test_spacing_marks_wrap_by_cells(self):
+        for line in wrap_table_cell_text("മലയാളം കേരളം നിങ്ങൾ", 6).split("\n"):
+            assert cell_len(line) <= 6
+
+    def test_truncate_and_pad_by_cells(self):
+        assert truncate_cells("日本語のリポジトリ", 7) == "日本語…"
+        assert cell_len(pad_cells(truncate_cells("日本語のリポジトリ", 8), 8)) == 8
+        assert truncate_cells("abc", 0) == ""
+        assert truncate_cells("abc", 1) == "…"
+        assert pad_cells("日本", 6) == "日本  "

@@ -22,17 +22,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
+from rich.cells import cell_len, split_graphemes
 from rich.console import Console, RenderableType
 from rich.table import Table
 from rich.text import Text
 
 from .. import version_check
+from ..cell_widths import match_rich_to_tmux
 from ..repo import MISSING_REPOSITORY_MESSAGE, RepositoryInfo, RepoStatus
+from ..terminal_text import printable
 
 if TYPE_CHECKING:
     from ..manager import RepositoryManager
 
 T = TypeVar("T")
+
+# Every command and console measures text as tmux and the terminal draw it.
+match_rich_to_tmux()
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
 
@@ -228,7 +234,7 @@ def print_rows(
     On a terminal, *fit_last* cuts the last column (a path) from the left
     so each row stays on one line; piped output is never truncated.
     """
-    rows = [[cell if isinstance(cell, Text) else Text(cell) for cell in row] for row in rows]
+    rows = [[_printable_cell(cell) for cell in row] for row in rows]
     if fit_last and console.is_terminal and rows:
         used = sum(
             max(len(headers[i]), *(row[i].cell_len for row in rows)) + 2
@@ -251,6 +257,17 @@ def print_rows(
     emit(table)
 
 
+def _printable_cell(cell: str | Text) -> Text:
+    if isinstance(cell, str):
+        return Text(printable(cell))
+    if printable(cell.plain) == cell.plain:
+        return cell
+    pieces = cell.divide(sorted({offset for span in cell.spans for offset in span[:2]}))
+    for piece in pieces:
+        piece.plain = printable(piece.plain)
+    return Text(style=cell.style).join(pieces)
+
+
 def emit(renderable: RenderableType) -> None:
     """Print a table-like *renderable* to stdout without trailing padding.
 
@@ -267,11 +284,18 @@ def emit(renderable: RenderableType) -> None:
 
 def fit_left(text: str, width: int) -> str:
     """Cut *text* from the left to *width* cells, keeping a path's informative tail."""
-    if len(text) <= width:
+    if cell_len(text) <= width:
         return text
     if width <= 1:
         return "…"[:width]
-    return "…" + text[-(width - 1) :]
+    room = width - 1
+    start = len(text)
+    for span_start, _end, cells in reversed(split_graphemes(text)[0]):
+        if cells > room:
+            break
+        room -= cells
+        start = span_start
+    return "…" + text[start:]
 
 
 def format_size(size: int | None) -> Text:
