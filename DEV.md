@@ -50,26 +50,39 @@ the configured theme's background and foreground.
 
 ## Text width
 
-tmux, Rich and the terminal must agree on how many cells a line takes. Where
-the terminal draws it wider than tmux counts, a pane on the right edge wraps
-the excess onto the next row, over the sidebar, and tmux never repaints those
-cells; where Rich counts it narrower than tmux, a console row overflows its
-own pane. tmux takes its widths from utf8proc or the C library and Rich from
-its own tables, and they differ: spacing marks (the vowel signs of Malayalam,
-Tamil, Devanagari, ...) get no cell where terminals draw one, and an older C
-library leaves new emoji one cell wide.
+A program in a pane places text by its own count of cells and tmux keeps its
+grid by tmux's: where they differ, the program's redraws land on the wrong
+cells and its text is garbled in the grid itself. Where Rich counts a line
+narrower than tmux, a console row overflows its own pane. tmux takes its
+widths from utf8proc or the C library, Rich from its own tables, and an
+older C library leaves new emoji one cell wide.
+
+Spacing marks (the vowel signs of Malayalam, Tamil, Devanagari, ...) have no
+width everyone agrees on, so tmux keeps its own (none on macOS, one cell with
+glibc). Claude Code (`Bun.stringWidth`), OpenCode and Copilot give them no
+cell; Codex gives them one; Gemini CLI and Pi redraw whole lines and work
+either way. 1.14 gave them a cell in tmux, which garbled every streamed
+Malayalam line of Claude Code. Terminals draw them a cell wide (Ghostty: a
+cluster with one is two cells), so with tmux at zero a long line on the right
+edge can still spill a few cells onto the next row; no tmux setting fixes both,
+and garbled agent text is the worse failure. Turning the terminal's autowrap
+off does not help either: tmux's full redraw relies on it for soft-wrapped
+full-width lines, even with `am@`.
 
 `cell_widths.py` measures the binary of the running tmux server (found from
 its pid, so a different `tmux` on PATH does not matter) once per build, in a
 private server (`width_probe.py` asks tmux for the cursor after each
 codepoint, about 0.4s), and caches the result in
-`~/.gitdirector/cache/cell-widths.json`. Every codepoint gets the wider of
-the two widths, and at least one cell for a spacing mark. tmux gets the
-difference as `codepoint-widths` slots from 1000 up (server-wide; the user's
-own entries sit below) at the end of every config sync while tmux runs; Rich
-gets it when `gitdirector.commands` is imported. If tmux cannot be measured,
-spacing marks get one cell, and regional indicators and skin tones two in
-tmux, as Rich counts them.
+`~/.gitdirector/cache/cell-widths.json`. Every codepoint but a mark gets the
+wider of the two widths; marks keep tmux's. tmux gets the difference as
+`codepoint-widths` slots from 1000 up (server-wide; the user's own entries sit
+below) at the end of every config sync while tmux runs, and slots from 1000 up
+it no longer needs are unset. Rich gets the same widths when
+`gitdirector.commands` is imported inside tmux; drawing straight to a terminal
+(the console outside tmux) it also gives a spacing mark a cell, as terminals
+draw one. If tmux cannot be measured, tmux gets regional indicators and skin
+tones two cells, as Rich counts them, and Rich outside tmux gives spacing
+marks a cell.
 
 Rich also groups characters into cells the way tmux does
 (`tmux_graphemes`): VS16 widens any one-cell character; a ZWJ joins the next

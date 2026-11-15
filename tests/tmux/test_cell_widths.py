@@ -1,4 +1,4 @@
-"""tmux and Rich agree on the width of any text, once tmux has been measured."""
+"""tmux and Rich, measuring inside tmux, agree on the width of any text once tmux is measured."""
 
 import random
 import shutil
@@ -59,13 +59,15 @@ def measured(monkeypatch):
         monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
         monkeypatch.delenv("TMUX", raising=False)
         monkeypatch.setattr(cell_widths, "_identity", REAL_TMUX_IDENTITY)
-        previous = cell_widths._rich_spans
+        previous = cell_widths._rich_side, cell_widths._rich_spans
         try:
             assert cell_widths._widths(shutil.which("tmux")) is not None
+            cell_widths.match_rich_to_tmux()
             commands = tmux_codepoint_width_commands()
             yield shutil.which("tmux"), commands
         finally:
-            cell_widths._give_rich(previous or [])
+            cell_widths._rich_side = previous[0]
+            cell_widths._give_rich(previous[1] or [])
             _cleanup_tmux_tmpdir(tmux_dir)
 
 

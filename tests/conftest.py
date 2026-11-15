@@ -132,10 +132,12 @@ REAL_TMUX_IDENTITY = cell_widths._identity
 
 @pytest.fixture(autouse=True)
 def _unmeasured_tmux(monkeypatch):
-    """Widths fall back to the spacing-mark rule; tests that measure tmux opt in."""
+    """Widths fall back to the unmeasured rules; tests that measure tmux opt in."""
     monkeypatch.setattr(cell_widths, "_identity", lambda _tmux: None)
     monkeypatch.setattr(cell_widths, "_measured", {})
-    monkeypatch.setattr("gitdirector.integrations.tmux.core._server_pid", lambda: None)
+    monkeypatch.setattr(
+        "gitdirector.integrations.tmux.core._server_width_state", lambda: (None, "")
+    )
 
 
 @pytest.fixture(autouse=True)

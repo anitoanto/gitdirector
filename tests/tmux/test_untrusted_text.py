@@ -8,7 +8,7 @@ import pytest
 
 from gitdirector import cell_widths
 from gitdirector.integrations.tmux import create_tmux_session, list_all_gd_sessions
-from gitdirector.integrations.tmux.core import _server_pid, _status_text
+from gitdirector.integrations.tmux.core import _server_width_state, _status_text
 
 from .._timeouts import TMUX_CMD_TIMEOUT
 from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
@@ -74,7 +74,7 @@ def test_the_running_server_build_is_the_one_measured(monkeypatch):
                 check=True,
                 timeout=TMUX_CMD_TIMEOUT,
             )
-            pid = _server_pid()
+            pid, _current = _server_width_state()
             executable = cell_widths._executable(pid) if pid else None
         finally:
             subprocess.run(["tmux", "kill-server"], capture_output=True, timeout=TMUX_CMD_TIMEOUT)

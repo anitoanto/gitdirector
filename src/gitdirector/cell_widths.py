@@ -1,19 +1,20 @@
-"""One width per character for tmux, Rich and the terminal.
+"""One width per character for tmux, Rich and the programs in the panes.
 
-When the terminal draws a line wider than tmux counts it, a pane on the
-right edge wraps the excess onto the next row, over the pane on the left,
-and tmux never redraws those cells. When Rich (and so Textual) counts a line
-narrower than tmux, a console row overflows its own pane. Both happened:
-tmux gives spacing marks (the vowel signs in Malayalam "കാ") and emoji newer
-than its C library no cell, or one, where terminals draw one, or two; Rich
-has its own tables.
+A program in a pane places text by its own count of cells, and tmux keeps
+its grid by tmux's. Where they differ, the program's redraws land on the
+wrong cells and its text is garbled for good. When Rich (and so Textual)
+counts a line narrower than tmux, a console row overflows its own pane.
 
 The installed tmux is measured once, in a throwaway server, for every
-codepoint. Each gets the wider of tmux's and Rich's widths, and at least one
-cell for a spacing mark; tmux is told where that differs from its own, and
-so is Rich, which also joins characters into cells by tmux's rules. A
-terminal that draws a character narrower only leaves a line short inside its
-pane.
+codepoint. Characters tmux's C library is too old to know (new emoji, newly
+assigned letters) get the wider of tmux's and Rich's widths, which is what
+every agent counts too; tmux is told where that differs from its own. Marks
+keep tmux's width: agents disagree on spacing marks (the vowel signs in
+Malayalam "കാ"). Claude Code, OpenCode and Copilot give them no cell, as
+tmux does on macOS, and Codex gives them one, so changing tmux breaks
+whichever counts the other way. Inside tmux Rich counts as tmux does, and
+joins characters into cells by tmux's rules. Drawing straight to a terminal,
+Rich gives a spacing mark a cell, as terminals draw one.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -61,6 +63,11 @@ _JOINERS = frozenset(
 _PROBE_TIMEOUT_SECS = 10.0
 _CACHE_FILE = "cell-widths.json"
 _CACHE_ENTRIES = 4
+# Bumped whenever the agreed widths are worked out differently, so a cached
+# measurement from an older rule is never reused.
+_RULES = 2
+_SIDES = ("tmux", "rich", "rich_terminal")
+_SLOT = re.compile(r"^codepoint-widths\[(\d+)\]", re.MULTILINE)
 
 # tmux 3.7's joining rules (screen_write_combine, utf8_should_combine).
 _ZWJ = "\u200d"
@@ -104,6 +111,9 @@ _EMOJI_PARTS = [(0x1F1E6, 0x1F1FF, 2), (0x1F3FB, 0x1F3FF, 2)]
 
 _measured: dict[str, dict[str, list[Span]] | None] = {}
 _rich_spans: list[Span] | None = None
+# Which measured table Rich uses: "rich" where this process draws inside
+# tmux, "rich_terminal" straight to a terminal; None until Rich is patched.
+_rich_side: str | None = None
 
 
 @cache
@@ -120,27 +130,48 @@ def spacing_mark_ranges() -> tuple[tuple[int, int], ...]:
     return tuple((start, end) for start, end in ranges)
 
 
-def tmux_codepoint_width_commands(server_pid: int | None = None) -> list[str]:
+def tmux_codepoint_width_commands(server_pid: int | None = None, current: str = "") -> list[str]:
     """``set-option`` lines giving tmux the agreed widths.
 
     The tmux binary running as *server_pid* is measured first if it never
-    was; without it, only spacing marks and emoji parts get their widths.
+    was; without it, only emoji parts get their widths. *current* is the
+    server's ``show-options -s codepoint-widths``: gitdirector's slots that
+    are no longer needed are unset, and the user's own are left alone.
     """
     widths = _widths(_executable(server_pid) if server_pid else None)
-    spans = widths["tmux"] if widths else _fallback_tmux_spans()
-    if _rich_spans is not None:
-        _give_rich(widths["rich"] if widths else _spacing_mark_spans_for_rich())
+    spans = widths["tmux"] if widths else list(_EMOJI_PARTS)
+    if _rich_side is not None:
+        _give_rich(_rich_table(widths, _rich_side))
     lines = []
     for slot, (start, end, width) in enumerate(spans, TMUX_FIRST_SLOT):
         span = f"U+{start:04X}" if start == end else f"U+{start:04X}-U+{end:04X}"
         lines.append(f"set-option -s codepoint-widths[{slot}] {span}={width}")
+    first_unused = TMUX_FIRST_SLOT + len(spans)
+    stale = sorted({int(slot) for slot in _SLOT.findall(current)} - set(range(first_unused)))
+    lines.extend(f"set-option -su codepoint-widths[{slot}]" for slot in stale)
     return lines
 
 
 def match_rich_to_tmux() -> None:
     """Make Rich, and so Textual, measure text as tmux does."""
-    widths = _widths(None)
-    _give_rich(widths["rich"] if widths else _spacing_mark_spans_for_rich())
+    _match_rich("rich")
+
+
+def match_rich_to_screen() -> None:
+    """Make Rich measure text as it is drawn: by tmux inside tmux, else by the terminal."""
+    _match_rich("rich" if os.environ.get("TMUX") else "rich_terminal")
+
+
+def _match_rich(side: str) -> None:
+    global _rich_side
+    _rich_side = side
+    _give_rich(_rich_table(_widths(None), side))
+
+
+def _rich_table(widths: dict[str, list[Span]] | None, side: str) -> list[Span]:
+    if widths:
+        return widths[side]
+    return _spacing_mark_spans_for_rich() if side == "rich_terminal" else []
 
 
 def tmux_graphemes(text: str, unicode_version: str = "auto") -> tuple[list[Span], int]:
@@ -332,10 +363,6 @@ def _spans(widths: dict[int, int]) -> list[Span]:
     return [(start, end, width) for start, end, width in spans]
 
 
-def _fallback_tmux_spans() -> list[Span]:
-    return overridden([(start, end, 1) for start, end in spacing_mark_ranges()], _EMOJI_PARTS)
-
-
 def _executable(pid: int) -> str | None:
     """The program running as *pid*: the tmux server's build, which may not be the one on PATH."""
     try:
@@ -369,6 +396,7 @@ def _identity(tmux: str) -> dict[str, object] | None:
         "rich": rich_version,
         "rich_unicode": os.environ.get("UNICODE_VERSION", ""),
         "python_unicode": unicodedata.unidata_version,
+        "rules": _RULES,
     }
 
 
@@ -406,7 +434,7 @@ def _parse(stored: object) -> dict[str, list[Span]] | None:
     try:
         return {
             side: [(start, end, width) for start, end, width in stored[side]]  # type: ignore[index]
-            for side in ("tmux", "rich")
+            for side in _SIDES
         }
     except (KeyError, TypeError, ValueError):
         return None
@@ -444,14 +472,23 @@ def _measure(tmux: str) -> dict[str, list[Span]] | None:
     rich_width = _rich_width()
     tmux_widths: dict[int, int] = {}
     rich_widths: dict[int, int] = {}
+    terminal_widths: dict[int, int] = {}
     for code, tmux_width in zip(codepoints, native):
         own = rich_width(code)
-        agreed = max(own, tmux_width, int(unicodedata.category(chr(code)) == "Mc"))
-        if agreed != tmux_width:
-            tmux_widths[code] = agreed
-        if agreed != own:
-            rich_widths[code] = agreed
-    return {"tmux": overridden(_spans(tmux_widths), _EMOJI_PARTS), "rich": _spans(rich_widths)}
+        category = unicodedata.category(chr(code))
+        in_tmux = tmux_width if category.startswith("M") else max(own, tmux_width)
+        on_terminal = max(own, in_tmux, int(category == "Mc"))
+        if in_tmux != tmux_width:
+            tmux_widths[code] = in_tmux
+        if in_tmux != own:
+            rich_widths[code] = in_tmux
+        if on_terminal != own:
+            terminal_widths[code] = on_terminal
+    return {
+        "tmux": overridden(_spans(tmux_widths), _EMOJI_PARTS),
+        "rich": _spans(rich_widths),
+        "rich_terminal": _spans(terminal_widths),
+    }
 
 
 def measure_in_tmux(

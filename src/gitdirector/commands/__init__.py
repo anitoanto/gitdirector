@@ -28,7 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import version_check
-from ..cell_widths import match_rich_to_tmux
+from ..cell_widths import match_rich_to_screen
 from ..repo import MISSING_REPOSITORY_MESSAGE, RepositoryInfo, RepoStatus
 from ..terminal_text import printable
 
@@ -37,8 +37,8 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-# Every command and console measures text as tmux and the terminal draw it.
-match_rich_to_tmux()
+# Every command and console measures text as tmux, or the terminal, draws it.
+match_rich_to_screen()
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
 

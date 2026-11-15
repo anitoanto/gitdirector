@@ -1758,7 +1758,7 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     lines.extend(_deck_tmux_config(session_name, resolved_theme) for session_name in live_decks)
     if windows:
         # Last: a tmux that rejects it still takes the theme above.
-        lines.extend(tmux_codepoint_width_commands(_server_pid()))
+        lines.extend(tmux_codepoint_width_commands(*_server_width_state()))
 
     atomic_write_text(config_path, "\n".join(lines))
     # Always sourced while tmux runs: identical text can still mean a new
@@ -1773,10 +1773,14 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
     return config_path
 
 
-def _server_pid() -> int | None:
-    result = _run_tmux(["display-message", "-p", "#{pid}"], text=True)
-    value = result.stdout.strip() if result.returncode == 0 and result.stdout else ""
-    return int(value) if value.isdigit() else None
+def _server_width_state() -> tuple[int | None, str]:
+    """The server's pid and its ``codepoint-widths`` option, in one call."""
+    result = _run_tmux(
+        ["display-message", "-p", "#{pid}", ";", "show-options", "-s", "codepoint-widths"],
+        text=True,
+    )
+    pid, _, current = (result.stdout or "").partition("\n")
+    return (int(pid) if pid.strip().isdigit() else None), current
 
 
 def try_sync_panel_tmux_config() -> None:
