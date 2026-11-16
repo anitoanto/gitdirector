@@ -153,7 +153,7 @@ pick another; when no sessions are left you are back in the console. Set
 | `status [--json]` | Only repos with uncommitted changes, file by file |
 | `pull [PATH\|NAME...] [--yes]` | `git pull --ff-only`, concurrently; all repos by default |
 | `info PATH\|NAME [--full] [--json]` | File, line, and token counts per extension |
-| `autoclean [--yes]` | Stop tracking repos that no longer exist |
+| `autoclean [--yes]` | Clear `~/.gitdirector/cache` and stop tracking repos that no longer exist |
 | `cd PATH\|NAME\|SESSION [--agent A]` | Open a shell or an agent in a new session, or rejoin a live one |
 | `sessions [--json]` | Live sessions and their status: `running`, `waiting`, `idle` |
 | `panel [NAME]` | Open a saved panel, or list them |

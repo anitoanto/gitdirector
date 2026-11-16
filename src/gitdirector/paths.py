@@ -58,6 +58,24 @@ def lock_file(name: str) -> Path:
     return state_dir() / f"{name}.lock"
 
 
+def clear_cache() -> None:
+    """Delete what GitDirector rebuilds on demand.
+
+    ``temp/`` stays: a running command may still be waiting on a file there.
+    """
+    cache = cache_dir()
+    if not cache.is_dir() or cache.is_symlink():
+        return
+    temp = temp_dir()
+    for entry in cache.iterdir():
+        if entry == temp:
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink(missing_ok=True)
+
+
 def remove_legacy_files() -> None:
     """Drop the files older versions kept at the top of the folder."""
     if home_override():

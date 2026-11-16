@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from gitdirector import paths
 from gitdirector.cli import cli
 
 
@@ -68,3 +69,45 @@ class TestAutocleanLinks:
             console.width = original_width
 
         assert "vanished" in result.output
+
+
+class TestAutocleanCache:
+    def _seed_cache(self):
+        paths.temp_dir().mkdir(parents=True)
+        (paths.cache_dir() / "repos.yaml").write_text("")
+
+    def test_cache_is_cleared_with_nothing_broken(self, runner):
+        self._seed_cache()
+        config = MagicMock()
+        config.repositories = []
+
+        with patch("gitdirector.commands.autoclean.Config", return_value=config):
+            result = runner.invoke(cli, ["autoclean"])
+        assert result.exit_code == 0
+        assert "Cleared" in result.output
+        assert not (paths.cache_dir() / "repos.yaml").exists()
+        assert paths.temp_dir().is_dir()
+
+    def test_cache_is_cleared_even_when_links_are_kept(self, runner, tmp_path):
+        self._seed_cache()
+        config = MagicMock()
+        config.repositories = [tmp_path / "gone"]
+
+        with patch("gitdirector.commands.autoclean.Config", return_value=config):
+            result = runner.invoke(cli, ["autoclean"], input="n\n")
+        assert result.exit_code == 0
+        assert not (paths.cache_dir() / "repos.yaml").exists()
+        config.remove_repositories.assert_not_called()
+
+    def test_a_cache_that_cannot_be_cleared_fails_the_command(self, runner):
+        config = MagicMock()
+        config.repositories = []
+
+        with (
+            patch("gitdirector.commands.autoclean.Config", return_value=config),
+            patch.object(paths, "clear_cache", side_effect=PermissionError("denied")),
+        ):
+            result = runner.invoke(cli, ["autoclean"])
+        assert result.exit_code != 0
+        assert "Failed to clear" in result.output
+        assert "denied" in result.output

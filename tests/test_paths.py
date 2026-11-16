@@ -49,3 +49,29 @@ def test_an_overridden_folder_is_never_cleaned(tmp_path, monkeypatch):
     paths.remove_legacy_files()
 
     assert (tmp_path / "sidebar.log").exists()
+
+
+def test_clear_cache_keeps_temp_and_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    home = paths.home_dir()
+    cache = paths.cache_dir()
+    (cache / "terminfo" / "78").mkdir(parents=True)
+    (cache / "repos.yaml").write_text("")
+    paths.temp_dir().mkdir()
+    (paths.temp_dir() / "agent-1.ready").write_text("")
+    (home / "config.yaml").write_text("repositories: []\n")
+    paths.lock_file("config").parent.mkdir()
+    paths.lock_file("config").write_text("")
+
+    paths.clear_cache()
+
+    assert [entry.name for entry in cache.iterdir()] == ["temp"]
+    assert (paths.temp_dir() / "agent-1.ready").exists()
+    assert (home / "config.yaml").exists()
+    assert paths.lock_file("config").exists()
+
+
+def test_clear_cache_without_a_cache_is_a_no_op(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    paths.clear_cache()
+    assert not paths.home_dir().exists()

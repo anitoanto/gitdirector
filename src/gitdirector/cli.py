@@ -33,10 +33,11 @@ from .commands.help import show_help
 __all__ = ["cli", "main"]
 
 # Commands driven by scripts and agents, that report versions themselves, or
-# that wipe ~/.gitdirector (the check's cache lives there, so a concurrent
-# check would race the wipe); the update notice stays out of their way.
+# that wipe ~/.gitdirector or its cache (the check's cache lives there, so a
+# concurrent check would race the wipe); the update notice stays out of their way.
 _NO_UPDATE_NOTICE = frozenset(
     {
+        "autoclean",
         "completion",
         "doctor",
         "console",
