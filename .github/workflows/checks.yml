@@ -11,13 +11,13 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -31,13 +31,13 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -52,31 +52,40 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TMUX_VERSION: "3.7c"
+      # uv follows .python-version (3.12, for development) over whatever
+      # Python is on PATH; this makes it use the matrix's.
+      UV_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
         python-version: [ "3.10", "3.11", "3.12", "3.13", "3.14" ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync
 
+      # A tmux build needs the libraries of the OS release it was built on
+      # (libtinfo's symbol versions): ubuntu-latest moves between releases.
+      - name: Identify the OS release
+        id: os
+        run: echo "release=$(. /etc/os-release && echo "${ID}-${VERSION_ID}")" >> "$GITHUB_OUTPUT"
+
       # GitDirector needs tmux 3.7+ (kill-session -g); the runner ships an older one.
       - name: Cache tmux
         id: tmux-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/tmux
-          key: tmux-${{ env.TMUX_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+          key: tmux-${{ env.TMUX_VERSION }}-${{ steps.os.outputs.release }}-${{ runner.arch }}
 
       - name: Build tmux
         if: steps.tmux-cache.outputs.cache-hit != 'true'
@@ -93,8 +102,10 @@ jobs:
       - name: Put tmux on PATH
         run: echo "$HOME/.local/tmux/bin" >> "$GITHUB_PATH"
 
-      - name: Show tmux version
-        run: tmux -V
+      - name: Show tmux and Python versions
+        run: |
+          tmux -V
+          uv run python -V
 
       - name: Run tests
         run: uv run pytest

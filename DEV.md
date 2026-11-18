@@ -710,6 +710,12 @@ is not yet released, builds and publishes it, then creates the `v<version>`
 tag and a GitHub release with auto-generated notes and the built sdist/wheel
 attached. Pull requests run only the checks.
 
+Each test job sets `UV_PYTHON` to its matrix version: uv otherwise follows
+`.python-version` (3.12, for development) whatever Python is installed. It
+builds tmux 3.7c once per OS release and caches it under that release, since
+the binary needs that release's libraries (`ubuntu-latest` moves between
+them).
+
 Never create the tag yourself. It is made by the release job at the exact
 commit that was published, and only after PyPI succeeds, so a failed build
 cannot leave a tag behind. Re-running a workflow whose tag already exists is
