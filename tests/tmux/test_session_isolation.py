@@ -167,13 +167,16 @@ class TestSessionEnvironmentIsolation:
     def test_session_shell_starts_once_as_a_login_shell(self, polluted_server):
         """Its startup files run once, never with the launch context in reach."""
         tmp_path, home_dir, _launch_dir = polluted_server
+        repo = home_dir / "once-repo"
+        repo.mkdir()
         starts = tmp_path / "starts.txt"
+        # Only shells started in the repository: the fixture's own session
+        # runs a login shell too, and bash reads .profile as well.
         (home_dir / ".profile").write_text(
+            f'[ "$(pwd -P)" = {shlex.quote(os.path.realpath(repo))} ] && '
             f'echo "$0 ${{CLAUDECODE:-clean}}" >> {shlex.quote(str(starts))}\n'
         )
         _tmux("set-option", "-g", "default-shell", "/bin/sh")
-        repo = home_dir / "once-repo"
-        repo.mkdir()
         probe_file = tmp_path / "once-probe.txt"
         sync_panel_tmux_config()
 
