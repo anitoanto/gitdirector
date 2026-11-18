@@ -15,8 +15,8 @@ from gitdirector.integrations.tmux.core import _is_helper_session, _run_tmux, _s
 from ._shared import _cleanup_tmux_tmpdir, _make_short_tmux_tmpdir, _tmux_integration_lock
 
 
-def _result(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(["tmux"], returncode, stdout, "")
+def _result(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(["tmux"], returncode, stdout, stderr)
 
 
 class TestNames:
@@ -77,9 +77,17 @@ class TestReadDeckState:
         assert state.main is None
         assert state.sidebar is not None
 
-    def test_gone_deck(self):
-        with patch.object(D, "_run_tmux", return_value=_result("", 1)):
+    @pytest.mark.parametrize(
+        "stderr", ["can't find session: gd/deck/1-a", "no server running on /tmp/tmux-1/default"]
+    )
+    def test_gone_deck(self, stderr):
+        with patch.object(D, "_run_tmux", return_value=_result("", 1, stderr)):
             assert D.read_deck_state("gd/deck/1-a") is None
+
+    def test_a_failed_query_is_no_answer(self):
+        with patch.object(D, "_run_tmux", return_value=_result("", 1, "tmux command timed out")):
+            with pytest.raises(D.TmuxError):
+                D.read_deck_state("gd/deck/1-a")
 
 
 def _tmux_calls(mock_run: MagicMock) -> list[list[str]]:
@@ -296,7 +304,7 @@ class TestCloseDeck:
 class TestAttachDeck:
     @patch.object(D, "kill_tmux_session", return_value=False)
     @patch.object(D, "create_deck", return_value="gd/deck/1-a")
-    @patch.object(D, "_run_tmux", return_value=_result())
+    @patch.object(D, "run_tmux_client", return_value=_result())
     def test_outside_tmux_attaches_then_arms_destroy_unattached(self, mock_run, create, _kill):
         with patch.dict("os.environ", {}, clear=True):
             assert D.attach_deck("gd/r/claude/1") is True
@@ -315,11 +323,10 @@ class TestAttachDeck:
             "destroy-unattached",
             "on",
         ]
-        assert mock_run.call_args.kwargs["timeout"] is None
 
     @patch.object(D, "kill_tmux_session", return_value=True)
     @patch.object(D, "create_deck", return_value="gd/deck/1-a")
-    @patch.object(D, "_run_tmux", return_value=_result(returncode=1))
+    @patch.object(D, "run_tmux_client", return_value=_result(returncode=1))
     def test_failed_attach_with_the_deck_still_there_raises(self, _run, _create, _kill):
         with patch.dict("os.environ", {}, clear=True), pytest.raises(D.TmuxError):
             D.attach_deck("gd/r/claude/1")
@@ -548,3 +555,26 @@ def test_the_wheel_wrap_keeps_tmux_own_binding_elsewhere():
         )
         assert '"select-pane ; send-keys -X scroll-up"' in line
         assert line.endswith('"select-pane ; send-keys -X -N 5 scroll-up"')
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required")
+@pytest.mark.usefixtures("tmux_server")
+def test_a_view_whose_client_left_is_not_left_behind():
+    deck = D.create_deck("gd/alpha_aaaaa/claude/1")
+    state = _wait_for(lambda: (s := D.read_deck_state(deck)) and s.main_attached and s)
+    views_before = {
+        s for s in _out("list-sessions", "-F", "#{session_name}").split() if "view" in s
+    }
+    real_run = D._run_tmux
+
+    def client_gone_on_switch(args, **kwargs):
+        if "switch-client" in args:
+            args = [token if token != state.main.tty else "/dev/gone" for token in args]
+        return real_run(args, **kwargs)
+
+    with patch.object(D, "_run_tmux", side_effect=client_gone_on_switch):
+        with pytest.raises(D.TmuxError):
+            D.show_session(deck, "gd/beta_bbbbb/shell/1")
+
+    views_after = {s for s in _out("list-sessions", "-F", "#{session_name}").split() if "view" in s}
+    assert views_after == views_before

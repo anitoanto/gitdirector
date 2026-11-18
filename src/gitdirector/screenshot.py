@@ -15,7 +15,7 @@ from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
 
-from .cell_widths import match_rich_to_tmux
+from .cell_widths import match_rich_widths
 
 if TYPE_CHECKING:
     from PIL.ImageFont import FreeTypeFont, ImageFont
@@ -29,8 +29,8 @@ PADDING = 12
 
 RGB = tuple[int, int, int]
 
-# The capture's cells are tmux's.
-match_rich_to_tmux()
+# The capture's cells are tmux's, which are the terminal's.
+match_rich_widths()
 
 # (regular, bold) as (file, face index); .ttc collections hold several faces.
 _KNOWN_FONTS: tuple[tuple[tuple[str, int], tuple[str, int]], ...] = (

@@ -11,9 +11,9 @@ from . import (
     console,
     count_noun,
     display_path,
-    error_console,
     print_json,
     print_rows,
+    spinner,
     summary_line,
 )
 from .completion import complete_repository_names
@@ -95,7 +95,7 @@ def register(cli: click.Group):
                 f"Several repositories match '{target}'; be more specific:\n{listing}"
             )
 
-        with error_console.status(f"Counting {repo_path.name}…"):
+        with spinner(f"Counting {repo_path.name}…"):
             result = gather_repo_info(repo_path, full=full)
         if as_json:
             print_json(_as_json(result, repo_path))

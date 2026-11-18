@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from ...integrations.tmux.core import (
     sync_panel_tmux_config,
 )
 from ...integrations.tmux.monitor import TmuxMonitor
+from ...logs import log_to_file
 from ...ui_theme import SupportedThemes
 from .app_sessions import session_matches
 from .constants import TablePalette, resolve_table_palette
@@ -52,10 +54,6 @@ _TICK_SECS = 0.3
 _FIRST_SAMPLE_WAIT_SECS = 2.0
 _THEME_CHECK_SECS = 2.0
 _FLASH_SECS = 4.0
-# Lets the hidden frame reach tmux before the pane is resized.
-_RESIZE_AFTER_SECS = 0.03
-# The content comes back even if no resize arrives.
-_RESIZE_TIMEOUT_SECS = 0.6
 # A press released over another pane never sends its MouseUp here.
 _PRESS_TIMEOUT_SECS = 1.0
 # Narrower than this, the sidebar is a rail of status dots.
@@ -467,7 +465,11 @@ class SessionSidebar(SupportedThemes, App):
         self._placed_cursor = False
         self._tick_running = False
         self._flash_timer = None
-        self._reconcile_blocked = False
+        # Held by everything that reads the deck and then changes it, the
+        # samples' repairs included, so no two of them interleave.
+        self._deck_lock = threading.Lock()
+        # The session the user chose last; a show only ever applies the latest.
+        self._wanted: str | None = None
         self._revealed = False
         self._query = ""
         # A sample begun before the last click, while a session is being
@@ -476,7 +478,8 @@ class SessionSidebar(SupportedThemes, App):
         # shown session: applying them would flash the highlight and the
         # marker for a moment.
         self._local_change_at = 0.0
-        self._showing = False
+        # Deck changes started from the UI and not finished yet.
+        self._showing = 0
         self._pressed_at: float | None = None
 
     @property
@@ -547,9 +550,7 @@ class SessionSidebar(SupportedThemes, App):
             prefix = deck_api.prefix_key_label()
             self.call_from_thread(self._apply_setup, collapsed, prefix)
             # Statuses from the monitor's first pass, not "checking" first.
-            deadline = time.monotonic() + _FIRST_SAMPLE_WAIT_SECS
-            while self._monitor.entries() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
+            self._monitor.wait_for_entries(_FIRST_SAMPLE_WAIT_SECS)
             self._sample_once()
         except Exception:
             logger.warning("sidebar setup failed", exc_info=True)
@@ -606,11 +607,11 @@ class SessionSidebar(SupportedThemes, App):
     def _sample_once(self) -> None:
         """Read and repair the deck, then hand the result to the UI; on a worker thread."""
         started = time.monotonic()
-        state = deck_api.read_deck_state(self.deck)
-        if state is None:
-            self.call_from_thread(self.exit)
-            return
-        if not self._reconcile_blocked:
+        with self._deck_lock:
+            state = deck_api.read_deck_state(self.deck)
+            if state is None:
+                self.call_from_thread(self.exit)
+                return
             state = self._reconcile(state) or state
         raw = self._monitor.entries()
         if raw is None:
@@ -828,8 +829,8 @@ class SessionSidebar(SupportedThemes, App):
         self._render_title()
         self._main.add_class("-resizing")
         collapsed = self._collapsed
-        self.set_timer(_RESIZE_AFTER_SECS, lambda: self._set_collapsed(collapsed))
-        self.set_timer(_RESIZE_TIMEOUT_SECS, self._end_resize)
+        # Resized once the frame with the content hidden is out.
+        self.call_after_refresh(self._set_collapsed, collapsed)
 
     def _end_resize(self) -> None:
         self._main.remove_class("-resizing")
@@ -900,7 +901,8 @@ class SessionSidebar(SupportedThemes, App):
     @work(thread=True, group="deck")
     def action_leave_deck(self) -> None:
         try:
-            deck_api.close_deck(self.deck)
+            with self._deck_lock:
+                deck_api.close_deck(self.deck)
         except Exception as exc:
             logger.warning("could not leave the deck", exc_info=True)
             self.call_from_thread(self._flash, f"could not leave: {exc}")
@@ -914,8 +916,9 @@ class SessionSidebar(SupportedThemes, App):
                 return
         self._start_showing()
         self._shown = session_name
+        self._wanted = session_name
         self._render_list()
-        self._show(session_name)
+        self._show()
 
     def _focus_session(self, pane_id: str) -> None:
         self._start_showing()
@@ -925,10 +928,10 @@ class SessionSidebar(SupportedThemes, App):
         self.note_local_change()
         # Focus goes to the session: dim now rather than when a sample says so.
         self._main.add_class("-blurred")
-        self._showing = True
+        self._showing += 1
 
     def _show_finished(self) -> None:
-        self._showing = False
+        self._showing -= 1
         self.note_local_change()
 
     def _finish_showing(self) -> None:
@@ -940,30 +943,44 @@ class SessionSidebar(SupportedThemes, App):
             pass
 
     @work(thread=True, group="deck")
-    def _show(self, session_name: str) -> None:
-        self._reconcile_blocked = True
+    def _show(self) -> None:
+        session_name = None
         try:
-            deck_api.show_session(self.deck, session_name)
+            with self._deck_lock:
+                # Picks made while an earlier show ran: only the last counts.
+                session_name, self._wanted = self._wanted, None
+                if session_name is not None:
+                    deck_api.show_session(self.deck, session_name)
         except Exception as exc:
             logger.warning("could not show %s", session_name, exc_info=True)
             self.call_from_thread(self._flash, f"could not open {session_name}: {exc}")
         finally:
-            self._reconcile_blocked = False
             self._finish_showing()
 
     @work(thread=True, group="deck")
     def _select_pane(self, pane_id: str) -> None:
         try:
-            deck_api.select_pane(pane_id)
+            with self._deck_lock:
+                deck_api.select_pane(pane_id)
+        except Exception as exc:
+            logger.warning("could not focus the session", exc_info=True)
+            self.call_from_thread(self._flash, f"could not focus the session: {exc}")
         finally:
             self._finish_showing()
 
     @work(thread=True, group="deck")
     def _set_collapsed(self, collapsed: bool) -> None:
+        resized = False
         try:
-            deck_api.set_sidebar_collapsed(self.deck, collapsed)
+            with self._deck_lock:
+                before = deck_api.pane_width(self.pane_id) if self.pane_id else None
+                deck_api.set_sidebar_collapsed(self.deck, collapsed)
+                resized = self.pane_id is not None and deck_api.pane_width(self.pane_id) != before
         except Exception:
             logger.warning("could not resize the sidebar", exc_info=True)
+        if not resized:
+            # No Resize event will bring the content back.
+            self.call_from_thread(self._end_resize)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -971,8 +988,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) != 1:
         print("usage: python -m gitdirector.commands.tui.sidebar <deck>", file=sys.stderr)
         return 2
-    # Python's fallback handler would print warnings over the sidebar.
-    logging.getLogger("gitdirector").addHandler(logging.NullHandler())
+    log_to_file("sidebar")
     app = SessionSidebar(args[0], os.environ.get("TMUX_PANE"))
     app.run()
     return app.return_code or 0

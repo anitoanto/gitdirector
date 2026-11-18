@@ -48,10 +48,12 @@ from .core import (
     _session_option_target,
     _tmux_child_environment_command,
     _tmux_new_session_environment_args,
+    _tmux_server_is_gone,
     attach_client_env,
     guard_session_window,
     kill_tmux_session,
     respawn_pane,
+    run_tmux_client,
     try_sync_panel_tmux_config,
     view_attach_command,
 )
@@ -237,7 +239,11 @@ _STATE_SEPARATOR = "\t"
 
 
 def read_deck_state(deck: str) -> DeckState | None:
-    """Everything the sidebar reconciles against, in one tmux call; None once the deck is gone."""
+    """Everything the sidebar reconciles against, in one tmux call; None once the deck is gone.
+
+    Raises :class:`TmuxError` when tmux could not answer (a timeout, a fork
+    failure): that says nothing about the deck, so the sidebar tries again.
+    """
     target = _deck_target(deck)
     sep = _STATE_SEPARATOR
     result = _run_tmux(
@@ -281,7 +287,14 @@ def read_deck_state(deck: str) -> DeckState | None:
         text=True,
     )
     if result.returncode != 0:
-        return None
+        if "can't find session" in result.stderr or _tmux_server_is_gone(result.stderr):
+            return None
+        raise TmuxError(
+            "could not read the deck",
+            args_list=list(result.args),
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
     header: list[str] | None = None
     panes: dict[str, DeckPane] = {}
     client_ttys: set[str] = set()
@@ -472,7 +485,14 @@ def show_session(deck: str, session_name: str, *, focus: bool = True) -> None:
     )
     if focus:
         commands.append(["select-pane", "-t", state.main.pane_id])
-    _run_tmux(_chain_tmux_commands(commands), check=True)
+    try:
+        _run_tmux(_chain_tmux_commands(commands), check=True)
+    except TmuxError:
+        # tmux stops a chain at the first failure (the client left before
+        # switch-client): the view made for it would never be destroyed.
+        if state.main_attached:
+            _run_tmux(["kill-session", "-t", f"={view}"])
+        raise
 
 
 def show_placeholder(
@@ -541,6 +561,12 @@ def set_sidebar_collapsed(deck: str, collapsed: bool) -> None:
         ),
         check=True,
     )
+
+
+def pane_width(pane_id: str) -> int | None:
+    result = _run_tmux(["display-message", "-p", "-t", pane_id, "#{pane_width}"], text=True)
+    width = result.stdout.strip() if result.returncode == 0 else ""
+    return int(width) if width.isdigit() else None
 
 
 def select_pane(pane_id: str) -> None:
@@ -838,13 +864,11 @@ def attach_deck(session_name: str, deck: str | None = None, *, same_screen: bool
         return False
     # Blocks for the whole visit; see attach_tmux_session for why there is
     # no timeout and why a non-zero exit is not necessarily a failure.
-    result = _run_tmux(
+    result = run_tmux_client(
         [
             *TMUX_CLIENT_FEATURES,
             *_chain_tmux_commands([["attach-session", "-t", f"={deck}"], destroy_when_left]),
         ],
-        capture_output=False,
-        timeout=None,
         extra_env=attach_client_env() if same_screen else None,
     )
     deck_left_behind = kill_tmux_session(deck)

@@ -20,6 +20,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.geometry import Size
 from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
@@ -336,6 +337,7 @@ class DiffReviewScreen(ModalScreen[None]):
         # result over a newer one: a thread worker cannot be interrupted.
         self._load_generation = 0
         self._diff_renders: dict[tuple[str, int], DiffDocument] = {}
+        self._commit_loading: CommitLoadingScreen | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="diff-container"):
@@ -552,25 +554,28 @@ class DiffReviewScreen(ModalScreen[None]):
             return
         try:
             file = self.query_one("#diff-files-list", FileTileList).selected_file()
-        except Exception:
+            view = self.query_one("#diff-content-scroll", DiffContentView)
+        except NoMatches:
             return
         # Before the list's deferred initial selection the panel shows the
         # first file, so it is never blank while there is content.
         file = file or self._shown[0]
+        code_width = self._content_width()
+        key = (file.path, code_width)
         try:
-            view = self.query_one("#diff-content-scroll", DiffContentView)
-            code_width = self._content_width()
-            key = (file.path, code_width)
             document = self._diff_renders.get(key)
             if document is None:
                 document = build_diff_document(file, code_width=code_width)
                 if len(self._diff_renders) >= _DOCUMENT_CACHE_SIZE:
                     del self._diff_renders[next(iter(self._diff_renders))]
                 self._diff_renders[key] = document
-            view.set_document(document)
-            self._apply_content_tone(file)
-        except Exception:
-            logger.debug("Failed to render diff content", exc_info=True)
+        except Exception as exc:
+            # Never leave the previous file's diff under this file's name.
+            logger.warning("could not render the diff of %s", file.path, exc_info=True)
+            note = ("The diff could not be shown:", str(exc) or type(exc).__name__)
+            document = DiffDocument(file, code_width=code_width, note=note)
+        view.set_document(document)
+        self._apply_content_tone(file)
 
     def _apply_content_tone(self, file: ChangedFile) -> None:
         """Tint the right-side content area the same family as the
@@ -780,6 +785,7 @@ class DiffReviewScreen(ModalScreen[None]):
             return
         message, push_after = payload
         loading = CommitLoadingScreen(self.repo_name, push_after=push_after)
+        self._commit_loading = loading
         self.app.push_screen(loading)
         self._commit_worker(self.repo_path, message, push_after, loading)
 
@@ -844,20 +850,8 @@ class DiffReviewScreen(ModalScreen[None]):
                 output_lines.append(commit_out)
 
             if push_after:
-                _post(loading.set_status, "Pushing to origin\u2026")
-                # First push on a fresh clone usually needs
-                # ``-u origin <branch>`` to set the upstream. Try
-                # a plain push first; if it fails because there's
-                # no upstream, fall back to the set-upstream form.
+                _post(loading.set_status, "Pushing\u2026")
                 push_ok, push_out = repo.push()
-                push_err_lower = (push_out or "").lower()
-                no_upstream = (
-                    "no upstream" in push_err_lower
-                    or "set up a tracking branch" in push_err_lower
-                    or "has no upstream" in push_err_lower
-                )
-                if not push_ok and no_upstream:
-                    push_ok, push_out = repo.push(set_upstream=True)
                 if not push_ok:
                     _post(
                         self._show_commit_result,
@@ -890,19 +884,10 @@ class DiffReviewScreen(ModalScreen[None]):
         push_ok: bool | None,
         output: str,
     ) -> None:
-        try:
-            active = self.app.screen
-        except Exception:
-            active = None
-        # Dismiss the loading screen (whichever instance is on top)
-        # before pushing the result modal. ``_commit_worker`` is
-        # ``exclusive=True`` so there is only ever one in flight.
-        try:
-            if isinstance(active, CommitLoadingScreen):
-                active.dismiss(None)
-        except Exception:
-            logger.debug("Failed to dismiss loading screen", exc_info=True)
-
+        # ``_commit_worker`` is ``exclusive=True``: one card at a time.
+        loading, self._commit_loading = self._commit_loading, None
+        if loading is not None:
+            loading.close()
         self.app.push_screen(
             CommitResultScreen(
                 self.repo_name,

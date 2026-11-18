@@ -254,7 +254,9 @@ class RepositoryManager:
                 repo = Repository(path)
                 return repo.get_status(fetch=fetch, include_size=include_size)
             except Exception as exc:
-                return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+                return RepositoryInfo(
+                    path, path.name, RepoStatus.UNKNOWN, None, str(exc), error=str(exc)
+                )
         return RepositoryInfo(
             path,
             path.name,

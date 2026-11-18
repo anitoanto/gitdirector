@@ -4,7 +4,7 @@
   ``panels.yaml``)
 * ``cache/``: whatever is rebuilt on demand, ``cache/temp/`` for files that
   live only while a command runs
-* ``state/``: lock files
+* ``state/``: lock files, and the console's and sidebar's logs
 
 ``GITDIRECTOR_HOME`` moves the whole folder. Nothing else on disk is written.
 """
@@ -56,6 +56,10 @@ def state_dir() -> Path:
 
 def lock_file(name: str) -> Path:
     return state_dir() / f"{name}.lock"
+
+
+def log_file(name: str) -> Path:
+    return state_dir() / f"{name}.log"
 
 
 def clear_cache() -> None:

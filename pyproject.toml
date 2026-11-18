@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "gitdirector"
-version = "1.15.0"
+version = "1.16.0"
 description = "A terminal based control plane for developers working across multiple repositories. Launch multiple AI coding agents, multiple tmux sessions and track changes across all your repos in one place."
 readme = "README.md"
 license = { text = "MIT" }
@@ -36,8 +36,10 @@ classifiers = [
 dependencies = [
     "pyyaml>=6.0",
     "click>=8.1.0",
-    "rich>=14.3.0",
-    "textual>=8.2.1",
+    # cell_widths.py and terminal_text.py hook into private Rich and Textual
+    # internals; a new major version is tested before it is allowed.
+    "rich>=14.3.0,<16",
+    "textual>=8.2.1,<9",
     "tiktoken>=0.5.0",
     "pathspec>=1.0.0",
     "pillow>=10.1",

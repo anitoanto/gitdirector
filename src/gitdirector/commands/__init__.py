@@ -22,14 +22,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import click
-from rich.cells import cell_len, split_graphemes
+from rich.cells import cell_len
 from rich.console import Console, RenderableType
 from rich.table import Table
 from rich.text import Text
 
 from .. import version_check
-from ..cell_widths import match_rich_to_screen
-from ..repo import MISSING_REPOSITORY_MESSAGE, RepositoryInfo, RepoStatus
+from ..cell_widths import match_rich_widths, tmux_graphemes
+from ..repo import MISSING_REPOSITORY_MESSAGE, Repository, RepositoryInfo, RepoStatus
 from ..terminal_text import printable
 
 if TYPE_CHECKING:
@@ -37,13 +37,45 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-# Every command and console measures text as tmux, or the terminal, draws it.
-match_rich_to_screen()
+# Every command and console measures text as the terminal, and tmux, draw it.
+match_rich_widths()
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
 
 console = Console(highlight=False)
 error_console = Console(highlight=False, stderr=True)
+
+
+def on_a_terminal(target: Console) -> bool:
+    """Whether *target* writes to a real terminal.
+
+    Rich's ``is_terminal`` also says yes under ``FORCE_COLOR``, which asks
+    for colour only: piped output must still be laid out whole, and a
+    spinner never drawn into a file.
+    """
+    try:
+        return os.isatty(target.file.fileno())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def spinner(message: str):
+    """A stderr spinner on a terminal; nothing at all otherwise."""
+    if on_a_terminal(error_console):
+        return error_console.status(message)
+    return _NoSpinner()
+
+
+class _NoSpinner:
+    def __enter__(self) -> "_NoSpinner":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def update(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
 
 # Styles shared with the console's design language.
 ATTENTION = "bold yellow"
@@ -96,10 +128,14 @@ def _emit_update_notice(notice: str | None) -> None:
 
 
 def print_update_notice() -> None:
-    """Check for a newer release now and print a notice if there is one."""
+    """Print the notice for a newer release the last check found, if any.
+
+    Never waits on the network: help must be instant offline. Every other
+    command refreshes the check in the background.
+    """
     if not _claim_update_notice(click.get_current_context(silent=True)):
         return
-    _emit_update_notice(version_check.get_update_notice())
+    _emit_update_notice(version_check.get_cached_update_notice())
 
 
 def schedule_update_notice(ctx: click.Context) -> None:
@@ -177,13 +213,17 @@ def run_concurrently(
 
     Results come back in the order of *paths*. *on_error* turns an exception
     raised by *task* into a result, so one bad repository never aborts the run.
+    An interrupt (Ctrl+C) cancels the repositories not yet started and stops
+    the git commands running, which run in sessions of their own and so never
+    see the terminal's signal.
     """
     paths = list(paths)
     results: list[T | None] = [None] * len(paths)
     total = len(paths)
     noun = count_noun(total, "repository", "repositories")
-    with error_console.status(f"{verb} {noun}…") as status:
-        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, total))) as executor:
+    with spinner(f"{verb} {noun}…") as status:
+        executor = ThreadPoolExecutor(max_workers=max(1, min(max_workers, total)))
+        try:
             futures = {executor.submit(task, path): index for index, path in enumerate(paths)}
             for done, future in enumerate(as_completed(futures), start=1):
                 index = futures[future]
@@ -192,6 +232,11 @@ def run_concurrently(
                 except Exception as exc:
                     results[index] = on_error(paths[index], exc)
                 status.update(f"{verb} {noun}… {done}/{total}")
+        except BaseException:
+            executor.shutdown(wait=False, cancel_futures=True)
+            Repository.kill_running_git_commands()
+            raise
+        executor.shutdown()
     return results  # type: ignore[return-value]
 
 
@@ -235,7 +280,7 @@ def print_rows(
     so each row stays on one line; piped output is never truncated.
     """
     rows = [[_printable_cell(cell) for cell in row] for row in rows]
-    if fit_last and console.is_terminal and rows:
+    if fit_last and on_a_terminal(console) and rows:
         used = sum(
             max(len(headers[i]), *(row[i].cell_len for row in rows)) + 2
             for i in range(len(headers) - 1)
@@ -275,7 +320,7 @@ def emit(renderable: RenderableType) -> None:
     that was wrapped or cut to fit an imaginary 80-column screen.
     """
     target = console
-    if not console.is_terminal:
+    if not on_a_terminal(console):
         target = Console(file=io.StringIO(), width=100_000, highlight=False)
     with target.capture() as capture:
         target.print(renderable)
@@ -290,7 +335,7 @@ def fit_left(text: str, width: int) -> str:
         return "…"[:width]
     room = width - 1
     start = len(text)
-    for span_start, _end, cells in reversed(split_graphemes(text)[0]):
+    for span_start, _end, cells in reversed(tmux_graphemes(text)[0]):
         if cells > room:
             break
         room -= cells
@@ -315,6 +360,11 @@ def is_missing(info: RepositoryInfo) -> bool:
     return info.message == MISSING_REPOSITORY_MESSAGE
 
 
+def has_failed(info: RepositoryInfo) -> bool:
+    """Whether git could not read the repository, so nothing about it is known."""
+    return bool(info.error)
+
+
 def status_parts(info: RepositoryInfo) -> list[tuple[str, str]]:
     """The console's status wording: ``↑1 to push · 2 staged · 5 changed``."""
     parts: list[tuple[str, str]] = []
@@ -328,8 +378,10 @@ def status_parts(info: RepositoryInfo) -> list[tuple[str, str]]:
         parts.append((f"{_count(info.unstaged_files)}changed", ATTENTION))
     if is_missing(info):
         parts.append(("missing", ATTENTION))
+    elif has_failed(info):
+        parts.append((f"failed: {info.error}", DANGER))
     elif info.status is RepoStatus.UNKNOWN:
-        label = "no remote branch" if info.message.startswith("No origin/") else "sync unknown"
+        label = "no remote branch" if info.no_remote_branch else "sync unknown"
         parts.append((label, MUTED))
     if info.sync_stale:
         parts.append(("offline", MUTED))
@@ -345,6 +397,7 @@ def repository_json(info: RepositoryInfo) -> dict[str, Any]:
         "name": info.name,
         "path": str(info.path),
         "branch": info.branch,
+        "upstream": info.upstream or None,
         "sync": info.status.value,
         "ahead": info.ahead,
         "behind": info.behind,
@@ -355,11 +408,12 @@ def repository_json(info: RepositoryInfo) -> dict[str, Any]:
         "last_commit_timestamp": info.last_commit_timestamp,
         "size": info.size,
         "message": info.message,
+        "error": info.error or None,
     }
 
 
 def failed_status(path: Path, exc: Exception) -> RepositoryInfo:
-    return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+    return RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc), error=str(exc))
 
 
 def confirm(prompt: str, *, default: bool) -> bool:

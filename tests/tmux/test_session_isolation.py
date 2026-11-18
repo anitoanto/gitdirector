@@ -15,6 +15,7 @@ process.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -162,6 +163,33 @@ class TestSessionEnvironmentIsolation:
         leaks = [line for line in output.splitlines() if line.startswith("LEAK ")]
         assert leaks == [], f"session shell inherited gitdirector's launch context: {leaks}"
         assert f"cwd={os.path.realpath(repo)}" in output
+
+    def test_session_shell_starts_once_as_a_login_shell(self, polluted_server):
+        """Its startup files run once, never with the launch context in reach."""
+        tmp_path, home_dir, _launch_dir = polluted_server
+        starts = tmp_path / "starts.txt"
+        (home_dir / ".profile").write_text(
+            f'echo "$0 ${{CLAUDECODE:-clean}}" >> {shlex.quote(str(starts))}\n'
+        )
+        _tmux("set-option", "-g", "default-shell", "/bin/sh")
+        repo = home_dir / "once-repo"
+        repo.mkdir()
+        probe_file = tmp_path / "once-probe.txt"
+        sync_panel_tmux_config()
+
+        session_name = create_tmux_session("once-repo", repo, purpose="shell")
+        try:
+            _tmux("send-keys", "-t", f"={session_name}:", _probe_script(probe_file), "Enter")
+            output = _wait_for_probe(probe_file)
+        finally:
+            kill_tmux_session(session_name)
+
+        assert "END" in output, f"probe never ran: {output!r}"
+        lines = starts.read_text().splitlines()
+        assert len(lines) == 1, f"the shell started {len(lines)} times: {lines}"
+        login_name, leak = lines[0].split()
+        assert login_name.startswith("-"), f"not a login shell: {login_name}"
+        assert leak == "clean"
 
     def test_agent_launch_sees_no_launch_context(self, polluted_server):
         """The path an AI agent is actually started through."""

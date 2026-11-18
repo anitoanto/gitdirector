@@ -59,15 +59,14 @@ def measured(monkeypatch):
         monkeypatch.setenv("TMUX_TMPDIR", str(tmux_dir))
         monkeypatch.delenv("TMUX", raising=False)
         monkeypatch.setattr(cell_widths, "_identity", REAL_TMUX_IDENTITY)
-        previous = cell_widths._rich_side, cell_widths._rich_spans
+        previous = cell_widths._rich_spans
         try:
             assert cell_widths._widths(shutil.which("tmux")) is not None
-            cell_widths.match_rich_to_tmux()
+            cell_widths.match_rich_widths()
             commands = tmux_codepoint_width_commands()
             yield shutil.which("tmux"), commands
         finally:
-            cell_widths._rich_side = previous[0]
-            cell_widths._give_rich(previous[1] or [])
+            cell_widths._give_rich(previous or [])
             _cleanup_tmux_tmpdir(tmux_dir)
 
 

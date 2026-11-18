@@ -36,6 +36,44 @@ the helpers in `commands/__init__.py`:
   from `status_parts`), and session statuses use its `●`/`○` marks.
 - **Startup.** Every Tab press in shell completion runs the CLI, so import
   heavy modules (tmux, Textual, pathspec, urllib) inside the command.
+- **Git.** Every git command runs in `repo.git_env()`: it never prompts (no
+  terminal prompt, no askpass), drops what ties git to another repository (a
+  parent git's `GIT_DIR` and the rest of `git rev-parse --local-env-vars`),
+  and takes no optional locks, so a status never holds `index.lock` against
+  the user's own `git add`. Network commands get GitDirector's ssh options
+  only when the user chose no ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`,
+  `core.sshCommand`). Stopping git sends SIGTERM first, which lets git remove
+  its lock files, and SIGKILL after 2 s; Ctrl+C in `run_concurrently` cancels
+  what has not started and stops what runs. A push takes `-u origin <branch>`
+  when the branch tracks nothing yet (`push_arguments`), decided from the
+  branch, not from git's error text. Sync, fetch and pull follow the branch's
+  configured upstream (`Repository.sync_target`), any remote, a local branch
+  (`.`) included, and `origin/<branch>` only for a branch that tracks none.
+  Without a fetch, `git status`'s own `branch.ab` counts are used as they are.
+- **Failures.** A repository git cannot read carries `error`, in git's own
+  words; `list` and `status` count it `unreadable` and exit 1. An expected
+  failure is one line; a bug (`UnicodeError`, `NotImplementedError`,
+  `RecursionError`), or anything with `GITDIRECTOR_DEBUG` set, keeps its
+  traceback.
+- **Terminal.** Layout (fitting rows, cutting paths) and the spinner follow
+  whether stdout or stderr really is a terminal (`on_a_terminal`):
+  `FORCE_COLOR` only adds colour.
+
+The console and the sidebar log to `~/.gitdirector/state/{console,sidebar}.log`
+(`logs.log_to_file`), warnings and up, everything with `GITDIRECTOR_DEBUG`;
+nothing reaches the screen they draw on. In them, worker threads never change
+the app's state: they hand results to the UI thread (`call_from_thread`),
+where every read happens. A tmux call that fails is reported
+(`_report_failure`) instead of ending the app, and `_run_tmux` returns every
+failure, a timeout or a tmux that could not start included, as a non-zero
+result unless asked to raise. A `new-session` that reaches a server in the
+middle of exiting (its last session just closed) gets `server exited
+unexpectedly`, and nothing it did survives; `_run_tmux` runs it again, which
+starts a new server, as a client a moment later would have. A tab writes the
+status bar only while it is the one shown, so a load that lands after a tab
+switch leaves it alone. A loading card is taken away with
+`LoadingCard.close`: `dismiss` pops whatever screen is on top, which is not
+the card once a result covers it.
 
 ## Screenshots
 
@@ -50,39 +88,43 @@ the configured theme's background and foreground.
 
 ## Text width
 
-A program in a pane places text by its own count of cells and tmux keeps its
-grid by tmux's: where they differ, the program's redraws land on the wrong
-cells and its text is garbled in the grid itself. Where Rich counts a line
-narrower than tmux, a console row overflows its own pane. tmux takes its
-widths from utf8proc or the C library, Rich from its own tables, and an
-older C library leaves new emoji one cell wide.
+tmux keeps a copy of the screen and sends the terminal only the cells that
+changed, so its width for every character must be the width the terminal
+draws. Where tmux counts a character narrower, the terminal's cursor runs
+ahead of tmux's: the rest of the line lands further right, a line on a pane's
+right edge spills into the pane beside or below it (a deck's sidebar, a
+neighbouring panel slot, the status line), and tmux never repaints it,
+because its copy says nothing changed. Where Rich counts a line narrower
+than tmux, a console row overflows its own pane. tmux takes its widths from
+utf8proc or the C library, Rich from its own tables, and an older C library
+leaves new emoji one cell wide.
 
-Spacing marks (the vowel signs of Malayalam, Tamil, Devanagari, ...) have no
-width everyone agrees on, so tmux keeps its own (none on macOS, one cell with
-glibc). Claude Code (`Bun.stringWidth`), OpenCode and Copilot give them no
-cell; Codex gives them one; Gemini CLI and Pi redraw whole lines and work
-either way. 1.14 gave them a cell in tmux, which garbled every streamed
-Malayalam line of Claude Code. Terminals draw them a cell wide (Ghostty: a
-cluster with one is two cells), so with tmux at zero a long line on the right
-edge can still spill a few cells onto the next row; no tmux setting fixes both,
-and garbled agent text is the worse failure. Turning the terminal's autowrap
-off does not help either: tmux's full redraw relies on it for soft-wrapped
-full-width lines, even with `am@`.
+Spacing marks (the vowel signs of Malayalam, Tamil, Devanagari, ...) are
+drawn a cell wide by terminals (Unicode gives them an advance; in Ghostty a
+cluster with one is two cells), so tmux and Rich count them so too. Programs
+disagree: Claude Code (`Bun.stringWidth`), OpenCode and Copilot give them no
+cell, Codex gives them one, and Gemini CLI and Pi redraw whole lines. A
+program that gives them no cell misplaces its own lines that hold them,
+exactly as it does in a terminal without tmux; that damage stays inside its
+pane. 1.14.1 gave them tmux's own width instead (none on macOS) to keep such
+programs' text intact in tmux's grid, and the terminal then spilled those
+lines into the sidebar and neighbouring slots. No setting in tmux, Ghostty
+(`grapheme-width-method` and mode 2027 both give them a cell) or Claude Code
+makes both sides agree, so the terminal's width wins.
 
 `cell_widths.py` measures the binary of the running tmux server (found from
 its pid, so a different `tmux` on PATH does not matter) once per build, in a
 private server (`width_probe.py` asks tmux for the cursor after each
 codepoint, about 0.4s), and caches the result in
-`~/.gitdirector/cache/cell-widths.json`. Every codepoint but a mark gets the
-wider of the two widths; marks keep tmux's. tmux gets the difference as
-`codepoint-widths` slots from 1000 up (server-wide; the user's own entries sit
-below) at the end of every config sync while tmux runs, and slots from 1000 up
-it no longer needs are unset. Rich gets the same widths when
-`gitdirector.commands` is imported inside tmux; drawing straight to a terminal
-(the console outside tmux) it also gives a spacing mark a cell, as terminals
-draw one. If tmux cannot be measured, tmux gets regional indicators and skin
-tones two cells, as Rich counts them, and Rich outside tmux gives spacing
-marks a cell.
+`~/.gitdirector/cache/cell-widths.json`. Each codepoint gets the width
+terminals draw (`drawn_width`): a spacing mark one cell, a combining mark
+tmux's own (none), anything else the wider of tmux's and Rich's. tmux gets
+the difference as `codepoint-widths` slots from 1000 up (server-wide; the
+user's own entries sit below) at the end of every config sync while tmux
+runs, and slots from 1000 up it no longer needs are unset. Rich gets the same
+widths, inside tmux and out, when `gitdirector.commands` is imported. If tmux
+cannot be measured, tmux and Rich still give spacing marks a cell, and tmux
+gets regional indicators and skin tones two cells, as Rich counts them.
 
 Rich also groups characters into cells the way tmux does
 (`tmux_graphemes`): VS16 widens any one-cell character; a ZWJ joins the next
@@ -271,7 +313,8 @@ On tmux 3.6+ the divider between sidebar and session is drawn as spaces on the
 terminal background, so it disappears; older tmux keeps a heavy line.
 
 The sidebar owns the deck. Every 0.3 s it reads the deck in one tmux call
-(`read_deck_state`) and repairs it: a shown session gone from
+(`read_deck_state`, which tells a deck that is gone from a query that failed
+and is only retried) and repairs it: a shown session gone from
 `list-sessions` gets a "session ended" message in the main pane and focus
 moves to the sidebar (checked by name, because a killed session's window
 lives on in the view until the view goes); a main pane whose client exited
@@ -288,7 +331,11 @@ release the sidebar never sees (the button let go over another pane) stops
 counting as held after a second. A click or Enter goes straight from
 `SessionList.action_select` to `open_session`, not through an
 `OptionSelected` message, so the highlight, the dimmed look and the marker
-land in the same frame.
+land in the same frame. Everything that reads the deck and then changes it
+(the sample's repairs, showing or focusing a session, collapsing, leaving)
+holds one lock (`_deck_lock`), so a repair never lands halfway through a
+show; quick picks only ever show the last one (`_wanted`). A show whose
+client went away before `switch-client` removes the view it made.
 
 `prefix Tab` (unbound in tmux by default), `prefix b` and `prefix v` are rebound as
 `if-shell -F '#{m:gd/deck/*,...}' <deck command> <original>`, so outside a
@@ -328,7 +375,9 @@ to its pane (`set-clipboard external`), so without this a selection never
 reached the terminal. The script climbs from `#{client_tty}` (the client
 that copied) through the pane whose tty it is to that session's clients,
 until it reaches terminals, and sends them the newest buffer with
-`load-buffer -w` (OSC 52, sent only to terminals tmux knows take it). For
+`load-buffer -w` (OSC 52, sent only to terminals tmux knows take it) into a
+scratch buffer it deletes at once: loaded back under its own name, the copy
+became a named buffer, which tmux's paste skips and never evicts. For
 terminals without OSC 52 (Terminal.app, VTE) it also pipes the copy to the
 system clipboard's tool: `pbcopy`, `clip.exe` on WSL, `wl-copy`, `xclip`, or
 `xsel`. A buffer older than 3 s, or already forwarded
@@ -374,11 +423,34 @@ frame stays up while the console writes its captured frame over it
 (`_release_held_frame`). To check, record a pty's output across a detach:
 there must be no `?1049l` and nothing drawn between the `?2026h` and the frame.
 
+Answers the terminal still owed tmux (its device attributes, version, colour
+and theme queries) can arrive after its client is gone, and Textual turns a
+reply it does not know into keys: `ESC[?997;1n`, a theme report, read as `1`
+(the repositories tab) and `n` (a new panel). Before the console reads
+again, `terminal_replies.drain_terminal_replies` asks the terminal for the
+cursor position, which tmux never asks, and reads everything up to that
+answer away: terminals answer in order.
+
+Every attach client runs through `run_tmux_client`, which has no timeout. A
+suspend (`prefix C-z`) stops the client; a parent that only waited would hang
+with it, the terminal nobody's. It stops too, as the shell expects of its
+job, and continues the client once `fg` continues it; started straight by a
+terminal, with no shell, it continues the client at once.
+
 A deck gets `destroy-unattached` only once its client is on it, so it dies
 when the client detaches; `reap_stale_decks` removes any a crash left
 unattached. From inside tmux the client switches in, and closing the deck
 switches it back to `@gd_deck_return`: `detach-on-destroy previous` means
 the previous session alphabetically, not the one the client came from.
+
+**Starting a session.** `create_tmux_session` creates the session around an
+idle placeholder (`sleep`, run without a shell), checks it landed in the
+repository, isolates its environment (`set-environment -r`), and only then
+starts what tmux starts in any new window (`default-command`, or
+`default-shell` as a login shell) with `new-window -k` in the placeholder's
+place, guarded in the same call. The user's shell starts once and never sees
+the launch context; an agent session keeps the placeholder until the agent is
+respawned in, so no shell starts there at all.
 
 **Respawning panes.** Every `respawn-pane` goes through `core.respawn_pane`.
 When a respawn cannot fork (no free pty, process limit), tmux before 3.8
@@ -458,13 +530,17 @@ with `#{s/…//:…}`) so concurrent hooks cannot race:
 - `@gitdirector_agent_shells` = `` <id> <id>`` of the background shells
   started: a Bash call (main thread or subagent) whose `tool_response`
   carries a `backgroundTaskId` lists it. No hook marks a shell's end.
-- The main thread's `Stop` carries `background_tasks`, everything still in
-  flight (`{"id", "type", "status", ...}`; a subagent's task id is its
-  `agent_id`), and rewrites both lists from its `subagent` and `shell`
-  entries. Other types (`monitor`, `workflow`, `MCP task`, ...) are not
-  counted. Only `Stop` does this: no subagent can start then, while a
+- `@gitdirector_agent_tasks` = `` <id> <id>`` of every other kind of
+  background work: `workflow`, `monitor`, `MCP task`, `teammate`,
+  `cloud session` (a remote review), `dream`, ... No hook marks their start
+  or end; only a `Stop` lists them.
+- The main thread's `Stop` carries `background_tasks`, everything still
+  running or pending (`{"id", "type", "status", ...}`; a subagent's task id
+  is its `agent_id`), and rewrites all three lists from it: `subagent`
+  entries to the helpers, `shell` to the shells, everything else to the
+  tasks. Only `Stop` does this: no subagent can start then, while a
   `SubagentStop` still lists the subagent that is stopping. `SessionStart`
-  and `SessionEnd` clear both lists; a new prompt does not (background work
+  and `SessionEnd` clear the lists; a new prompt does not (background work
   keeps going).
 
 Automatic compaction changes nothing. Its `auto` trigger also covers idle
@@ -502,26 +578,31 @@ records (`resolve_agent_status` in `monitor.py`):
   once, so it needs no inference.
 
 The monitor then turns an `idle` into `running` while a listed subagent or
-shell still works. The lists are kept by best-effort hooks (one seen live
-never took effect and left a finished subagent listed), so the monitor
-never trusts them alone. A shell counts only while Claude has a
-non-interactive shell child (`zsh -c source …/shell-snapshots/…`) that has
-lived 2 s; the list gates this so MCP servers and other children never
-count, and the age keeps out hook and status-line commands. For a subagent, a
-subagent's transcript is `<session>/subagents/agent-<id>.jsonl` beside the
-session's own (`_has_live_helper`), and a listed subagent counts as gone
-when that file is missing, when its last `assistant` entry carries
-`stop_reason: end_turn` (a subagent runs one turn, so that is its final
-message; the tail is re-read only when the file changes), or when it has
-been quiet for 2 minutes (a killed subagent never sends its
-`SubagentStop`; a working one writes at every tool call). `waiting` always
-wins. A background shell that never ends (a dev server) keeps the session
-`running` for as long as it runs. A finished background shell or subagent
-comes back as a queued message, which fires `UserPromptSubmit` then a `Stop`
-whose `background_tasks` no longer lists it. Verified live against Claude
-Code 2.1.282 (subagents, in default and auto mode, with the hand-back
-arriving both at the prompt and mid-turn) and 2.1.311 (a background shell
-and a background subagent at once: `running` until the last of them ends).
+shell still works, or anything is in the tasks list. The subagent and shell
+lists are kept by best-effort hooks (one seen live never took effect and
+left a finished subagent listed), so the monitor never trusts them alone. A
+shell counts only while Claude has a non-interactive shell child
+(`zsh -c source …/shell-snapshots/…`) that has lived 2 s; the list gates this
+so MCP servers and other children never count, and the age keeps out hook
+and status-line commands. A subagent, a fork included, counts by its own
+files (`_has_live_helper`): its transcript is
+`<session>/subagents/agent-<id>.jsonl` beside the session's own, in a
+subdirectory of `subagents` for the agents a workflow runs, with
+`agent-<id>.meta.json` beside it. It is gone when the transcript is missing,
+when Claude Code has marked the meta `finished` or `stoppedByUser`, or when
+its last `assistant` entry carries `stop_reason: end_turn` (a subagent runs
+one turn, so that is its final message); the files are re-read only when
+they change. Silence says nothing: one tool call (a render, a test run) can
+keep a subagent quiet for many minutes. `waiting` always wins. A background
+shell that never ends (a dev server) or a monitor that keeps watching keeps
+the session `running` for as long as it runs. Finished background work comes
+back as a queued message, which fires `UserPromptSubmit` then a `Stop` whose
+`background_tasks` no longer lists it. Verified live against Claude Code
+2.1.282 (subagents, in default and auto mode, with the hand-back arriving
+both at the prompt and mid-turn) and 2.1.311 (a background shell and a
+background subagent at once: `running` until the last of them ends); the
+task types, the transcript subdirectories and the meta flags are read from
+2.1.325.
 
 **OpenCode.** The launch entry sets `OPENCODE_CONFIG_CONTENT` to a config
 that adds one plugin, `src/gitdirector/integrations/opencode_status.js`

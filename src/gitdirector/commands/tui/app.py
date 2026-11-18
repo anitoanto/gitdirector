@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,12 +18,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.reactive import reactive
+from textual.theme import Theme
 from textual.widgets import DataTable, Footer, Input, Static, TabbedContent, TabPane
 from textual.widgets._footer import FooterKey, FooterLabel
 from textual.worker import NoActiveWorker, Worker, get_current_worker
 
 from ... import version_check
 from ...agents import AGENTS_BY_KEY
+from ...logs import log_to_file
 from ...manager import RepositoryManager
 from ...repo import Repository, RepositoryInfo
 from ...storage import normalize_repository_path
@@ -81,13 +84,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-_NO_UPSTREAM_PUSH_MARKERS = (
-    "no upstream",
-    "set up a tracking branch",
-    "has no upstream",
-)
-
-
 class RefreshFooter(Footer):
     refreshing = reactive(False, repaint=False)
     refresh_text = reactive("", repaint=False)
@@ -113,11 +109,6 @@ class RefreshFooter(Footer):
             ):
                 yield FooterLabel(self.refresh_text, classes="-refresh-indicator")
             yield child
-
-
-def _is_no_upstream_push_error(message: str) -> bool:
-    message_lower = message.lower()
-    return any(marker in message_lower for marker in _NO_UPSTREAM_PUSH_MARKERS)
 
 
 def _newer_version(status: version_check.UpdateStatus | None) -> str | None:
@@ -340,8 +331,12 @@ class GitDirectorConsole(
 
         self.manager = RepositoryManager()
         # A theme that is not offered (removed by a Textual upgrade, a typo
-        # in config.yaml, an ANSI theme) must not stop the console starting.
-        self.apply_theme(self.manager.config.theme)
+        # in config.yaml, an ANSI theme) must not stop the console starting;
+        # the one shown instead is saved.
+        applied = self.apply_theme(self.manager.config.theme)
+        if applied != self.manager.config.theme:
+            self.manager.config.theme = applied
+            self.manager.config.save()
         self._repo_paths: list[Path] = []
         self._results: dict[str, RepositoryInfo] = {}
         self._search_query: str = ""
@@ -376,7 +371,6 @@ class GitDirectorConsole(
         self._resume_selection_tab: str | None = None
         self._resume_selection_key: str | None = None
         self._resume_selection_row: int | None = None
-        self._resume_new_panel_guard_until: float = 0.0
         self._stale_input_before: float = 0.0
         self._panel_store = PanelStore()
         self._status_message = ""
@@ -469,8 +463,8 @@ class GitDirectorConsole(
         self._apply_sessions_column_layout()
         panels_table = self.query_one("#panels-table", DataTable)
         self._panels_col_keys = panels_table.add_columns("Map", "Panel", "Sessions", "Status")
-        self._disable_tabs_widget_arrow_keybindings()
         self.app_resume_signal.subscribe(self, self._handle_app_resume)
+        self.theme_changed_signal.subscribe(self, self._on_theme_changed)
         self._sync_tmux_theme_config(self.theme)
         self._poll_timer = self.set_interval(
             _SESSION_STATUS_POLL_INTERVAL_SECS,
@@ -520,21 +514,6 @@ class GitDirectorConsole(
             self.query_one(RefreshFooter).refresh_text = f"{frame} refreshing"
         except NoMatches:
             pass
-
-    def _disable_tabs_widget_arrow_keybindings(self) -> None:
-        """Remove the ``left``/``right`` bindings from every Tabs widget.
-
-        The ``Tabs`` widget binds ``left``/``right`` to ``previous_tab``/``next_tab``
-        so it can switch tabs when focused. We want those keys to scroll the
-        active table horizontally instead, so strip the bindings on the
-        underlying ContentTabs instances. Users can still switch tabs with the
-        ``1``/``2``/``3`` number keys (and ``tab``/``shift+tab``).
-        """
-        from textual.widgets._tabs import Tabs
-
-        for tabs_widget in self.query(Tabs):
-            tabs_widget._bindings.key_to_bindings.pop("left", None)
-            tabs_widget._bindings.key_to_bindings.pop("right", None)
 
     def _background_shutdown_requested(self, worker: Worker | None = None) -> bool:
         return self._shutdown_requested or (
@@ -591,9 +570,8 @@ class GitDirectorConsole(
         except Exception:
             logger.debug("Syncing the tmux theme config failed", exc_info=True)
 
-    def _watch_theme(self, theme_name: str) -> None:
-        super()._watch_theme(theme_name)
-
+    def _on_theme_changed(self, theme: Theme) -> None:
+        theme_name = theme.name
         manager = getattr(self, "manager", None)
         if manager is None:
             return
@@ -822,7 +800,6 @@ class GitDirectorConsole(
                 self._resume_refresh_path = None
                 self._clear_resume_selection()
         finally:
-            self._arm_resume_new_panel_guard(restore_tab)
             self._resume_session_status_tracking()
 
         if attach_error is not None:
@@ -924,9 +901,9 @@ class GitDirectorConsole(
         alternate screen this method entered, and stale input is dropped.
         """
         import sys
-        import termios
 
         from ...integrations.tmux import attach_tmux_session
+        from .terminal_replies import drain_terminal_replies
 
         def write_terminal(sequence: str) -> None:
             try:
@@ -969,10 +946,7 @@ class GitDirectorConsole(
                     # tmux may never have drawn anything: leave the cleared
                     # alt screen ourselves or the terminal stays black.
                     write_terminal("\033[?2026l\033[?25h\033[?1049l")
-            try:
-                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-            except (AttributeError, OSError, ValueError):
-                pass
+            drain_terminal_replies()
         return error
 
     def _resolve_repo_refresh_path(
@@ -1020,13 +994,11 @@ class GitDirectorConsole(
             if self._background_shutdown_requested(worker):
                 return
 
-            self._results[str(path)] = info
-            self._repo_results_version += 1
+            self.call_from_thread(self._store_result, info)
             if self._repos_cache_saved_at is not None and len(self._results) == len(
                 self._repo_paths
             ):
                 self._save_repos_cache(updated_at=self._repos_cache_saved_at)
-            self.call_from_thread(self._update_row, info)
         finally:
             self.call_from_thread(self._hide_refresh_indicator)
 
@@ -1121,7 +1093,13 @@ class GitDirectorConsole(
         session_name = self._get_selected_row_key(table)
         if session_name is None:
             return
-        current_description = _get_session_description(session_name)
+        from ...integrations.tmux import TmuxError
+
+        try:
+            current_description = _get_session_description(session_name)
+        except (TmuxError, OSError) as exc:
+            self._report_failure("Could not read the description", exc)
+            return
         self.push_screen(
             EditSessionDescriptionScreen(session_name, current_description),
             callback=lambda value, sn=session_name: self._handle_description_edit(sn, value),
@@ -1130,9 +1108,14 @@ class GitDirectorConsole(
     def _handle_description_edit(self, session_name: str, value: str | None) -> None:
         if value is None:
             return
+        from ...integrations.tmux import TmuxError
         from ...integrations.tmux.core import GD_DEFAULT_DESCRIPTION, _set_session_description
 
-        _set_session_description(session_name, value)
+        try:
+            _set_session_description(session_name, value)
+        except (TmuxError, OSError) as exc:
+            self._report_failure("Could not save the description", exc)
+            return
         self._monitor.invalidate()
         for entry in self._sessions_entries:
             if entry["session_name"] == session_name:
@@ -1372,12 +1355,9 @@ class GitDirectorConsole(
 
     def _push_repository(self, path: Path, command: str) -> tuple[str, bool, str, str]:
         repo = Repository(path)
-        ok, message = repo.push()
-        if not ok and _is_no_upstream_push_error(message):
-            branch = repo.get_current_branch()
-            command = f"git push -u origin {branch}" if branch else "git push -u origin <branch>"
-            ok, message = repo.push(set_upstream=True)
-        return path.name, ok, message, command
+        arguments = repo.push_arguments()
+        ok, message = repo.push(arguments)
+        return path.name, ok, message, shlex.join(["git", *arguments])
 
     @work(thread=True)
     def _push_repo(self, path: Path, command: str, loading_screen: PullLoadingScreen) -> None:
@@ -1412,7 +1392,7 @@ class GitDirectorConsole(
         result: tuple[str, bool, str, str],
     ) -> None:
         repo_name, ok, message, command = result
-        loading_screen.dismiss(None)
+        loading_screen.close()
         self.push_screen(
             PullResultScreen(
                 repo_name,
@@ -1440,24 +1420,20 @@ class GitDirectorConsole(
             )
             return
 
-        remote, branch, err = repo.get_pull_target()
-        command = None
-        if remote is not None and branch is not None:
-            command = f"git pull --ff-only {remote} {branch}"
-
-        if err is not None or command is None or remote is None or branch is None:
+        target, err = repo.get_pull_target()
+        if target is None:
             message = err or "Could not determine pull target"
             self._update_status(f"{path.name}: {message}")
             self.push_screen(
-                PullResultScreen(path.name, command, False, message),
+                PullResultScreen(path.name, None, False, message),
                 callback=lambda action: self._handle_git_result_dismissal(action, path),
             )
             return
 
-        target = f"{remote}/{branch}"
+        command = shlex.join(["git", *target.pull_arguments])
         self.push_screen(
             ConfirmScreen(
-                f"Pull '{escape(path.name)}' from [$text-primary]{escape(target)}[/]?\n"
+                f"Pull '{escape(path.name)}' from [$text-primary]{escape(target.name)}[/]?\n"
                 f"[dim]{escape(command)}[/dim]"
             ),
             callback=lambda confirmed: self._do_pull_repo(confirmed, path, command),
@@ -1509,7 +1485,7 @@ class GitDirectorConsole(
         result: tuple[str, bool, str],
     ) -> None:
         repo_name, ok, message = result
-        loading_screen.dismiss(None)
+        loading_screen.close()
         self.push_screen(
             PullResultScreen(repo_name, command, ok, message),
             callback=lambda action: self._handle_git_result_dismissal(action, path),
@@ -1584,12 +1560,18 @@ class GitDirectorConsole(
         )
 
     def _do_remove(self, confirmed: bool, session_name: str) -> None:
-        if confirmed:
-            from ...integrations.tmux import kill_tmux_session, sync_panel_tmux_config
+        if not confirmed:
+            return
+        from ...integrations.tmux import TmuxError, kill_tmux_session
+        from ...integrations.tmux.core import try_sync_panel_tmux_config
 
+        try:
             kill_tmux_session(session_name)
-            sync_panel_tmux_config()
-            self._forget_session(session_name)
+        except (TmuxError, OSError) as exc:
+            self._report_failure(f"Could not remove {session_name}", exc)
+            return
+        try_sync_panel_tmux_config()
+        self._forget_session(session_name)
 
     def _report_failure(self, title: str, error: BaseException) -> None:
         """Say plainly why something could not start, where it cannot be missed."""
@@ -1631,6 +1613,7 @@ class GitDirectorConsole(
 
 
 def _run_console() -> None:
+    log_to_file("console")
     app = GitDirectorConsole()
     try:
         app.run()

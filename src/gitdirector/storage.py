@@ -25,8 +25,22 @@ def advisory_file_lock(lock_path: Path) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def atomic_write_text(path: Path, content: str) -> None:
+def atomic_write_text(path: Path, content: str, *, private: bool = False) -> None:
+    """Replace *path*'s content in one step, so a reader never sees half of it.
+
+    A symlinked file (a config kept with stow or chezmoi) has the file it
+    points to replaced, keeping the link. An existing file keeps its mode
+    and a new one is 0600; *private* makes it 0600 whatever it was.
+    """
+    if path.is_symlink():
+        path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode: int | None = None
+    if not private:
+        try:
+            mode = path.stat().st_mode & 0o7777
+        except OSError:
+            pass
     fd, temp_path = tempfile.mkstemp(
         dir=str(path.parent),
         prefix=f".{path.name}.",
@@ -36,6 +50,8 @@ def atomic_write_text(path: Path, content: str) -> None:
     temp_file = Path(temp_path)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -50,9 +66,9 @@ def atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-def write_yaml_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_yaml_atomic(path: Path, data: dict[str, Any], *, private: bool = False) -> None:
     content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
-    atomic_write_text(path, content)
+    atomic_write_text(path, content, private=private)
 
 
 def load_yaml_mapping(path: Path, *, description: str) -> dict[str, Any]:

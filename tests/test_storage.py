@@ -178,3 +178,42 @@ class TestAdvisoryFileLockExclusivity:
         with advisory_file_lock(lock_path):
             assert lock_path.parent.is_dir()
             assert lock_path.exists()
+
+
+class TestAtomicWriteKeepsTheFile:
+    def test_a_symlinked_file_keeps_its_link(self, tmp_path):
+        from gitdirector.storage import atomic_write_text
+
+        dotfiles = tmp_path / "dotfiles" / "config.yaml"
+        dotfiles.parent.mkdir()
+        dotfiles.write_text("old\n")
+        link = tmp_path / "home" / "config.yaml"
+        link.parent.mkdir()
+        link.symlink_to(dotfiles)
+
+        atomic_write_text(link, "new\n")
+
+        assert link.is_symlink()
+        assert dotfiles.read_text() == "new\n"
+
+    def test_an_existing_file_keeps_its_mode_and_a_new_one_is_private(self, tmp_path):
+        from gitdirector.storage import atomic_write_text
+
+        shared = tmp_path / "config.yaml"
+        shared.write_text("old\n")
+        shared.chmod(0o644)
+        atomic_write_text(shared, "new\n")
+        assert shared.stat().st_mode & 0o777 == 0o644
+
+        fresh = tmp_path / "secrets.yaml"
+        atomic_write_text(fresh, "token\n")
+        assert fresh.stat().st_mode & 0o777 == 0o600
+
+    def test_a_private_file_is_made_private(self, tmp_path):
+        from gitdirector.storage import atomic_write_text
+
+        secrets = tmp_path / "secrets.yaml"
+        secrets.write_text("token\n")
+        secrets.chmod(0o644)
+        atomic_write_text(secrets, "token\n", private=True)
+        assert secrets.stat().st_mode & 0o777 == 0o600

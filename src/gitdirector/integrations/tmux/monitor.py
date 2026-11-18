@@ -40,6 +40,7 @@ from ...agents import (
     AGENT_SHELLS_OPTION,
     AGENT_STATE_OPTION,
     AGENT_STATES,
+    AGENT_TASKS_OPTION,
     AGENT_TRANSCRIPT_OPTION,
     AGENT_WAITER_OPTION,
 )
@@ -159,10 +160,6 @@ _PROCESS_START_SLACK_SECS = 1.0
 _AGENT_HELPERS = frozenset({"caffeinate"})
 # Where Claude Code's transcript records an interrupt.
 _INTERRUPT_MARKER = "[Request interrupted by user"
-# A listed subagent whose transcript has been quiet this long is taken as
-# gone: a killed one never sends its SubagentStop, and a lost hook leaves a
-# finished one listed. A working one writes at every tool call.
-_HELPER_QUIET_SECS = 120
 # What a subagent's last message carries once its one turn is over.
 _TURN_END = "end_turn"
 # How much of the transcript's end is read for it.
@@ -173,7 +170,7 @@ _PANE_LIST_SEPARATOR = "\t"
 # many times, so a separator inside it can never shift another field.
 _PANE_LIST_FIELDS = (
     ("session", "#{session_name}"),
-    ("command", "#{pane_current_command}"),
+    ("command", one_line_format("pane_current_command")),
     ("dead", "#{pane_dead}"),
     ("pid", "#{pane_pid}"),
     ("bell", "#{window_bell_flag}"),
@@ -185,9 +182,10 @@ _PANE_LIST_FIELDS = (
     ("size", "#{pane_width}x#{pane_height}"),
     ("agent_state", f"#{{{AGENT_STATE_OPTION}}}"),
     ("agent_waiter", f"#{{{AGENT_WAITER_OPTION}}}"),
-    ("agent_transcript", f"#{{{AGENT_TRANSCRIPT_OPTION}}}"),
+    ("agent_transcript", one_line_format(AGENT_TRANSCRIPT_OPTION)),
     ("agent_helpers", f"#{{{AGENT_HELPERS_OPTION}}}"),
     ("agent_shells", f"#{{{AGENT_SHELLS_OPTION}}}"),
+    ("agent_tasks", f"#{{{AGENT_TASKS_OPTION}}}"),
     ("bell_mark", f"#{{{_BELL_MARK_OPTION}}}"),
     ("repo_label", one_line_format(GD_REPO_LABEL_OPTION)),
     ("description", one_line_format(GD_DESCRIPTION_OPTION)),
@@ -221,6 +219,8 @@ class PaneSample:
     agent_helpers: str = ""
     #: `` <id> <id>`` of the background shells the agent started ("" when none).
     agent_shells: str = ""
+    #: `` <id> <id>`` of the agent's other background work in flight ("" when none).
+    agent_tasks: str = ""
     #: When a monitor last took a bell off the session ("" when never).
     bell_mark: str = ""
     #: User-facing metadata stored on the session, for the Sessions tab.
@@ -450,6 +450,7 @@ def _list_gd_panes() -> dict[str, PaneSample] | None:
             agent_transcript=row["agent_transcript"].strip(),
             agent_helpers=row["agent_helpers"].strip(),
             agent_shells=row["agent_shells"].strip(),
+            agent_tasks=row["agent_tasks"].strip(),
             bell_mark=row["bell_mark"].strip(),
             repo_label=row["repo_label"],
             description=row["description"],
@@ -646,39 +647,81 @@ def _turn_ended(path: Path) -> bool:
     return False
 
 
-def _has_live_helper(
-    helpers: str, transcript: str, now: float, activity: _SessionActivity | None = None
-) -> bool:
-    """Whether a subagent listed in *helpers* is still working.
+def _helper_transcript(
+    directory: Path, agent: str, activity: _SessionActivity | None
+) -> Path | None:
+    """Where subagent *agent* keeps its transcript: under ``subagents``, or a
+    subdirectory of it for the agents a workflow runs."""
+    known = activity.helper_paths.get(agent) if activity is not None else None
+    if known is not None and known.exists():
+        return known
+    name = f"agent-{agent}.jsonl"
+    path = directory / name
+    if not path.exists():
+        path = next(directory.glob(f"*/**/{name}"), None) if directory.is_dir() else None
+    if path is not None and activity is not None:
+        activity.helper_paths[agent] = path
+    return path
 
-    Claude Code keeps each subagent's transcript at
-    ``<session>/subagents/agent-<id>.jsonl`` beside the session's own. The
-    list is kept by best-effort hooks, so the transcript decides: one that
-    is missing, has ended its turn, or has been quiet for long is gone.
+
+def _helper_done(path: Path) -> bool:
+    """Whether the subagent whose transcript is *path* has finished.
+
+    Claude Code marks ``finished`` (or ``stoppedByUser``) in the
+    ``.meta.json`` beside the transcript; a subagent runs one turn, so a
+    transcript whose last message ends the turn is done too.
+    """
+    meta = path.with_name(f"{path.name.removesuffix('.jsonl')}.meta.json")
+    try:
+        data = json.loads(meta.read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and (data.get("finished") or data.get("stoppedByUser")):
+        return True
+    return _turn_ended(path)
+
+
+def _has_live_helper(
+    helpers: str, transcript: str, activity: _SessionActivity | None = None
+) -> bool:
+    """Whether a subagent listed in *helpers* (forks included) is still working.
+
+    The list is kept by best-effort hooks and rewritten from every ``Stop``,
+    so the subagent's own files decide: one whose transcript is missing, or
+    that is marked or recorded as finished, is gone. However long it stays
+    quiet (one tool call can run for many minutes) a working one is working.
     """
     agents = helpers.split()
     if not agents or not transcript:
         return False
     directory = Path(transcript).with_suffix("") / "subagents"
-    ended = activity.helper_ends if activity is not None else {}
+    done = activity.helper_ends if activity is not None else {}
     live = False
     for agent in agents:
-        path = directory / f"agent-{agent}.jsonl"
+        path = _helper_transcript(directory, agent, activity)
+        if path is None:
+            continue
+        meta = path.with_name(f"{path.name.removesuffix('.jsonl')}.meta.json")
         try:
             info = path.stat()
+            meta_info = meta.stat() if meta.exists() else None
         except OSError:
             continue
-        if now - info.st_mtime >= _HELPER_QUIET_SECS:
-            continue
-        key = (info.st_size, info.st_mtime_ns)
-        cached = ended.get(agent)
+        key = (
+            info.st_size,
+            info.st_mtime_ns,
+            meta_info.st_mtime_ns if meta_info is not None else None,
+        )
+        cached = done.get(agent)
         if cached is None or cached[0] != key:
-            cached = ended[agent] = (key, _turn_ended(path))
+            cached = done[agent] = (key, _helper_done(path))
         if not cached[1]:
             live = True
-    for agent in list(ended):
+    for agent in list(done):
         if agent not in agents:
-            del ended[agent]
+            del done[agent]
+            if activity is not None:
+                activity.helper_paths.pop(agent, None)
     return live
 
 
@@ -801,9 +844,10 @@ class _SessionActivity:
     #: The transcript's size and mtime when it was last read, and what it said.
     transcript_key: tuple | None = None
     interrupted_at: float | None = None
-    #: Per listed subagent, its transcript's size and mtime when last read
-    #: and whether it had ended its turn.
+    #: Per listed subagent, its files' sizes and mtimes when last read and
+    #: whether it had finished, and where its transcript is.
     helper_ends: dict[str, tuple[tuple, bool]] = field(default_factory=dict)
+    helper_paths: dict[str, Path] = field(default_factory=dict)
     status: str = STATUS_RUNNING
 
     def forget_samples(self) -> None:
@@ -836,6 +880,8 @@ class TmuxMonitor:
 
     def __init__(self):
         self._lock = threading.Lock()
+        # Notified, under _lock, whenever a sample lands.
+        self._sampled = threading.Condition(self._lock)
         self._poll_lock = threading.Lock()
         self._sessions: dict[str, _SessionActivity] = {}
         self._sync_thread: threading.Thread | None = None
@@ -896,9 +942,18 @@ class TmuxMonitor:
         further tmux call: the sample already carried the metadata.
         """
         with self._lock:
-            if self._entries is None or self._entries_generation < self._generation:
-                return None
-            return [dict(e) for e in self._entries]
+            return self._fresh_entries()
+
+    def wait_for_entries(self, timeout: float) -> list[dict[str, str]] | None:
+        """:meth:`entries`, waiting up to *timeout* seconds for a sample that has them."""
+        with self._sampled:
+            self._sampled.wait_for(lambda: self._fresh_entries() is not None, timeout)
+            return self._fresh_entries()
+
+    def _fresh_entries(self) -> list[dict[str, str]] | None:
+        if self._entries is None or self._entries_generation < self._generation:
+            return None
+        return [dict(e) for e in self._entries]
 
     def invalidate(self) -> None:
         """Say tmux just changed here: drop older samples and take a new one now."""
@@ -954,6 +1009,7 @@ class TmuxMonitor:
                     del self._sessions[stale]
                 self._entries = entries
                 self._entries_generation = generation
+                self._sampled.notify_all()
         return self.statuses()
 
     def _sample_session(self, pane: PaneSample, snapshot: ProcessSnapshot, now: float) -> None:
@@ -1072,7 +1128,8 @@ class TmuxMonitor:
             and _started_a_tool_since(pane.pane_pid, snapshot, since, now),
         )
         if status == STATUS_IDLE and (
-            _has_live_helper(pane.agent_helpers, pane.agent_transcript, now, activity)
+            bool(pane.agent_tasks.split())
+            or _has_live_helper(pane.agent_helpers, pane.agent_transcript, activity)
             or _has_live_shell(pane.agent_shells, pane.pane_pid, snapshot)
         ):
             return STATUS_RUNNING

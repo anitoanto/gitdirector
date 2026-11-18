@@ -55,7 +55,22 @@ class TestLeaveLaunchDirectory:
 
     def test_noop_once_neutral(self, home, tty, monkeypatch):
         monkeypatch.chdir(home)
-        monkeypatch.setattr(launch_context, "neutral_directory", lambda: os.getcwd())
+        monkeypatch.delenv("PWD", raising=False)
+        monkeypatch.delenv("OLDPWD", raising=False)
+        execve = MagicMock()
+        monkeypatch.setattr(launch_context.os, "execve", execve)
+
+        launch_context.leave_launch_directory()
+
+        execve.assert_not_called()
+
+    def test_noop_once_neutral_through_a_symlinked_home(self, tty, tmp_path, monkeypatch):
+        real = tmp_path / "real-home"
+        real.mkdir()
+        link = tmp_path / "home-link"
+        link.symlink_to(real)
+        monkeypatch.setattr(launch_context.Path, "home", lambda: link)
+        monkeypatch.chdir(link)
         monkeypatch.delenv("PWD", raising=False)
         monkeypatch.delenv("OLDPWD", raising=False)
         execve = MagicMock()

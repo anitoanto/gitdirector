@@ -12,7 +12,7 @@ import click
 from rich.table import Table
 from rich.text import Text
 
-from .. import version_check
+from .. import paths, version_check
 from ..agents import agent_tools
 from ..config import Config
 from ..storage import load_yaml_mapping
@@ -147,47 +147,42 @@ def _validate_repos_cache(path: Path) -> None:
         raise ValueError("Invalid repository cache: 'config_token' must be a mapping")
 
 
-def _validate_gitdirector_state(config: Config) -> tuple[bool, tuple[str, ...]]:
+def _validate_gitdirector_state(config: Config) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Problems in the user's own files, and in the cache GitDirector rebuilds by itself."""
     config_dir = config.config_dir
-    validated_files = 0
-    corrupted_files: list[str] = []
-    checked_paths: set[Path] = set()
-
-    for path in (config.config_file, config.secrets_file):
-        if path.exists():
-            checked_paths.add(path)
-            validated_files += 1
-
+    cache_dir = paths.cache_dir()
+    checked_paths = {path for path in (config.config_file, config.secrets_file) if path.exists()}
     validators = {
         config_dir / "panels.yaml": _validate_panels_file,
-        config_dir / "version_check.yaml": _validate_version_check_cache,
-        config_dir / "cache" / "repos.yaml": _validate_repos_cache,
+        cache_dir / "version_check.yaml": _validate_version_check_cache,
+        cache_dir / "repos.yaml": _validate_repos_cache,
     }
-
+    problems: dict[Path, str] = {}
     for path, validator in validators.items():
         if not path.exists():
             continue
         checked_paths.add(path)
-        validated_files += 1
         try:
             validator(path)
         except (OSError, RuntimeError, ValueError) as exc:
-            corrupted_files.append(f"{path.relative_to(config_dir)}: {exc}")
-
+            problems[path] = str(exc)
     for path in sorted(config_dir.rglob("*.yaml")):
         if path in checked_paths:
             continue
-        validated_files += 1
         try:
             load_yaml_mapping(
                 path, description=f"GitDirector state file {path.relative_to(config_dir)}"
             )
         except ValueError as exc:
-            corrupted_files.append(f"{path.relative_to(config_dir)}: {exc}")
-
-    if corrupted_files:
-        return False, tuple(f"Corrupted: {entry}" for entry in corrupted_files)
-    return True, ()
+            problems[path] = str(exc)
+    in_cache = {path for path in problems if path.is_relative_to(cache_dir)}
+    user = tuple(
+        f"Corrupted: {path.relative_to(config_dir)}: {problem}"
+        for path, problem in problems.items()
+        if path not in in_cache
+    )
+    cache = tuple(f"Corrupted: {path.name}: {problems[path]}" for path in sorted(in_cache))
+    return user, cache
 
 
 def _tool_version(executable: str) -> str | None:
@@ -275,15 +270,23 @@ def _config_check() -> DoctorCheck:
             f"Fix the permissions of {location}.",
             critical=True,
         )
-    valid, details = _validate_gitdirector_state(config)
-    if not valid:
+    user_problems, cache_problems = _validate_gitdirector_state(config)
+    if user_problems:
         return DoctorCheck(
             "Config",
             FAIL,
             f"corrupted files in {location}",
-            details,
+            user_problems,
             "Repair or remove the corrupted files.",
             critical=True,
+        )
+    if cache_problems:
+        return DoctorCheck(
+            "Config",
+            WARN,
+            "corrupted cache files",
+            cache_problems,
+            "Run: gitdirector autoclean (the cache is rebuilt on demand).",
         )
     return DoctorCheck(
         "Config",

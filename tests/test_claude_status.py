@@ -12,6 +12,7 @@ from gitdirector.agents import (
     AGENT_HELPERS_OPTION,
     AGENT_SHELLS_OPTION,
     AGENT_STATE_OPTION,
+    AGENT_TASKS_OPTION,
     AGENT_TRANSCRIPT_OPTION,
     AGENT_WAITER_OPTION,
     CLAUDE_STATUS_EVENTS,
@@ -128,6 +129,7 @@ class TestMainThread:
             AGENT_WAITER_OPTION,
             AGENT_HELPERS_OPTION,
             AGENT_SHELLS_OPTION,
+            AGENT_TASKS_OPTION,
             AGENT_TRANSCRIPT_OPTION,
         ):
             assert ["set-option", "-p", "-u", "-t", PANE, option] in commands
@@ -231,6 +233,8 @@ class TestBackgroundWork:
         {"id": "a4b5470bd6bd3799b", "type": "subagent", "status": "running"},
         {"id": "m1", "type": "monitor", "status": "running"},
         {"id": "w1", "type": "workflow", "status": "running"},
+        {"id": "r1", "type": "cloud session", "status": "running"},
+        {"id": "t1", "type": "MCP task", "status": "pending"},
     ]
 
     def _add_shell(self, shell):
@@ -250,17 +254,19 @@ class TestBackgroundWork:
         commands = _commands("PostToolUse", tool_name="Bash", tool_response={"stdout": "hi"})
         assert all(AGENT_SHELLS_OPTION not in " ".join(command) for command in commands)
 
-    def test_stop_rewrites_both_lists_from_the_work_in_flight(self):
+    def test_stop_rewrites_every_list_from_the_work_in_flight(self):
         commands = _commands("Stop", background_tasks=self._TASKS)
         assert ["set-option", "-p", "-t", PANE, AGENT_HELPERS_OPTION, " a4b5470bd6bd3799b"] in (
             commands
         )
         assert ["set-option", "-p", "-t", PANE, AGENT_SHELLS_OPTION, " bbz3y1iz5"] in commands
+        # Every other kind of background work counts too.
+        assert ["set-option", "-p", "-t", PANE, AGENT_TASKS_OPTION, " m1 w1 r1 t1"] in commands
 
-    def test_stop_with_nothing_in_flight_clears_both_lists(self):
+    def test_stop_with_nothing_in_flight_clears_every_list(self):
         commands = _commands("Stop", background_tasks=[])
-        assert ["set-option", "-p", "-u", "-t", PANE, AGENT_HELPERS_OPTION] in commands
-        assert ["set-option", "-p", "-u", "-t", PANE, AGENT_SHELLS_OPTION] in commands
+        for option in (AGENT_HELPERS_OPTION, AGENT_SHELLS_OPTION, AGENT_TASKS_OPTION):
+            assert ["set-option", "-p", "-u", "-t", PANE, option] in commands
 
     def test_stop_without_a_task_registry_leaves_the_lists_alone(self):
         (command,) = _commands("Stop")
@@ -279,8 +285,9 @@ class TestBackgroundWork:
         commands = _commands("SubagentStop", agent_id="a1", background_tasks=self._TASKS)
         assert all(AGENT_SHELLS_OPTION not in command for command in commands)
 
-    def test_a_new_session_forgets_shells(self):
-        unset = ["set-option", "-p", "-u", "-t", PANE, AGENT_SHELLS_OPTION]
+    @pytest.mark.parametrize("option", [AGENT_SHELLS_OPTION, AGENT_TASKS_OPTION])
+    def test_a_new_session_forgets_background_work(self, option):
+        unset = ["set-option", "-p", "-u", "-t", PANE, option]
         assert unset in _commands("SessionStart")
         assert unset not in _commands("UserPromptSubmit")
 

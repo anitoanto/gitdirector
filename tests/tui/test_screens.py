@@ -1653,7 +1653,7 @@ class TestAgentLoadingScreen:
     def test_do_dismiss_removes_marker_and_delegates_attach_to_app(self):
         screen = AgentLoadingScreen("copilot", "gd/my-repo/copilot/1", Path("/tmp/agent.ready"))
         screen._ready_marker = MagicMock()
-        screen.dismiss = MagicMock()
+        screen.close = MagicMock()
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
         app.call_after_refresh = MagicMock(side_effect=lambda fn, *a: fn(*a))
@@ -1665,27 +1665,27 @@ class TestAgentLoadingScreen:
         app._suspend_and_attach.assert_called_once_with(
             "gd/my-repo/copilot/1", skip_config_sync=True
         )
-        screen.dismiss.assert_called_once_with(None)
+        screen.close.assert_called_once_with()
 
     def test_do_dismiss_attaches_only_after_the_card_has_gone(self):
         """The frame kept for the way back must be the console's, not the card."""
         on_attach = MagicMock()
         screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1", on_attach=on_attach)
-        screen.dismiss = MagicMock()
+        screen.close = MagicMock()
         app = GitDirectorConsole()
         app.call_after_refresh = MagicMock()
         screen._parent = app
 
         screen._do_dismiss()
 
-        screen.dismiss.assert_called_once_with(None)
+        screen.close.assert_called_once_with()
         on_attach.assert_not_called()
         app.call_after_refresh.assert_called_once_with(on_attach)
 
     def test_do_dismiss_prefers_on_attach_callback(self):
         on_attach = MagicMock()
         screen = AgentLoadingScreen("shell", "gd/my-repo/shell/1", on_attach=on_attach)
-        screen.dismiss = MagicMock()
+        screen.close = MagicMock()
         app = GitDirectorConsole()
         app._suspend_and_attach = MagicMock()
         app.call_after_refresh = MagicMock(side_effect=lambda fn, *a: fn(*a))
@@ -1695,7 +1695,7 @@ class TestAgentLoadingScreen:
 
         on_attach.assert_called_once_with()
         app._suspend_and_attach.assert_not_called()
-        screen.dismiss.assert_called_once_with(None)
+        screen.close.assert_called_once_with()
 
 
 class TestRemoveFlow:
@@ -1802,3 +1802,44 @@ class TestListAllGdSessions:
         mock_run.return_value = MagicMock(returncode=0, stdout="my-session\nanother\n")
         result = list_all_gd_sessions()
         assert result == []
+
+
+class TestLoadingCardClose:
+    async def test_a_card_on_top_closes_at_once(self):
+        from textual.app import App
+
+        from gitdirector.commands.tui.screens.card import LoadingCard
+
+        app = App()
+        async with app.run_test() as pilot:
+            card = LoadingCard("Pulling")
+            await app.push_screen(card)
+            card.close()
+            await pilot.pause()
+            assert card not in app.screen_stack
+            assert len(app.screen_stack) == 1
+
+    async def test_a_covered_card_leaves_the_screen_on_top_alone(self):
+        from textual.app import App
+        from textual.screen import ModalScreen
+
+        from gitdirector.commands.tui.screens.card import LoadingCard
+
+        class Result(ModalScreen[None]):
+            pass
+
+        app = App()
+        async with app.run_test() as pilot:
+            card, result = LoadingCard("Pulling"), Result()
+            await app.push_screen(card)
+            await app.push_screen(result)
+
+            card.close()
+            await pilot.pause()
+            assert app.screen is result
+            assert card in app.screen_stack
+
+            app.pop_screen()
+            await pilot.pause()
+            assert card not in app.screen_stack
+            assert len(app.screen_stack) == 1

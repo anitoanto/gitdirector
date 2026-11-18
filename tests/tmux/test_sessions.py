@@ -32,10 +32,6 @@ _TMUX_ENV_ARGS = [
     "-e",
     "COLORTERM=truecolor",
     "-e",
-    "FORCE_COLOR=3",
-    "-e",
-    "CLICOLOR_FORCE=1",
-    "-e",
     "CLAUDE_CODE_TMUX_TRUECOLOR=1",
 ]
 
@@ -64,6 +60,14 @@ def _fake_tmux_run(repo_path, *, new_session=None):
         return MagicMock(returncode=0)
 
     return run
+
+
+def _client(returncode: int = 0):
+    """The interactive client: it must never really start in a test."""
+    return patch(
+        "gitdirector.integrations.tmux.core.run_tmux_client",
+        return_value=subprocess.CompletedProcess(["tmux"], returncode),
+    )
 
 
 class TestMakeSessionName:
@@ -426,6 +430,9 @@ class TestCreateTmuxSession:
                 ANY,
                 "-c",
                 str(path),
+                "--",
+                "sleep",
+                "2147483647",
             ],
             capture_output=True,
             text=True,
@@ -445,14 +452,14 @@ class TestCreateTmuxSession:
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("subprocess.run")
-    def test_scrubs_launch_context_and_restarts_the_shell(
+    def test_scrubs_launch_context_before_the_shell_starts(
         self, mock_run, _mock_list, _mock_sync, tmp_path
     ):
         """The session must not inherit gitdirector's own environment.
 
         tmux hands a pane the server's global environment, so the leak has
-        to be removed at session scope and the shell that ``new-session``
-        already started has to be replaced.
+        to be removed at session scope, and the shell may only start after:
+        until then the session holds a placeholder, never the user's shell.
         """
         path = tmp_path / "iso-repo"
         path.mkdir()
@@ -461,28 +468,37 @@ class TestCreateTmuxSession:
         session_name = create_tmux_session("iso-repo", path)
 
         argv_calls = [list(call.args[0]) for call in mock_run.call_args_list]
-        scrub = next(argv for argv in argv_calls if "set-environment" in argv)
+        scrub_at = next(i for i, argv in enumerate(argv_calls) if "set-environment" in argv)
+        scrub = argv_calls[scrub_at]
         for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "VIRTUAL_ENV", "PWD"):
             assert name in scrub, f"{name} was not scrubbed from the session"
         assert "-r" in scrub
 
-        assert ["tmux", "respawn-pane", "-k", "-t", f"={session_name}:"] in argv_calls
+        window = f"={session_name}:^"
+        start_at = next(i for i, argv in enumerate(argv_calls) if "new-window" in argv)
+        start = argv_calls[start_at]
+        assert start[:7] == ["tmux", "new-window", "-k", "-t", window, "-c", str(path)]
+        # Guarded in the same call, before the shell can exit and close the window.
+        assert ["remain-on-exit", "on"] == start[start.index("remain-on-exit") :][:2]
+        assert "pane-died" in start
+        assert scrub_at < start_at
+        assert not any("respawn-pane" in argv for argv in argv_calls)
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
     @patch("subprocess.run")
-    def test_agent_sessions_leave_the_shell_for_the_launch_to_replace(
-        self, mock_run, _mock_list, _mock_sync, tmp_path
-    ):
+    def test_agent_sessions_start_no_shell(self, mock_run, _mock_list, _mock_sync, tmp_path):
         path = tmp_path / "agent-repo"
         path.mkdir()
         mock_run.side_effect = _fake_tmux_run(path)
 
-        create_tmux_session("agent-repo", path, shell=False)
+        session_name = create_tmux_session("agent-repo", path, shell=False)
 
         argv_calls = [list(call.args[0]) for call in mock_run.call_args_list]
         assert any("set-environment" in argv for argv in argv_calls)
-        assert not any("respawn-pane" in argv for argv in argv_calls)
+        assert not any("respawn-pane" in argv or "new-window" in argv for argv in argv_calls)
+        guard = next(argv for argv in argv_calls if "remain-on-exit" in argv)
+        assert f"={session_name}:^" in guard
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("gitdirector.integrations.tmux.core._list_sessions", return_value=[])
@@ -583,6 +599,9 @@ class TestCreateTmuxSession:
                 ANY,
                 "-c",
                 str(path),
+                "--",
+                "sleep",
+                "2147483647",
             ],
             capture_output=True,
             text=True,
@@ -782,24 +801,24 @@ class TestAttachTmuxSession:
     @patch("subprocess.run")
     def test_outside_tmux_attaches_to_the_session(self, mock_run, mock_sync, mock_bindings):
         mock_run.return_value = MagicMock(returncode=0)
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), _client() as client:
             assert attach_tmux_session("gd/repo/shell/1") is True
         # Copy reaches the terminal in a session that never opens in a deck.
         mock_bindings.assert_called_once_with()
         assert [call.args[0] for call in mock_run.call_args_list] == [
             ["tmux", "has-session", "-t", "=gd/repo/shell/1"],
-            ["tmux", "-T", "RGB,sync", "attach-session", "-t", "=gd/repo/shell/1"],
         ]
-        # The interactive attach blocks until detach, so it must run without
-        # the default tmux command timeout.
-        assert "timeout" not in mock_run.call_args.kwargs
+        # The interactive client, which has no timeout and survives a suspend.
+        client.assert_called_once_with(
+            ["-T", "RGB,sync", "attach-session", "-t", "=gd/repo/shell/1"], extra_env=None
+        )
         mock_sync.assert_called_once_with()
 
     @patch("gitdirector.integrations.tmux.core.sync_panel_tmux_config")
     @patch("subprocess.run")
     def test_non_gd_session_skips_theme_sync(self, mock_run, mock_sync):
         mock_run.return_value = MagicMock(returncode=0)
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), _client():
             attach_tmux_session("plain-session")
         mock_sync.assert_not_called()
 
@@ -807,7 +826,7 @@ class TestAttachTmuxSession:
     @patch("subprocess.run")
     def test_skip_config_sync_skips_sync(self, mock_run, mock_sync):
         mock_run.return_value = MagicMock(returncode=0)
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), _client():
             attach_tmux_session("gd/alpha/shell/1", skip_config_sync=True)
         mock_sync.assert_not_called()
 
@@ -829,20 +848,24 @@ class TestAttachTmuxSession:
         """
         mock_run.side_effect = [
             MagicMock(returncode=0),  # has-session
-            MagicMock(returncode=1),  # attach-session: server went away
             MagicMock(returncode=1, stderr=b"no server running"),  # has-session
         ]
-        with patch.dict("os.environ", {}, clear=True):
+        # The client exits 1: the server went away.
+        with patch.dict("os.environ", {}, clear=True), _client(1):
             assert attach_tmux_session("plain-session") is True
 
     @patch("subprocess.run")
     def test_failed_attach_with_live_session_raises(self, mock_run):
         mock_run.side_effect = [
             MagicMock(returncode=0),  # has-session
-            MagicMock(returncode=1),  # attach-session: e.g. not a terminal
             MagicMock(returncode=0),  # has-session: target still alive
         ]
-        with patch.dict("os.environ", {}, clear=True), pytest.raises(TmuxError) as excinfo:
+        # The client exits 1: e.g. not a terminal.
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            _client(1),
+            pytest.raises(TmuxError) as excinfo,
+        ):
             attach_tmux_session("plain-session")
         assert excinfo.value.returncode == 1
 
@@ -912,6 +935,7 @@ class TestAttachOpensDeck:
         with (
             patch.dict("os.environ", {}, clear=True),
             patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False),
+            _client(),
         ):
             attach_tmux_session("gd/panel/dev", prepared=True)
             mock_direct.assert_not_called()
@@ -929,11 +953,12 @@ class TestAttachOpensDeck:
             patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=False),
             patch("gitdirector.integrations.tmux.core.attach_client_env", return_value=env),
             patch("gitdirector.integrations.tmux.core._prepare_direct_attach"),
+            _client() as client,
         ):
             attach_tmux_session("gd/repo/shell/1")
-            assert mock_run.call_args.kwargs["env"].get("TERM") == "xterm-256color"
+            assert client.call_args.kwargs["extra_env"] is None
             attach_tmux_session("gd/repo/shell/1", same_screen=True)
-            assert mock_run.call_args.kwargs["env"].get("TERM") == "xterm-256color-gdscreen"
+            assert client.call_args.kwargs["extra_env"] == env
 
     @patch("gitdirector.integrations.tmux.deck.attach_deck")
     @patch("gitdirector.integrations.tmux.core._sidebar_enabled", return_value=True)
@@ -945,7 +970,7 @@ class TestAttachOpensDeck:
         self, mock_run, _bindings, _reflow, _sync, _enabled, mock_deck
     ):
         mock_run.return_value = MagicMock(returncode=0)
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), _client():
             attach_tmux_session("gd/panel/dev")
             attach_tmux_session("plain-session")
         mock_deck.assert_not_called()

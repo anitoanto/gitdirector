@@ -1,5 +1,6 @@
 """The script that hands a copy made in a GitDirector session to the user's terminal."""
 
+import os
 import subprocess
 import sys
 
@@ -122,8 +123,21 @@ class TestForward:
     def test_a_nested_copy_reaches_the_terminal_and_the_system_clipboard(self, tmux):
         calls, _, native = tmux
         F.forward("/sock", "/dev/ttys002", NOW)
+        scratch = f"gd-clipboard-forward-{os.getpid()}"
         assert (
-            ("load-buffer", "-w", "-b", "buffer3", "-t", "/dev/ttys000", "-"),
+            (
+                "load-buffer",
+                "-w",
+                "-b",
+                scratch,
+                "-t",
+                "/dev/ttys000",
+                "-",
+                ";",
+                "delete-buffer",
+                "-b",
+                scratch,
+            ),
             b"copied text",
         ) in calls
         assert (("set-option", "-g", F.FORWARDED_OPTION, f"{int(NOW)} buffer3"), None) in calls

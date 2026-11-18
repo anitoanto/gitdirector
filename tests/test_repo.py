@@ -13,6 +13,7 @@ from gitdirector.repo import (
     Repository,
     RepositoryInfo,
     RepoStatus,
+    SyncTarget,
     _classify_remote_error,
     _github_credentials_from_config,
     _is_auth_error,
@@ -223,6 +224,11 @@ class TestRunGit:
                 self.returncode = -9
                 killed.set()
 
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("git", timeout)
+                return self.returncode
+
             def communicate(self, timeout=None):
                 started.set()
                 if not killed.wait(timeout or SYNC_TIMEOUT):
@@ -425,14 +431,22 @@ class TestGetStatusFromPorcelainHeaders:
         assert info.message == "ahead 2, behind 3"
         assert not any(args[:1] == ["show-ref"] or args[:1] == ["rev-list"] for args in calls)
 
-    def test_other_upstream_falls_back_to_origin_comparison(self, fake_git_repo, mocker):
+    def test_any_upstream_is_what_the_branch_is_compared_with(self, fake_git_repo, mocker):
         calls = self._mock(
             mocker,
             "# branch.oid abc\n# branch.head main\n# branch.upstream fork/main\n# branch.ab +5 -0\n",
         )
         info = Repository(fake_git_repo).get_status()
+        assert info.status == RepoStatus.AHEAD
+        assert (info.ahead, info.upstream) == (5, "fork/main")
+        assert not any(args[:1] in (["rev-list"], ["for-each-ref"]) for args in calls)
+
+    def test_a_branch_tracking_nothing_is_compared_with_origin(self, fake_git_repo, mocker):
+        calls = self._mock(mocker, "# branch.oid abc\n# branch.head topic\n")
+        info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.UP_TO_DATE
-        assert any(args[:1] == ["rev-list"] for args in calls)
+        assert info.upstream == "origin/topic"
+        assert ["rev-list", "--left-right", "--count", "HEAD...refs/remotes/origin/topic"] in calls
 
     def test_fetch_ignores_pre_fetch_counts(self, fake_git_repo, mocker):
         calls = self._mock(
@@ -520,6 +534,7 @@ class TestGetStatusSync:
         info = Repository(fake_git_repo).get_status(fetch=True)
         assert info.sync_stale is False
         assert info.message == "No origin/main branch"
+        assert info.no_remote_branch
 
     def test_network_fetch_failure_is_stale(self, fake_git_repo, mocker):
         _setup_status_mocks(
@@ -539,6 +554,7 @@ class TestGetStatusSync:
         info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.UNKNOWN
         assert info.message == "No origin/main branch"
+        assert info.no_remote_branch
 
     def test_git_status_fails(self, fake_git_repo, mocker):
         def side_effect(cmd, **kwargs):
@@ -550,7 +566,21 @@ class TestGetStatusSync:
         mocker.patch("gitdirector.repo._run_git_process", side_effect=side_effect)
         info = Repository(fake_git_repo).get_status()
         assert info.status == RepoStatus.UNKNOWN
-        assert info.message == "git status failed"
+        assert info.message == info.error == "error"
+
+    def test_a_corrupt_index_is_reported_in_gits_words(self, tmp_path):
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _run_git(repo_dir, "init")
+        (repo_dir / "a.txt").write_text("a\n")
+        _run_git(repo_dir, "add", "a.txt")
+        (repo_dir / ".git" / "index").write_bytes(b"DIRC")
+
+        info = Repository(repo_dir).get_status()
+
+        assert info.status == RepoStatus.UNKNOWN
+        assert "index" in info.error
+        assert not info.staged and not info.unstaged
 
 
 class TestGetStatusChanges:
@@ -700,6 +730,7 @@ def _setup_pull_mocks(
     *,
     branch_result=(0, "main\n", ""),
     pull_results=((0, "Already up to date.\n", ""),),
+    upstream="",
 ):
     calls = []
     remaining_pull_results = list(pull_results)
@@ -711,6 +742,8 @@ def _setup_pull_mocks(
 
         if git_args[:2] == ["rev-parse", "--abbrev-ref"]:
             return _make_run_result(*branch_result)
+        if git_args[:1] == ["for-each-ref"]:
+            return _make_run_result(0, upstream, "")
         if git_args and git_args[0] == "pull":
             result = remaining_pull_results.pop(0)
             return _make_run_result(*result)
@@ -725,18 +758,39 @@ class TestPull:
         _setup_pull_mocks(mocker, pull_results=())
         repo = Repository(fake_git_repo)
 
-        remote, branch, err = repo.get_pull_target()
+        target, err = repo.get_pull_target()
 
-        assert (remote, branch, err) == ("origin", "main", None)
+        assert (target, err) == (SyncTarget.origin("main"), None)
+
+    def test_pull_target_is_the_configured_upstream(self, fake_git_repo, mocker):
+        line = "\0".join(
+            [
+                "refs/heads/main",
+                "refs/remotes/upstream/trunk",
+                "upstream/trunk",
+                "upstream",
+                "refs/heads/trunk",
+            ]
+        )
+        calls = _setup_pull_mocks(mocker, upstream=line + "\n")
+        repo = Repository(fake_git_repo)
+
+        target, _ = repo.get_pull_target()
+        ok, _ = repo.pull()
+
+        assert target == SyncTarget(
+            "upstream", "trunk", "refs/remotes/upstream/trunk", "upstream/trunk"
+        )
+        assert ok is True
+        assert calls[-1] == ["pull", "--ff-only", "upstream", "trunk"]
 
     def test_get_pull_target_branch_error(self, fake_git_repo, mocker):
         _setup_pull_mocks(mocker, branch_result=(128, "", "fatal: no branch"), pull_results=())
         repo = Repository(fake_git_repo)
 
-        remote, branch, err = repo.get_pull_target()
+        target, err = repo.get_pull_target()
 
-        assert remote is None
-        assert branch is None
+        assert target is None
         assert err == "fatal: no branch"
 
     def test_status_output_success(self, fake_git_repo, mocker):
@@ -861,33 +915,38 @@ class TestAddCommitPush:
         assert "origin" in output
         assert run_git.call_args.args[0][3:] == ["push"]
 
-    def test_push_set_upstream(self, fake_git_repo, mocker):
+    def test_a_branch_without_upstream_is_pushed_to_track_origin(self, fake_git_repo, mocker):
         run_git = mocker.patch(
             "gitdirector.repo._run_git_process",
             side_effect=[
+                _make_run_result(128, "", "fatal: no upstream configured\n"),  # @{upstream}
                 _make_run_result(0, "main\n", ""),  # get_current_branch
                 _make_run_result(0, "To origin\n", ""),  # push
             ],
         )
         repo = Repository(fake_git_repo)
 
-        ok, _ = repo.push(set_upstream=True)
+        ok, _ = repo.push()
 
         assert ok is True
-        # The second ``subprocess.run`` call is the actual push.
-        assert run_git.call_args_list[1].args[0][3:] == ["push", "-u", "origin", "main"]
+        assert run_git.call_args_list[-1].args[0][3:] == ["push", "-u", "origin", "main"]
 
-    def test_push_set_upstream_without_branch(self, fake_git_repo, mocker):
-        mocker.patch(
-            "gitdirector.repo._run_git_process",
-            return_value=_make_run_result(128, "", "fatal: not a git repo\n"),
-        )
-        repo = Repository(fake_git_repo)
+    def test_a_first_push_sets_the_upstream_for_real(self, tmp_path):
+        remote = tmp_path / "remote.git"
+        _run_git(tmp_path, "init", "--bare", str(remote))
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        _run_git(clone, "init", "-b", "main")
+        _run_git(clone, "remote", "add", "origin", str(remote))
+        (clone / "a.txt").write_text("a\n")
+        _run_git(clone, "add", "a.txt")
+        _run_git(clone, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "a")
+        repo = Repository(clone)
 
-        ok, msg = repo.push(set_upstream=True)
-
-        assert ok is False
-        assert "branch" in msg.lower()
+        assert repo.push_arguments() == ["push", "-u", "origin", "main"]
+        ok, _ = repo.push()
+        assert ok is True
+        assert repo.push_arguments() == ["push"]
 
 
 class TestTimelineOutput:
@@ -1006,7 +1065,7 @@ class TestRemotesOutput:
         calls = _setup_pull_mocks(
             mocker,
             pull_results=(
-                (1, "", "network error \u2014 could not reach remote"),
+                (1, "", "ssh: Could not resolve hostname github.com: nodename nor servname"),
                 (0, "Updated.\n", ""),
             ),
         )
@@ -1028,9 +1087,9 @@ class TestRemotesOutput:
         _setup_pull_mocks(
             mocker,
             pull_results=(
-                (1, "", "network error \u2014 could not reach remote"),
-                (1, "", "network error \u2014 could not reach remote"),
-                (1, "", "network error \u2014 could not reach remote"),
+                (1, "", "ssh: Could not resolve hostname github.com: nodename nor servname"),
+                (1, "", "ssh: Could not resolve hostname github.com: nodename nor servname"),
+                (1, "", "ssh: Could not resolve hostname github.com: nodename nor servname"),
             ),
         )
         repo = Repository(fake_git_repo)
@@ -1119,8 +1178,9 @@ class TestClassifyRemoteError:
 # ---------------------------------------------------------------------------
 
 
-# Captured at import time, before the autouse fixture in conftest stubs it.
+# Captured at import time, before the autouse fixture in conftest stubs them.
 _REAL_SSH_ACCEPTS = repo_mod._ssh_accepts
+_REAL_HAS_OWN_SSH_COMMAND = Repository._has_own_ssh_command
 
 
 class TestDefaultSshCommand:
@@ -1133,10 +1193,12 @@ class TestDefaultSshCommand:
             "-o",
             "ConnectTimeout=10",
             "-o",
+            "BatchMode=yes",
+            "-o",
             "StrictHostKeyChecking=accept-new",
         ]
         # Exactly the option handed to git was checked against the local ssh.
-        assert accepts.call_args.args[0] == argv[3:]
+        assert accepts.call_args.args[0] == argv[5:]
 
     def test_probe_runs_once(self, mocker):
         accepts = mocker.patch("gitdirector.repo._ssh_accepts", return_value=True)
@@ -1145,7 +1207,7 @@ class TestDefaultSshCommand:
 
     def test_falls_back_when_ssh_rejects_the_option(self, mocker):
         mocker.patch("gitdirector.repo._ssh_accepts", return_value=False)
-        assert repo_mod._default_ssh_command() == "ssh -o ConnectTimeout=10"
+        assert repo_mod._default_ssh_command() == "ssh -o ConnectTimeout=10 -o BatchMode=yes"
 
     def test_probe_is_false_when_ssh_is_missing(self, mocker):
         mocker.patch("gitdirector.repo.subprocess.run", side_effect=FileNotFoundError)
@@ -1158,14 +1220,30 @@ class TestDefaultSshCommand:
         )
         assert _REAL_SSH_ACCEPTS(["-o", "StrictHostKeyChecking=bogus"]) is False
 
-    def test_git_env_uses_it_unless_caller_set_ssh(self, fake_git_repo, monkeypatch):
+    def test_git_env_uses_it_for_remote_commands_unless_caller_set_ssh(
+        self, fake_git_repo, monkeypatch
+    ):
         monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
         monkeypatch.delenv("GIT_SSH", raising=False)
         repo = Repository(fake_git_repo)
-        assert repo._git_env()["GIT_SSH_COMMAND"] == repo_mod._default_ssh_command()
+        assert repo._git_env(remote=True)["GIT_SSH_COMMAND"] == repo_mod._default_ssh_command()
+        assert "GIT_SSH_COMMAND" not in repo._git_env()
 
         monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -vvv")
-        assert repo._git_env()["GIT_SSH_COMMAND"] == "ssh -vvv"
+        assert repo._git_env(remote=True)["GIT_SSH_COMMAND"] == "ssh -vvv"
+
+    def test_a_configured_core_ssh_command_wins(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+        monkeypatch.delenv("GIT_SSH", raising=False)
+        monkeypatch.setattr(Repository, "_has_own_ssh_command", _REAL_HAS_OWN_SSH_COMMAND)
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        _run_git(repo_dir, "init")
+        repo = Repository(repo_dir)
+        assert "GIT_SSH_COMMAND" in repo._git_env(remote=True)
+
+        _run_git(repo_dir, "config", "core.sshCommand", "ssh -i ~/.ssh/work")
+        assert "GIT_SSH_COMMAND" not in repo._git_env(remote=True)
 
     def test_git_env_pins_language_and_unquoted_paths(self, fake_git_repo, monkeypatch):
         monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
@@ -1305,7 +1383,7 @@ class TestRepositoryInfo:
 # ---------------------------------------------------------------------------
 #
 # When the user runs `list` (which sets fetch=True) the repo's status goes
-# through `_get_origin_sync_status` after `_fetch_origin_branch`. If the
+# through `Repository._sync`, which fetches the branch's upstream first. If the
 # fetch fails, the message surfaced to the UI must be the *classified*
 # string (so the TUI can colour it sensibly and the CLI can show a useful
 # summary). Without classification, raw `fatal: ...` from git leaks into
@@ -1342,6 +1420,8 @@ class TestGetStatusFetchErrorClassification:
                     "",
                     "fatal: Authentication failed for 'https://example.com/r.git'",
                 )
+            elif "for-each-ref" in cmd:
+                rc, out, err = 0, "", ""
             elif "show-ref" in cmd:
                 rc, out, err = 1, "", "unknown ref"
             elif "rev-list" in cmd:
@@ -1599,3 +1679,154 @@ class TestReadFileTextBinaryDetection:
         repo = Repository(fake_git_repo)
 
         assert repo.read_file_text("small.txt") == "hello\n"
+
+
+# ---------------------------------------------------------------------------
+# The environment git runs in, and stopping it
+# ---------------------------------------------------------------------------
+
+
+class TestGitEnvironment:
+    def test_is_non_interactive_and_takes_no_optional_locks(self, monkeypatch):
+        monkeypatch.setenv("GIT_ASKPASS", "/Applications/Code.app/askpass.sh")
+        env = repo_mod.git_env()
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_ASKPASS"] == ""
+        assert env["SSH_ASKPASS_REQUIRE"] == "never"
+        assert env["GIT_OPTIONAL_LOCKS"] == "0"
+
+    def test_drops_what_ties_git_to_another_repository(self, monkeypatch):
+        monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+        monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/.git/index")
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.name")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "hook")
+        monkeypatch.setenv("KEEP_ME", "1")
+        env = repo_mod.git_env()
+        assert "GIT_DIR" not in env and "GIT_INDEX_FILE" not in env
+        assert env["KEEP_ME"] == "1"
+        assert env["GIT_CONFIG_COUNT"] == "1"
+        assert env["GIT_CONFIG_KEY_0"] == "core.quotepath"
+
+    def test_a_leaked_git_dir_cannot_redirect_a_command(self, tmp_path, monkeypatch):
+        first, second = tmp_path / "first", tmp_path / "second"
+        for repo_dir, branch in ((first, "alpha"), (second, "beta")):
+            repo_dir.mkdir()
+            _run_git(repo_dir, "init", "-b", branch)
+        monkeypatch.setenv("GIT_DIR", str(first / ".git"))
+
+        assert Repository(second).get_status().branch == "beta"
+
+
+class TestStoppingGit:
+    def _start(self, script: str, tmp_path: Path) -> subprocess.Popen:
+        ready = tmp_path / "ready"
+        process = subprocess.Popen(
+            [
+                "sh",
+                "-c",
+                f"{script}; touch {shlex.quote(str(ready))}; while :; do sleep 0.05; done",
+            ],
+            cwd=tmp_path,
+            start_new_session=True,
+        )
+        for _ in range(200):
+            if ready.exists():
+                break
+            threading.Event().wait(0.01)
+        return process
+
+    def test_terminates_first_so_git_can_remove_its_locks(self, tmp_path):
+        lock = tmp_path / "index.lock"
+        process = self._start(f"touch {lock}; trap 'rm -f {lock}; exit 1' TERM", tmp_path)
+
+        repo_mod._stop_git_processes([process])
+
+        assert process.wait(SYNC_TIMEOUT) is not None
+        assert not lock.exists()
+
+    def test_kills_what_ignores_termination(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(repo_mod, "_TERMINATE_GRACE_SECS", 0.2)
+        process = self._start("trap '' TERM", tmp_path)
+
+        repo_mod._stop_git_processes([process])
+
+        assert process.wait(SYNC_TIMEOUT) == -9
+
+
+def _commit(repo_dir: Path, message: str) -> None:
+    _run_git(
+        repo_dir,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        message,
+    )
+
+
+class TestUpstreamOnAnotherRemote:
+    """A fork: origin is the user's copy, the branch tracks ``upstream``."""
+
+    @pytest.fixture
+    def fork(self, tmp_path):
+        project = tmp_path / "project"
+        _run_git(tmp_path, "init", "-b", "main", str(project))
+        _commit(project, "one")
+        _run_git(tmp_path, "clone", "--bare", str(project), str(tmp_path / "fork.git"))
+        work = tmp_path / "work"
+        _run_git(tmp_path, "clone", str(tmp_path / "fork.git"), str(work))
+        _run_git(work, "remote", "add", "upstream", str(project))
+        _run_git(work, "fetch", "upstream")
+        _run_git(work, "branch", "-u", "upstream/main")
+        _commit(project, "two")
+        return project, work
+
+    def test_status_fetches_and_compares_the_upstream(self, fork):
+        _project, work = fork
+
+        before = Repository(work).get_status()
+        after = Repository(work).get_status(fetch=True)
+
+        assert (before.status, before.upstream) == (RepoStatus.UP_TO_DATE, "upstream/main")
+        assert (after.status, after.behind, after.upstream) == (
+            RepoStatus.BEHIND,
+            1,
+            "upstream/main",
+        )
+
+    def test_pull_comes_from_the_upstream(self, fork):
+        project, work = fork
+
+        ok, output = Repository(work).pull()
+
+        assert ok is True, output
+        head = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout
+        upstream_head = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout
+        assert head == upstream_head
+
+    def test_an_upstream_that_is_gone_has_no_remote_branch(self, fork):
+        _project, work = fork
+        _run_git(work, "config", "branch.main.merge", "refs/heads/old")
+
+        info = Repository(work).get_status()
+
+        assert (info.status, info.no_remote_branch) == (RepoStatus.UNKNOWN, True)
+        assert info.message == "No upstream/old branch"
+
+    def test_a_local_upstream_is_compared_without_a_fetch(self, fork):
+        _project, work = fork
+        _run_git(work, "switch", "-c", "topic", "--track", "main")
+        _commit(work, "topic work")
+
+        info = Repository(work).get_status(fetch=True)
+
+        assert (info.status, info.ahead, info.upstream) == (RepoStatus.AHEAD, 1, "main")
+        assert not info.sync_stale

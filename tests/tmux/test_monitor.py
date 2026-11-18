@@ -523,6 +523,7 @@ def _pane_line(
     bell_mark="",
     helpers="",
     shells="",
+    tasks="",
 ) -> str:
     """One ``list-panes`` row, in the monitor's field order."""
     values = {
@@ -542,6 +543,7 @@ def _pane_line(
         "agent_transcript": transcript,
         "agent_helpers": helpers,
         "agent_shells": shells,
+        "agent_tasks": tasks,
         "bell_mark": bell_mark,
         "repo_label": label,
         "description": description,
@@ -889,6 +891,7 @@ class _FakeTmux:
             "agent_transcript": "",
             "agent_helpers": "",
             "agent_shells": "",
+            "agent_tasks": "",
             "bell_mark": "",
             "repo_label": "",
             "description": "",
@@ -1699,13 +1702,18 @@ class TestAgentRefresh:
             world.run_program(name, "claude", children=[("zsh", 3.0)])
             assert monitor.refresh()[name] == "waiting"
 
-    def _subagent_transcript(self, tmp_path, world, agent, quiet, entries=()):
+    def _subagent_transcript(
+        self, tmp_path, world, agent, quiet, entries=(), *, subdir="", meta=None
+    ):
         transcript = tmp_path / "session.jsonl"
         transcript.write_text("")
-        subagent = tmp_path / "session" / "subagents" / f"agent-{agent}.jsonl"
+        folder = tmp_path / "session" / "subagents" / subdir
+        subagent = folder / f"agent-{agent}.jsonl"
         subagent.parent.mkdir(parents=True, exist_ok=True)
         subagent.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
         os.utime(subagent, (world.now - quiet, world.now - quiet))
+        if meta is not None:
+            (folder / f"agent-{agent}.meta.json").write_text(json.dumps(meta))
         return str(transcript)
 
     # Entries as Claude Code 2.1.282 writes them to a subagent's transcript.
@@ -1751,15 +1759,16 @@ class TestAgentRefresh:
             world.pane(name, agent_state=f"waiting {world.now}", agent_helpers="a1")
             assert monitor.refresh()[name] == "waiting"
 
-    def test_a_subagent_quiet_for_long_is_taken_as_gone(self, tmp_path):
-        # A killed subagent never sends its SubagentStop; a working one writes
-        # its transcript at every tool call.
+    def test_a_subagent_in_one_long_tool_call_keeps_running(self, tmp_path):
+        # A fork rendering a video writes nothing to its transcript for many
+        # minutes; it is still working.
         stack, world = self._world()
         with stack:
             monitor = TmuxMonitor()
             name = "gd/repo/claude-auto/1"
             entries = (self._TOOL_CALL, self._TOOL_RESULT, self._TOOL_CALL)
-            transcript = self._subagent_transcript(tmp_path, world, "a1", 90, entries)
+            meta = {"agentType": "fork", "isFork": True}
+            transcript = self._subagent_transcript(tmp_path, world, "a1", 1800, entries, meta=meta)
             world.pane(
                 name,
                 agent_state=f"idle {world.now}",
@@ -1768,7 +1777,55 @@ class TestAgentRefresh:
             )
             world.run_program(name, "claude")
             assert monitor.refresh()[name] == "running"
-            world.advance(31)
+            world.advance(3600)
+            assert monitor.refresh()[name] == "running"
+
+    @pytest.mark.parametrize("marker", [{"finished": True}, {"stoppedByUser": True}])
+    def test_a_subagent_claude_marks_done_is_gone(self, tmp_path, marker):
+        # The SubagentStop hook can be lost; Claude Code's own record is not.
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            entries = (self._TOOL_CALL, self._TOOL_RESULT, self._TOOL_CALL)
+            meta = {"agentType": "general-purpose", **marker}
+            transcript = self._subagent_transcript(tmp_path, world, "a1", 1, entries, meta=meta)
+            world.pane(
+                name,
+                agent_state=f"idle {world.now}",
+                agent_helpers="a1",
+                agent_transcript=transcript,
+            )
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "idle"
+
+    def test_a_workflows_subagent_is_found_in_its_subdirectory(self, tmp_path):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            entries = (self._TOOL_CALL, self._TOOL_RESULT, self._TOOL_CALL)
+            transcript = self._subagent_transcript(
+                tmp_path, world, "a1", 1, entries, subdir="wf_1234abcd-001-1"
+            )
+            world.pane(
+                name,
+                agent_state=f"idle {world.now}",
+                agent_helpers="a1",
+                agent_transcript=transcript,
+            )
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "running"
+
+    def test_any_other_background_work_keeps_it_running(self):
+        stack, world = self._world()
+        with stack:
+            monitor = TmuxMonitor()
+            name = "gd/repo/claude-auto/1"
+            world.pane(name, agent_state=f"idle {world.now}", agent_tasks="wf-1")
+            world.run_program(name, "claude")
+            assert monitor.refresh()[name] == "running"
+            world.pane(name, agent_state=f"idle {world.now}", agent_tasks="")
             assert monitor.refresh()[name] == "idle"
 
     def test_a_subagent_that_ended_its_turn_is_gone_at_once(self, tmp_path):
@@ -1981,3 +2038,17 @@ class TestCapturePaneText:
 # matching a session whose name starts with the supplied string – the cascade
 # kill bug.  The tests below guarantee the ``=`` prefix is always present.
 # ---------------------------------------------------------------------------
+
+
+class TestWaitingForTheFirstSample:
+    def test_returns_as_soon_as_a_sample_lands(self):
+        import threading
+        import time as _time
+
+        monitor = TmuxMonitor()
+        assert monitor.wait_for_entries(0.05) is None
+        with patch("gitdirector.integrations.tmux.monitor._list_gd_panes", return_value={}):
+            threading.Timer(0.1, monitor.refresh).start()
+            started = _time.monotonic()
+            assert monitor.wait_for_entries(10) == []
+        assert _time.monotonic() - started < 5

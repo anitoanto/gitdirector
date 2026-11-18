@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from time import monotonic
 
 from rich.markup import escape
 from textual.app import App, ScreenStackError
@@ -17,8 +16,6 @@ from .constants import (
 )
 from .screens import SortMenuScreen
 from .topbar import NavState, TopBar
-
-_POST_RESUME_NEW_PANEL_GUARD_SECONDS = 0.25
 
 logger = logging.getLogger(__name__)
 
@@ -94,20 +91,6 @@ class ConsoleUIHelpersMixin:
         if action == "sort":
             return self._active_tab != "sessions"
         return super().check_action(action, parameters)
-
-    def _arm_resume_new_panel_guard(self, restore_tab: str) -> None:
-        if restore_tab == "panels":
-            self._resume_new_panel_guard_until = monotonic() + _POST_RESUME_NEW_PANEL_GUARD_SECONDS
-            return
-        self._resume_new_panel_guard_until = 0.0
-
-    def _consume_resume_new_panel_guard(self) -> bool:
-        if self._resume_new_panel_guard_until <= 0.0:
-            return False
-        if monotonic() >= self._resume_new_panel_guard_until:
-            self._resume_new_panel_guard_until = 0.0
-            return False
-        return True
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""

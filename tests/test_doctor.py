@@ -154,6 +154,24 @@ def test_doctor_reports_corrupted_gitdirector_file(doctor_env, config, monkeypat
     assert "Corrupted: panels.yaml:" in result.output
 
 
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [("repos.yaml", "repositories: nope\n"), ("version_check.yaml", "checked_at: 7\n")],
+)
+def test_a_corrupted_cache_file_is_a_warning(doctor_env, config, monkeypatch, name, content):
+    from gitdirector import paths
+
+    paths.cache_dir().mkdir(parents=True, exist_ok=True)
+    (paths.cache_dir() / name).write_text(content)
+    _tools(monkeypatch, git="/usr/bin/git", tmux="/usr/bin/tmux")
+
+    result = _doctor()
+
+    assert result.exit_code == 0, result.output
+    assert f"Corrupted: {name}:" in result.output
+    assert "gitdirector autoclean" in result.output
+
+
 def test_doctor_warns_but_passes_when_optional_checks_fail(doctor_env, monkeypatch):
     monkeypatch.setenv("SHELL", "/bin/tcsh")
     _tools(monkeypatch, git="/usr/bin/git", tmux="/usr/bin/tmux")

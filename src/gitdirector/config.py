@@ -76,17 +76,15 @@ class Config:
         }
 
     def repository_cache_token(self) -> dict[str, list[bool | int | None]]:
-        return {key: value.copy() for key, value in self._cache_token().items()}
+        """The files' state as this config last read or wrote them.
+
+        The console stamps its repository cache with it and trusts the cache
+        only while the files are still in that state.
+        """
+        return {key: value.copy() for key, value in self._config_state_snapshot.items()}
 
     def _refresh_config_state_snapshot(self) -> None:
         self._config_state_snapshot = self._cache_token()
-
-    def _invalidate_repository_cache(self) -> None:
-        cache_file = paths.cache_dir() / "repos.yaml"
-        try:
-            cache_file.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to remove repository cache", exc_info=True)
 
     def _ensure_config_dir(self) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -268,13 +266,12 @@ class Config:
             secrets_data["github_PAT"] = settings.github_PAT
         secrets_data.update({k: v for k, v in latest_secrets.items() if k not in _SECRET_KEYS})
         if secrets_data:
-            write_yaml_atomic(self.secrets_file, secrets_data)
+            write_yaml_atomic(self.secrets_file, secrets_data, private=True)
         else:
             self.secrets_file.unlink(missing_ok=True)
 
         self._load_data(main_data, secrets_data)
         self._refresh_config_state_snapshot()
-        self._invalidate_repository_cache()
 
     def _load(self) -> None:
         self._load_data(self._read_main_unlocked(), self._read_secrets_unlocked())
@@ -284,7 +281,6 @@ class Config:
         if self._cache_token() == self._config_state_snapshot:
             return False
         self._load()
-        self._invalidate_repository_cache()
         return True
 
     def save(self) -> None:

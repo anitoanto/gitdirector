@@ -14,6 +14,7 @@ from gitdirector.commands.tui.repo_rows import (
     attention_rank,
     group_row,
     name_width,
+    repo_facts,
     repo_header,
     repo_row,
     resolve_repo_layout,
@@ -47,7 +48,9 @@ class TestStatusText:
 
     def test_unknown_sync_and_offline_are_named(self):
         info = _make_info(status=RepoStatus.UNKNOWN)
-        info = replace(info, message="No origin/main branch", sync_stale=True)
+        info = replace(
+            info, message="No origin/main branch", no_remote_branch=True, sync_stale=True
+        )
         assert status_text(info, PALETTE).plain == "no remote branch · offline"
 
     def test_loading(self):
@@ -300,3 +303,23 @@ class TestSeamlessRefresh:
         assert app._resolve_repo_layout(infos, set()).status == 30
         app._repos_refreshing = False
         assert app._resolve_repo_layout(infos, set()).status < 30
+
+
+class TestSyncFact:
+    def _sync(self, info):
+        return dict(repo_facts(info, None, PALETTE))["Sync"].plain
+
+    def test_names_what_the_branch_is_in_step_with(self):
+        info = replace(
+            _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main"),
+            upstream="upstream/main",
+        )
+        assert self._sync(info) == "in step with upstream/main"
+
+    def test_a_stale_comparison_says_the_remote_was_unreachable(self):
+        info = replace(
+            _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main"),
+            upstream="origin/main",
+            sync_stale=True,
+        )
+        assert self._sync(info) == "in step with origin/main  (remote unreachable: last known)"

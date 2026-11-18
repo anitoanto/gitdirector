@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import click
@@ -29,6 +30,7 @@ from .commands import (
     unlink,
 )
 from .commands.help import show_help
+from .logs import DEBUG_ENV_VAR
 
 __all__ = ["cli", "main"]
 
@@ -94,11 +96,19 @@ for module in (
     module.register(cli)
 
 
+# Subclasses of the errors below that only a bug raises: they keep their traceback.
+_BUGS = (UnicodeError, NotImplementedError, RecursionError)
+
+
 def main(prog_name: str | None = None):
     paths.remove_legacy_files()
     try:
         cli(prog_name=prog_name)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        # What could not be done is one line; a bug, or any failure with
+        # GITDIRECTOR_DEBUG set, keeps its traceback.
+        if isinstance(exc, _BUGS) or os.environ.get(DEBUG_ENV_VAR):
+            raise
         CommandError(str(exc)).show()
         raise SystemExit(1) from exc
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -18,7 +17,7 @@ from gitdirector.commands.tui.screens._shared import ConfirmScreen
 from gitdirector.commands.tui.sidebar import SessionList
 from gitdirector.integrations.tmux.deck import DeckPane, DeckState
 
-from .conftest import _wait_for_refresh
+from .conftest import _until, _wait_for_refresh
 
 PALETTE = TablePalette(success="green", yellow="yellow", muted="grey50", primary="magenta")
 DECK = "gd/deck/1-a"
@@ -159,14 +158,6 @@ def deck_api():
         patch.object(S.TmuxMonitor, "statuses", return_value={CLAUDE: "running"}),
     ):
         yield api
-
-
-async def _until(pilot, predicate, timeout: float = 5.0):
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not predicate():
-        if asyncio.get_running_loop().time() > deadline:
-            raise AssertionError("condition never became true")
-        await pilot.pause(0.05)
 
 
 def _highlighted(app) -> str | None:
@@ -337,6 +328,8 @@ class TestSidebarApp:
             app._tick_running = True  # no samples of its own during the test
             before = time.monotonic()
             await pilot.press("j", "enter")
+            # The pick arrives a message after the key.
+            await _until(pilot, lambda: app._shown == CLAUDE_2)
             assert app.screen.has_class("-blurred")
             await _until(pilot, lambda: not app._showing)
 
@@ -353,7 +346,7 @@ class TestSidebarApp:
         async with app.run_test(size=(32, 30)) as pilot:
             await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
             app._tick_running = True
-            app._showing = True
+            app._showing = 1
             app.screen.add_class("-blurred")
             app._apply_sample(_state(target=CLAUDE), app._entries, time.monotonic())
             assert app.screen.has_class("-blurred")
@@ -424,7 +417,8 @@ class TestSidebarApp:
             await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
             app._tick_running = True
             await pilot.click(OptionList, offset=ROW[CLAUDE])
-            assert app._showing
+            # The pick arrives a message after the click; select-pane holds it there.
+            await _until(pilot, lambda: app._showing)
             # tmux still has the sidebar active until select-pane goes through.
             app._apply_sample(_state(sidebar_focused=True), app._entries, time.monotonic())
             assert app.screen.has_class("-blurred")
@@ -447,6 +441,8 @@ class TestSidebarApp:
         app = S.SessionSidebar(DECK, "%2")
         async with app.run_test(size=(32, 30)) as pilot:
             await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            # The stub says the sidebar has focus: no sample may contradict the key.
+            app._tick_running = True
             assert not app.screen.has_class("-blurred")
             await pilot.press("tab")
             # Dimmed at once, not when a sample says so.
@@ -461,6 +457,25 @@ class TestSidebarApp:
             await pilot.press("b")
             await _until(pilot, lambda: deck_api.set_sidebar_collapsed.called)
             deck_api.set_sidebar_collapsed.assert_called_once_with(DECK, True)
+
+    async def test_a_toggle_that_changes_no_width_shows_the_list_again(self, deck_api):
+        deck_api.pane_width.return_value = 10
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            await pilot.press("b")
+            await _until(pilot, lambda: deck_api.set_sidebar_collapsed.called)
+            await _until(pilot, lambda: not app.screen.has_class("-resizing"))
+
+    async def test_a_toggle_that_resizes_waits_for_the_new_size(self, deck_api):
+        deck_api.pane_width.side_effect = [32, 5]
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            await pilot.press("b")
+            await _until(pilot, lambda: deck_api.pane_width.call_count == 2)
+            await pilot.pause(0.2)
+            assert app.screen.has_class("-resizing")
 
     async def test_the_back_arrow_leaves_the_deck(self, deck_api):
         app = S.SessionSidebar(DECK, "%2")
@@ -734,3 +749,60 @@ class TestListAndSearch:
             assert str(app.query_one("#empty", Static).render()) == "no match"
             await pilot.press("escape")
             assert not app.screen.has_class("-empty")
+
+
+class TestDeckChangesInOrder:
+    async def test_only_the_last_of_quick_picks_is_shown_last(self, deck_api):
+        released = threading.Event()
+        shown: list[str] = []
+
+        def slow_show(deck, name, **_kwargs):
+            released.wait(5)
+            shown.append(name)
+
+        deck_api.show_session.side_effect = slow_show
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            app._tick_running = True
+            app.open_session(CLAUDE_2)
+            app.open_session(SHELL)
+            released.set()
+            await _until(pilot, lambda: not app._showing)
+            assert shown[-1] == SHELL
+            assert shown in ([SHELL], [CLAUDE_2, SHELL])
+
+    async def test_a_sample_never_repairs_the_deck_halfway_through_a_show(self, deck_api):
+        released = threading.Event()
+        showing = threading.Event()
+
+        def slow_show(deck, name, **_kwargs):
+            showing.set()
+            released.wait(5)
+
+        deck_api.show_session.side_effect = slow_show
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed)
+            app._tick_running = True
+            app.open_session(CLAUDE_2)
+            await _until(pilot, showing.is_set)
+            reads = deck_api.read_deck_state.call_count
+            sample = threading.Thread(target=app._sample_once, daemon=True)
+            sample.start()
+            sample.join(0.3)
+            assert sample.is_alive()
+            assert deck_api.read_deck_state.call_count == reads
+            released.set()
+            sample.join(5)
+            assert deck_api.read_deck_state.call_count == reads + 1
+
+    async def test_a_failed_focus_is_reported_not_fatal(self, deck_api):
+        deck_api.select_pane.side_effect = OSError("fork failed")
+        app = S.SessionSidebar(DECK, "%2")
+        async with app.run_test(size=(32, 30)) as pilot:
+            await _until(pilot, lambda: app._revealed and _highlighted(app) == CLAUDE)
+            await pilot.press("tab")
+            await _until(pilot, lambda: deck_api.select_pane.called and not app._showing)
+            assert app.is_running
+            assert "could not focus" in str(app.query_one("#title", Static).render())

@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from array import array
 from bisect import bisect_right
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import accumulate
@@ -920,7 +920,8 @@ class DiffDocument:
     *width* is the widest line in cells, the gutter included.
     """
 
-    def __init__(self, file: ChangedFile, *, code_width: int) -> None:
+    def __init__(self, file: ChangedFile, *, code_width: int, note: Sequence[str] = ()) -> None:
+        """*note*, when given, is shown under the file's header instead of its diff."""
         self.file = file
         self._fixed = [_file_header_row(file)]
         self._lines: _TextLines | None = None
@@ -930,15 +931,11 @@ class DiffDocument:
         self._hunk_rows: list[int] = []
         self._blocks: dict[tuple[int, int], _Block] = {}
         self.gutter_width = 0
-        if file.is_image or file.is_binary:
-            if not file.is_image:
-                for line in (
-                    "",
-                    "  Binary file differs from HEAD.",
-                    "  Diff is not shown for binary files.",
-                    "",
-                ):
-                    self._fixed.append(RichText(f"  {line}" if line else "", style="italic dim"))
+        if note or file.is_image or file.is_binary:
+            if not note and not file.is_image:
+                note = ("Binary file differs from HEAD.", "Diff is not shown for binary files.")
+            for line in ("", *note, "") if note else ():
+                self._fixed.append(RichText(f"    {line}" if line else "", style="italic dim"))
             self._length = len(self._fixed)
             shown = _split_lines(file.diff_text) or [file.display_path]
             self.width = max(code_width, _longest_line_cells(shown, "\n".join(shown)))

@@ -3,10 +3,12 @@ from rich.text import Text
 
 from . import (
     ATTENTION,
+    DANGER,
     MUTED,
     SUCCESS,
     console,
     count_noun,
+    has_failed,
     is_missing,
     print_json,
     repository_json,
@@ -22,11 +24,15 @@ def register(cli: click.Group):
         """Show repositories with uncommitted changes
 
         Local only: nothing is fetched. Untracked files count as changed.
+        Exits 1 if git could not read a repository.
         """
         results = gather_statuses(fetch=False, include_size=False)
         dirty = [info for info in results if info.staged or info.unstaged]
+        failed = [info for info in results if has_failed(info)]
         if as_json:
-            print_json([repository_json(info) for info in dirty])
+            print_json([repository_json(info) for info in [*dirty, *failed]])
+            if failed:
+                raise SystemExit(1)
             return
         if not results:
             console.print("No repositories tracked. Add one with: gitdirector link PATH")
@@ -40,13 +46,20 @@ def register(cli: click.Group):
                 console.print(Text.assemble("  ", ("changed  ", ATTENTION), path), soft_wrap=True)
             console.print()
 
+        for info in failed:
+            console.print(Text.assemble((info.name, "bold"), "  ", (info.error, DANGER)))
+            console.print()
+
         missing = sum(is_missing(info) for info in results)
-        clean = len(results) - len(dirty) - missing
+        clean = len(results) - len(dirty) - missing - len(failed)
         console.print(
             summary_line(
                 count_noun(len(results), "repository", "repositories"),
                 (f"{clean} clean", MUTED),
                 *([(f"{len(dirty)} with changes", ATTENTION)] if dirty else []),
+                *([(f"{len(failed)} unreadable", DANGER)] if failed else []),
                 *([(f"{missing} missing", ATTENTION)] if missing else []),
             )
         )
+        if failed:
+            raise SystemExit(1)

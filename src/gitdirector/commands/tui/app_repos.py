@@ -44,8 +44,19 @@ class ConsoleReposMixin:
     def _repos_cache_file(self) -> Path:
         return paths.cache_dir() / "repos.yaml"
 
+    def _store_result(self, info: RepositoryInfo) -> None:
+        """Record *info* and redraw its row: on the UI thread, where the results are read."""
+        self._results[str(info.path)] = info
+        self._repo_results_version += 1
+        self._update_row(info)
+
+    def _forget_results_outside(self, configured: set[str]) -> None:
+        self._results = {path: info for path, info in self._results.items() if path in configured}
+
     def _save_repos_cache(self, *, updated_at: float | None = None) -> None:
         saved_at = time() if updated_at is None else updated_at
+        # One C-level copy: no other thread can change the results halfway.
+        infos = list(self._results.values())
         data = {
             "updated_at": saved_at,
             "config_token": self.manager.config.repository_cache_token(),
@@ -66,8 +77,11 @@ class ConsoleReposMixin:
                     "sync_stale": info.sync_stale,
                     "ahead": info.ahead,
                     "behind": info.behind,
+                    "error": info.error,
+                    "no_remote_branch": info.no_remote_branch,
+                    "upstream": info.upstream,
                 }
-                for info in self._results.values()
+                for info in infos
             ],
         }
         try:
@@ -154,6 +168,9 @@ class ConsoleReposMixin:
                     sync_stale=entry["sync_stale"],
                     ahead=entry.get("ahead") or 0,
                     behind=entry.get("behind") or 0,
+                    error=str(entry.get("error") or ""),
+                    no_remote_branch=bool(entry.get("no_remote_branch")),
+                    upstream=str(entry.get("upstream") or ""),
                 )
                 infos[str(info.path)] = info
         except (KeyError, TypeError, ValueError, OSError):
@@ -173,7 +190,8 @@ class ConsoleReposMixin:
             self._show_no_repos()
         else:
             self._populate_initial_rows()
-            self._update_status(self._build_loaded_status(len(repo_paths), len(repo_paths)))
+            if self._active_tab == "repos":
+                self._update_status(self._build_loaded_status(len(repo_paths), len(repo_paths)))
         return True
 
     def _repo_path_sort_key(self, path: Path) -> tuple[str, str, str]:
@@ -197,13 +215,11 @@ class ConsoleReposMixin:
                 self.manager.config.repositories, key=self._repo_path_sort_key
             )
             self._groups_entries = detect_repo_groups(self._repo_paths)
-            configured_paths = {str(path) for path in self._repo_paths}
-            self._results = {
-                path: info for path, info in self._results.items() if path in configured_paths
-            }
+            configured = {str(path) for path in self._repo_paths}
 
             if not self._repo_paths:
                 if not shutdown_requested():
+                    safe_call(self._forget_results_outside, configured)
                     safe_call(self._show_no_repos)
                     self._repos_cache_updated_at = monotonic()
                     self._save_repos_cache()
@@ -212,6 +228,7 @@ class ConsoleReposMixin:
             if shutdown_requested():
                 return
 
+            safe_call(self._forget_results_outside, configured)
             safe_call(self._populate_initial_rows)
 
             executor = ThreadPoolExecutor(max_workers=self.manager.config.max_workers)
@@ -228,12 +245,12 @@ class ConsoleReposMixin:
                     try:
                         info = future.result()
                     except Exception as exc:
-                        info = RepositoryInfo(path, path.name, RepoStatus.UNKNOWN, None, str(exc))
+                        info = RepositoryInfo(
+                            path, path.name, RepoStatus.UNKNOWN, None, str(exc), error=str(exc)
+                        )
                     if shutdown_requested():
                         break
-                    self._results[str(info.path)] = info
-                    self._repo_results_version += 1
-                    safe_call(self._update_row, info)
+                    safe_call(self._store_result, info)
             finally:
                 executor.shutdown(
                     wait=not shutdown_requested(), cancel_futures=shutdown_requested()
@@ -260,7 +277,7 @@ class ConsoleReposMixin:
         """Re-read every repository's worktree and local refs, without the network.
 
         Keeps the table honest while agents edit files in their sessions; only
-        a full refresh fetches from origin.
+        a full refresh fetches each branch's upstream.
         """
         if (
             self._active_tab != "repos"
@@ -289,7 +306,7 @@ class ConsoleReposMixin:
                 except Exception:
                     logger.debug("local status failed for %s", path, exc_info=True)
                     continue
-                # Nothing was fetched, so whether origin was reachable is unchanged.
+                # Nothing was fetched, so whether the remote was reachable is unchanged.
                 info = replace(info, sync_stale=previous.sync_stale)
                 if info != previous:
                     changed.append(info)
@@ -509,7 +526,9 @@ class ConsoleReposMixin:
         table.clear()
         self._visible_repo_count = 0
         self._visible_group_count = 0
-        self._update_status("No repositories linked")
+        # A load that lands after a tab switch must not take over that tab's status bar.
+        if self._active_tab == "repos":
+            self._update_status("No repositories linked")
 
     def _sort_key_func(self, sessions: dict[Path, RepoSessions] | None = None):
         col = self._sort_column

@@ -3,7 +3,7 @@
 import unicodedata
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 from rich._unicode_data import load as load_unpatched_table
 from rich.cells import cell_len, chop_cells, get_character_cell_size, set_cell_size, split_graphemes
@@ -169,6 +169,7 @@ def test_table_cells_fit_their_columns(text, width):
 
 @fuzz
 @given(text_strategy, st.integers(min_value=0, max_value=60))
+@example("/repos/flags-🇸🇺🇸", 4)
 def test_fit_left_fits(text, width):
     assert cell_len(fit_left(text, width)) <= width
 

@@ -24,7 +24,7 @@ stderr. Exit code is 0 on success, 1 on failure, and 2 for bad arguments.
 
 ```bash
 # Find repositories
-gitdirector list --json [--no-fetch]      # tracked repos: name, path, branch, sync, changes
+gitdirector list --json [--no-fetch]      # tracked repos: name, path, branch, upstream, sync, changes
 gitdirector info PATH|NAME --json [--full] # files, lines, and tokens per extension
 
 # Sessions

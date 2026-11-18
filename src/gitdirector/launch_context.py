@@ -25,11 +25,13 @@ def neutral_directory() -> str:
 
 
 def _in_launch_context() -> bool:
+    if any(name in os.environ for name in _LAUNCH_ENV_NAMES):
+        return True
     try:
-        cwd = os.getcwd()
+        # getcwd() is the physical path, $HOME may lead there through a symlink.
+        return not os.path.samefile(os.getcwd(), neutral_directory())
     except OSError:
         return True
-    return cwd != neutral_directory() or any(name in os.environ for name in _LAUNCH_ENV_NAMES)
 
 
 def leave_launch_directory(args: Sequence[str] | None = None) -> None:

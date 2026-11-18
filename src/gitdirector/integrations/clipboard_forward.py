@@ -144,8 +144,25 @@ def forward(socket: str, tty: str, now: float) -> None:
     data = _tmux(socket, "save-buffer", "-b", name, "-")
     if not data:
         return
+    # Loading the copy back under its own name would make it a named buffer:
+    # tmux's paste skips those for the copy before it, and never evicts them.
+    scratch = f"gd-clipboard-forward-{os.getpid()}"
     for client in targets:
-        _tmux(socket, "load-buffer", "-w", "-b", name, "-t", client, "-", data=data)
+        _tmux(
+            socket,
+            "load-buffer",
+            "-w",
+            "-b",
+            scratch,
+            "-t",
+            client,
+            "-",
+            ";",
+            "delete-buffer",
+            "-b",
+            scratch,
+            data=data,
+        )
     _native_copy(data)
 
 

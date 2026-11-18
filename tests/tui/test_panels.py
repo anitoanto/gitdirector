@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from time import monotonic
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-from textual.app import App
 from textual.widgets import DataTable, Static
 from textual.widgets._footer import FooterKey
 
@@ -656,7 +655,9 @@ class TestGitDirectorConsolePanels:
                 for binding in app.query(FooterKey)
             )
 
-    async def test_resume_to_panels_suppresses_first_stray_new_panel_key(self):
+    async def test_n_right_after_coming_back_opens_a_new_panel(self):
+        # Replies the terminal owed tmux are drained before the console reads
+        # again (terminal_replies), so a real key is never thrown away.
         app = GitDirectorConsole()
         app.manager = _mock_manager([])
 
@@ -664,40 +665,10 @@ class TestGitDirectorConsolePanels:
             await pilot.pause()
             await pilot.press("3")
             await pilot.pause()
-
-            app._resume_new_panel_guard_until = monotonic() + 60
-
-            await pilot.press("n")
-            await pilot.pause()
-
-            assert not isinstance(app.screen, CreatePanelScreen)
-
-            app._resume_new_panel_guard_until = 0.0
-
             await pilot.press("n")
             await pilot.pause()
 
             assert isinstance(app.screen, CreatePanelScreen)
-
-    def test_suspend_and_attach_arms_new_panel_guard(self):
-        app = GitDirectorConsole()
-        app._active_tab = "panels"
-        table = MagicMock()
-        app.query_one = MagicMock(return_value=table)
-        app._pause_session_status_tracking = MagicMock()
-        app._resume_session_status_tracking = MagicMock()
-        app._monitor = MagicMock()
-        app.suspend = MagicMock(
-            return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
-        )
-
-        before = monotonic()
-        with patch("gitdirector.integrations.tmux.attach_tmux_session"):
-            with patch("sys.stdout"):
-                with patch("termios.tcflush"):
-                    app._suspend_and_attach("test")
-
-        assert app._resume_new_panel_guard_until > before
 
     def test_action_select_row_on_panels_opens_action_menu(self):
         app = GitDirectorConsole()
@@ -1070,8 +1041,7 @@ class TestGitDirectorConsolePanels:
         app.manager.config.save = MagicMock()
         mock_sync.reset_mock()
 
-        with patch.object(App, "_watch_theme", return_value=None):
-            app._watch_theme("nord")
+        app._on_theme_changed(SimpleNamespace(name="nord"))
 
         assert app.manager.config.theme == "nord"
         app.manager.config.save.assert_called_once_with()

@@ -28,6 +28,15 @@ _LOADING_STATUS_MARKERS = (" remaining...", " done, ")
 _MAX_TUI_SETTLE_ROUNDS = 500
 
 
+async def _until(pilot, predicate, timeout: float = 20.0) -> None:
+    """Wait for *predicate*; generous, as only a failing test ever waits it out."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition never became true")
+        await pilot.pause(0.05)
+
+
 async def _wait_for_refresh(widget, timeout: float = SYNC_TIMEOUT) -> None:
     refreshed = asyncio.Event()
     widget.call_after_refresh(refreshed.set)

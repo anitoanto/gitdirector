@@ -320,7 +320,7 @@ wheels = [
 
 [[package]]
 name = "gitdirector"
-version = "1.15.0"
+version = "1.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -353,8 +353,8 @@ requires-dist = [
     { name = "pathspec", specifier = ">=1.0.0" },
     { name = "pillow", specifier = ">=10.1" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rich", specifier = ">=14.3.0" },
-    { name = "textual", specifier = ">=8.2.1" },
+    { name = "rich", specifier = ">=14.3.0,<16" },
+    { name = "textual", specifier = ">=8.2.1,<9" },
     { name = "tiktoken", specifier = ">=0.5.0" },
 ]
 

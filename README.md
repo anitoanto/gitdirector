@@ -82,7 +82,9 @@ The console has three tabs, switched with `1`, `2`, and `3`.
 | `q` | Quit |
 
 **Repositories** shows each repo's branch, status (`↑1 to push · 2 staged ·
-5 changed`, or nothing when clean and in step with origin), and last commit.
+5 changed`, or nothing when clean and in step with its upstream), and last
+commit. A branch is compared with, fetched from and pulled from the upstream
+git has for it (`git branch -u`), or `origin/<branch>` when it tracks none.
 Repos sharing a parent directory collapse into a group. `enter` opens the
 action menu: start a shell or an AI agent, open the repo in your editor
 (`code` unless `editor:` in the config says otherwise, started as if you had
@@ -151,7 +153,7 @@ pick another; when no sessions are left you are back in the console. Set
 | `unlink PATH\|NAME [--discover]` | Stop tracking (nothing on disk is touched) |
 | `list [--no-fetch] [--json]` | Every tracked repo: branch, sync state, changes, last commit, size |
 | `status [--json]` | Only repos with uncommitted changes, file by file |
-| `pull [PATH\|NAME...] [--yes]` | `git pull --ff-only`, concurrently; all repos by default |
+| `pull [PATH\|NAME...] [--yes]` | `git pull --ff-only` from each branch's upstream, concurrently; all repos by default |
 | `info PATH\|NAME [--full] [--json]` | File, line, and token counts per extension |
 | `autoclean [--yes]` | Clear `~/.gitdirector/cache` and stop tracking repos that no longer exist |
 | `cd PATH\|NAME\|SESSION [--agent A]` | Open a shell or an agent in a new session, or rejoin a live one |
@@ -234,11 +236,14 @@ Host github.com
   IdentityFile ~/.ssh/github
 ```
 
-Git runs without a terminal, so ssh can't ask to confirm an unknown host;
+Git runs without a terminal, so nothing can be asked: no password, passphrase
+or askpass prompt (`BatchMode=yes`). ssh can't confirm an unknown host either;
 GitDirector uses `StrictHostKeyChecking=accept-new`, which records a new host
 in `~/.ssh/known_hosts` as answering `yes` would and still refuses a key that
-changes. A refused key shows as `(offline)` in the Sync column. Set
-`GIT_SSH_COMMAND` to take over ssh entirely.
+changes. A refused key shows as `(offline)` in the Sync column. Your own
+`core.sshCommand` (per repository or through `includeIf`) or
+`GIT_SSH_COMMAND` takes over ssh entirely. Background reads never take
+`.git/index.lock`, so they never block your own `git add` or commit.
 
 If SSH isn't possible, HTTPS GitHub remotes can fall back to a personal access
 token in `~/.gitdirector/secrets.yaml`:
@@ -256,8 +261,10 @@ file is plaintext, so scope the token narrowly.
 
 Everything GitDirector writes lives in `~/.gitdirector`: your settings
 (`config.yaml`, `panels.yaml`, `secrets.yaml`) at the top, anything it can
-rebuild under `cache/`, and lock files under `state/`. Set `GITDIRECTOR_HOME`
-to keep it somewhere else. Outside that folder it only runs its own tmux
+rebuild under `cache/`, and lock files and the console's and sidebar's logs
+(`console.log`, `sidebar.log`) under `state/`. Set `GITDIRECTOR_DEBUG=1` for
+detailed logs, and full tracebacks from commands. A symlinked settings file
+stays a symlink. Set `GITDIRECTOR_HOME` to keep it somewhere else. Outside that folder it only runs its own tmux
 sessions; your tmux key bindings keep working outside them.
 
 ## Shell completion

@@ -103,8 +103,10 @@ class TestPanelPaneTitles:
         ) in config
         assert "set-environment -r -t =gd/my-repo/shell/1: NO_COLOR" in config
         assert "set-environment -t =gd/my-repo/shell/1: COLORTERM truecolor" in config
-        assert "set-environment -t =gd/my-repo/shell/1: FORCE_COLOR 3" in config
-        assert "set-environment -t =gd/my-repo/shell/1: CLICOLOR_FORCE 1" in config
+        # Forcing colour reached piped output too; sessions made with it lose it.
+        assert "FORCE_COLOR 3" not in config and "CLICOLOR_FORCE 1" not in config
+        assert "set-environment -u -t =gd/my-repo/shell/1: FORCE_COLOR" in config
+        assert "set-environment -u -t =gd/my-repo/shell/1: CLICOLOR_FORCE" in config
         assert "set-environment -t =gd/my-repo/shell/1: CLAUDE_CODE_TMUX_TRUECOLOR 1" in config
         assert "set-option -t =gd/my-repo/shell/1: mouse on" in config
         assert "set-clipboard" not in config
@@ -215,9 +217,12 @@ class TestPanelPaneTitles:
         assert "# theme: nord" in content
         assert "set-option -t =gd/panel/main: status-position bottom" in content
         assert "set-option -t =gd/panel/me2: status-position bottom" in content
+        # tmux reads this process's own text, not the file another may rewrite.
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)],
+            ["tmux", "source-file", "-"],
             capture_output=True,
+            text=True,
+            input=config_path.read_text(),
             env=ANY,
             cwd=ANY,
             timeout=ANY,
@@ -245,9 +250,12 @@ class TestPanelPaneTitles:
         assert "SHELL" in content
         assert "set-window-option -t =gd/my-repo/shell/1:2 pane-border-style" in content
         assert "misc" not in content
+        # tmux reads this process's own text, not the file another may rewrite.
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)],
+            ["tmux", "source-file", "-"],
             capture_output=True,
+            text=True,
+            input=config_path.read_text(),
             env=ANY,
             cwd=ANY,
             timeout=ANY,
@@ -298,7 +306,7 @@ class TestPanelPaneTitles:
     def test_sync_panel_tmux_config_ignores_source_file_failure(self, mock_run, tmp_path):
         config_path = tmp_path / "tmux_design.conf"
         mock_run.side_effect = __import__("subprocess").CalledProcessError(
-            1, ["tmux", "source-file", str(config_path)]
+            1, ["tmux", "source-file", "-"]
         )
 
         with patch(
@@ -315,9 +323,12 @@ class TestPanelPaneTitles:
 
         assert written_path == config_path
         assert config_path.exists()
+        # tmux reads this process's own text, not the file another may rewrite.
         mock_run.assert_called_once_with(
-            ["tmux", "source-file", str(config_path)],
+            ["tmux", "source-file", "-"],
             capture_output=True,
+            text=True,
+            input=config_path.read_text(),
             env=ANY,
             cwd=ANY,
             timeout=ANY,

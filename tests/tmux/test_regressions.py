@@ -184,11 +184,15 @@ class TestExactMatchAttachTmuxSession:
         _mock_sync,
     ):
         mock_run.return_value = MagicMock(returncode=0)
-        with patch.dict("os.environ", {}, clear=True):
+        client = patch(
+            "gitdirector.integrations.tmux.core.run_tmux_client",
+            return_value=subprocess.CompletedProcess(["tmux"], 0),
+        )
+        with patch.dict("os.environ", {}, clear=True), client as attach:
             attach_tmux_session("gd/panel/dev")
-        argv = mock_run.call_args[0][0]
-        assert argv[1:4] == ["-T", "RGB,sync", "attach-session"]
-        assert argv[5] == "=gd/panel/dev"
+        argv = attach.call_args[0][0]
+        assert argv[0:3] == ["-T", "RGB,sync", "attach-session"]
+        assert argv[4] == "=gd/panel/dev"
         mock_prefix_bindings.assert_called_once_with()
         mock_reflow.assert_called_once_with("gd/panel/dev")
 

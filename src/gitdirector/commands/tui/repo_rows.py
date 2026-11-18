@@ -107,8 +107,10 @@ def _status_parts(info: RepositoryInfo, palette: TablePalette) -> list[tuple[str
         parts.append((f"{_count(info.staged_files)}staged", f"bold {palette.success}"))
     if info.unstaged:
         parts.append((f"{_count(info.unstaged_files)}changed", attention))
-    if info.status is RepoStatus.UNKNOWN:
-        label = "no remote branch" if info.message.startswith("No origin/") else "sync unknown"
+    if info.error:
+        parts.append(("unreadable", f"bold {palette.danger}"))
+    elif info.status is RepoStatus.UNKNOWN:
+        label = "no remote branch" if info.no_remote_branch else "sync unknown"
         parts.append((label, palette.muted))
     if info.sync_stale:
         parts.append(("offline", palette.muted))
@@ -116,7 +118,7 @@ def _status_parts(info: RepositoryInfo, palette: TablePalette) -> list[tuple[str
 
 
 def status_text(info: RepositoryInfo, palette: TablePalette, *, loading: bool = False) -> Text:
-    """``↑1 to push · 2 staged · 5 changed``; empty when in step with origin and clean."""
+    """``↑1 to push · 2 staged · 5 changed``; empty when in step with its upstream and clean."""
     if loading:
         return Text("checking…", style=palette.muted)
     text = Text()
@@ -369,6 +371,8 @@ def group_row(
 
 def _sync_fact(info: RepositoryInfo, palette: TablePalette) -> Text:
     attention = f"bold {palette.yellow}"
+    if info.error:
+        return Text(info.error, style=f"bold {palette.danger}")
     if info.status is RepoStatus.UNKNOWN:
         return Text(info.message or "unknown", style=palette.muted)
     text = Text()
@@ -379,9 +383,9 @@ def _sync_fact(info: RepositoryInfo, palette: TablePalette) -> Text:
             text.append(" · ", style=palette.muted)
         text.append(f"↓{info.behind or ''} to pull", style=attention)
     if not text:
-        text.append(f"in step with origin/{info.branch}")
+        text.append(f"in step with {info.upstream}" if info.upstream else "in step")
     if info.sync_stale:
-        text.append("  (origin unreachable: last known)", style=palette.muted)
+        text.append("  (remote unreachable: last known)", style=palette.muted)
     return text
 
 

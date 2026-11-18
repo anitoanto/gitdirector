@@ -283,7 +283,7 @@ class AgentLoadingScreen(LoadingCard):
         # Attach once this card has gone, so the frame kept for the way back
         # is the console's and not the card.
         app = self.app
-        self.dismiss(None)
+        self.close()
         app.call_after_refresh(attach)
 
 

@@ -24,6 +24,7 @@ from .conftest import (
     SAMPLE_SESSIONS,
     _make_info,
     _mock_manager,
+    _until,
     patch_sessions,
     sample_sessions,
 )
@@ -33,6 +34,12 @@ def _session_row_lines(app, table, row_key: str) -> list[str]:
     """Return the plain text lines of a composed sessions row."""
     cell = table.get_cell(row_key, app._sess_col_keys[0])
     return [line.rstrip() for line in cell.plain.split("\n")]
+
+
+async def _settled(pilot, condition, timeout: float = 20.0) -> None:
+    """Let pending messages run, then wait for *condition*."""
+    await pilot.pause()
+    await _until(pilot, condition, timeout)
 
 
 class TestSessionsTab:
@@ -59,20 +66,18 @@ class TestSessionsTab:
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             app.action_tab_sessions()
-            await pilot.pause()
             tabs = app.query_one("#tabs", TabbedContent)
-            assert tabs.active == "sessions"
+            await _settled(pilot, lambda: tabs.active == "sessions")
 
     async def test_tab_switching_back_to_repos(self):
         app = GitDirectorConsole()
         app.manager = _mock_manager()
         async with app.run_test(size=(120, 30)) as pilot:
             app.action_tab_sessions()
-            await pilot.pause()
-            app.action_tab_repos()
-            await pilot.pause()
             tabs = app.query_one("#tabs", TabbedContent)
-            assert tabs.active == "repos"
+            await _settled(pilot, lambda: tabs.active == "sessions")
+            app.action_tab_repos()
+            await _settled(pilot, lambda: tabs.active == "repos")
 
     @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
     async def test_no_sessions_shows_message(self, _mock):
@@ -169,6 +174,19 @@ class TestSessionsTab:
             await pilot.pause()
             status_text = app.query_one("#status-bar", Static).content
             assert "No active sessions" in status_text
+
+    @patch("gitdirector.integrations.tmux.list_all_gd_sessions", return_value=[])
+    async def test_a_late_repository_load_leaves_the_sessions_status(self, _mock):
+        app = GitDirectorConsole()
+        app.manager = _mock_manager()
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.action_tab_sessions()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            app._show_no_repos()
+
+            assert "No active sessions" in app.query_one("#status-bar", Static).content
 
     async def test_get_active_table_repos(self):
         app = GitDirectorConsole()

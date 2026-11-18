@@ -44,7 +44,10 @@ class TestStatusText:
                 _info(staged=True, staged_files=["a"], unstaged=True, unstaged_files=["b", "c"]),
                 "1 staged · 2 changed",
             ),
-            (_info(RepoStatus.UNKNOWN, message="No origin/main branch"), "no remote branch"),
+            (
+                _info(RepoStatus.UNKNOWN, message="No origin/main branch", no_remote_branch=True),
+                "no remote branch",
+            ),
             (_info(RepoStatus.UNKNOWN), "sync unknown"),
             (_info(RepoStatus.BEHIND, behind=1, sync_stale=True), "↓1 to pull · offline"),
             (_info(RepoStatus.UNKNOWN, message=MISSING_REPOSITORY_MESSAGE), "missing"),
@@ -319,6 +322,7 @@ class TestListCommand:
             behind=2,
             size=10,
             last_updated="1 day ago",
+            upstream="upstream/main",
         )
         mgr = _mock_manager(get_repository_status=info)
         mgr.config.repositories = [info.path]
@@ -327,6 +331,7 @@ class TestListCommand:
         assert result.exit_code == 0
         [repo] = json.loads(result.stdout)
         assert repo["sync"] == "diverged"
+        assert repo["upstream"] == "upstream/main"
         assert (repo["ahead"], repo["behind"], repo["size"]) == (1, 2, 10)
         assert repo["path"] == str(info.path)
 
@@ -387,6 +392,25 @@ class TestStatusCommand:
         summary = strip_ansi(result.output).splitlines()[-1]
         assert "1 clean" in summary
         assert "1 missing" in summary
+
+    @pytest.mark.parametrize("command", [["status"], ["list", "--no-fetch"]])
+    def test_an_unreadable_repository_is_not_clean_and_fails_the_command(
+        self, runner, tmp_path, command
+    ):
+        clean = RepositoryInfo(tmp_path / "a", "a", RepoStatus.UP_TO_DATE, "main")
+        error = "index file smaller than expected"
+        broken = RepositoryInfo(tmp_path / "b", "b", RepoStatus.UNKNOWN, None, error, error=error)
+        mgr = _mock_manager()
+        mgr.config.repositories = [clean.path, broken.path]
+        mgr.get_repository_status = lambda path, **_: clean if path == clean.path else broken
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, command)
+        assert result.exit_code == 1
+        output = strip_ansi(result.output)
+        assert error in output
+        summary = output.splitlines()[-1]
+        assert "1 unreadable" in summary
+        assert "all clean" not in summary and "2 clean" not in summary
 
     def test_dirty(self, runner, fake_git_repo):
         info = RepositoryInfo(
@@ -924,15 +948,19 @@ class TestHelpGroup:
         assert result.exit_code == 0
         assert "GITDIRECTOR" in result.output
 
-    def test_help_flag_prints_update_notice(self, runner):
-        with patch(
-            "gitdirector.version_check.get_update_notice",
-            return_value="Update available: v1.5.0 (current v1.4.2)",
+    def test_help_flag_prints_the_known_update_without_checking(self, runner):
+        with (
+            patch(
+                "gitdirector.version_check.get_cached_update_notice",
+                return_value="Update available: v1.5.0 (current v1.4.2)",
+            ),
+            patch("gitdirector.version_check.get_update_notice") as network_check,
         ):
             result = runner.invoke(cli, ["--help"])
 
         assert result.exit_code == 0
         assert result.output.count("Update available: v1.5.0 (current v1.4.2)") == 1
+        network_check.assert_not_called()
 
 
 class TestMain:
@@ -946,3 +974,77 @@ class TestMain:
         with patch("gitdirector.cli.cli") as mock_cli:
             main()
             mock_cli.assert_called_once()
+
+
+class TestRunConcurrentlyInterrupted:
+    def test_ctrl_c_cancels_what_has_not_started_and_stops_git(self, tmp_path, monkeypatch):
+        import threading
+        from concurrent import futures as concurrent_futures
+
+        from gitdirector import commands
+        from gitdirector.repo import Repository
+
+        started: list[Path] = []
+        release = threading.Event()
+
+        def task(path):
+            started.append(path)
+            if path != paths[0]:
+                release.wait(5)
+            return path
+
+        def interrupted(fs):
+            yield next(concurrent_futures.as_completed(fs))
+            raise KeyboardInterrupt
+
+        stopped = threading.Event()
+        monkeypatch.setattr(commands, "as_completed", interrupted)
+        monkeypatch.setattr(
+            Repository,
+            "kill_running_git_commands",
+            classmethod(lambda cls: (stopped.set(), release.set())),
+        )
+        paths = [tmp_path / f"repo{i}" for i in range(20)]
+
+        with pytest.raises(KeyboardInterrupt):
+            commands.run_concurrently(
+                paths, task, max_workers=2, verb="Pulling", on_error=lambda p, e: None
+            )
+
+        assert stopped.is_set()
+        # The first, and at most the two the workers were already running.
+        assert len(started) <= 3
+
+
+class TestForcedColourOnlyColours:
+    def test_a_piped_table_is_whole_under_force_color(self, runner, tmp_path, monkeypatch):
+        from gitdirector import commands
+
+        monkeypatch.setenv("FORCE_COLOR", "3")
+        path = tmp_path / ("very-long-directory-name-" * 8) / "repo"
+        info = RepositoryInfo(path, "repo", RepoStatus.UP_TO_DATE, "main")
+        mgr = _mock_manager(get_repository_status=info)
+        mgr.config.repositories = [path]
+        monkeypatch.setattr(commands.console, "_force_terminal", True)
+        with patch("gitdirector.commands.listt.RepositoryManager", return_value=mgr):
+            result = runner.invoke(cli, ["list", "--no-fetch"])
+        assert str(path) in strip_ansi(result.stdout)
+
+    def test_no_spinner_off_a_terminal(self):
+        from gitdirector import commands
+
+        with commands.spinner("Counting") as status:
+            status.update("still counting")
+
+
+class TestMainKeepsBugsVisible:
+    def test_a_bug_keeps_its_traceback(self):
+        with patch("gitdirector.cli.cli", side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "x")):
+            with pytest.raises(UnicodeDecodeError):
+                main()
+
+    def test_any_failure_keeps_its_traceback_when_debugging(self, monkeypatch):
+        monkeypatch.setenv("GITDIRECTOR_DEBUG", "1")
+        with patch("gitdirector.cli.cli", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                main()

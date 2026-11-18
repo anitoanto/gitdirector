@@ -24,7 +24,7 @@ from gitdirector.commands.tui.app_groups import RepoGroup
 from gitdirector.commands.tui.constants import _REPO_CACHE_TTL_SECS
 from gitdirector.info import FileTypeInfo, RepoInfoResult
 from gitdirector.integrations.tmux.core import TmuxError, _repo_session_name_segment
-from gitdirector.repo import Repository, RepoStatus
+from gitdirector.repo import Repository, RepoStatus, SyncTarget
 from gitdirector.storage import load_yaml_mapping
 
 from .._timeouts import SYNC_TIMEOUT
@@ -40,6 +40,32 @@ def _run_git_output_inline(app: GitDirectorConsole) -> None:
 
 
 class TestGitDirectorConsole:
+    def test_the_cache_keeps_what_is_wrong_with_a_repository(self):
+        from dataclasses import replace
+
+        broken = replace(
+            _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UNKNOWN, None),
+            error="index file smaller than expected",
+        )
+        lonely = replace(
+            _make_info("beta", Path("/tmp/beta"), RepoStatus.UNKNOWN, "main"),
+            no_remote_branch=True,
+            upstream="upstream/main",
+        )
+        saved = GitDirectorConsole()
+        saved.manager = _mock_manager([broken, lonely])
+        saved._results = {str(broken.path): broken, str(lonely.path): lonely}
+        saved._save_repos_cache()
+
+        loaded = GitDirectorConsole()
+        loaded.manager = saved.manager
+        loaded._populate_initial_rows = MagicMock()
+        loaded._update_status = MagicMock()
+        assert loaded._load_repos_from_cache()
+        assert loaded._results[str(broken.path)].error == broken.error
+        assert loaded._results[str(lonely.path)].no_remote_branch
+        assert loaded._results[str(lonely.path)].upstream == "upstream/main"
+
     @patch("gitdirector.integrations.tmux.list_repo_sessions", return_value=[])
     async def test_startup_uses_fresh_repository_cache(self, _mock_sessions):
         info = _make_info("alpha", Path("/tmp/alpha"), RepoStatus.UP_TO_DATE, "main")
@@ -124,7 +150,11 @@ class TestGitDirectorConsole:
         app._repo_paths = [updated.path]
         app._results = {str(original.path): original}
         app._save_repos_cache()
-        app.call_from_thread = MagicMock()
+        app._update_row = MagicMock()
+        # The UI thread runs what call_from_thread hands it.
+        app.call_from_thread = MagicMock(side_effect=lambda callback, *a, **k: callback(*a, **k))
+        app._show_refresh_indicator = MagicMock()
+        app._hide_refresh_indicator = MagicMock()
 
         GitDirectorConsole._refresh_repo_for_path.__wrapped__(app, updated.path)
 
@@ -841,22 +871,18 @@ class TestGitDirectorConsoleActionRouting:
         assert callable(app.push_screen.call_args.kwargs["callback"])
 
     @patch("gitdirector.commands.tui.app.Repository")
-    def test_push_repository_falls_back_to_set_upstream(self, mock_repo_cls):
+    def test_push_repository_reports_the_command_it_ran(self, mock_repo_cls):
         path = Path("/tmp/alpha")
         repo = MagicMock()
-        repo.push.side_effect = [
-            (False, "fatal: The current branch main has no upstream branch."),
-            (True, "To origin"),
-        ]
-        repo.get_current_branch.return_value = "main"
+        repo.push_arguments.return_value = ["push", "-u", "origin", "main"]
+        repo.push.return_value = (True, "To origin")
         mock_repo_cls.return_value = repo
         app = GitDirectorConsole()
 
         result = app._push_repository(path, "git push")
 
         assert result == ("alpha", True, "To origin", "git push -u origin main")
-        repo.push.assert_any_call()
-        repo.push.assert_any_call(set_upstream=True)
+        repo.push.assert_called_once_with(["push", "-u", "origin", "main"])
 
     def test_handle_git_result_dismissal_reopens_git_menu_on_back(self):
         path = Path("/tmp/alpha")
@@ -880,7 +906,7 @@ class TestGitDirectorConsoleActionRouting:
     def test_prompt_repo_pull_pushes_confirm_screen(self, mock_repo_cls):
         path = Path("/tmp/alpha")
         repo = MagicMock()
-        repo.get_pull_target.return_value = ("origin", "main", None)
+        repo.get_pull_target.return_value = (SyncTarget.origin("main"), None)
         mock_repo_cls.return_value = repo
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
@@ -894,10 +920,27 @@ class TestGitDirectorConsoleActionRouting:
         assert callable(app.push_screen.call_args.kwargs["callback"])
 
     @patch("gitdirector.commands.tui.app.Repository")
+    def test_prompt_repo_pull_names_the_branchs_own_upstream(self, mock_repo_cls):
+        repo = MagicMock()
+        repo.get_pull_target.return_value = (
+            SyncTarget("upstream", "trunk", "refs/remotes/upstream/trunk", "upstream/trunk"),
+            None,
+        )
+        mock_repo_cls.return_value = repo
+        app = GitDirectorConsole()
+        app.push_screen = MagicMock()
+
+        app._prompt_repo_pull(Path("/tmp/alpha"))
+
+        screen = app.push_screen.call_args.args[0]
+        assert "upstream/trunk" in screen.message
+        assert "git pull --ff-only upstream trunk" in screen.message
+
+    @patch("gitdirector.commands.tui.app.Repository")
     def test_prompt_repo_pull_shows_result_when_target_fails(self, mock_repo_cls):
         path = Path("/tmp/alpha")
         repo = MagicMock()
-        repo.get_pull_target.return_value = (None, None, "Cannot pull in detached HEAD")
+        repo.get_pull_target.return_value = (None, "Cannot pull in detached HEAD")
         mock_repo_cls.return_value = repo
         app = GitDirectorConsole()
         app.push_screen = MagicMock()
@@ -965,7 +1008,7 @@ class TestGitDirectorConsoleActionRouting:
         assert isinstance(screen, PullResultScreen)
         assert screen.command == "git pull --ff-only origin main"
         assert screen.ok is True
-        loading_screen.dismiss.assert_called_once_with(None)
+        loading_screen.close.assert_called_once_with()
         app._update_status.assert_called_once_with("alpha: pull completed")
         app._refresh_repo_for_path.assert_called_once_with(path)
 
@@ -984,7 +1027,7 @@ class TestGitDirectorConsoleActionRouting:
             ("alpha", False, "fatal: Not possible to fast-forward"),
         )
 
-        loading_screen.dismiss.assert_called_once_with(None)
+        loading_screen.close.assert_called_once_with()
         app._update_status.assert_called_once_with("alpha: pull failed")
         app._refresh_repo_for_path.assert_not_called()
 
@@ -1023,7 +1066,7 @@ class TestGitDirectorConsoleActionRouting:
         assert screen.command == "git push"
         assert screen.ok is True
         assert screen.operation == "Push"
-        loading_screen.dismiss.assert_called_once_with(None)
+        loading_screen.close.assert_called_once_with()
         app._update_status.assert_called_once_with("alpha: push completed")
         app._refresh_repo_for_path.assert_called_once_with(path)
 
@@ -1041,7 +1084,7 @@ class TestGitDirectorConsoleActionRouting:
             ("alpha", False, "fatal: rejected", "git push"),
         )
 
-        loading_screen.dismiss.assert_called_once_with(None)
+        loading_screen.close.assert_called_once_with()
         app._update_status.assert_called_once_with("alpha: push failed")
         app._refresh_repo_for_path.assert_not_called()
 
@@ -1226,7 +1269,7 @@ class TestGitDirectorConsoleDirectBranches:
             if call.args[0] == app._populate_initial_rows
         )
         assert populate_call.kwargs == {}
-        assert app._update_row in call_targets
+        assert app._store_result in call_targets
 
     def test_load_repos_skips_table_updates_after_app_stops(self):
         app = GitDirectorConsole()
@@ -1780,7 +1823,7 @@ class TestGitDirectorConsoleDirectBranches:
 
         name, screen_path, branch, status = mock_screen_cls.call_args.args
         assert (name, screen_path, branch) == ("alpha", path, "main")
-        # Clean and in step with origin: nothing to report.
+        # Clean and in step with its upstream: nothing to report.
         assert status.plain == ""
         app.push_screen.assert_called_once()
 

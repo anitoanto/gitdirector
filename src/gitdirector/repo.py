@@ -7,7 +7,9 @@ import signal
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+import time
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -99,12 +101,16 @@ def _is_host_key_error(stderr: str) -> bool:
 _NO_REMOTE_RE = re.compile(r"'([^']+)' does not appear to be a git repository", re.IGNORECASE)
 
 
+# Matched by identity where a remote was out of reach (pull retries once).
+NETWORK_ERROR_MESSAGE = "network error: could not reach remote"
+
+
 def _classify_remote_error(stderr: str) -> str | None:
     missing = _NO_REMOTE_RE.search(stderr)
     if missing is not None:
         return f"no remote named {missing.group(1)}"
     if _is_network_error(stderr):
-        return "network error: could not reach remote"
+        return NETWORK_ERROR_MESSAGE
     if _is_host_key_error(stderr):
         return (
             "host key rejected: the remote's SSH host key changed or is not in ~/.ssh/known_hosts"
@@ -175,6 +181,52 @@ def _apply_github_auth_env(env: dict[str, str], username: str, token: str) -> No
     env["GITDIRECTOR_GITHUB_PAT"] = token
 
 
+# What `git rev-parse --local-env-vars` lists: they tie git to one repository.
+# A parent git process (a hook, `rebase -x`, `bisect run`) leaves them set,
+# and every command would then act on that repository instead.
+_REPOSITORY_ENV_NAMES = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+)
+
+
+def git_env() -> dict[str, str]:
+    """The environment every git command runs in: non-interactive and repository-neutral."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in _REPOSITORY_ENV_NAMES
+        and not name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+    }
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # git asks an askpass program (VS Code's terminal sets one) before it
+    # looks at GIT_TERMINAL_PROMPT; an empty one turns them all off.
+    env["GIT_ASKPASS"] = ""
+    env["SSH_ASKPASS_REQUIRE"] = "never"
+    # A status or diff would otherwise hold .git/index.lock while refreshing
+    # the index, failing the user's own `git add` or commit in that repository.
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    # Messages are matched in English, and paths are shown unquoted.
+    env["LANGUAGE"] = "C"
+    _add_env_git_config(env, "core.quotepath", "false")
+    return env
+
+
 def _register_running_git_process(process: subprocess.Popen) -> None:
     with _RUNNING_GIT_PROCESSES_LOCK:
         _RUNNING_GIT_PROCESSES.add(process)
@@ -185,20 +237,40 @@ def _unregister_running_git_process(process: subprocess.Popen) -> None:
         _RUNNING_GIT_PROCESSES.discard(process)
 
 
-def _kill_running_git_process(process: subprocess.Popen) -> None:
+def _signal_process_group(process: subprocess.Popen, sig: signal.Signals) -> None:
     if process.poll() is not None:
         return
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process.pid, sig)
     except OSError:
         pass
+
+
+# git removes its .lock files when terminated, never when killed: a killed
+# commit or status leaves index.lock behind and every later git command in
+# that repository fails until it is deleted by hand.
+_TERMINATE_GRACE_SECS = 2.0
+
+
+def _stop_git_processes(processes: Iterable[subprocess.Popen]) -> None:
+    """Terminate *processes* and their helpers, killing whatever outlives the grace period."""
+    processes = list(processes)
+    for process in processes:
+        _signal_process_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + _TERMINATE_GRACE_SECS
+    for process in processes:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            _signal_process_group(process, signal.SIGKILL)
 
 
 # Commit hooks (tests, linters) and large transfers routinely outlast the
 # default 30 s; killing them midway leaves a half-finished commit or push.
 _LONG_GIT_TIMEOUT = 600
 
-_BASE_SSH_COMMAND = ["ssh", "-o", "ConnectTimeout=10"]
+# BatchMode: no password or passphrase prompt, which nothing could answer.
+_BASE_SSH_COMMAND = ["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]
 _SSH_HOST_KEY_OPTIONS = ["-o", "StrictHostKeyChecking=accept-new"]
 
 
@@ -261,7 +333,7 @@ def _run_git_process(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_running_git_process(process)
+        _stop_git_processes([process])
         try:
             process.communicate(timeout=1)
         except subprocess.TimeoutExpired:
@@ -306,6 +378,10 @@ def _parse_ahead_behind(text: str) -> tuple[int, int] | None:
         return None
 
 
+def _no_remote_branch_message(name: str) -> str:
+    return f"No {name} branch"
+
+
 def _sync_status_from_counts(ahead: int, behind: int) -> tuple[RepoStatus, str]:
     if ahead > 0 and behind > 0:
         return RepoStatus.DIVERGED, f"ahead {ahead}, behind {behind}"
@@ -314,6 +390,38 @@ def _sync_status_from_counts(ahead: int, behind: int) -> tuple[RepoStatus, str]:
     if behind > 0:
         return RepoStatus.BEHIND, f"behind {behind}"
     return RepoStatus.UP_TO_DATE, ""
+
+
+@dataclass(frozen=True)
+class SyncTarget:
+    """What a branch is compared with, fetched from and pulled from: its
+    upstream, or ``origin/<branch>`` when it has none."""
+
+    #: ``.`` when the upstream is a local branch.
+    remote: str
+    #: The branch's name on *remote*.
+    branch: str
+    #: The ref holding its last known state: ``refs/remotes/origin/main``.
+    ref: str
+    #: How git names it: ``origin/main``.
+    name: str
+
+    @classmethod
+    def origin(cls, branch: str) -> SyncTarget:
+        return cls("origin", branch, f"refs/remotes/origin/{branch}", f"origin/{branch}")
+
+    @property
+    def pull_arguments(self) -> list[str]:
+        return ["pull", "--ff-only", self.remote, self.branch]
+
+
+@dataclass(frozen=True)
+class _Sync:
+    counts: tuple[int, int] | None
+    message: str = ""
+    upstream: str = ""
+    missing: bool = False
+    fetch_error: str = ""
 
 
 class RepoStatus(Enum):
@@ -341,9 +449,15 @@ class RepositoryInfo:
     #: True when the remote could not be fetched, so the sync status was
     #: computed from the refs already on disk and may be out of date.
     sync_stale: bool = False
-    #: Commits HEAD is ahead of and behind origin/<branch>.
+    #: Commits HEAD is ahead of and behind :attr:`upstream`.
     ahead: int = 0
     behind: int = 0
+    #: Why git could not read the repository at all ("" when it could).
+    error: str = ""
+    #: :attr:`upstream` does not exist (yet), so there is nothing to sync with.
+    no_remote_branch: bool = False
+    #: What the branch is compared with (``origin/main``), "" when detached.
+    upstream: str = ""
 
     def __repr__(self) -> str:
         return f"{self.name:<30} {self.status.value:<12} {self.branch or 'N/A':<15}"
@@ -360,21 +474,32 @@ class Repository:
     def kill_running_git_commands(cls) -> None:
         with _RUNNING_GIT_PROCESSES_LOCK:
             processes = tuple(_RUNNING_GIT_PROCESSES)
-        for process in processes:
-            _kill_running_git_process(process)
+        _stop_git_processes(processes)
 
-    def _git_env(self, *, github_auth: tuple[str, str] | None = None) -> dict[str, str]:
-        env = os.environ.copy()
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        # Messages are matched in English, and paths are shown unquoted.
-        env["LANGUAGE"] = "C"
-        _add_env_git_config(env, "core.quotepath", "false")
-        if "GIT_SSH_COMMAND" not in env and "GIT_SSH" not in env:
+    def _git_env(
+        self, *, remote: bool = False, github_auth: tuple[str, str] | None = None
+    ) -> dict[str, str]:
+        env = git_env()
+        if remote and not self._has_own_ssh_command(env):
             env["GIT_SSH_COMMAND"] = _default_ssh_command()
         if github_auth is not None:
             username, token = github_auth
             _apply_github_auth_env(env, username, token)
         return env
+
+    def _has_own_ssh_command(self, env: dict[str, str]) -> bool:
+        """Whether the user chose how git runs ssh here, which then wins over ours."""
+        if "GIT_SSH_COMMAND" in env or "GIT_SSH" in env:
+            return True
+        try:
+            result = _run_git_process(
+                ["git", "-C", str(self.path), "config", "--get", "core.sshCommand"],
+                env=env,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return bool(result.stdout.strip())
 
     def _run_git_once(
         self,
@@ -383,7 +508,7 @@ class Repository:
         _timeout: int,
         _github_auth: tuple[str, str] | None = None,
     ) -> tuple[int, str, str, str]:
-        env = self._git_env(github_auth=_github_auth)
+        env = self._git_env(remote=_is_remote_command(args), github_auth=_github_auth)
         command = ["git", "-C", str(self.path), *args]
         try:
             result = _run_git_process(command, env=env, timeout=_timeout)
@@ -422,13 +547,29 @@ class Repository:
         code, out, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         return out if code == 0 and out not in {"", "HEAD"} else None
 
-    def get_pull_target(self) -> tuple[str | None, str | None, str | None]:
+    def get_pull_target(self) -> tuple[SyncTarget | None, str | None]:
+        """The current branch's :class:`SyncTarget`, or None and why there is none."""
         code, branch, err = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         if code != 0:
-            return None, None, err or "Could not determine current branch"
+            return None, err or "Could not determine current branch"
         if branch in {"", "HEAD"}:
-            return None, None, "Cannot pull in detached HEAD"
-        return "origin", branch, None
+            return None, "Cannot pull in detached HEAD"
+        return self.sync_target(branch), None
+
+    def sync_target(self, branch: str) -> SyncTarget:
+        """*branch*'s upstream, as git has it configured; ``origin/<branch>`` without one."""
+        refname = f"refs/heads/{branch}"
+        code, out, _ = self._run_git(
+            "for-each-ref",
+            "--format=%(refname)%00%(upstream)%00%(upstream:short)"
+            "%00%(upstream:remotename)%00%(upstream:remoteref)",
+            refname,
+        )
+        for line in out.splitlines() if code == 0 else ():
+            name, ref, short, remote, remote_ref = (line.split("\0") + [""] * 5)[:5]
+            if name == refname and ref and remote and remote_ref.startswith("refs/heads/"):
+                return SyncTarget(remote, remote_ref.removeprefix("refs/heads/"), ref, short)
+        return SyncTarget.origin(branch)
 
     def _read_only_output(
         self,
@@ -486,40 +627,62 @@ class Repository:
             failure_text="git remote -v failed",
         )
 
-    @staticmethod
-    def _origin_branch_ref(branch: str) -> str:
-        return f"refs/remotes/origin/{branch}"
+    def _fetch(self, target: SyncTarget) -> str:
+        """Fetch *target*; "" once done, or when the remote has no such branch."""
+        if target.remote == ".":
+            return ""
+        code, _, err = self._run_git("fetch", target.remote, f"refs/heads/{target.branch}")
+        # The remote answered: it just has no such remote or branch.
+        if code == 0 or _is_missing_remote_ref_error(err):
+            return ""
+        return err or f"could not fetch from {target.remote}"
 
-    def _fetch_origin_branch(self, branch: str | None) -> tuple[int, str]:
-        args = ["fetch", "origin"]
-        if branch:
-            args.append(branch)
-        code, _, err = self._run_git(*args)
-        return code, err
-
-    def _origin_ahead_behind(self, branch: str | None) -> tuple[tuple[int, int] | None, str]:
-        """``(ahead, behind)`` against origin/<branch>, or None and the reason."""
-        if branch is None:
-            return None, "Detached HEAD"
-
-        remote_ref = self._origin_branch_ref(branch)
+    def _compare(self, target: SyncTarget) -> _Sync:
         code, out, err = self._run_git(
-            "rev-list",
-            "--left-right",
-            "--count",
-            f"HEAD...{remote_ref}",
+            "rev-list", "--left-right", "--count", f"HEAD...{target.ref}"
         )
         if code != 0:
-            ref_code, _, _ = self._run_git("show-ref", "--verify", "--quiet", remote_ref)
+            ref_code, _, _ = self._run_git("show-ref", "--verify", "--quiet", target.ref)
             if ref_code != 0:
-                return None, f"No origin/{branch} branch"
-            return None, err or f"Could not compare HEAD with origin/{branch}"
-
+                message = _no_remote_branch_message(target.name)
+                return _Sync(None, message, target.name, missing=True)
+            return _Sync(None, err or f"Could not compare HEAD with {target.name}", target.name)
         parts = out.split()
         try:
-            return (int(parts[0]), int(parts[1])), ""
+            return _Sync((int(parts[0]), int(parts[1])), upstream=target.name)
         except (IndexError, ValueError):
-            return None, "Could not determine sync status"
+            return _Sync(None, "Could not determine sync status", target.name)
+
+    def _sync(
+        self,
+        branch: str | None,
+        upstream: str | None,
+        ahead_behind: tuple[int, int] | None,
+        *,
+        fetch: bool,
+    ) -> _Sync:
+        """How *branch* compares with its :class:`SyncTarget`.
+
+        *upstream* and *ahead_behind* are what ``git status`` already found
+        for the configured upstream; they hold unless a fetch moved it. No
+        counts for an upstream means it is gone, or git's line was unreadable:
+        rev-list and show-ref tell which.
+        """
+        if branch is None:
+            return _Sync(None, "Detached HEAD")
+        fetch_error = ""
+        if fetch:
+            target = self.sync_target(branch)
+            fetch_error = self._fetch(target)
+            if not fetch_error:
+                return self._compare(target)
+        if upstream is None:
+            sync = self._compare(SyncTarget.origin(branch))
+        elif ahead_behind is None:
+            sync = self._compare(self.sync_target(branch))
+        else:
+            sync = _Sync(ahead_behind, upstream=upstream)
+        return replace(sync, fetch_error=fetch_error)
 
     def get_last_commit_info(self) -> tuple[str | None, int | None]:
         code, out, _ = self._run_git("log", "-1", "--format=%cd%n%ct", "--date=relative")
@@ -552,10 +715,12 @@ class Repository:
         return total
 
     def get_status(self, *, fetch: bool = False, include_size: bool = True) -> RepositoryInfo:
-        code, out, _ = self._run_git("status", "--porcelain=v2", "--branch", _strip=False)
+        code, out, err = self._run_git("status", "--porcelain=v2", "--branch", _strip=False)
         if code != 0:
+            # git's own words: a corrupt index, "detected dubious ownership", ...
+            error = err.removeprefix("fatal: ").strip() or "git status failed"
             return RepositoryInfo(
-                self.path, self.name, RepoStatus.UNKNOWN, None, "git status failed"
+                self.path, self.name, RepoStatus.UNKNOWN, None, error, error=error
             )
 
         branch = None
@@ -602,22 +767,8 @@ class Repository:
                 unstaged = True
                 unstaged_files.append(filename)
 
-        fetch_error = ""
-        if fetch and branch is not None:
-            code, err = self._fetch_origin_branch(branch)
-            # The remote answered: it just has no origin or no such branch.
-            if code != 0 and not _is_missing_remote_ref_error(err):
-                fetch_error = err or "could not fetch from origin"
-
-        if fetch and branch is not None and not fetch_error:
-            # The counts parsed above predate the fetch.
-            counts, msg = self._origin_ahead_behind(branch)
-        elif branch is not None and upstream == f"origin/{branch}" and ahead_behind is not None:
-            # git already compared HEAD with origin/<branch>: two fewer
-            # git processes per repository.
-            counts, msg = ahead_behind, ""
-        else:
-            counts, msg = self._origin_ahead_behind(branch)
+        sync = self._sync(branch, upstream, ahead_behind, fetch=fetch)
+        counts, msg, fetch_error = sync.counts, sync.message, sync.fetch_error
         if counts is None:
             status = RepoStatus.UNKNOWN
         else:
@@ -625,7 +776,7 @@ class Repository:
 
         if fetch_error:
             # A remote that cannot be reached says nothing about how this
-            # branch compares with the origin ref already on disk: report that
+            # branch compares with the ref already on disk: report that
             # (possibly stale) comparison instead of blanking every repository
             # to "unknown".
             msg = f"{msg} ({fetch_error})" if msg else fetch_error
@@ -648,21 +799,21 @@ class Repository:
             size,
             bool(fetch_error),
             *(counts or (0, 0)),
+            no_remote_branch=sync.missing,
+            upstream=sync.upstream,
         )
 
     def pull(self, *, retries: int = 1) -> tuple[bool, str]:
-        remote, branch, err = self.get_pull_target()
-        if err is not None or remote is None or branch is None:
+        target, err = self.get_pull_target()
+        if target is None:
             return False, err or "Could not determine pull target"
 
         attempts = max(1, 1 + retries)
         for attempt in range(attempts):
-            code, out, err = self._run_git(
-                "pull", "--ff-only", remote, branch, _timeout=_LONG_GIT_TIMEOUT
-            )
+            code, out, err = self._run_git(*target.pull_arguments, _timeout=_LONG_GIT_TIMEOUT)
             if code == 0:
                 return True, out
-            if attempt < attempts - 1 and "network error" in err:
+            if attempt < attempts - 1 and err == NETWORK_ERROR_MESSAGE:
                 continue
             return False, err
         return False, "git pull failed"
@@ -692,23 +843,21 @@ class Repository:
             return False, err or out or "git commit failed"
         return True, out
 
-    def push(self, *, set_upstream: bool = False) -> tuple[bool, str]:
-        """Push the current branch to its upstream.
+    def push_arguments(self) -> list[str]:
+        """``push`` for a branch that tracks a remote one; ``push -u origin
+        <branch>`` for one pushed for the first time, so it tracks it after."""
+        code, _, _ = self._run_git(
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"
+        )
+        if code == 0:
+            return ["push"]
+        branch = self.get_current_branch()
+        return ["push", "-u", "origin", branch] if branch else ["push"]
 
-        With ``set_upstream=True`` runs ``git push -u origin <branch>`` so
-        the local branch tracks the remote on the first push. Subsequent
-        pushes (or pushes from a clone that already has the tracking
-        branch) can pass ``set_upstream=False`` for a plain ``git push``.
-        """
-        if set_upstream:
-            branch = self.get_current_branch()
-            if not branch:
-                return False, "Could not determine current branch"
-            code, out, err = self._run_git(
-                "push", "-u", "origin", branch, _timeout=_LONG_GIT_TIMEOUT
-            )
-        else:
-            code, out, err = self._run_git("push", _timeout=_LONG_GIT_TIMEOUT)
+    def push(self, arguments: list[str] | None = None) -> tuple[bool, str]:
+        """Push the current branch with *arguments*, :meth:`push_arguments` by default."""
+        arguments = self.push_arguments() if arguments is None else arguments
+        code, out, err = self._run_git(*arguments, _timeout=_LONG_GIT_TIMEOUT)
         if code != 0:
             return False, err or out or "git push failed"
         return True, out

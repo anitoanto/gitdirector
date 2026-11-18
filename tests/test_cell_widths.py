@@ -19,7 +19,7 @@ from gitdirector.cell_widths import (
 
 from .conftest import REAL_TMUX_IDENTITY
 
-# What Ghostty 1.3 draws, and so Rich counts when drawing straight to a terminal.
+# What Ghostty 1.3 draws, and so tmux and Rich count.
 SPACING_MARK_TEXT = {
     "നി": 2,
     "കാ": 2,
@@ -65,22 +65,27 @@ def test_ranges_are_merged():
     assert all(previous[1] + 1 < current[0] for previous, current in zip(ranges, ranges[1:]))
 
 
-def test_without_measuring_tmux_only_emoji_parts_get_their_widths():
-    assert tmux_codepoint_width_commands() == [
-        f"set-option -s codepoint-widths[{TMUX_FIRST_SLOT}] U+1F1E6-U+1F1FF=2",
-        f"set-option -s codepoint-widths[{TMUX_FIRST_SLOT + 1}] U+1F3FB-U+1F3FF=2",
-    ]
+def test_without_measuring_tmux_emoji_parts_and_spacing_marks_get_their_widths():
+    commands = tmux_codepoint_width_commands()
+    assert len(commands) == len(spacing_mark_ranges()) + 2
+    assert all(
+        command.startswith(f"set-option -s codepoint-widths[{slot}] ")
+        for slot, command in enumerate(commands, TMUX_FIRST_SLOT)
+    )
+    spans = {command.split()[-1] for command in commands}
+    assert {"U+0D3E-U+0D40=1", "U+1F1E6-U+1F1FF=2", "U+1F3FB-U+1F3FF=2"} <= spans
 
 
 def test_slots_no_longer_needed_are_unset_and_the_users_own_kept():
+    stale = TMUX_FIRST_SLOT + 5000
     current = (
         "codepoint-widths[3] U+00E9=2\n"
         f"codepoint-widths[{TMUX_FIRST_SLOT}] U+0D3E-U+0D40=1\n"
-        f"codepoint-widths[{TMUX_FIRST_SLOT + 1}] U+0D46-U+0D48=1\n"
-        f"codepoint-widths[{TMUX_FIRST_SLOT + 7}] U+1F1E6-U+1F1FF=2\n"
+        f"codepoint-widths[{stale}] U+1F1E6-U+1F1FF=2\n"
     )
-    assert tmux_codepoint_width_commands(None, current)[2:] == [
-        f"set-option -su codepoint-widths[{TMUX_FIRST_SLOT + 7}]"
+    commands = tmux_codepoint_width_commands(None, current)
+    assert [command for command in commands if " -su " in command] == [
+        f"set-option -su codepoint-widths[{stale}]"
     ]
 
 
@@ -93,7 +98,7 @@ def _native_widths(texts, setup=(), width=20):
     ]
 
 
-def test_marks_keep_tmuxs_width_and_only_the_terminal_gives_them_a_cell(tmp_path):
+def test_tmux_and_rich_count_spacing_marks_as_the_terminal_draws_them(tmp_path):
     with patch.object(
         cell_widths, "measure_in_tmux", side_effect=lambda _tmux, texts: _native_widths(texts)
     ):
@@ -102,30 +107,26 @@ def test_marks_keep_tmuxs_width_and_only_the_terminal_gives_them_a_cell(tmp_path
     def width(side, code):
         return next((w for start, end, w in measured[side] if start <= code <= end), None)
 
-    malayalam_aa = 0x0D3E
-    assert width("tmux", malayalam_aa) is None
-    assert width("rich", malayalam_aa) is None
-    assert width("rich_terminal", malayalam_aa) == 1
+    malayalam_aa, malayalam_virama = 0x0D3E, 0x0D4D
+    assert width("tmux", malayalam_aa) == 1
+    assert (width("rich", malayalam_aa) or cell_widths._rich_width()(malayalam_aa)) == 1
+    assert width("tmux", malayalam_virama) is None
     assert width("tmux", 0x1FAE9) == 2
     assert width("tmux", 0x1F1E6) == 2
 
 
-@pytest.mark.parametrize(
-    ("tmux", "side"), [("/tmp/tmux-1/default,1,0", "rich"), (None, "rich_terminal")]
-)
-def test_rich_counts_as_whatever_draws_it(monkeypatch, tmux, side):
-    previous = cell_widths._rich_side, cell_widths._rich_spans
+@pytest.mark.parametrize("tmux", ["/tmp/tmux-1/default,1,0", None])
+def test_rich_counts_the_same_inside_tmux_and_out(monkeypatch, tmux):
+    previous = cell_widths._rich_spans
     if tmux:
         monkeypatch.setenv("TMUX", tmux)
     else:
         monkeypatch.delenv("TMUX", raising=False)
     try:
-        cell_widths.match_rich_to_screen()
-        assert cell_widths._rich_side == side
-        assert cell_len("കാ") == (2 if side == "rich_terminal" else 1)
+        cell_widths.match_rich_widths()
+        assert cell_len("കാ") == 2
     finally:
-        cell_widths._rich_side = previous[0]
-        cell_widths._give_rich(previous[1] or [])
+        cell_widths._give_rich(previous or [])
 
 
 def test_spans_take_precedence_over_the_table():
@@ -210,9 +211,8 @@ def fake_tmux(tmp_path, monkeypatch):
 
 
 MEASURED = {
-    "tmux": [(0x1FAE8, 0x1FAE8, 2)],
-    "rich": [(0x261D, 0x261D, 2)],
-    "rich_terminal": [(0x261D, 0x261D, 2), (0x0D3E, 0x0D40, 1)],
+    "tmux": [(0x1FAE8, 0x1FAE8, 2), (0x0D3E, 0x0D40, 1)],
+    "rich": [(0x261D, 0x261D, 2), (0x0D3E, 0x0D40, 1)],
 }
 
 
@@ -242,5 +242,5 @@ def test_a_failed_measurement_falls_back(fake_tmux, monkeypatch):
     monkeypatch.setattr(cell_widths, "_executable", lambda _pid: str(fake_tmux))
     with patch.object(cell_widths, "measure_in_tmux", return_value=None):
         commands = tmux_codepoint_width_commands(12345)
-    assert len(commands) == 2
+    assert commands == tmux_codepoint_width_commands()
     assert not (paths.cache_dir() / "cell-widths.json").exists()

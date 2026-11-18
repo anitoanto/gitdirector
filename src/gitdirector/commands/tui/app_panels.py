@@ -429,8 +429,6 @@ class ConsolePanelsMixin:
     def action_new_panel(self) -> None:
         if self._active_tab != "panels":
             return
-        if self._consume_resume_new_panel_guard():
-            return
         self.push_screen(
             CreatePanelScreen(),
             callback=self._handle_create_panel,

@@ -60,8 +60,8 @@ def register(cli: click.Group):
     def pull(targets: tuple[str, ...], yes: bool):
         """Fast-forward pull repositories (all by default)
 
-        Runs git pull --ff-only on each repository's current branch,
-        concurrently. Never merges or rebases: a branch that has diverged is
+        Runs git pull --ff-only on each repository's current branch, from
+        its upstream (origin/<branch> when it tracks none), concurrently. Never merges or rebases: a branch that has diverged is
         reported and left alone. Asks first when pulling every repository.
         Exits 1 if any pull failed.
         """

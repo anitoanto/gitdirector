@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,8 @@ from functools import lru_cache, partial
 from pathlib import Path
 
 import tiktoken
+
+from .repo import git_env
 
 _GIT_LS_FILES_TIMEOUT = 30
 _MAX_INFO_WORKERS = 8
@@ -113,6 +116,7 @@ def _get_non_ignored_files(repo_path: Path) -> list[str]:
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             capture_output=True,
             cwd=str(repo_path),
+            env=git_env(),
             timeout=_GIT_LS_FILES_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
@@ -127,30 +131,40 @@ def _get_non_ignored_files(repo_path: Path) -> list[str]:
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(stderr or f"git ls-files failed for {repo_path}")
-    # An unmerged path is listed once per index stage.
-    files = result.stdout.decode("utf-8", errors="replace").split("\0")
-    return list(dict.fromkeys(f for f in files if f))
+    # An unmerged path is listed once per index stage. fsdecode keeps a name
+    # that is not UTF-8 openable; only its displayed extension is cleaned.
+    files = [os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
+    return list(dict.fromkeys(files))
 
 
 def _read_text(file_path: Path, *, max_bytes: int | None = None) -> str | None:
     # Resolved here rather than as a default so the module constant stays the
     # single source of truth; a default would freeze its value at import.
     limit = _MAX_TEXT_BYTES if max_bytes is None else max_bytes
+    # Only regular files are read: a tracked symlink to /dev/zero would be
+    # read forever and a FIFO would block. Oversized files (a checked-in
+    # dataset, a vendored bundle) are reported like binaries: counted, not
+    # measured, and never more than the cap is read.
     try:
-        with open(file_path, "rb") as f:
-            # gather_repo_info reads every non-ignored file, across a thread
-            # pool. Without a cap one oversized artifact that git happens to
-            # track -- a checked-in dataset, a vendored bundle -- is pulled
-            # into memory in full and then tokenized, which can exhaust RAM.
-            # Oversized files are reported like binaries: counted, not measured.
-            if os.fstat(f.fileno()).st_size > limit:
-                return None
-            data = f.read()
+        fd = os.open(file_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return None
+            data = f.read(limit + 1)
+    except OSError:
+        return None
+    if len(data) > limit:
         return None
     if b"\x00" in data:
         return None
     return data.decode("utf-8", errors="replace")
+
+
+def _displayable(name: str) -> str:
+    return name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def _count_lines_from_text(text: str) -> int:
@@ -175,7 +189,7 @@ def _info_worker_count(total_files: int) -> int:
 
 def _process_file(repo_path: Path, rel_path: str) -> tuple[str, str, int | None, int | None]:
     _, ext = os.path.splitext(rel_path)
-    ext = ext.lower() if ext else "(no ext)"
+    ext = _displayable(ext.lower()) if ext else "(no ext)"
 
     if ext in _BINARY_EXTENSIONS:
         return rel_path, ext, None, None

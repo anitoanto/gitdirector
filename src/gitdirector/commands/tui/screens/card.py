@@ -134,6 +134,24 @@ class LoadingCard(ModalScreen[None]):
         self.card_title = title
         self.card_subtitle = subtitle
         self.hint = hint
+        self._close_when_on_top = False
+
+    def close(self) -> None:
+        """Take the card away once its work is done.
+
+        ``dismiss`` pops whatever screen is on top: a card a later screen
+        covers (a result that finished first) closes when it is back on top.
+        """
+        # is_current also holds under a modal that leaves this card visible.
+        if self.app.screen is self:
+            self.dismiss(None)
+        else:
+            self._close_when_on_top = True
+
+    def on_screen_resume(self) -> None:
+        if self._close_when_on_top:
+            self._close_when_on_top = False
+            self.dismiss(None)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="menu-container"):

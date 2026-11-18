@@ -35,6 +35,9 @@ AGENT_WAITER_OPTION = "@gitdirector_agent_waiter"
 AGENT_HELPERS_OPTION = "@gitdirector_agent_helpers"
 #: `` <id> <id>`` of the background shells Claude Code started.
 AGENT_SHELLS_OPTION = "@gitdirector_agent_shells"
+#: `` <id> <id>`` of Claude Code's other background work still in flight:
+#: workflows, monitors, MCP tasks, teammates, cloud sessions, ...
+AGENT_TASKS_OPTION = "@gitdirector_agent_tasks"
 #: Claude Code's transcript, where an interrupt (which fires no hook) shows.
 AGENT_TRANSCRIPT_OPTION = "@gitdirector_agent_transcript"
 

@@ -7,7 +7,9 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import tempfile
 import threading
 from base64 import b32encode
 from collections.abc import Collection
@@ -43,11 +45,11 @@ _LEGACY_SERVER_OPTIONS = {"terminal-features[90]": "*:RGB", "terminal-overrides[
 _TMUX_CHILD_ENV_UNSET = ("NO_COLOR",)
 # Standard color-capability advertisement, honoured by well-behaved
 # terminal programs (supports-color/chalk, termenv, Rich, ...).
-_TMUX_STANDARD_COLOR_ENV = {
-    "COLORTERM": "truecolor",
-    "FORCE_COLOR": "3",
-    "CLICOLOR_FORCE": "1",
-}
+_TMUX_STANDARD_COLOR_ENV = {"COLORTERM": "truecolor"}
+# Older versions also set these, which force colour into piped output too:
+# every command an agent captured came back full of escape codes. Unset
+# from sessions those versions made, so the user's own values show again.
+_LEGACY_SESSION_ENV = ("FORCE_COLOR", "CLICOLOR_FORCE")
 # Vendor-specific truecolor opt-outs. Some agents ignore the standard
 # variables above and clamp their palette to 256 colors whenever $TMUX
 # is set; each exposes its own escape hatch, read from the process
@@ -66,13 +68,20 @@ _TMUX_COLOR_ENV = {**_TMUX_STANDARD_COLOR_ENV, **_TMUX_AGENT_TRUECOLOR_OPT_OUTS}
 # as a failure rather than waiting on it.
 TMUX_COMMAND_TIMEOUT = 10
 
+# A client that reaches a server while it exits (its last session just
+# closed) gets this; one a moment later would have started a new server.
+_SERVER_EXITING = "server exited unexpectedly"
+# The commands that start a server when there is none.
+_SERVER_STARTING_COMMANDS = frozenset({"new-session", "start-server"})
+
+
 # The tmux client prints one of these when there is no server to talk to:
 # it died mid-command (observed inside `respawn-pane`), or it exited on its
 # own because its last session closed. Every session on that server is gone
 # with it, so a failure carrying one of these is an authoritative "no
 # sessions", not an unknown error.
 _TMUX_SERVER_GONE_MARKERS = (
-    "server exited unexpectedly",
+    _SERVER_EXITING,
     "no server running",
     "lost server",
     "error connecting to",
@@ -179,9 +188,10 @@ def _run_tmux(
 ) -> subprocess.CompletedProcess:
     """Run one tmux command. Every tmux invocation goes through here.
 
-    A hung server surfaces as a failed result (or :class:`TmuxError` with
-    *check*) instead of blocking forever, and the client always starts from a
-    sanitized environment.
+    Every failure, a hung server and a tmux that could not even be started
+    (no process or pty left) included, is a non-zero result whose stderr
+    says why, or :class:`TmuxError` with *check*. The client always starts
+    from a sanitized environment.
     """
     command = ["tmux", *args]
     kwargs: dict[str, object] = {}
@@ -203,15 +213,20 @@ def _run_tmux(
         kwargs["timeout"] = timeout
     try:
         result = subprocess.run(command, **kwargs)
-    except subprocess.TimeoutExpired as exc:
-        # Callers branch on returncode, so surface a hung server as an ordinary
-        # failure instead of an exception they are not written to handle.
-        if check:
-            raise TmuxError("tmux command timed out", args_list=command, returncode=None) from exc
-        empty: str | bytes = "" if text else b""
-        return subprocess.CompletedProcess(command, 1, empty, empty)
+        if _met_an_exiting_server(args, result):
+            # Whatever it did went with that server: run it on a new one.
+            result = subprocess.run(command, **kwargs)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise TmuxError(str(exc), args_list=command) from exc
+        reason = (
+            "tmux command timed out"
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else str(exc) or type(exc).__name__
+        )
+        if check:
+            raise TmuxError(reason, args_list=command) from exc
+        empty: str | bytes = "" if text else b""
+        stderr: str | bytes = reason if text else reason.encode()
+        return subprocess.CompletedProcess(command, 1, empty, stderr)
     if check and isinstance(result.returncode, int) and result.returncode != 0:
         raise TmuxError(
             "tmux command failed",
@@ -220,6 +235,49 @@ def _run_tmux(
             stderr=result.stderr,
         )
     return result
+
+
+def _met_an_exiting_server(args: list[str], result: subprocess.CompletedProcess) -> bool:
+    if result.returncode == 0 or not args or args[0] not in _SERVER_STARTING_COMMANDS:
+        return False
+    stderr = result.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return isinstance(stderr, str) and _SERVER_EXITING in stderr
+
+
+def run_tmux_client(
+    args: list[str], *, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run a tmux client that owns the terminal until it detaches; no timeout.
+
+    ``suspend-client`` (``prefix C-z``) makes the client stop itself, and a
+    parent that only waits would hang with it, the terminal nobody's. This
+    process stops too, as the shell expects of the job it started, and once
+    the shell's ``fg`` continues it, it continues the client. Started
+    straight by a terminal, with no shell to continue it, it continues the
+    client at once instead. A client that cannot start is a failed result.
+    """
+    command = ["tmux", *args]
+    try:
+        process = subprocess.Popen(
+            command, env={**sanitized_environ(), **(extra_env or {})}, cwd=neutral_directory()
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return subprocess.CompletedProcess(command, 1, None, str(exc))
+    while True:
+        _pid, status = os.waitpid(process.pid, os.WUNTRACED)
+        if os.WIFSTOPPED(status):
+            if os.getpgrp() != os.getsid(0):
+                _stop_with_the_client()
+            os.kill(process.pid, signal.SIGCONT)
+            continue
+        process.returncode = os.waitstatus_to_exitcode(status)
+        return subprocess.CompletedProcess(command, process.returncode)
+
+
+def _stop_with_the_client() -> None:
+    os.kill(os.getpid(), signal.SIGSTOP)
 
 
 def _chain_tmux_commands(commands: list[list[str]]) -> list[str]:
@@ -408,21 +466,20 @@ def guard_session_window(session_name: str) -> None:
     way: while other panes are left, the hook only removes the dead one,
     which never closes the window.
     """
+    _run_tmux(_chain_tmux_commands(_guard_window_commands(session_name)), check=True)
+
+
+def _guard_window_commands(session_name: str) -> list[list[str]]:
     window = f"={session_name}:{_FIRST_WINDOW}"
     kill_group = shlex.join(_kill_session_args(session_name))
     hook = (
         f"if-shell -F '#{{==:#{{window_panes}},1}}' '{kill_group}' "
         """'run-shell -C "kill-pane -t #{hook_pane}"'"""
     )
-    _run_tmux(
-        _chain_tmux_commands(
-            [
-                ["set-window-option", "-t", window, "remain-on-exit", "on"],
-                ["set-hook", "-w", "-t", window, "pane-died", hook],
-            ]
-        ),
-        check=True,
-    )
+    return [
+        ["set-window-option", "-t", window, "remain-on-exit", "on"],
+        ["set-hook", "-w", "-t", window, "pane-died", hook],
+    ]
 
 
 # gitdirector creates its own sessions with one window, which is window 0
@@ -562,18 +619,23 @@ def respawn_pane(target: str, command: str | None = None) -> None:
         )
 
 
-def _respawn_session_shell(session_name: str) -> None:
-    """Restart the session's first shell so it picks up the scrubbed environment.
+# What a new session runs until its environment is isolated: nothing of the
+# user's. Two arguments, so tmux execs it directly instead of through a shell.
+_SESSION_PLACEHOLDER = ("sleep", "2147483647")
 
-    ``new-session`` spawns its shell before gitdirector has a chance to
-    remove anything, so that first shell still holds whatever leaked.
-    Respawning with no command reuses tmux's ``default-command`` /
-    ``default-shell`` and the pane's original start directory, so the
-    result is indistinguishable from a freshly created shell -- minus the
-    leak. Nothing has been typed into the pane at this point, so the
-    restart is invisible.
+
+def _start_session_shell(session_name: str, path: Path) -> None:
+    """Replace the placeholder with what tmux starts in any new window.
+
+    That is ``default-command``, or ``default-shell`` as a login shell, and
+    it starts once, with the isolated environment. A new window rather than
+    a respawn: a respawned pane reruns its first program, the placeholder.
+    ``-k`` puts it at the placeholder's index and keeps the session alive.
+    The guard goes on in the same call, before the shell can exit.
     """
-    respawn_pane(_active_pane_target(session_name))
+    window = f"={session_name}:{_FIRST_WINDOW}"
+    start = ["new-window", "-k", "-t", window, "-c", str(path)]
+    _run_tmux(_chain_tmux_commands([start, *_guard_window_commands(session_name)]), check=True)
 
 
 def _session_pane_path(session_name: str) -> str | None:
@@ -611,6 +673,7 @@ def _tmux_color_environment_config(quoted_session: str) -> list[str]:
         f"set-environment -r -t {quoted_session} {shlex.quote(name)}"
         for name in _tmux_child_unset_names()
     ]
+    lines.extend(f"set-environment -u -t {quoted_session} {name}" for name in _LEGACY_SESSION_ENV)
     lines.extend(
         f"set-environment -t {quoted_session} {name} {shlex.quote(value)}"
         for name, value in _TMUX_COLOR_ENV.items()
@@ -738,9 +801,9 @@ def create_tmux_session(
     the TUI Sessions tab. A value of ``None`` or ``""`` leaves the option
     unset (the next read returns the default ``"-"`` placeholder).
 
-    Pass ``shell=False`` when the pane's program is replaced right after
-    (:func:`~.monitor.launch_command_in_tmux_session`): the first shell is
-    then left for that respawn to end instead of being respawned twice.
+    Pass ``shell=False`` when the caller starts its own program in the pane
+    (:func:`~.monitor.launch_command_in_tmux_session`): the session then
+    holds an idle placeholder until it does, and no shell starts at all.
 
     Raises :class:`TmuxError` when *path* is not a directory. tmux itself
     would not: ``new-session -c`` on a missing directory exits 0 and
@@ -766,6 +829,8 @@ def create_tmux_session(
                 *_detached_session_size_args(),
                 "-c",
                 str(path),
+                "--",
+                *_SESSION_PLACEHOLDER,
             ],
             text=True,
         )
@@ -788,19 +853,17 @@ def create_tmux_session(
         )
     try:
         _protect_session(session_name)
-        guard_session_window(session_name)
-        # Order matters: scrub first so the removals are in place, then
-        # respawn the shell that new-session already started with the
-        # unscrubbed environment.
-        _scrub_session_environment(session_name)
-        if shell:
-            _respawn_session_shell(session_name)
-
+        # The placeholder never changes directory, so this checks tmux's -c.
         pane_path = _session_pane_path(session_name)
         if pane_path is not None and not _same_directory(pane_path, path):
             raise TmuxError(
                 f"tmux session started in {pane_path} instead of the repository path {path}"
             )
+        _scrub_session_environment(session_name)
+        if shell:
+            _start_session_shell(session_name, path)
+        else:
+            guard_session_window(session_name)
 
         # The session name keeps only [a-z0-9-] of the repository's own name.
         _set_session_repo_label(
@@ -1033,28 +1096,34 @@ def _build_attach_client_env(directory: Path) -> dict[str, str]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", base) or base.endswith(_SAME_SCREEN_SUFFIX):
         return {}
     name = base + _SAME_SCREEN_SUFFIX
-    source = directory / f"{name}.src"
     try:
         directory.mkdir(parents=True, exist_ok=True)
         leave_keypad = subprocess.run(
             ["tput", "-T", base, "rmkx"], capture_output=True, timeout=10, check=False
         ).stdout
-        source.write_text(
-            f"{name}|{base} drawing on the screen it is given (gitdirector),\n"
-            f"\tsmcup@, rmcup@, rmkx={_terminfo_string(leave_keypad + _HOLD_DISPLAY)},\n"
-            f"\tuse={base},\n"
-        )
-        result = subprocess.run(
-            ["tic", "-x", "-o", str(directory), str(source)],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
+        # Built aside and moved in whole: a console starting at the same
+        # moment must never read a half-written entry.
+        with tempfile.TemporaryDirectory(dir=directory, prefix=".build-") as build:
+            source = Path(build, f"{name}.src")
+            source.write_text(
+                f"{name}|{base} drawing on the screen it is given (gitdirector),\n"
+                f"\tsmcup@, rmcup@, rmkx={_terminfo_string(leave_keypad + _HOLD_DISPLAY)},\n"
+                f"\tuse={base},\n"
+            )
+            result = subprocess.run(
+                ["tic", "-x", "-o", build, str(source)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0:
+                for compiled in Path(build).glob(f"*/{name}"):
+                    target = directory / compiled.parent.name / name
+                    target.parent.mkdir(exist_ok=True)
+                    os.replace(compiled, target)
     except (OSError, subprocess.SubprocessError):
         logger.debug("could not build the attach terminal description", exc_info=True)
         return {}
-    finally:
-        source.unlink(missing_ok=True)
     if result.returncode != 0 or not _terminfo_compiled(directory, name):
         logger.debug("tic failed for %s: %s", name, result.stderr)
         return {}
@@ -1104,10 +1173,8 @@ def attach_tmux_session(
     # must never inherit the default command timeout: a timeout here
     # SIGKILLs the tmux client mid-session, which the user experiences as a
     # random detach with the terminal left in tmux's alternate screen.
-    result = _run_tmux(
+    result = run_tmux_client(
         [*TMUX_CLIENT_FEATURES, "attach-session", "-t", f"={session_name}"],
-        capture_output=False,
-        timeout=None,
         extra_env=attach_client_env() if same_screen else None,
     )
     # A non-zero exit is not necessarily a failed attach. The client also
@@ -1760,13 +1827,16 @@ def sync_panel_tmux_config(theme_name: str | None = None) -> Path:
         # Last: a tmux that rejects it still takes the theme above.
         lines.extend(tmux_codepoint_width_commands(*_server_width_state()))
 
-    atomic_write_text(config_path, "\n".join(lines))
+    config = "\n".join(lines)
+    # Kept for reading only: every process writes this one file, so tmux is
+    # handed this process's own text on stdin, never another's snapshot.
+    atomic_write_text(config_path, config)
     # Always sourced while tmux runs: identical text can still mean a new
     # session that reuses a closed one's name and has never been themed, and
     # a console in tmux needs the widths before it has any session.
     if windows:
         try:
-            _run_tmux(["source-file", str(config_path)], check=True)
+            _run_tmux(["source-file", "-"], input=config, text=True, check=True)
         except TmuxError:
             return config_path
 
@@ -1788,7 +1858,7 @@ def try_sync_panel_tmux_config() -> None:
     try:
         sync_panel_tmux_config()
     except Exception:
-        logger.debug("could not apply the tmux theme", exc_info=True)
+        logger.warning("could not apply the tmux theme", exc_info=True)
 
 
 __all__ = [

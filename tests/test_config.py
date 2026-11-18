@@ -141,14 +141,10 @@ class TestConfigAddRepository:
         assert result is True
         assert Path("/tmp/repo") in config.repositories
 
-    def test_add_invalidates_repository_cache(self, config):
-        cache_file = config.config_dir / "cache" / "repos.yaml"
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text("cached")
-
+    def test_add_changes_the_repository_cache_token(self, config):
+        before = config.repository_cache_token()
         config.add_repository(Path("/tmp/repo"))
-
-        assert not cache_file.exists()
+        assert config.repository_cache_token() != before
 
     def test_add_duplicate_returns_false(self, config):
         config.add_repository(Path("/tmp/repo"))
@@ -179,15 +175,11 @@ class TestConfigRemoveRepository:
         data = yaml.safe_load(config.config_file.read_text())
         assert data["repositories"] == []
 
-    def test_remove_invalidates_repository_cache(self, config):
+    def test_remove_changes_the_repository_cache_token(self, config):
         config.add_repository(Path("/tmp/repo"))
-        cache_file = config.config_dir / "cache" / "repos.yaml"
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text("cached")
-
+        before = config.repository_cache_token()
         config.remove_repository(Path("/tmp/repo"))
-
-        assert not cache_file.exists()
+        assert config.repository_cache_token() != before
 
 
 class TestConfigHasRepository:
@@ -253,15 +245,11 @@ class TestConfigTheme:
         data = yaml.safe_load(config.config_file.read_text())
         assert data["theme"] == "nord"
 
-    def test_save_invalidates_repository_cache(self, config):
-        cache_file = config.config_dir / "cache" / "repos.yaml"
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text("cached")
-
+    def test_save_changes_the_repository_cache_token(self, config):
+        before = config.repository_cache_token()
         config.theme = "nord"
         config.save()
-
-        assert not cache_file.exists()
+        assert config.repository_cache_token() != before
 
     def test_default_theme_not_saved(self, config):
         config.save()
@@ -345,15 +333,15 @@ class TestConfigSaveRoundtrip:
 
 
 class TestConfigReloadIfChanged:
-    def test_reload_if_changed_invalidates_repository_cache(self, config):
-        cache_file = config.config_dir / "cache" / "repos.yaml"
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text("cached")
+    def test_reload_if_changed_moves_the_repository_cache_token(self, config):
+        before = config.repository_cache_token()
         config.config_file.write_text(yaml.dump({"repositories": [], "theme": "nord"}))
+        # Not before the reload: the token is the state the config was read in.
+        assert config.repository_cache_token() == before
 
         assert config.reload_if_changed() is True
         assert config.theme == "nord"
-        assert not cache_file.exists()
+        assert config.repository_cache_token() != before
 
     def test_reload_if_changed_returns_false_without_fs_change(self, config):
         assert config.reload_if_changed() is False

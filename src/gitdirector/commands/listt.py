@@ -5,12 +5,14 @@ from ..manager import RepositoryManager
 from ..repo import RepositoryInfo, RepoStatus
 from . import (
     ATTENTION,
+    DANGER,
     MUTED,
     console,
     count_noun,
     display_path,
     failed_status,
     format_size,
+    has_failed,
     is_missing,
     print_json,
     print_rows,
@@ -42,7 +44,10 @@ def _summary(results: list[RepositoryInfo]) -> Text:
     ahead = sum(info.status in (RepoStatus.AHEAD, RepoStatus.DIVERGED) for info in results)
     changed = sum(info.staged or info.unstaged for info in results)
     missing = sum(is_missing(info) for info in results)
+    failed = sum(has_failed(info) for info in results)
     parts: list[tuple[str, str] | str] = [count_noun(len(results), "repository", "repositories")]
+    if failed:
+        parts.append((f"{failed} unreadable", DANGER))
     if missing:
         parts.append((f"{missing} missing", ATTENTION))
     if behind:
@@ -59,18 +64,22 @@ def _summary(results: list[RepositoryInfo]) -> Text:
 def register(cli: click.Group):
     @cli.command(name="list")
     @click.option(
-        "--no-fetch", is_flag=True, help="Compare with the origin refs on disk; skip the network"
+        "--no-fetch", is_flag=True, help="Compare with the upstream refs on disk; skip the network"
     )
     @click.option("--json", "as_json", is_flag=True, help="Print JSON instead of a table")
     def list_repos(no_fetch: bool, as_json: bool):
         """List repositories with sync state and changes
 
-        Fetches each repository's branch from origin first (concurrently, up
-        to max_workers at a time) unless --no-fetch is given.
+        Fetches each repository's upstream first (origin/<branch> for a
+        branch that tracks none; concurrently, up to max_workers at a time)
+        unless --no-fetch is given. Exits 1 if git
+        could not read a repository.
         """
         results = gather_statuses(fetch=not no_fetch, include_size=True)
         if as_json:
             print_json([repository_json(info) for info in results])
+            if any(has_failed(info) for info in results):
+                raise SystemExit(1)
             return
         if not results:
             console.print("No repositories tracked. Add one with: gitdirector link PATH")
@@ -93,3 +102,5 @@ def register(cli: click.Group):
         )
         console.print()
         console.print(_summary(results))
+        if any(has_failed(info) for info in results):
+            raise SystemExit(1)

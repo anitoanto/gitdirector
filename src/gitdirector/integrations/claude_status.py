@@ -28,10 +28,15 @@ question (``AskUserQuestion``, ``ExitPlanMode``, an MCP elicitation) fires
 * ``@gitdirector_agent_shells``: `` <id> <id>`` of the background shells
   started, likewise counted as running. A shell is listed when its Bash call
   returns its ``backgroundTaskId``; no hook marks its end.
+* ``@gitdirector_agent_tasks``: `` <id> <id>`` of every other kind of
+  background work in flight (workflows, monitors, MCP tasks, teammates,
+  cloud sessions, ...), likewise counted as running. Only a ``Stop`` knows
+  about them: no hook marks their start or end.
 
 Every ``Stop`` carries ``background_tasks``, the work still in flight, and
-rewrites both lists from it. Hooks are best-effort, so the monitor checks
-the subagents' transcripts and the shells' processes before it trusts them.
+rewrites all three lists from it. Hooks are best-effort, so the monitor
+checks the subagents' own files and the shells' processes before it trusts
+them.
 * ``@gitdirector_agent_transcript``: the transcript, where the monitor sees
   an interrupt, the one transition no hook reports.
 
@@ -51,6 +56,7 @@ STATE_OPTION = "@gitdirector_agent_state"
 WAITER_OPTION = "@gitdirector_agent_waiter"
 HELPERS_OPTION = "@gitdirector_agent_helpers"
 SHELLS_OPTION = "@gitdirector_agent_shells"
+TASKS_OPTION = "@gitdirector_agent_tasks"
 TRANSCRIPT_OPTION = "@gitdirector_agent_transcript"
 
 _RUNNING = "running"
@@ -80,7 +86,8 @@ _FRESH = frozenset({"SessionStart", "UserPromptSubmit"})
 _QUESTION_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
 # A subagent's final tool call: it delivers the report and then stops.
 _HANDBACK_TOOL = "SubagentHandback"
-# ``background_tasks`` types: everything else in flight is not counted.
+# ``background_tasks`` types with lists of their own; every other type goes
+# to the tasks list.
 _SUBAGENT_TASK = "subagent"
 _SHELL_TASK = "shell"
 APPROVAL = "approval"
@@ -136,25 +143,32 @@ def _shell_commands(event: str, payload: dict, pane: str) -> list[list[str]]:
 
 
 def _background_tasks_commands(payload: dict, pane: str) -> list[list[str]]:
-    """Rewrite the subagent and shell lists from a ``Stop``'s ``background_tasks``.
+    """Rewrite the subagent, shell and task lists from a ``Stop``'s ``background_tasks``.
 
     Only the main thread's ``Stop`` is trusted with this: no subagent can be
     starting then, while a ``SubagentStop`` lists the subagent that is stopping.
+    Claude Code lists only work still running or pending.
     """
     tasks = payload.get("background_tasks")
     if not isinstance(tasks, list):
         return []
-    found: dict[str, list[str]] = {_SUBAGENT_TASK: [], _SHELL_TASK: []}
+    subagents: list[str] = []
+    shells: list[str] = []
+    others: list[str] = []
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        ids = found.get(task.get("type"))
         task_id = task.get("id")
-        if ids is not None and isinstance(task_id, str) and _is_id(task_id):
-            ids.append(task_id)
+        if not isinstance(task_id, str) or not _is_id(task_id):
+            continue
+        kind = task.get("type")
+        (subagents if kind == _SUBAGENT_TASK else shells if kind == _SHELL_TASK else others).append(
+            task_id
+        )
     return [
-        _set_list(HELPERS_OPTION, found[_SUBAGENT_TASK], pane),
-        _set_list(SHELLS_OPTION, found[_SHELL_TASK], pane),
+        _set_list(HELPERS_OPTION, subagents, pane),
+        _set_list(SHELLS_OPTION, shells, pane),
+        _set_list(TASKS_OPTION, others, pane),
     ]
 
 
@@ -198,6 +212,7 @@ def tmux_commands(payload: dict, pane: str, now: float) -> list[list[str]]:
                 WAITER_OPTION,
                 HELPERS_OPTION,
                 SHELLS_OPTION,
+                TASKS_OPTION,
                 TRANSCRIPT_OPTION,
             )
         ]
@@ -226,8 +241,8 @@ def tmux_commands(payload: dict, pane: str, now: float) -> list[list[str]]:
     if event in _FRESH:
         commands.append(["set-option", "-p", "-u", "-t", pane, WAITER_OPTION])
     if event == "SessionStart":
-        commands.append(["set-option", "-p", "-u", "-t", pane, HELPERS_OPTION])
-        commands.append(["set-option", "-p", "-u", "-t", pane, SHELLS_OPTION])
+        for option in (HELPERS_OPTION, SHELLS_OPTION, TASKS_OPTION):
+            commands.append(["set-option", "-p", "-u", "-t", pane, option])
     if event == "Stop":
         commands += _background_tasks_commands(payload, pane)
     transcript = payload.get("transcript_path")

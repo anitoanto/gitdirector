@@ -193,6 +193,12 @@ def _no_ssh_probe(monkeypatch):
 
     repo._default_ssh_command.cache_clear()
     monkeypatch.setattr(repo, "_ssh_accepts", lambda options: True)
+    # Asking git for core.sshCommand is one more process tests do not expect.
+    monkeypatch.setattr(
+        repo.Repository,
+        "_has_own_ssh_command",
+        lambda self, env: "GIT_SSH_COMMAND" in env or "GIT_SSH" in env,
+    )
     yield
     repo._default_ssh_command.cache_clear()
 

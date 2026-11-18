@@ -920,3 +920,37 @@ class TestOversizedFilesAreNotReadIntoMemory:
         entry = next(ft for ft in result.file_types if ft.extension == ".txt")
         assert entry.count == 1
         assert entry.line_count is None
+
+
+class TestOnlyRegularFilesAreRead:
+    def test_a_symlink_to_an_endless_device_is_not_followed(self, tmp_path):
+        link = tmp_path / "zero.txt"
+        link.symlink_to("/dev/zero")
+        assert _read_text(link) is None
+
+    def test_a_fifo_never_blocks(self, tmp_path):
+        fifo = tmp_path / "pipe.txt"
+        os.mkfifo(fifo)
+        assert _read_text(fifo) is None
+
+    def test_a_tracked_device_link_is_counted_not_read(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        _write(repo, "a.txt", "one\ntwo\n")
+        (repo / "zero.txt").symlink_to("/dev/zero")
+        _commit_all(repo)
+
+        result = gather_repo_info(repo)
+
+        assert result.total_files == 2
+        assert result.total_lines == 2
+
+    def test_a_name_that_is_not_utf8_is_still_read(self, tmp_path):
+        repo = _init_repo(tmp_path)
+        name = os.fsdecode(b"caf\xe9.txt")
+        try:
+            (repo / name).write_text("hello\n")
+        except OSError:
+            pytest.skip("the filesystem only takes UTF-8 names")
+        _commit_all(repo)
+
+        assert gather_repo_info(repo).total_lines == 1

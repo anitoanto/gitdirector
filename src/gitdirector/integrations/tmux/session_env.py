@@ -28,7 +28,8 @@ case:
    environment, so this holds even when the server was already running
    with a dirty environment long before gitdirector started. This is the
    layer that actually guarantees the invariant; the others are
-   hardening.
+   hardening. A new session holds a placeholder until it is in place, so
+   the user's shell starts once, after it.
 3. :func:`child_unset_names` feeds the ``env -u`` prefix used when a pane
    is respawned to run an agent -- the last line of defence for the
    agent command itself.

@@ -16,7 +16,7 @@ from gitdirector.commands.tui.app_groups import detect_repo_groups, group_row_ke
 from gitdirector.integrations.tmux.core import _repo_session_name_segment
 from gitdirector.repo import RepoStatus
 
-from .conftest import _make_info, _mock_manager, repo_row_text
+from .conftest import _make_info, _mock_manager, _until, repo_row_text
 
 
 class TestRepoGroupDetection:
@@ -54,21 +54,18 @@ class TestRepositoryGroups:
         app = GitDirectorConsole()
         app.manager = _mock_manager()
 
-        async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause()
-
-            assert any(
+        def shows_toggle() -> bool:
+            return any(
                 binding.key == "space" and binding.description == "Toggle"
                 for binding in app.query(FooterKey)
             )
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            # The footer recomposes on its own schedule after a tab change.
+            await _until(pilot, shows_toggle)
 
             await pilot.press("3")
-            await pilot.pause()
-
-            assert not any(
-                binding.key == "space" and binding.description == "Toggle"
-                for binding in app.query(FooterKey)
-            )
+            await _until(pilot, lambda: not shows_toggle())
 
     async def test_repo_table_populates_group_headers_from_linked_repo_parents(self):
         repos = [

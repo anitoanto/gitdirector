@@ -845,7 +845,7 @@ class TestDiffReviewScreenCommitFlow:
         def fake_add(self, paths=None):
             return True, ""
 
-        def fake_push(self, *, set_upstream=False):
+        def fake_push(self, arguments=None):
             return True, "To origin\n"
 
         mocker.patch.object(
@@ -1047,7 +1047,7 @@ class TestDiffReviewScreenCommitFlow:
         mocker.patch.object(
             repo_mod.Repository,
             "push",
-            lambda self, *, set_upstream=False: (True, ""),
+            lambda self, arguments=None: (True, ""),
         )
 
         app = GitDirectorConsole()
@@ -1371,3 +1371,14 @@ class TestDiffReviewScreenSearch:
             assert screen.focused is files_list
             assert files_list.selected_file().path == "docs/Guide.md"
             assert self._paths(files_list)[files_list.index] == "docs/Guide.md"
+
+
+class TestAFileThatCannotBeRendered:
+    def test_shows_its_own_failure_not_the_previous_file(self):
+        from gitdirector.commands.tui.diff_renderer import ChangedFile, DiffDocument
+
+        file = ChangedFile(path="broken.py", status="M")
+        document = DiffDocument(file, code_width=40, note=("The diff could not be shown:", "boom"))
+        text = "\n".join(document.line(index).plain for index in range(len(document)))
+        assert "broken.py" in text
+        assert "boom" in text

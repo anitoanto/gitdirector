@@ -169,6 +169,7 @@ class TestRepoPullErrors:
             "gitdirector.repo._run_git_process",
             side_effect=[
                 MagicMock(returncode=0, stdout="main\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),  # for-each-ref: no upstream
                 MagicMock(
                     returncode=128,
                     stdout="",
@@ -187,6 +188,7 @@ class TestRepoPullErrors:
             "gitdirector.repo._run_git_process",
             side_effect=[
                 MagicMock(returncode=0, stdout="main\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),  # for-each-ref: no upstream
                 MagicMock(
                     returncode=1,
                     stdout="",
@@ -248,7 +250,7 @@ class TestRepoGetStatusParsingErrors:
     """Test error paths when parsing git status output."""
 
     def test_get_status_invalid_ahead_behind_format(self, fake_git_repo, mocker):
-        """Sync status comes from origin/main even if branch.ab metadata is malformed."""
+        """Sync status is still compared when branch.ab metadata is malformed."""
 
         def mock_run(*args, **kwargs):
             git_cmd = args[0]
